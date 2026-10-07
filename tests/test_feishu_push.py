@@ -188,7 +188,7 @@ def test_render_blocked_interaction_answer_guidance(monkeypatch):
                            "options": ["A", "B"], "answerable": True,
                            "kind": "question"},
                           9, "http://t/")
-    assert "作答 7" in text and "请到站点会话窗口处理" not in text
+    assert "作答 7" in text and "不支持远程作答" not in text
     assert "详情：http://t" in text
 
 
@@ -244,7 +244,10 @@ def test_render_blocked_interaction_lists_all_sub_questions(monkeypatch):
 
 
 def test_render_blocked_interaction_sub_questions_not_answerable(monkeypatch):
-    """不可远程作答的多子题：仍逐题展示，末行引导站点处理。"""
+    """不可远程作答的多子题：仍逐题展示，末行引导回 dsh 会话窗口。
+
+    站点会话窗此时同样不出作答控件（webui SessionView 按 answerable 门控），
+    故**不得**再出现「请到站点会话窗口处理」（2026-10-07 文案纠偏）。"""
     monkeypatch.setattr(db, "get_project", lambda pid: _proj())
     text = feishu._render("blocked_interaction",
                           {"card_id": 806, "title": "t", "kind": "question",
@@ -257,7 +260,8 @@ def test_render_blocked_interaction_sub_questions_not_answerable(monkeypatch):
                                 "options": [{"id": "b", "label": "B"}]}]},
                           9, "")
     assert "第一题？" in text and "第二题？" in text
-    assert "请到站点会话窗口处理" in text
+    assert "不支持远程作答" in text and "dsh 会话窗口作答" in text
+    assert "站点会话窗口" not in text
 
 
 def test_render_blocked_interaction_approval(monkeypatch):
@@ -271,17 +275,17 @@ def test_render_blocked_interaction_approval(monkeypatch):
                           9, "")
     assert "审批请求：run_command" in text and "bash" in text
     assert "同意 7" in text and "拒绝 7" in text and "会话」" in text
-    assert "agent 提问" not in text and "请到站点会话窗口处理" not in text
+    assert "agent 提问" not in text and "不支持远程作答" not in text
 
 
 def test_render_blocked_interaction_not_answerable(monkeypatch):
-    """opencode 等不可远程作答：维持「请到站点会话窗口处理」引导。"""
+    """不可远程作答（会话非平台自持）：引导去 dsh 会话窗口，不再指向站点。"""
     monkeypatch.setattr(db, "get_project", lambda pid: _proj())
     text = feishu._render("blocked_interaction",
                           {"card_id": 7, "title": "t", "question": "q？",
                            "options": ["A"], "answerable": False, "kind": ""},
                           9, "")
-    assert "请到站点会话窗口处理" in text
+    assert "dsh 会话窗口作答" in text and "站点会话窗口" not in text
 
 
 def test_push_event_never_raises(monkeypatch):
@@ -388,7 +392,7 @@ def test_build_card_approval_buttons():
 def test_build_card_downgrades_no_answer_buttons():
     """不放「逐选项作答按钮」的三类：单题多选（改给 mini 表单，见
     `test_build_card_single_multiselect_form`）、多子题（改给逐题点选卡）、
-    不可远程作答（只读 + 站点引导）。三者都不发 t=a 按钮，且都留文本指引兜底。"""
+    不可远程作答（只读 + dsh 会话窗口引导）。三者都不发 t=a 按钮，且都留文本指引兜底。"""
     base = {"card_id": 7, "title": "t", "kind": "question", "question": "q？",
             "options": ["A"], "answerable": True}
     card = feishu._build_interaction_card({**base, "multi_select": True,
@@ -404,7 +408,8 @@ def test_build_card_downgrades_no_answer_buttons():
     card = feishu._build_interaction_card({**base, "kind": "", "answerable": False,
                                            "multi_select": False,
                                            "questions_count": 0}, "p")
-    assert _btn_values(card) == [] and "站点" in str(card["body"]["elements"])
+    assert (_btn_values(card) == []
+            and "dsh 会话窗口作答" in str(card["body"]["elements"]))
 
 
 def _clicks_of(card):
@@ -546,12 +551,13 @@ def test_build_card_multi_question_shows_all_questions():
     assert "旧名是否保留兼容回退？" in md
     assert "容器与工具链消费，改名会破坏启动" in md     # 选项描述次行
     assert "（多选）" in md                            # 第 3 题多选标注
-    assert "该等待不支持远程作答" in md                 # 不可作答仍引导站点
+    assert "该等待不支持远程作答" in md                 # 不可作答 → 引导 dsh 会话窗
+    assert "dsh 会话窗口作答" in md and "站点会话窗口" not in md
     assert _btn_values(card) == []                     # 不放逐选项按钮
 
 
 def test_build_card_multi_question_unanswerable_stays_readonly():
-    """不可远程作答（会话非平台自持）：只读逐题展示 + 站点引导，**不放下拉**
+    """不可远程作答（会话非平台自持）：只读逐题展示 + dsh 会话窗口引导，**不放下拉**
     ——放了也无人接收回调（answerable=false 时平台侧不会暂存/送达）。"""
     card = feishu._build_interaction_card({
         "card_id": 7, "title": "t", "kind": "question", "question": "q？",
@@ -566,7 +572,7 @@ def test_build_card_multi_question_unanswerable_stays_readonly():
     assert _clicks_of(card) == []
     md = _card_md(card)
     assert "第一题？" in md and "第二题？" in md
-    assert "该等待不支持远程作答" in md
+    assert "该等待不支持远程作答" in md and "dsh 会话窗口作答" in md
 
 
 def test_build_card_long_multi_question_still_clickable():

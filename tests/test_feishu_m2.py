@@ -629,7 +629,7 @@ def test_execute_answer_approval_kind_hints_agree(monkeypatch):
 
 
 def test_execute_answer_not_answerable(monkeypatch):
-    """opencode 等不可远程作答：维持站点引导。"""
+    """不可远程作答（会话非平台自持）：引导去 dsh 会话窗口（站点会话窗也答不了）。"""
     _patch_projects(monkeypatch, [_proj(2, "touchstone")])
     monkeypatch.setattr(db, "list_board_cards",
                         lambda pid: [_card(7, 2, "登录鉴权", col="blocked",
@@ -641,7 +641,7 @@ def test_execute_answer_not_answerable(monkeypatch):
                         lambda *a, **k: called.append(a) or None)
     r = feishu.execute_intent(_binding(), {"action": "answer",
                                            "groups": ["7", "1"]}, "ou_x")
-    assert called == [] and "站点会话窗口" in r
+    assert called == [] and "dsh 会话窗口作答" in r and "站点会话窗口" not in r
 
 
 def test_execute_agree_and_deny(monkeypatch):

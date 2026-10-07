@@ -52,6 +52,17 @@ _MQ_TTL = 1800         # 暂存存活上限（秒）：超时即丢，用户重�
 _MQ_MAX_BUCKETS = 64   # 暂存桶上限（卡×提问）：极端情况下防无界增长
 _MQ_FORM_MAX_BYTES = 950   # 单题多选 mini 表单 JSON 预算（飞书 form 元素硬限 1000）
 
+# 不可远程作答（board._iw_interaction 的 `answerable=false`）时的**统一引导文案**
+# （2026-10-07 纠偏）。这类等待的提问由**非平台自持会话**发起——用户在 dsh GUI 里
+# 直跑的会话，以及宿主重启丢掉会话池身份后由 GUI 续跑的会话；此时插件只旁听、
+# 挂起标记的 call_id 为空 ⇒ 站点会话窗（webui SessionView 按 answerable 门控选项
+# 与「提交」）与飞书卡片都只展示、不出作答控件，**唯一能作答的地方是 dsh 宿主的
+# 会话窗口**。旧文案「请到站点会话窗口处理」把用户引到同样答不了的地方，故统一
+# 换成这段（旧文案出现的其余几处属于「可作答但飞书无处可点」的场合，站点会话窗
+# 确实可答，保持原样不动）。
+_NO_REMOTE_ANSWER_HINT = ("该等待不支持远程作答（提问由 dsh 直跑会话发起），"
+                          "请在 dsh 会话窗口作答")
+
 
 def user_config(user_id):
     """用户飞书配置（feishu_user_cfgs 表；enabled/base_url/默认 webhook/应用凭据）。
@@ -139,8 +150,10 @@ def _render(kind, ctx, project_id, base_url=""):
         if kind == "blocked_interaction":
             n_q = len(qs) or ctx.get("questions_count") or 0
             if not ctx.get("answerable"):
-                # 不可远程作答的等待（answerable=false）：仍引导站点
-                lines.append("请到站点会话窗口处理")
+                # 不可远程作答的等待（answerable=false）：引导回 dsh 会话窗口——
+                # 站点会话窗此时同样不出作答控件，旧文案「请到站点会话窗口处理」
+                # 会把用户引到死胡同（见 _NO_REMOTE_ANSWER_HINT）
+                lines.append(_NO_REMOTE_ANSWER_HINT)
             elif n_q > 1:
                 # 多子题：一条指令按题号逐题答全（表单卡超 form 体积硬限时同样走这条）
                 lines.append(_multi_answer_help(cid, qs or [None] * int(n_q)))
@@ -472,12 +485,12 @@ def _build_interaction_card(ctx, project_name):
                                  "content": _multi_click_hint(cid, qs, text_only,
                                                               forms)})
             else:
-                # 不可远程作答（会话非平台自持）：逐题只读展示 + 站点引导。
+                # 不可远程作答（会话非平台自持）：逐题只读展示 + dsh 会话窗口引导。
                 # 2026-10-06 前的实现落到下面的单题分支，只渲染首题（q0），其余
                 # 子题在飞书上完全不可见（用户实障：agent 一次问 3 题只见第 1 题）。
                 elements.extend(_question_card_blocks(views))
                 elements.append({"tag": "markdown",
-                                 "content": "该等待不支持远程作答，请到站点会话窗口处理"})
+                                 "content": _NO_REMOTE_ANSWER_HINT})
         else:
             md = [f"**agent 提问**：{ctx.get('question') or 'agent 正在等待你的回答'}",
                   f"卡片 #{cid} {(ctx.get('title') or '')[:60]}"]
@@ -486,7 +499,8 @@ def _build_interaction_card(ctx, project_name):
             elements.append({"tag": "markdown", "content": "\n".join(md)})
             hint = None
             if not ctx.get("answerable"):
-                hint = "该等待不支持远程作答，请到站点会话窗口处理"
+                # 不可远程作答：站点会话窗也答不了（见 _NO_REMOTE_ANSWER_HINT）
+                hint = _NO_REMOTE_ANSWER_HINT
             elif (ctx.get("questions_count") or len(qs) or 0) > 1:
                 hint = (f"该提问含 {ctx.get('questions_count') or len(qs)} 道子题，"
                         "请到站点会话窗口逐题作答")
@@ -1654,8 +1668,8 @@ def _answer_multi_click(p, c, value, action):
                 f"请回复「同意 {c['id']}」或「拒绝 {c['id']}」",
                 _toast("error", "该等待是审批"))
     if not st.get("answerable"):
-        return ("该等待不支持远程作答，请到站点会话窗口处理",
-                _toast("error", "不支持远程作答"))
+        return (_NO_REMOTE_ANSWER_HINT,
+                _toast("error", "请到 dsh 会话窗口作答"))
     qs = [q for q in (st.get("questions") or []) if q]
     n = len(qs)
     if n < 1:
@@ -1803,7 +1817,7 @@ def _answer_by_token(p, c, token):
         # 审批等待收到「作答」：引导用同意/拒绝指令（answer_interaction 只收提问）
         return f"该等待是工具审批，请回复「同意 {c['id']}」或「拒绝 {c['id']}」"
     if not st.get("answerable"):
-        return "该等待不支持远程作答，请到站点会话窗口处理"
+        return _NO_REMOTE_ANSWER_HINT
     # 作答须一次给全全部子题（answers 逐题 record，漏项即未答）：多子题走
     # 「题号:值」逐题形态（2026-10-06 第二档），并与卡片点选暂存**合并**
     # （2026-10-07 第三档）——文本只需给没点过的题，缺题仍不提交
