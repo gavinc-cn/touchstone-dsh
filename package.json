@@ -1,8 +1,9 @@
 {
   "name": "@gavinc-cn/touchstone-dsh",
-  "version": "0.1.0",
-  "description": "Touchstone 自动化测试平台的 dsh 插件（自包含）: Node 薄壳托管 Python 后端 + /touchstone 前缀反代 + 进程内 agent 驱动, 浏览器半经 exports[\"./client\"] 提供侧栏入口与全屏面板; 包内附完整平台源码与预构建插件前端",
+  "version": "0.1.1",
+  "description": "AI-agent-driven automated testing platform for DeepSeek Harness (dsh): Markdown case library, bug reports, per-project serial queue, development board and built-in load testing.",
   "license": "MIT",
+  "author": "Touchstone contributors",
   "type": "module",
   "main": "./dsh-plugin/lib/index.js",
   "exports": {
@@ -72,5 +73,9 @@
     "testing",
     "automation",
     "agent"
-  ]
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  }
 }

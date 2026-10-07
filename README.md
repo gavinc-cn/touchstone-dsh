@@ -5,6 +5,7 @@
 **An AI-agent-driven automated testing platform.** Point it at a repository; it explores the code, writes and runs test cases, files what breaks, fixes it, and re-verifies the fix.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/@gavinc-cn/touchstone-dsh?logo=npm&color=cb3837)](https://www.npmjs.com/package/@gavinc-cn/touchstone-dsh)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB.svg)](https://www.python.org/)
 [![Node 22.19+ | 24+](https://img.shields.io/badge/Node-22.19%2B%20%7C%2024%2B-339933.svg)](https://nodejs.org/)
 [![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek%20Harness-plugin-4D6BFE.svg)](https://github.com/deepseek-ai/deepseek-harness)
