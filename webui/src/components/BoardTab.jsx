@@ -561,7 +561,18 @@ export default function BoardTab({ project }) {
   // 点击：拖拽刚结束（suppressClickRef）时吞掉；标题区在其自身 onClick 中自行处理
   function onClickCard(card) {
     if (suppressClickRef.current) { suppressClickRef.current = false; return }
+    openCard(card)
+  }
+  // 打开卡片详情（点击卡面正文 / 详情按钮两个入口共用）：
+  // 卡片带「有更新」标记（card.unread，平台/agent 改过列且用户还没打开过）时，
+  // 打开即视为已查看——先乐观清本地标记（免标记在重取前闪一下），再通知服务端
+  // （不 await：失败也不打断打开；服务端写成功后经 SSE 触发重取对齐）
+  function openCard(card) {
     setSelId(card.id)
+    if (!card.unread) return
+    setData((d) => !d ? d
+      : { ...d, cards: d.cards.map((c) => (c.id === card.id ? { ...c, unread: false } : c)) })
+    boardApi.markViewed(projectId, card.id).catch(() => {})
   }
 
   if (!projectId) return null
@@ -669,6 +680,13 @@ export default function BoardTab({ project }) {
                       onStartEdit={startEdit} onSaveTitle={saveTitle}
                       onEditChange={setEditTitle} onCancelEdit={cancelEdit} />
                     <div className="board-card-badges">
+                      {/* 「有更新」标记（card.unread，服务端权威）：平台/agent 改过卡片状态
+                          （会话结束→待审核、提问→阻塞、归档同步→已完成…）而用户还没打开过
+                          这张卡 ⇒ 打标记；打开卡片详情即清（openCard → markViewed）。
+                          用户自己拖列/开始/停止造成的列变化不置位（服务端 mark_unread=False） */}
+                      {card.unread && (
+                        <span className="board-card-new"
+                          title="状态有更新，打开卡片后标记消失">有更新</span>)}
                       {/* 卡片 id（与详情弹窗标题行同款 #N）：日志/会话/bug 报告里说「卡 345」时可直接对上号 */}
                       <span className="board-card-id" title="卡片 id">#{card.id}</span>
                       {/* 队列态徽标＝服务端 queue_state 单枚举派生（P6，前端不拼条件；
@@ -751,7 +769,7 @@ export default function BoardTab({ project }) {
                       {/* 卡片详情显式入口（与点击卡片正文同语义）：正文点击要过拖拽阈值判定，
                           卡片被编辑标题/拖拽占位时不稳，给按钮一个确定入口 */}
                       <Button size="sm" variant="ghost" title="打开卡片详情"
-                        onClick={() => setSelId(card.id)}><Maximize2 /></Button>
+                        onClick={() => openCard(card)}><Maximize2 /></Button>
                       <Button size="sm" variant="ghost" title="删除卡片" onClick={() => removeCard(card)}><Trash2 /></Button>
                       {/* 主会话直达：一键打开卡片主会话（SessionModal board 模式）；尚无会话时禁用 */}
                       <Button size="sm" variant="ghost"

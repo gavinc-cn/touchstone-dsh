@@ -109,8 +109,9 @@ def test_finish_is_idempotent(monkeypatch):
                         lambda i, **kw: updates.append(kw) or real_update(i, **kw))
     board.finish(f"c:{cid}", "会话结束收尾", to_column="review")
     board.finish(f"c:{cid}", "会话结束收尾", to_column="review")   # 终态行重入
-    assert updates == [{"column_key": "review", "block_kind": None,
-                        "block_text": ""}]               # 搬列各一次
+    assert updates == [{"mark_unread": True, "column_key": "review",
+                        "block_kind": None,
+                        "block_text": ""}]               # 搬列各一次（缺省置「有更新」标记）
     assert waitq.get_item(rid)["state"] == "done"        # 行终态（唯一表征）
     assert db.get_board_card(cid)["column_key"] == "review"
 

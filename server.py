@@ -1086,6 +1086,11 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             self._api_board_card_action(int(m.group(1)), int(m.group(2)), m.group(3), body)
             return
+        # 卡片「已查看」（2026-10-07 批次）：前端打开卡片详情时调用，清「有更新」标记
+        m = re.match(r"^/api/projects/(\d+)/board/cards/(\d+)/viewed$", path)
+        if m:
+            self._api_board_mark_viewed(int(m.group(1)), int(m.group(2)))
+            return
         m = re.match(r"^/api/projects/(\d+)/board/cards/(\d+)/compact$", path)
         if m:
             self._api_board_compact(int(m.group(1)), int(m.group(2)), body)
@@ -2894,6 +2899,23 @@ class Handler(BaseHTTPRequestHandler):
                           "application/json; charset=utf-8")
             return
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
+
+    def _api_board_mark_viewed(self, project_id, card_id):
+        """标记卡片已查看（POST /api/projects/<pid>/board/cards/<cid>/viewed）。
+
+        2026-10-07 批次「卡片状态有更新·用户还没打开过 ⇒ 卡面打标记」的清除端：
+        前端打开卡片详情（点击卡面正文 / 详情按钮）时调用，清 `board_cards.unread`。
+        幂等：本来就未读/标记已被别的标签页清掉都回 200；`changed` 说明本次是否真的
+        清了标记（不清就不发看板变更信号，前端也不必重取）。归属校验走
+        `_board_owned`（多用户隔离红线：越权访问他人卡片一律 404）。
+        """
+        row, card = self._board_owned(project_id, card_id)
+        if row is None:
+            return
+        changed = db.mark_card_viewed(card_id)
+        self._respond(200, json.dumps({"ok": True, "unread": False,
+                                       "changed": bool(changed)}).encode("utf-8"),
+                      "application/json; charset=utf-8")
 
     def _api_board_card_action(self, project_id, card_id, action, body):
         """move / start / stop。move 走门禁仲裁；start 额外带打回意见起会话；

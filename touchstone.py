@@ -476,6 +476,7 @@ def cmd_test_ui():
     base = f"http://127.0.0.1:{actual_port() or PORT}"
     files = [f"tests/{name}" for name in
              ("e2e_board_enhance.py", "e2e_board_quickadd_skill.py",
+              "e2e_board_unread.py",
               "e2e_session_dialog.py", "e2e_session_scroll.py",
               "e2e_personalize.py", "e2e_project_dialog.py",
               "e2e_settings.py", "e2e_tabbar.py")

@@ -315,6 +315,7 @@ cmd_test_ui() {
     # 只收集实际存在的 e2e 文件(公开仓不带 e2e 脚本): 一个都没有时提示并跳过该档
     local files="" f
     for f in tests/e2e_board_enhance.py tests/e2e_board_quickadd_skill.py \
+             tests/e2e_board_unread.py \
              tests/e2e_session_dialog.py tests/e2e_session_scroll.py \
              tests/e2e_personalize.py tests/e2e_project_dialog.py \
              tests/e2e_settings.py tests/e2e_tabbar.py; do

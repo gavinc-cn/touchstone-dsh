@@ -130,6 +130,9 @@ def card_json(row, running=False, busy=False, msg_queued=False, queue_state=None
             "last_error": row["last_error"], "last_error_at": row["last_error_at"],
             "worktree": _card_opt(row, "worktree"),
             "created_at": row["created_at"], "updated_at": row["updated_at"],
+            # 状态有更新·用户未打开（2026-10-07 批次）：卡面打「有更新」标记的依据，
+            # 置位/清除全在 db 层派生维护，读侧只透传布尔值。
+            "unread": bool(_card_opt(row, "unread") or 0),
             "running": running, "busy": busy,
             "answer_pending": answer,
             "msg_queued": msg_queued,
@@ -302,6 +305,8 @@ def move_card(project, card_id, target, block_text="", before_id=None):
     wait_items 行，2026-09-17——卡已移走，迟到送达会唤醒已停会话、与拖拽意图相悖）；
     进/出「已完成」先做 dsh 归档/取消归档（2026-10-05 双向同步：任一会话归档失败
     即整体放弃本次移列并 400 报错，见 `_archive_card_sessions`）。
+    2026-10-07 起本路径落列一律 `mark_unread=False`：拖列/按钮移列都是用户本人
+    在看板上发起的操作，不是「用户没看见的状态更新」，不该由平台反过来提醒用户。
     """
     card = db.get_board_card(card_id)
     if card is None:
@@ -361,7 +366,7 @@ def move_card(project, card_id, target, block_text="", before_id=None):
                 "SELECT COALESCE(MAX(sort_order),0)+1 FROM board_cards"
                 " WHERE project_id=? AND column_key=?",
                 (card["project_id"], target)).fetchone()[0]
-    db.update_board_card(card_id, **fields)
+    db.update_board_card(card_id, mark_unread=False, **fields)
     if is_answer_pending(card_id):
         # 拖离当前列 = 放弃该卡已作答·待送达的答案（2026-09-17，见 docstring）。
         # 覆盖 doing/queue 直接落手动阻塞等不走 stop_card 的路径；停止/删除
@@ -1013,7 +1018,9 @@ def _enter_doing(project, card, extra="", force=False, worktree=False):
                       "last_error": ""}  # 落 doing 清陈旧错误（对齐旧 start_into_doing）
             if card["column_key"] == "todo":
                 fields["scheduled_at"] = None  # 离开待开发清定时
-            db.update_board_card(card["id"], **fields)
+            # 用户本人点「开始/强制」（或 runner 缺位退化直起）引起的落列：
+            # 不置「有更新」标记（排队路径经 waitq 落列，同样不置）
+            db.update_board_card(card["id"], mark_unread=False, **fields)
             queued = False
     if queued:
         # 入队前同步刷新一次外部条目探测（ext 行对账，worker 拾起经
@@ -1050,7 +1057,9 @@ def _enter_doing(project, card, extra="", force=False, worktree=False):
             # from_column——上方回滚写即 from_column；不留 starting 泄漏行
             # 占前缀，用户重按开始/重 force 重新落行）
             waitq.mark_failed(force_row_id, str(e))
-        db.update_board_card(card["id"], column_key=card["column_key"],
+        # 回滚同样是用户这次「开始」的收场（错误串已由 400 回执给前端），不置标记
+        db.update_board_card(card["id"], mark_unread=False,
+                             column_key=card["column_key"],
                              block_kind=card["block_kind"],
                              block_text=card["block_text"] or "")
         return None, {"error": str(e)}
@@ -1178,7 +1187,8 @@ def _enter_doing_worktree(project, card, extra="", force=False, want=False):
                       "last_error": "", "worktree": path}
             if card["column_key"] == "todo":
                 fields["scheduled_at"] = None      # 离开待开发清定时（对齐排队路径）
-            db.update_board_card(card_id, **fields)
+            # 用户本人下拉点「在新 worktree 中开始」引起的落列：不置「有更新」标记
+            db.update_board_card(card_id, mark_unread=False, **fields)
         try:
             log_path = start_card(project, db.get_board_card(card_id), extra)
         except RuntimeError as e:
@@ -1186,8 +1196,10 @@ def _enter_doing_worktree(project, card, extra="", force=False, want=False):
             if _session_in_flight(card_id):
                 return card_json(db.get_board_card(card_id)), None
             # 起会话失败：回原列（worktree 标记保留，重按开始即复用）；本路径
-            # 从未落行，无需行收口（finish 无行时幂等 no-op，此处不调）
-            db.update_board_card(card_id, column_key=card["column_key"],
+            # 从未落行，无需行收口（finish 无行时幂等 no-op，此处不调）；
+            # 列回退同样是用户这次操作的收场（错误串已由前端 toast 提示），不置标记
+            db.update_board_card(card_id, mark_unread=False,
+                                 column_key=card["column_key"],
                                  block_kind=card["block_kind"],
                                  block_text=card["block_text"] or "")
             return None, {"error": str(e)}
@@ -1910,7 +1922,7 @@ def stop_card(card_id):
             # 统一走出队收口（v3b `_dequeue_card`：等待行取消/运行行终态化 +
             # 补位唤醒，to_column 一并归位待审核）；排队消息/待送达答案已在
             # 上方先行取消
-            _dequeue_card(card_id, "用户停止", to_column="review")
+            _dequeue_card(card_id, "用户停止", to_column="review", mark_unread=False)
             return True
         proj = db.get_project(card["project_id"])
         if proj is None:
@@ -2067,7 +2079,7 @@ def fork_session(project, card, sid):
     return new_sid
 
 
-def finish(unit_key, reason, *, to_column=None):
+def finish(unit_key, reason, *, to_column=None, mark_unread=True):
     """所有「条目结束」的唯一收口（v2 §2.5.2-4，裁决 R14；v2d T1）。
 
     步骤：finishing 重入门禁（幂等）→ waitq.mark_finishing（running→finishing
@@ -2079,6 +2091,12 @@ def finish(unit_key, reason, *, to_column=None):
     /卡已删、_iw_apply to_review 出队归位、_leave_doing 容器迁移、move_card
     移列、delete_card_cleanup、dequeue_start 起跑失败回滚、runner worker finally
     c: 分支）逐处改调本函数（v3b 起经 `_dequeue_card` 统一行收口）。
+
+    mark_unread（2026-10-07 批次）：搬列时是否给卡片置「状态有更新·用户未打开」
+    标记，透传给 `db.update_board_card`。缺省 True=平台/agent 自己搬的列要标记
+    （会话结束→待审核、归档同步→已完成最典型）；`mark_unread=False` 只给「用户
+    本人在看板上操作」的收尾路径（`stop_card` 的停止→待审核），用户不需要自己
+    给自己发提醒。
 
     行态口径（v2b fix round 1 逐字保留 + v2b 终审记录①）：running/finishing
     行=本收尾点收口；starting 行不收（起跑失败行终态归 worker finally
@@ -2130,7 +2148,8 @@ def finish(unit_key, reason, *, to_column=None):
     if to_column is not None:
         card = db.get_board_card(card_id)
         if card is not None and card["column_key"] != to_column:
-            db.update_board_card(card_id, column_key=to_column,
+            db.update_board_card(card_id, mark_unread=mark_unread,
+                                 column_key=to_column,
                                  block_kind=None, block_text="")
 
 
@@ -2532,7 +2551,10 @@ def _recover_web_card(proj, card):
         except dshdriver.DshDriverError:
             busy = False
     if not busy:
-        db.update_board_card(card["id"], column_key="review")
+        # 重启恢复的列回落不置「有更新」标记：这是平台自己重建视图（会话实况已不在
+        # ⇒ 卡不该留在开发列），不是「你不在时卡片发生了什么」；否则每次重启都会给
+        # 整列 doing 卡（本机实测十余张 sync 卡）一次性打满标记 = 噪音
+        db.update_board_card(card["id"], column_key="review", mark_unread=False)
         return
     if (card["origin"] or "") == "sync":
         return                    # 外部直跑：不建 _RUNS（见 docstring）
@@ -2606,7 +2628,8 @@ def recover():
                         platcompat.kill_tree(int(m.group(1)), signal.SIGTERM)
                     except (ProcessLookupError, PermissionError, OSError):
                         pass  # 进程可能已随重启消失
-        db.update_board_card(r["id"], column_key="review")
+        # 同 `_recover_web_card`：重启恢复的列回落是平台重建视图，不置「有更新」标记
+        db.update_board_card(r["id"], column_key="review", mark_unread=False)
     # 统一队列重建：运行中的卡片补回运行行（有 proc 在手补 evidence.pid——CLI
     # 判据，供自检 R11④ 进程存活裁活；P5 R10）；排队卡片按序重新入队
     if runner.INSTANCE is not None:
@@ -2751,7 +2774,7 @@ def jira_import(project_id):
 
 # ---------- 容器迁移 = 出队（卡离开「正在开发」容器即行收口；v3b 让行退场） ----------
 
-def _dequeue_card(card_id, reason="", to_column=None):
+def _dequeue_card(card_id, reason="", to_column=None, mark_unread=True):
     """出队收口（v3b 行收口唯一实现）：卡离开「正在开发」容器即出队。
 
     容器语义（设计 §2.1 I1）：只有「正在开发」是调度队列；卡迁移到阻塞 / 待审核 /
@@ -2770,13 +2793,16 @@ def _dequeue_card(card_id, reason="", to_column=None):
     行可能正被 worker 起会话，抢标会与拾取方抢同一行的终态标签（v2b fix round 1
     口径，`card_finished` 门禁同源）；起跑失败终态化后路径仍经 `finish` 收口占位
     （`dequeue_start`/worker finally 双调幂等）。
+
+    mark_unread 透传给 finish 的搬列（2026-10-07 批次）：用户本人操作导致的出队
+    （`stop_card` 停止→待审核）传 False，不给自己置「有更新」标记。
     """
     row = waitq.get_active(waitq.KIND_CARD, card_id)
     if row is None or row["state"] == waitq.WAITING:
         # 等待区行取消（行 + 占位投影单事务）；无活跃行时只剩占位投影清理（原
         # delete_card_cleanup「无条件清占位」语义保留；投影不在场/no 行时 no-op）
         waitq.cancel_card_wait(card_id, reason)
-    finish(f"c:{card_id}", reason, to_column=to_column)
+    finish(f"c:{card_id}", reason, to_column=to_column, mark_unread=mark_unread)
 
 
 def _leave_doing(card, stop=True, reason=""):
@@ -3863,7 +3889,9 @@ def _deliver_answer_unit(card_id):
     waitq.mark_done(row["id"])
     # 归位开发列：恢复的会话在跑=运行中卡在开发列；同时兜底落列失败滞留
     # blocked 的卡（2026-09-16 实障卡 388 场景，原自愈分支退场后由此兜底，R3）
-    db.update_board_card(card_id, column_key="doing",
+    # 用户作答引发的回列（阻塞→开发）不置「有更新」标记：用户刚答完，答案送达
+    # 与否由前端「排队中」徽标即时反映，再点一个未读是噪音
+    db.update_board_card(card_id, column_key="doing", mark_unread=False,
                          block_kind=None, block_text="")
     inst = runner.INSTANCE
     if inst is not None:
@@ -3916,7 +3944,8 @@ def deliver_pending_answer_now(card_id):
             inst.submit_answer(card_id)
         return False, f"回答失败：{e}"
     waitq.mark_done(row["id"])
-    db.update_board_card(card_id, column_key="doing",
+    # 「立即送达」同队列送达路径口径：用户作答引发的回列不置「有更新」标记
+    db.update_board_card(card_id, column_key="doing", mark_unread=False,
                          block_kind=None, block_text="")
     if inst is not None:
         # 「立即送达」= 用户自担路径：行补回运行位（与队列送达路径同款：

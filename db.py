@@ -151,7 +151,11 @@ CREATE TABLE IF NOT EXISTS board_cards (
     trashed        INTEGER NOT NULL DEFAULT 0,
     trashed_at     TEXT,
     created_at     TEXT NOT NULL,
-    updated_at     TEXT NOT NULL
+    updated_at     TEXT NOT NULL,
+    -- 2026-10-07 起：卡片状态（列）被平台/agent 改动、而用户还没打开过卡片 ⇒ 1
+    -- （前端卡面打「有更新」标记，用户打开卡片详情即清 0）。用户自己拖列/点按钮
+    -- 造成的列变化不置位（见 update_board_card 的 mark_unread 形参）。
+    unread         INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS board_comments (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -469,6 +473,12 @@ CREATE UNIQUE INDEX idx_projects_user_name ON projects(user_id, name);
         if "worktree" not in cols:
             conn.execute("ALTER TABLE board_cards"
                          " ADD COLUMN worktree TEXT NOT NULL DEFAULT ''")
+        # 2026-10-07 起：卡片状态有更新·用户未打开标记（卡面「有更新」标记的权威）。
+        # 旧库补列，存量卡片默认 0（无标记）——标记只描述「建列之后发生的变化」，
+        # 不给历史卡片补发（避免升级瞬间满板标记）。
+        if "unread" not in cols:
+            conn.execute("ALTER TABLE board_cards"
+                         " ADD COLUMN unread INTEGER NOT NULL DEFAULT 0")
     # P4 排队占位单态化迁移（2026-09-19，一次性；幂等：迁移后无 blocked+queue 行）：
     # 占位列 2026-09-10 起已落 doing，blocked+queue 仅存量兼容；P4 删除全部双态
     # 判定后该形态无人认领，先归位 doing+queue（磁盘/列语义等价，设计 §5.2）
@@ -1040,24 +1050,58 @@ def _notify_card_change(conn, card_id):
         pass
 
 
-def update_board_card(card_id, **fields):
+def update_board_card(card_id, mark_unread=True, **fields):
     """按白名单字段更新卡片，并自动刷新 updated_at。
 
     done_at 派生维护：column_key 落 'done' 且未显式给 done_at → 盖当前时间
     （= 最近一次进入已完成，前端 done 列默认排序用）；column_key 为其它列且
     未显式给 → 清空。集中在此维护可覆盖所有置 done 的写路径（手动移列 /
-    sync 归档 / 定时批量），调用方无需逐处补。"""
+    sync 归档 / 定时批量），调用方无需逐处补。
+
+    unread 派生维护（2026-10-07 批次：卡片状态有更新·用户未打开标记）：
+    `mark_unread=True`（缺省）且本次 `column_key` **确实发生变化**（与库中现值
+    比对，同列写回不算）→ 一并置 unread=1；`mark_unread=False` 用于「用户本人
+    在看板上操作引起」的列迁移（拖列 / 开始 / 停止 / 作答送达）——用户就在看板
+    上，不需要再给自己提醒。判定「确实变化」必须比对现值：`move_card` 等同列
+    早退路径、`dequeue_start` 对已在 doing/queue 的卡写回 doing 都不该置位。
+    unread 本身不在 BOARD_CARD_FIELDS 白名单内（只由本函数派生 / `mark_card_viewed`
+    清除），调用方无法经 fields 误置。"""
     cols = [k for k in fields if k in BOARD_CARD_FIELDS]
     if not cols:
         return
     if "column_key" in fields and "done_at" not in fields:
         fields["done_at"] = now_str() if fields["column_key"] == "done" else None
         cols.append("done_at")
-    sql = ("UPDATE board_cards SET " + ",".join(f"{c}=?" for c in cols)
-           + ", updated_at=? WHERE id=?")
     with connect() as conn:
+        if mark_unread and "column_key" in fields:
+            row = conn.execute("SELECT column_key FROM board_cards WHERE id=?",
+                               (card_id,)).fetchone()
+            if row is None:
+                return                       # 卡片已删：不动任何列
+            if row["column_key"] != fields["column_key"]:
+                fields["unread"] = 1
+                cols.append("unread")
+        # SQL 在 unread 派生之后拼（列集合此时才是最终的）
+        sql = ("UPDATE board_cards SET " + ",".join(f"{c}=?" for c in cols)
+               + ", updated_at=? WHERE id=?")
         conn.execute(sql, [fields[c] for c in cols] + [now_str(), card_id])
         _notify_card_change(conn, card_id)
+
+
+def mark_card_viewed(card_id):
+    """清卡片「状态有更新·用户未打开」标记（用户打开卡片详情时调用）。
+
+    只写 `unread=0`，**刻意不刷 updated_at**：查看不是卡片内容变更，顺带刷时间
+    会污染「更新新→旧」排序口径与 `list_queued_board_cards` 的排队顺序（该查询
+    按 updated_at 排）。返回本次是否真的清了标记（无卡 / 本来就未读 → False），
+    供端点如实回执；真清过才发看板变更信号（省掉无意义的前端重取）。"""
+    with connect() as conn:
+        cur = conn.execute("UPDATE board_cards SET unread=0 WHERE id=? AND unread=1",
+                           (card_id,))
+        changed = cur.rowcount > 0
+        if changed:
+            _notify_card_change(conn, card_id)
+        return changed
 
 
 def trash_board_card(card_id):

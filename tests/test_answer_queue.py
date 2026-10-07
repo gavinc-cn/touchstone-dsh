@@ -220,8 +220,9 @@ def test_answer_delivered_on_refill(monkeypatch):
     assert calls["answer"] == [("s-1", "Q-1", _dsh_payload())]   # dsh 侧提问已应答
     assert waitq.get_item(row["id"])["state"] == "done"
     (cid, kw), = calls["upd"]
-    assert cid == 1 and kw == {"column_key": "doing", "block_kind": None,
-                               "block_text": ""}
+    # mark_unread=False：作答送达是用户作答引发的回列，不置「有更新」标记（2026-10-07）
+    assert cid == 1 and kw == {"column_key": "doing", "mark_unread": False,
+                               "block_kind": None, "block_text": ""}
     assert ("start", 1, 9) in r.calls                # 恢复会话占住串行位
 
 
@@ -372,8 +373,9 @@ def test_deliver_answer_unit_success_orders_done_before_start(monkeypatch):
     board._deliver_answer_unit(1)
     assert waitq.get_item(i)["state"] == "done"
     (cid, kw), = calls["upd"]
-    assert cid == 1 and kw == {"column_key": "doing", "block_kind": None,
-                               "block_text": ""}
+    # 同 test_answer_delivered_on_refill：送达回列不置「有更新」标记（2026-10-07）
+    assert cid == 1 and kw == {"column_key": "doing", "mark_unread": False,
+                               "block_kind": None, "block_text": ""}
     assert r.calls[-2:] == [("done", i), ("start", 1, 9)]   # done 先于占用登记
 
 
