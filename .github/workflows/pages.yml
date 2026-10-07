@@ -12,6 +12,10 @@
 #
 # 本文件在私有仓维护（tools/sync_to_public/.publicignore 已放行 + /.github/***），
 # 随 tools/sync_to_public/sync_to_public.sh 同步到公开仓后生效。
+#
+# Action 版本（2026-10-07 升级）：四个都取当前大版本，运行时均为 Node 24，
+# 以消除 GitHub 的「Node.js 20 deprecated」注解（checkout@v4 / configure-pages@v5 /
+# deploy-pages@v4 声明 node20，upload-pages-artifact@v3 内部调 upload-artifact@v4 也是 node20）。
 
 name: Deploy website
 
@@ -39,7 +43,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 只把站点文件放进 artifact：README.md（维护说明）与 tools/（字体子集脚本）不上站。
       # 站点内部一律用相对路径，故项目站点的 /<repo>/ 子路径无需改任何文件。
@@ -49,13 +53,13 @@ jobs:
           rsync -a --exclude 'README.md' --exclude '/tools/' website/ _site/
 
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
       - name: Deploy
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
