@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# 提交前门禁（可选安装，2026-09-13 批次）：跑测试快层（后端单测 + 前端单测）。
+#
+# 安装（仓库根执行一次）:  git config core.hooksPath githooks
+# 单次跳过:                SKIP_TS_TESTS=1 git commit ...
+# 容错设计: python/pytest 环境不可用 → 警告放行（不阻塞没装测试环境的机器）；
+#           测试失败 → 阻止提交。
+set -u
+cd "$(dirname "$0")/.." || exit 0
+
+if [ -n "${SKIP_TS_TESTS:-}" ]; then
+    echo "[pre-commit] SKIP_TS_TESTS 已设置，跳过测试门禁"
+    exit 0
+fi
+
+PY="${TS_PYTHON:-python3}"
+if ! command -v "$PY" >/dev/null 2>&1 || ! "$PY" -c "import pytest" >/dev/null 2>&1; then
+    echo "[pre-commit] 警告: $PY 不可用或缺 pytest，跳过测试门禁（TS_PYTHON 可指定解释器）" >&2
+    exit 0
+fi
+
+echo "[pre-commit] 运行测试快层（./touchstone.sh test）……"
+if ! ./touchstone.sh test; then
+    echo "[pre-commit] 测试未通过，提交被阻止（单次跳过: SKIP_TS_TESTS=1 git commit ...）" >&2
+    exit 1
+fi

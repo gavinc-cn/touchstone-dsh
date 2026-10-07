@@ -1,0 +1,16 @@
+# Touchstone dsh 插件包自带的组合行 —— bundle patch（2026-10-02 起）。
+#
+# 为什么行搬进包内而不是留在 profile patch:
+#   dsh 的 Plugins 面板只把「包自带 patch 里 insert 出来的行」渲染成可开关的行
+#   （dsh-plugin-manager 的 declaredRows(): 包未声明 dsh.bundle.patch 时 rows 为空），
+#   手写在 profile cordis.patch.yml 里的 insert 在面板里既没有行也没有开关。
+#   包内声明 + 在 profile 的 package.json 里把包名加进 dsh.profile.bundles 之后,
+#   面板里就会出现 Touchstone 卡片与该行开关（开关写回 profile patch 的 disabled）。
+#
+# config 约定: repoDir 是**机器相关**路径（Touchstone 仓库根，须含 server.py 与 webui/dist-plugin），
+#   不写死在这里 —— 由各 profile 的 cordis.patch.yml 用 `- id: touchstone` + `config:` 覆盖提供
+#   （覆盖是整键替换，且 profile 层后于 bundle 层应用）。缺 repoDir 时薄壳只 warn 并跳过启动,
+#   不注册路由, 不影响其它条目。pythonPath 缺省 python3。
+- insert:
+    - id: touchstone
+      name: touchstone

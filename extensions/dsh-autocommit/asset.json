@@ -1,0 +1,18 @@
+{
+  "id": "dsh-autocommit",
+  "name": "自动提交守卫（dsh 原生插件）",
+  "type": "dsh_plugin",
+  "family": "dsh_plugin",
+  "description": "把 kimi-code 的 session_autocommit hook 移植为 DSH 原生 Cordis 插件（原 hook 资产随族退场后，平台改以 dsh 插件形态分发）：回合结束时挡住「本会话改过文件但没提交」并提示模型去提交；自行提交仅在 commitOnApproval=true（默认 false）的审批路径上发生。开关/标记文件与 kimi 侧同源（~/.kimi-code/hooks/session_autocommit.off、.dryrun、仓库内 .kimi-autocommit-off），日志单独一份 session_autocommit.dsh.log。安装 = 拷进 dsh profile 的 node_modules + 在 cordis.patch.yml 写注册行（幂等；web profile 声明 patchReload: live，改注册行即热生效）。",
+  "targets": ["user"],
+  "plugin": {
+    "package": "@gavinc-cn/dsh-autocommit",
+    "entry_id": "dsh-autocommit",
+    "profile": "web",
+    "requires": ["@deepseek-ai/dsh-llm"]
+  },
+  "files": [
+    { "from": "pkg/package.json", "to": "package.json" },
+    { "from": "pkg/lib/index.mjs", "to": "lib/index.mjs" }
+  ]
+}

@@ -1,0 +1,109 @@
+/* shadcn/ui + Tailwind v4 主题底座 (暗色)
+   颜色取值沿用 theme.css 的 bikeops 夜空色板, 与既有定制样式保持一致 */
+/* 显式声明层顺序: 旧定制样式(theme/components.css 里的 @layer legacy)
+   排在任何 Tailwind utilities 之前, 保证 shadcn 组件样式不被覆盖 */
+@layer theme, base, components, legacy, utilities;
+
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* 字体经 --ff-* 间接引用: 运行时按 data-skin 切换 */
+  --font-sans: var(--ff-sans);
+  --font-serif: var(--ff-serif);
+  --font-mono: var(--ff-mono);
+
+  /* 字号随 --fs 缩放(设置页「字体大小」, utils/fontScale.js 运行时写 <html> 内联值):
+     只缩字号不动间距/图标, 行高为比例值自动跟随 */
+  --text-xs: calc(0.75rem * var(--fs));
+  --text-sm: calc(0.875rem * var(--fs));
+  --text-base: calc(1rem * var(--fs));
+  --text-lg: calc(1.125rem * var(--fs));
+  --text-xl: calc(1.25rem * var(--fs));
+  --text-2xl: calc(1.5rem * var(--fs));
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* 全站暗色: 基础 token 直接落在 :root, 不依赖 .dark 类
+   默认皮肤 starlight(星夜金): 配色取自 bikeops 运营后台设计语言 */
+:root {
+  --radius: 0.625rem;
+  --fs: 1;  /* 全站字号缩放乘数(默认=出厂字号), 由 utils/fontScale.js 按设置档位改写 */
+  --background: #0B1426;              /* night */
+  --foreground: #F5F1E8;              /* cloud */
+  --card: #141E36;                    /* midnight */
+  --card-foreground: #F5F1E8;
+  --popover: #141E36;
+  --popover-foreground: #F5F1E8;
+  --primary: #E8B86D;                 /* star 星光金 */
+  --primary-foreground: #0B1426;
+  --secondary: #1F2D4D;               /* dusk */
+  --secondary-foreground: #F5F1E8;
+  --muted: #1F2D4D;
+  --muted-foreground: rgba(245, 241, 232, 0.55);
+  --accent: rgba(232, 184, 109, 0.14); /* star 淡染, 选中/hover 底 */
+  --accent-foreground: #E8B86D;
+  --destructive: #E07A8C;             /* rose */
+  --destructive-foreground: #0B1426;
+  --border: #2A3A5E;                  /* steel */
+  --input: #2A3A5E;
+  --ring: #E8B86D;
+
+  --ff-sans: "Noto Sans SC", system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ff-serif: "Noto Serif SC", "Songti SC", serif;
+  --ff-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* 皮肤 classic(经典蓝): 原 GitHub 暗色板, 由皮肤切换器写入 data-skin */
+[data-skin='classic'] {
+  --background: #0d1117;
+  --foreground: #c9d1d9;
+  --card: #151b23;
+  --card-foreground: #c9d1d9;
+  --popover: #151b23;
+  --popover-foreground: #c9d1d9;
+  --primary: #1f6feb;
+  --primary-foreground: #ffffff;
+  --secondary: #1b2230;
+  --secondary-foreground: #c9d1d9;
+  --muted: #1b2230;
+  --muted-foreground: #8b949e;
+  --accent: #1b2230;
+  --accent-foreground: #c9d1d9;
+  --destructive: #f85149;
+  --destructive-foreground: #ffffff;
+  --border: #2a3140;
+  --input: #2a3140;
+  --ring: #58a6ff;
+
+  --ff-sans: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ff-serif: var(--ff-sans); /* 经典皮肤无 serif 展示体 */
+  --ff-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+

@@ -1,0 +1,10 @@
+{
+  "name": "@gavinc-cn/dsh-autocommit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.mjs",
+  "exports": {
+    ".": "./lib/index.mjs"
+  }
+}

@@ -1,0 +1,7 @@
+# 测试工具链（开发/CI 用，生产运行不依赖；安装: pip install -r requirements-dev.txt）
+# 版本与项目实测环境对齐（2026-09-13，my_pyenv: pytest 9.1.1 / playwright 1.62.0）。
+# 生产运行依赖仍在 requirements.txt（zstandard/requests/lark-oapi/psutil）。
+pytest>=9
+playwright>=1.62
+# 覆盖率基线（可选，按需安装）
+pytest-cov>=6

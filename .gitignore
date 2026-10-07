@@ -1,0 +1,16 @@
+.idea/
+node_modules/
+.run/
+.touchstone/
+.superpowers/
+__pycache__/
+webui/dist/
+webui/dist-plugin/
+.pytest_cache/
+
+.coverage
+.privacyscan
+
+# B3 打包验证实验产物（脚本入库, 产物/依赖不入库; 见 doc_ai/spec/dsh_plugin/dsh插件形态.md）
+webui/b3-spike/out/
+webui/b3-spike/node_modules/
