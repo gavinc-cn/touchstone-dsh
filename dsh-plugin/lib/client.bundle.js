@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-	id: "touchstone",
+	id: "@gavinc-cn/touchstone-dsh",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;

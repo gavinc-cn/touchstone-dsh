@@ -172,14 +172,35 @@ start to skip the one-time password (and the forced change).
 The plugin embeds Touchstone in the `dsh` Web UI as a sidebar entry and panel, and lets Touchstone drive
 resident agent sessions in the host process.
 
+**Option A — from npm (self-contained package: whole platform + prebuilt front end):**
+
 ```bash
 npx @deepseek-ai/dsh web          # 1) start the dsh host once (creates ~/.dsh/profiles/web)
-cd touchstone-dsh
-./dsh-plugin/install.sh           # 2) idempotent install of the plugin package
-# 3) restart the dsh web UI, open http://127.0.0.1:3080, use the Touchstone entry (Alt+T toggles the panel)
+dsh plugin --profile web add @gavinc-cn/touchstone-dsh   # 2) install the plugin package
+# 3) select the bundle in the profile manifest (the Plugins panel toggle does the same thing):
+node ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/dsh-plugin/scripts/select-bundle.mjs \
+  ~/.dsh/profiles/web/package.json
+# 4) restart the dsh web UI, open http://127.0.0.1:3080, use the Touchstone entry (Alt+T toggles the panel)
 ```
 
-The installer prints the exact profile patch you need to point the plugin at this checkout:
+The platform's own Python dependencies are installed with pip, not npm:
+
+```bash
+pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/requirements.txt
+```
+
+No `repoDir` is needed: the package carries `server.py` and `webui/dist-plugin`, so the plugin falls back to
+its own directory.
+
+**Option B — from a checkout (development):**
+
+```bash
+cd touchstone-dsh
+./dsh-plugin/install.sh           # idempotent install of this checkout into the profile
+```
+
+The installer prints the optional profile patch for pointing the plugin at your working copy (or picking a
+specific interpreter); skip it to use the package's own directory:
 
 ```yaml
 - id: touchstone

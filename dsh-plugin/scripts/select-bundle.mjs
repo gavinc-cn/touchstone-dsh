@@ -6,13 +6,20 @@
  * **不会**改 bundles —— dsh 侧改 bundles 的官方入口是 Plugins 面板的包开关（`setBundleEnabled`）。
  * 本脚本补上这一步，让 `install.sh` 一条命令装完即可用。
  *
- * 用法: node scripts/select-bundle.mjs <profile 的 package.json 路径> [包名=touchstone]
+ * 用法: node scripts/select-bundle.mjs <profile 的 package.json 路径> [包名=本包 package.json 的 name]
  * 退出码: 0 = 已是选中态或本次写入成功；1 = 参数缺失 / 读取失败 / 写入失败。
  * 写法与 dsh 的 `writeProfileManifest` 对齐: 2 空格 JSON + 尾换行, 保留其它字段与键序。
  */
 import { readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const [manifestPath, bundleName = 'touchstone'] = process.argv.slice(2);
+// 本脚本在 <包根>/dsh-plugin/scripts/ 下, 上溯三级即包根; 包名从包根 package.json 读,
+// 不写死（2026-10-07 包名由 touchstone 改为 @gavinc-cn/touchstone-dsh 时只需改一处）。
+const PKG_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+const SELF_NAME = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')).name;
+
+const [manifestPath, bundleName = SELF_NAME] = process.argv.slice(2);
 if (!manifestPath) {
   console.error('用法: node scripts/select-bundle.mjs <profile 的 package.json> [包名]');
   process.exit(1);

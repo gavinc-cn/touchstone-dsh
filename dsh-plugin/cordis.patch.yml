@@ -7,10 +7,15 @@
 #   包内声明 + 在 profile 的 package.json 里把包名加进 dsh.profile.bundles 之后,
 #   面板里就会出现 Touchstone 卡片与该行开关（开关写回 profile patch 的 disabled）。
 #
-# config 约定: repoDir 是**机器相关**路径（Touchstone 仓库根，须含 server.py 与 webui/dist-plugin），
+# config 约定: repoDir 是**机器相关**路径（Touchstone 平台根，须含 server.py 与 webui/dist-plugin），
 #   不写死在这里 —— 由各 profile 的 cordis.patch.yml 用 `- id: touchstone` + `config:` 覆盖提供
-#   （覆盖是整键替换，且 profile 层后于 bundle 层应用）。缺 repoDir 时薄壳只 warn 并跳过启动,
-#   不注册路由, 不影响其它条目。pythonPath 缺省 python3。
+#   （覆盖是整键替换，且 profile 层后于 bundle 层应用）。**2026-10-07 起 repoDir 可省**:
+#   包已自包含（Python 平台 + 预构建 webui/dist-plugin 都在包内），薄壳缺省回退到**包自身目录**
+#   （lib/index.js 里 PACKAGE_DIR），只有要指向别的检出、或指定 pythonPath 时才写 config。
+#   pythonPath 缺省 python3。
+#
+# name 必须是**完整包名**（与仓库根 package.json 的 name、scripts/build.mjs 生成的
+# client.bundle.js 里的模块 id 三者逐字一致）；条目 id 仍是 touchstone（profile 覆盖按 id 命中）。
 - insert:
     - id: touchstone
-      name: touchstone
+      name: "@gavinc-cn/touchstone-dsh"

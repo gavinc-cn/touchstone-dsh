@@ -162,14 +162,33 @@ grep '一次性初始口令' .run/server.log     # 或：./touchstone.sh status
 插件把 Touchstone 嵌进 `dsh` Web 界面（侧栏入口 + 面板），并让 Touchstone 能驱动宿主进程内的常驻
 agent 会话。
 
+**方式 A —— 从 npm 安装（自包含包：整个平台 + 预构建前端都在包里）:**
+
 ```bash
 npx @deepseek-ai/dsh web          # 1) 先启动一次 dsh 宿主（会创建 ~/.dsh/profiles/web）
-cd touchstone-dsh
-./dsh-plugin/install.sh           # 2) 幂等安装插件包
-# 3) 重启 dsh web，打开 http://127.0.0.1:3080，用侧栏里的 Touchstone 入口（Alt+T 开关面板）
+dsh plugin --profile web add @gavinc-cn/touchstone-dsh   # 2) 装插件包
+# 3) 把包名选进 profile 清单（等同 Plugins 面板里那一行的开关）：
+node ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/dsh-plugin/scripts/select-bundle.mjs \
+  ~/.dsh/profiles/web/package.json
+# 4) 重启 dsh web，打开 http://127.0.0.1:3080，用侧栏里的 Touchstone 入口（Alt+T 开关面板）
 ```
 
-安装脚本会打印指向本仓库所需的 profile 配置：
+平台自身的 Python 依赖走 pip，npm 不管：
+
+```bash
+pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/requirements.txt
+```
+
+**不需要配 `repoDir`**：包里带着 `server.py` 与 `webui/dist-plugin`，插件缺省就用包自身目录。
+
+**方式 B —— 从检出安装（开发用）:**
+
+```bash
+cd touchstone-dsh
+./dsh-plugin/install.sh           # 幂等安装本检出到 profile
+```
+
+安装脚本会打印**可选**的 profile 覆盖（指向本机工作副本、或指定解释器）；不写就用包自身目录：
 
 ```yaml
 - id: touchstone

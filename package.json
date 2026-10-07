@@ -1,0 +1,76 @@
+{
+  "name": "@gavinc-cn/touchstone-dsh",
+  "version": "0.1.0",
+  "description": "Touchstone 自动化测试平台的 dsh 插件（自包含）: Node 薄壳托管 Python 后端 + /touchstone 前缀反代 + 进程内 agent 驱动, 浏览器半经 exports[\"./client\"] 提供侧栏入口与全屏面板; 包内附完整平台源码与预构建插件前端",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dsh-plugin/lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./dsh-plugin/lib/index.js"
+    },
+    "./client": {
+      "default": "./dsh-plugin/lib/client.bundle.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh-plugin/cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "files": [
+    "*.py",
+    "requirements.txt",
+    "builtin_prompts",
+    "extensions",
+    "dsh-plugin/cordis.patch.yml",
+    "dsh-plugin/install.sh",
+    "dsh-plugin/lib",
+    "dsh-plugin/scripts/build.mjs",
+    "dsh-plugin/scripts/prepack-check.mjs",
+    "dsh-plugin/scripts/select-bundle.mjs",
+    "dsh-plugin/src",
+    "webui/dist-plugin"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-llm": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "build:client": "node dsh-plugin/scripts/build.mjs",
+    "prepack": "node dsh-plugin/scripts/prepack-check.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gavinc-cn/touchstone-dsh.git"
+  },
+  "homepage": "https://github.com/gavinc-cn/touchstone-dsh#readme",
+  "bugs": {
+    "url": "https://github.com/gavinc-cn/touchstone-dsh/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "touchstone",
+    "testing",
+    "automation",
+    "agent"
+  ]
+}

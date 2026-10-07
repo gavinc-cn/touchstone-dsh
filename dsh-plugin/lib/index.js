@@ -22,9 +22,19 @@
  *   两条与正常 dispose 共用同一个幂等 `teardown()`, 因此正常路径行为不变。
  */
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import http from 'node:http';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { AgentDriver, loadUserMessageFactory, loadModelSelectionInstaller }
   from './agent-driver.js';
+
+/**
+ * 包自身目录（本文件位于 <包根>/dsh-plugin/lib/index.js, 上溯三级）。
+ * 2026-10-07 起本包**自包含**（Python 平台 + 预构建 webui/dist-plugin 都在包内）,
+ * 因此安装后的包目录本身就是平台根, 直接充当 repoDir 的缺省值 —— 用户零配置即可跑。
+ */
+const PACKAGE_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
 /** 反代统一注入的免登信任头（server.py --trust-internal-user 时生效） */
 const TRUST_HEADER = 'x-ts-internal-user';
@@ -120,7 +130,7 @@ function stopChild(proc, logger, why) {
 
 /**
  * cordis 插件入口。config 来自 profile patch insert 条目（install.sh 写入）:
- *   repoDir    Touchstone 仓库根（必填）
+ *   repoDir    Touchstone 平台根（可选; 缺省 = 包自身目录, 因为包是自包含的）
  *   pythonPath Python 解释器（默认 python3; 本机应指含 zstandard 的 conda env）
  *   extraEnv   透传子进程的额外环境变量（如 TOUCHSTONE_DB 指向隔离实例库）
  * 返回组合 disposer（注销路由 + 断开驱动 + SIGTERM 子进程），dsh 停用插件时调用；
@@ -128,9 +138,11 @@ function stopChild(proc, logger, why) {
  */
 export async function apply(ctx, config = {}) {
   const logger = ctx.logger ? ctx.logger('touchstone') : console;
-  const repoDir = config.repoDir;
-  if (!repoDir) {
-    logger.warn('touchstone: 缺少 config.repoDir(应由 install.sh 写入), 插件不启动');
+  // repoDir 缺省 = 包自身目录（自包含包: 包里就有 server.py 与 webui/dist-plugin）, 用户零配置即可跑;
+  // 显式 config.repoDir 仍优先 —— 要指向开发中的工作副本、或包被拆开放置时才需要写。
+  const repoDir = config.repoDir || PACKAGE_DIR;
+  if (!existsSync(join(repoDir, 'server.py'))) {
+    logger.warn(`touchstone: 找不到 ${repoDir}/server.py（repoDir 配置有误, 或安装包不完整）, 插件不启动`);
     return;
   }
   // ① 启用即回收：上一份壳若没走到 disposer（热重载换下不 dispose），它的路由与

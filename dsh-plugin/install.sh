@@ -1,29 +1,30 @@
 #!/usr/bin/env bash
 # Touchstone dsh 插件安装（幂等, 可重复执行）:
 #  1) 前置检查 dist-plugin 构建产物（缺失时尝试 npm run build:plugin）
-#  2) dsh plugin add 本仓库 dsh-plugin 包（file: 协议＝打包拷贝进 ~/.dsh/profiles/<profile>/node_modules）
+#  2) dsh plugin add **本仓库根**（包根＝仓库根, 自包含: Python 平台 + plugin 壳 + 预构建前端）
+#     file: 协议＝按 package.json 的 files 白名单打包拷贝进 ~/.dsh/profiles/<profile>/node_modules
 #  3) 把包名选进 profile 的 dsh.profile.bundles（scripts/select-bundle.mjs, 幂等）
 #  4) 提示重启 dsh web / 在侧栏 Plugins 面板里开关
 #
 # 为什么第 3 步是「选 bundle」而不是「手写 patch insert」（2026-10-02 变更）:
-#   组合行已随包下发（包内 cordis.patch.yml, 由 package.json 的 dsh.bundle.patch 指向）——
+#   组合行已随包下发（包内 dsh-plugin/cordis.patch.yml, 由 package.json 的 dsh.bundle.patch 指向）——
 #   只有这样 dsh 的 Plugins 面板才会把该行渲染成可开关的开关（dsh-plugin-manager 的
 #   declaredRows(): 包未声明 dsh.bundle.patch 时 rows 为空, 手写 insert 进 profile patch
 #   在面板里既没有行也没有开关）。旧的「向 profile cordis.patch.yml 追加 insert」已废弃;
 #   存量 profile 若还留着那条 insert, 请手工删除（同 id 两行会让面板行开关锁成 unaddressable）。
 #
-# 机器相关配置（repoDir / pythonPath）不由本脚本写入, 而是在 profile 的 cordis.patch.yml 里覆盖
-# （覆盖是整键替换; 缺 repoDir 时薄壳只 warn 并跳过启动）:
+# 机器相关配置（repoDir / pythonPath）**可省**（2026-10-07 自包含包起）: 缺省 repoDir = 包自身目录,
+# 包里就有 server.py 与 webui/dist-plugin; 只有要指向别的检出、或指定解释器时才在 profile 覆盖:
 #   - id: touchstone
-#     config:
-#       repoDir: <Touchstone 仓库根>
-#       pythonPath: <解释器>
+#     config: { pythonPath: <解释器> }        # 条目 id 仍是 touchstone
 # 环境变量: TS_DSH_PROFILE(默认 web) / TS_DSH_PYTHON(显式指定解释器, 优先)
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${TS_DSH_PROFILE:-web}"
 PROFILE_DIR="$HOME/.dsh/profiles/$PROFILE"
+# 包名（= profile 的 bundles 键 = client.bundle.js 的模块 id）从包根 package.json 读, 不写死
+PKG_NAME="$(node -p "require('$REPO_DIR/package.json').name")"
 
 # 解释器探测链（2026-10-02 去硬编码，原写死某个 conda 环境的解释器绝对路径）:
 #   TS_DSH_PYTHON / TS_PYTHON 显式指定 → 常见 conda 环境 → PATH 上的 python3 → 报错;
@@ -58,18 +59,21 @@ if [[ ! -f "$REPO_DIR/webui/dist-plugin/index.html" ]]; then
     || { echo "错误: 自动构建失败（先: cd webui && npm install && npm run build:plugin）"; exit 1; }
 fi
 
-# 1) 插件包安装（dsh plugin 转发 pnpm; 本机 pnpm 未直装时经 corepack 提供）
-#    file: 协议=打包拷贝为真实目录（裸路径会被 pnpm 以 link: 符号链接接入, 与 kanban 形态不符）
+# 1) 包安装（dsh plugin 转发 pnpm; 本机 pnpm 未直装时经 corepack 提供）
+#    file: 协议＝按包根 package.json 的 files 白名单打包拷贝为真实目录
+#    （裸路径会被 pnpm 以 link: 符号链接接入, 与 kanban 形态不符; 实测 pnpm 12 下 file: 只拷
+#     白名单内的文件, webui/node_modules 与 .git 都不会被拖进来）
 command -v pnpm >/dev/null 2>&1 || corepack enable pnpm
-dsh plugin --profile "$PROFILE" add "file:$REPO_DIR/dsh-plugin"
+dsh plugin --profile "$PROFILE" add "file:$REPO_DIR"
 
 # 2) 选 bundle（幂等）: 包名进 dsh.profile.bundles, 否则包内 cordis.patch.yml 这一层不会被加载。
 #    用 node 改 JSON（node 是 dsh 自身硬依赖; Windows git-bash 下也有）, 写法与 dsh 的
 #    writeProfileManifest 一致（2 空格 JSON + 尾换行）。
-node "$REPO_DIR/dsh-plugin/scripts/select-bundle.mjs" "$PROFILE_DIR/package.json"
+node "$REPO_DIR/dsh-plugin/scripts/select-bundle.mjs" "$PROFILE_DIR/package.json" "$PKG_NAME"
 
-echo "完成。重启 dsh web 生效（package.json 变更 dsh-hmr 也会热重载）;"
+echo "完成（包名 $PKG_NAME）。重启 dsh web 生效（package.json 变更 dsh-hmr 也会热重载）;"
 echo "之后侧栏 Plugins 面板里会出现 Touchstone 卡片与该行开关。"
-echo "若插件要指向本机仓库, 在 $PROFILE_DIR/cordis.patch.yml 里加:"
+echo "repoDir 不再必填（缺省 = 包自身目录, 包里自带 Python 平台与预构建前端）;"
+echo "只有要指向本机开发检出、或指定解释器时才在 $PROFILE_DIR/cordis.patch.yml 里加:"
 echo "  - id: touchstone"
 echo "    config: { repoDir: $REPO_DIR, pythonPath: $PYTHON_PATH }"
