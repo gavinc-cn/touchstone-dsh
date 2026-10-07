@@ -1,4 +1,5 @@
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { useEffect } from 'react'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import Login from './views/Login.jsx'
 import AppShell from './views/AppShell.jsx'
 import Admin from './views/Admin.jsx'
@@ -6,6 +7,7 @@ import Settings from './views/Settings.jsx'
 import TaskLogPage from './views/TaskLogPage.jsx'
 import ForcePasswordChange from './views/ForcePasswordChange.jsx'
 import { useAuthStore } from './stores/auth'
+import { writeLastRoute } from './lib/lastRoute'
 
 // 路由守卫: 未登录访问受保护页 → /login; 已登录访问 /login → /app; 非 admin 访问 /admin → /app;
 // 持一次性初始口令（must_change_pw）→ 只渲染强制改密门, 改完才进应用（后端同规则兜底 403）
@@ -34,6 +36,12 @@ function LoginGate({ children }) {
 }
 
 export default function App() {
+  const location = useLocation()
+  // 路由记忆: 每换一页把「当前页面」记进 localStorage —— dsh 面板重建 iframe（宿主页刷新/
+  // 重开）或独立形态重开时，就能回到用户切走前那一页（见 lib/lastRoute.js）。
+  useEffect(() => {
+    writeLastRoute(location.pathname, location.search)
+  }, [location.pathname, location.search])
   return (
     <Routes>
       <Route path="/login" element={<LoginGate><Login /></LoginGate>} />

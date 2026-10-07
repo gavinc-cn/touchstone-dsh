@@ -308,13 +308,17 @@ function caseLocalAltT() {
     check('面板内命中同样吞事件', e.defaultPrevented && e.propagationStopped);
   }
 
-  // 关闭后 React 清理 effect：iframe 监听解绑，再按不该有反应
+  // 关闭面板（2026-10-07 保活改动）：iframe 与它上面的 keydown 监听都**留着** —— 隐藏的
+  // iframe 仍会独吞键盘事件，监听还在才能用 Alt+T 把面板按回来；解绑只发生在插件 dispose。
   rerenderPanel(env, wrapped);
-  check('面板关闭后 iframe keydown 监听被解绑', !!iframeDoc && iframeDoc.listenerCount('keydown') === 0,
+  check('面板关闭后 iframe keydown 监听仍在（保活：隐藏 iframe 仍吞键）',
+    !!iframeDoc && iframeDoc.listenerCount('keydown') === 1,
     iframeDoc ? String(iframeDoc.listenerCount('keydown')) : 'no iframe doc');
   if (iframeDoc) {
     iframeDoc.dispatch(key());
-    check('解绑后 iframe 内按键不再改状态', openState(storage) === '0');
+    check('关闭后 iframe 内 Alt+T 仍能把面板按回来', openState(storage) === '1', String(openState(storage)));
+    iframeDoc.dispatch(key());
+    check('再按一次关闭（复位到关闭态）', openState(storage) === '0', String(openState(storage)));
   }
 
   // 卸载整个插件：宿主页监听解绑（ctx.effect 的 disposer）

@@ -2,12 +2,15 @@
 // 职责: dsh 侧栏入口按钮(sidebar.footer.action) + 全屏面板(shell.overlay)内嵌
 // 插件版 SPA 的 iframe(base=/touchstone/, 同源免登) + 面板消息桥(内嵌 SPA 请求
 // 「在 dsh 主界面打开卡片主会话」, 见 attachPanelBridge)。
-// 注意 iframe 指向 /touchstone/app 而非 /touchstone/: 后者会 302 到根相对 /app,
-// 在 dsh 宿主上会跳出本插件; 未登录跳转由 SPA 路由守卫在客户端完成。
+// 注意 iframe 入口勿用 /touchstone/ 根: 它会 302 到根相对 /app, 在 dsh 宿主上会跳出本插件;
+// 未登录跳转由 SPA 路由守卫在客户端完成。缺省入口 /touchstone/app, 有「上次页面」记忆时
+// 按记忆路径建 iframe(见 panelEntry), 面板一开就停在用户切走前那一页。
 // 纯 JS 函数体(无 JSX/import), 由 scripts/build.mjs 包装为 __ModuleLoader__ factory。
 
 const h = React.createElement;
 const OPEN_KEY = 'ts.plugin.open'; // 面板开合状态(localStorage 记忆)
+// 上次所在页面(路由级, 由内嵌 SPA 写入; 键名与 webui/src/lib/lastRoute.js **逐字一致**)
+const ROUTE_KEY = 'ts.last_route';
 let open = false;
 try { open = localStorage.getItem(OPEN_KEY) === '1'; } catch { /* 隐私模式等场景忽略 */ }
 const listeners = new Set();
@@ -171,14 +174,41 @@ function attachPanelBridge(el) {
   return () => window.removeEventListener('message', onMessage);
 }
 
+// ── 面板入口(2026-10-07) ─────────────────────────────────────────────────────
+// 面板 iframe 只在「本会话第一次打开」时建一次, 之后常驻(关闭只隐藏, 见 Panel)。
+// 建时的入口路径优先取内嵌 SPA 记下的「上次所在页面」—— 覆盖「dsh 宿主页刷新/重开」
+// 这一档: 那时 iframe 必须重建, 但用户仍希望回到切走前的页面。
+// 只认本插件前缀的绝对路径; 空值/异前缀/插件根('/touchstone/' 会 302 到根相对 /app,
+// 在 dsh 宿主上跳出插件)一律回落 /touchstone/app。
+/** 取面板 iframe 的入口路径(localStorage 脏值一律回落缺省入口)。 */
+function panelEntry() {
+  try {
+    const raw = localStorage.getItem(ROUTE_KEY) || '';
+    if (raw.startsWith('/touchstone/') && raw !== '/touchstone/') return raw;
+  } catch { /* 隐私模式等场景忽略 */ }
+  return '/touchstone/app';
+}
+
 // 全屏面板: 无顶栏(iframe 吃满全屏) + 关闭按钮悬浮在左下角(位置与 dsh 侧栏入口一致)
 // iframe 同源, /touchstone/app 经薄壳反代到 server.py 的插件版 SPA
 function Panel() {
   const isOpen = useOpen();
+  // 保活(2026-10-07): 打开过就在 DOM 里常驻, 关闭只把容器 display:none —— iframe 一旦
+  // 从 DOM 摘掉, 内嵌 SPA 整篇文档就没了, 再打开是全新加载(路由/弹窗/滚动/未提交输入全丢)。
+  // mounted 由「打开过」与「当前打开」合成: 首次打开的那一次渲染就带上 iframe(不等 effect
+  // 二次渲染, 否则同一次提交里挂载的 effect 看不到 iframe ref)。
+  const [everOpened, setEverOpened] = React.useState(isOpen);
+  const mounted = everOpened || isOpen;
   const [hover, setHover] = React.useState(false);   // 按钮自身 hover 反馈(内联样式写不了 :hover)
   const [shown, setShown] = React.useState(true);    // 自动隐藏: 当前是否显示
   const [zoneOk, setZoneOk] = React.useState(false); // iframe 同源可达 => 走自动隐藏, 否则常显
   const iframeRef = React.useRef(null);
+  const [entry] = React.useState(panelEntry);        // iframe 入口: 只在首次挂载时取一次
+
+  // 打开过就记下(常驻判据), 与开合解耦
+  React.useEffect(() => {
+    if (isOpen && !everOpened) setEverOpened(true);
+  }, [isOpen, everOpened]);
 
   // 打开面板: 先亮 CLOSE_PEEK_MS, 之后交给热区逻辑收口
   React.useEffect(() => {
@@ -186,6 +216,20 @@ function Panel() {
     setShown(true);
     const t = setTimeout(() => setShown(false), CLOSE_PEEK_MS);
     return () => clearTimeout(t);
+  }, [isOpen]);
+
+  // 关闭面板: 把焦点交还宿主页 —— 2026-10-07 实测, 隐藏(display:none)的 iframe 仍会
+  // 独吞键盘事件(document.activeElement 仍指向它、按键派发给它的文档), 不交还的话
+  // 宿主页的 Alt+T 再也收不到, 面板就「按不开」了。
+  React.useEffect(() => {
+    if (isOpen) return undefined;
+    const el = iframeRef.current;
+    if (!el) return undefined;
+    try {
+      if (document.activeElement === el && typeof el.blur === 'function') el.blur();
+      if (document.body && typeof document.body.focus === 'function') document.body.focus();
+    } catch { /* 焦点交还失败不影响面板本体 */ }
+    return undefined;
   }, [isOpen]);
 
   // 同源 iframe 内监听光标: 进左下角热区 => 显示; 离开热区 => 延时淡出
@@ -201,13 +245,10 @@ function Panel() {
       const inZone = e.clientX <= CLOSE_ZONE_W && e.clientY >= el.clientHeight - CLOSE_ZONE_H;
       if (inZone) reveal(); else conceal();
     };
-    // 面板内按键: iframe 里的 keydown 不会冒泡到宿主页, 必须挂在 iframe 自己的 document 上
-    const onKey = (e) => { toggleByKey(e); };
     const detach = () => {
       if (!doc) return;
       doc.removeEventListener('mousemove', onMove);
       doc.removeEventListener('mouseleave', conceal);
-      doc.removeEventListener('keydown', onKey, true);
       doc = null;
     };
     // 每次 load 重新挂载(初次附到 about:blank 上无副作用, 真文档就绪后由 load 事件接管)
@@ -218,29 +259,53 @@ function Panel() {
       setZoneOk(true);
       doc.addEventListener('mousemove', onMove);
       doc.addEventListener('mouseleave', conceal);
-      doc.addEventListener('keydown', onKey, true); // 同源 iframe 内也认快捷键
     };
     attach();
     el.addEventListener('load', attach);
     return () => { clearTimeout(pending); el.removeEventListener('load', attach); detach(); };
-  }, [isOpen]);
+  }, [isOpen, mounted]);
+
+  // 面板内按键: iframe 里的 keydown 不会冒泡到宿主页, 必须挂在 iframe 自己的 document 上。
+  // 这层监听**不随开合解绑**(与上面的热区监听不同): 关闭态 iframe 仍可能持有焦点,
+  // 那时按键照样派发给它的文档(实测), 监听还在才能用 Alt+T 把面板按回来。
+  React.useEffect(() => {
+    if (!mounted) return undefined;
+    const el = iframeRef.current;
+    if (!el) return undefined;
+    let doc = null;
+    const onKey = (e) => { toggleByKey(e); };
+    const detach = () => {
+      if (!doc) return;
+      doc.removeEventListener('keydown', onKey, true);
+      doc = null;
+    };
+    const attach = () => {
+      detach();
+      try { doc = el.contentDocument; } catch { doc = null; }
+      if (doc) doc.addEventListener('keydown', onKey, true); // 同源 iframe 内也认快捷键
+    };
+    attach();
+    el.addEventListener('load', attach);
+    return () => { el.removeEventListener('load', attach); detach(); };
+  }, [mounted]);
 
   // 面板打开期间挂宿主消息桥: iframe 里的 SPA 探能力 / 请求在 dsh 主界面打开会话
   React.useEffect(() => {
     if (!isOpen) return undefined;
     return attachPanelBridge(iframeRef.current);
-  }, [isOpen]);
+  }, [isOpen, mounted]);
 
-  if (!isOpen) return null; // kanban 同款: 槽组件常驻, 关闭态渲染 null
+  if (!mounted) return null; // 从没用过面板的会话零开销(首次打开才建 iframe)
   const visible = !zoneOk || shown; // 自动隐藏不可用时(zoneOk=false)保持常显
   return h('div', {
     style: {
       position: 'fixed', inset: 0, zIndex: 9999,
       background: 'var(--dsw-alias-bg-base, #161617)',
+      display: isOpen ? 'block' : 'none', // 关闭 = 只隐藏: iframe 与内嵌 SPA 常驻(保活)
     },
   },
     h('iframe', {
-      ref: iframeRef, src: '/touchstone/app', title: 'Touchstone',
+      ref: iframeRef, src: entry, title: 'Touchstone',
       style: { display: 'block', width: '100%', height: '100%', border: 'none' },
     }),
     h('button', {

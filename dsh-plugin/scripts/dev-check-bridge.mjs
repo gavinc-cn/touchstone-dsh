@@ -6,6 +6,10 @@
  *   ③ 拒绝面：来源窗口不是本面板 iframe / 异源 / sid 为空 / openSession 抛错 —— 一律不动作，
  *      失败时面板保持打开（用户视角仍停在自己刚点的卡片上）；
  *   ④ 生命周期：面板关闭即解绑 message 监听（不留悬挂监听）。
+ * 另钉 2026-10-07 的「保活 + 上次页面」三件事（⑤⑥⑦）：
+ *   ⑤ 保活：关闭只把浮层 display:none，iframe 与内嵌 SPA 常驻（重开不重新加载）；
+ *   ⑥ 入口路径：iframe src 取内嵌 SPA 记下的「上次页面」（ts.last_route），脏值回落 /touchstone/app；
+ *   ⑦ 焦点交还：关闭时把焦点从 iframe 交回宿主页（隐藏的 iframe 仍会独吞键盘事件）。
  * 协议常量与 SPA 半 webui/src/lib/dshHost.js 逐字一致（那边由
  * webui/src/__tests__/dshHost.test.js 覆盖）。
  *
@@ -70,10 +74,12 @@ function makeStorage(initial = {}) {
 }
 
 // ── 最小 React：足够跑 Toggle / Panel 的 hooks（同一组件内顺序稳定即可） ────────
-/** 造 mini React + 渲染器：createElement / useState / useEffect / useRef。 */
-function makeMiniReact() {
+/** 造 mini React + 渲染器：createElement / useState / useEffect / useRef。
+ * @param hostDoc - 宿主 document 桩（iframe.blur() 要把焦点从 iframe 上摘掉，得看它）。 */
+function makeMiniReact(hostDoc) {
   let index = 0;
   const runtime = { values: [], effects: [], pending: [] };
+  let stableIframe = null; // 跨渲染复用的 iframe 元素（见 createElement 注释）
   /** 造 iframe 元素：除事件目标外带同源 contentDocument 与 contentWindow（桥的 e.source 判定面）。 */
   const makeIframe = () => {
     const el = Object.assign(makeTarget('iframe'), { type: 'iframe', props: {}, children: [] });
@@ -83,14 +89,20 @@ function makeMiniReact() {
     win.posted = [];
     win.postMessage = (msg, targetOrigin) => { win.posted.push({ msg, targetOrigin }); };
     el.contentWindow = win;
+    el.blurred = false;
+    el.blur = () => { el.blurred = true; if (hostDoc.activeElement === el) hostDoc.activeElement = null; };
     return el;
   };
   const React = {
     createElement(type, props, ...children) {
-      // 元素本身也做成事件目标（Panel 会对 iframe 元素挂 'load'）
-      const el = type === 'iframe'
-        ? makeIframe()
-        : Object.assign(makeTarget(String(type)), { type, props: {}, children: [] });
+      // iframe 元素跨渲染复用（真 React 会复用 DOM 节点；桩里不这样，ref/焦点/监听
+      // 这些「同一个节点」语义就没法验——保活与焦点交还两处判据都依赖它）
+      let el;
+      if (type === 'iframe') {
+        el = stableIframe || (stableIframe = makeIframe());
+      } else {
+        el = Object.assign(makeTarget(String(type)), { type, props: {}, children: [] });
+      }
       el.props = { ...(props || {}) };
       el.children = children;
       if (props && props.ref && typeof props.ref === 'object') props.ref.current = el;
@@ -139,13 +151,21 @@ function makeMiniReact() {
  * 搭一套完整环境：载入真实产物 + 桩 DOM/React/ctx，并把 apply 跑起来。
  * @param uiWorkspace - 桩 uiWorkspace 服务；undefined=宿主半没拿到服务（能力位应为 false）。
  * @param openSessionError - 传 Error 时 openSession 抛该错（覆盖失败路径）。
+ * @param open - 面板初始开合状态（缺省 true：与「上次会话开着面板」的常见态一致）。
+ * @param lastRoute - 预置的「上次页面」记忆（ts.last_route）；不传=没有记忆。
  * @returns 该环境下所有可观测面。
  */
-function setup({ uiWorkspace, openSessionError = null } = {}) {
+function setup({ uiWorkspace, openSessionError = null, open: openInitial = true, lastRoute } = {}) {
   const src = fs.readFileSync(bundlePath, 'utf8');
-  // 预置面板已打开：Panel 在挂载时才挂 iframe/消息桥，开合状态本来就是记忆值
-  const storage = makeStorage({ 'ts.plugin.open': '1' });
+  // 预置面板开合状态：Panel 在挂载时才挂 iframe/消息桥，开合状态本来就是记忆值
+  const initial = openInitial ? { 'ts.plugin.open': '1' } : {};
+  if (lastRoute !== undefined) initial['ts.last_route'] = lastRoute;
+  const storage = makeStorage(initial);
   const hostDoc = makeTarget('host-document');
+  hostDoc.activeElement = null;
+  hostDoc.body = makeTarget('body');
+  hostDoc.body.focused = false;
+  hostDoc.body.focus = () => { hostDoc.body.focused = true; };
   const fakeWindow = makeTarget('host-window');
   fakeWindow.location = { origin: ORIGIN };
   fakeWindow.parent = fakeWindow; // 插件在宿主页顶层跑，无父窗口
@@ -156,7 +176,7 @@ function setup({ uiWorkspace, openSessionError = null } = {}) {
   new Function('window', 'document', 'localStorage', src)(fakeWindow, hostDoc, storage);
   if (!factory) throw new Error('bundle 未向 __ModuleLoader__ 注册 factory');
 
-  const mini = makeMiniReact();
+  const mini = makeMiniReact(hostDoc);
   const ex = factory((n) => { if (n === 'react') return mini.React; throw new Error('unexpected require ' + n); });
   const rec = { slots: [], injected: [] };
   const service = uiWorkspace === undefined ? null : {
@@ -238,15 +258,91 @@ function caseProbe() {
 function caseOpen() {
   console.log('== ② 打开请求：调 uiWorkspace.openSession + 关面板 ==');
   const env = setup({ uiWorkspace: {} });
-  const { wrapped, iframeWin } = renderPanel(env);
+  const { wrapped, iframeEl, iframeWin } = renderPanel(env);
   panelMessage(env, { type: 'touchstone:open-session', sid: 'sess-abc' });
   check('openSession 收到会话 id', env.service.calls.length === 1 && env.service.calls[0] === 'sess-abc',
     JSON.stringify(env.service.calls));
   check('面板已关闭（开合状态落 0）', openFlag(env.storage) === '0', String(openFlag(env.storage)));
   const tree = env.mini.render(wrapped.type, wrapped.props);
-  check('重渲染返回 null（浮层消失，露出 dsh 主界面）', tree === null || tree === undefined, String(tree));
+  const kept = tree && Array.isArray(tree.children)
+    ? tree.children.find((c) => c && c.type === 'iframe') : null;
+  check('关闭 = 浮层 display:none（保活：iframe 不卸载）',
+    !!tree && tree.props && tree.props.style && tree.props.style.display === 'none' && !!kept,
+    String(tree && tree.props && tree.props.style.display));
+  check('保活：关闭后 iframe 仍是同一个元素（SPA 文档没被销毁）', kept === iframeEl,
+    kept === iframeEl ? 'same' : 'rebuilt');
   check('没有多余的回包（打开请求只调服务，不回应答）', iframeWin.posted.length === 0,
     JSON.stringify(iframeWin.posted));
+}
+
+// ── ⑤ 保活：关闭只隐藏，重开还是原来那篇文档 ─────────────────────────────────
+function caseKeepAlive() {
+  console.log('== ⑤ 保活：关闭只隐藏，重开不重新加载 ==');
+  const env = setup({ uiWorkspace: {} });
+  // 首次渲染的元素句柄要留住: iframe 文档上的快捷键监听挂在它身上（桩 React 每次渲染
+  // 都会造新元素，只有真 React 才会复用 DOM 节点）
+  const { wrapped, tree: opened, iframeEl } = renderPanel(env);
+  check('打开态浮层 display:block', opened.props.style.display === 'block',
+    String(opened.props.style.display));
+
+  // 面板内 Alt+T 关闭（iframe 里的 keydown 不冒泡到宿主页，走的是 iframe 文档上那层监听）
+  iframeEl.contentDocument.dispatch({ type: 'keydown', code: 'KeyT', altKey: true });
+  check('面板内 Alt+T 关闭面板', openFlag(env.storage) === '0', String(openFlag(env.storage)));
+  const closed = env.mini.render(wrapped.type, wrapped.props);
+  check('关闭后浮层仍是 display:none 的容器（iframe 留在 DOM 里，SPA 不重新加载）',
+    closed && closed.props.style.display === 'none'
+    && !!closed.children.find((c) => c && c.type === 'iframe'),
+    String(closed && closed.props.style.display));
+  check('关闭后 iframe 文档上的快捷键监听仍在（隐藏 iframe 仍会吞键，靠它按回来）',
+    iframeEl.contentDocument.listenerCount('keydown') === 1,
+    String(iframeEl.contentDocument.listenerCount('keydown')));
+
+  iframeEl.contentDocument.dispatch({ type: 'keydown', code: 'KeyT', altKey: true });
+  const reopened = env.mini.render(wrapped.type, wrapped.props);
+  check('再按 Alt+T 面板回来（display:block，同一个 iframe 元素）',
+    openFlag(env.storage) === '1' && reopened.props.style.display === 'block'
+    && reopened.children.find((c) => c && c.type === 'iframe') === iframeEl,
+    `${openFlag(env.storage)} / ${reopened.props.style.display}`);
+}
+
+// ── ⑥ 入口路径：iframe src 取内嵌 SPA 记下的「上次页面」 ────────────────────────
+function caseEntry() {
+  console.log('== ⑥ 入口路径：remembered route → iframe src ==');
+  const remembered = setup({ uiWorkspace: {}, lastRoute: '/touchstone/settings/appearance' });
+  const rememberedSrc = renderPanel(remembered).iframeEl.props.src;
+  check('有记忆 → iframe 直接建在记忆页（不用先落 /app 再跳）',
+    rememberedSrc === '/touchstone/settings/appearance', String(rememberedSrc));
+
+  // 脏值/异前缀/插件根一律回落缺省入口（/touchstone/ 会 302 到根相对 /app，跳出插件）
+  const dirty = [undefined, '', 'http://evil.test/x', '/other/app', '/touchstone/', '/touchstone', '/touchstone-login'];
+  for (const value of dirty) {
+    const env = setup({ uiWorkspace: {}, lastRoute: value });
+    const got = renderPanel(env).iframeEl.props.src;
+    check(`记忆值 ${JSON.stringify(value)} → 回落 /touchstone/app`, got === '/touchstone/app', got);
+  }
+
+  // 从没用过面板的会话：不建 iframe，也不挂任何面板侧监听（零开销）
+  const fresh = setup({ uiWorkspace: {}, open: false });
+  const beforeOpen = renderPanel(fresh).tree;
+  check('没打开过面板 → 不建 iframe（渲染 null）', beforeOpen === null, String(beforeOpen));
+  fresh.hostDoc.dispatch({ type: 'keydown', code: 'KeyT', altKey: true }); // 宿主页 Alt+T
+  const opened = renderPanel(fresh);
+  check('首次打开才建 iframe，src 为缺省入口',
+    !!opened.iframeEl && opened.iframeEl.props.src === '/touchstone/app',
+    String(opened.iframeEl && opened.iframeEl.props.src));
+}
+
+// ── ⑦ 焦点交还：关闭时不能把焦点落在隐藏的 iframe 里（否则宿主页 Alt+T 收不到） ──
+function caseFocusHandoff() {
+  console.log('== ⑦ 焦点交还：关闭时把焦点从 iframe 交回宿主页 ==');
+  const env = setup({ uiWorkspace: {} });
+  const { wrapped, iframeEl } = renderPanel(env);
+  env.hostDoc.activeElement = iframeEl; // 焦点在面板 iframe 上（用户在面板里操作时的常态）
+  panelMessage(env, { type: 'touchstone:open-session', sid: 'sess-abc' }); // 关面板
+  env.mini.render(wrapped.type, wrapped.props);                            // 跑关闭态 effect
+  check('关闭时 iframe 被 blur 且宿主 body 拿回焦点',
+    iframeEl.blurred === true && env.hostDoc.body.focused === true,
+    `blurred=${iframeEl.blurred} bodyFocused=${env.hostDoc.body.focused}`);
 }
 
 function caseReject() {
@@ -300,18 +396,23 @@ function caseReject() {
 function caseLifecycle() {
   console.log('== ④ 生命周期：面板卸载即解绑 ==');
   const env = setup({ uiWorkspace: {} });
-  renderPanel(env);
+  const { iframeEl } = renderPanel(env);
   check('挂载后 1 条 message 监听', env.fakeWindow.listenerCount('message') === 1,
     String(env.fakeWindow.listenerCount('message')));
   env.mini.unmount();
-  check('卸载后 0 条（不留悬挂监听）', env.fakeWindow.listenerCount('message') === 0,
+  check('卸载后 0 条 message 监听（不留悬挂监听）', env.fakeWindow.listenerCount('message') === 0,
     String(env.fakeWindow.listenerCount('message')));
+  check('卸载后 iframe 文档上的快捷键监听一并解绑', iframeEl.contentDocument.listenerCount('keydown') === 0,
+    String(iframeEl.contentDocument.listenerCount('keydown')));
 }
 
 caseProbe();
 caseOpen();
 caseReject();
 caseLifecycle();
+caseKeepAlive();
+caseEntry();
+caseFocusHandoff();
 
 console.log(failures ? `\nOVERALL: FAIL (${failures} 项失败)` : '\nOVERALL: PASS');
 process.exit(failures ? 1 : 0);
