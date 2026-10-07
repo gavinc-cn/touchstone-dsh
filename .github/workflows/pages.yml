@@ -1,0 +1,61 @@
+# GitHub Pages 自动发布：把 website/（中英双语官网 + 在线 Demo）发布到
+#   https://gavinc-cn.github.io/touchstone-dsh/
+#
+# 为什么走 Actions 而不是「Deploy from a branch」：
+#   分支发布的源目录只能是 /（根）或 /docs，且会经过 Jekyll——源目录里没有
+#   index.html 时 Jekyll 会把 README.md 当首页渲染。官网在 website/ 子目录，
+#   按「分支 + 根目录」发布会让站点显示成仓库 README。走 Actions 时 artifact
+#   顶层即站点根，完全不经过 Jekyll。
+#
+# 一次性前置（人工，仓库 Settings → Pages → Build and deployment）：
+#   Source 选 “GitHub Actions”（原「Deploy from a branch」要切走并保存）。
+#
+# 本文件在私有仓维护（tools/sync_to_public/.publicignore 已放行 + /.github/***），
+# 随 tools/sync_to_public/sync_to_public.sh 同步到公开仓后生效。
+
+name: Deploy website
+
+on:
+  push:
+    branches: [master] # 公开仓默认分支；改名后要同步这里
+    paths:
+      - "website/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write # upload/deploy-pages 必需
+  id-token: write # deploy-pages 走 OIDC，缺了必失败
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 只把站点文件放进 artifact：README.md（维护说明）与 tools/（字体子集脚本）不上站。
+      # 站点内部一律用相对路径，故项目站点的 /<repo>/ 子路径无需改任何文件。
+      - name: Stage site
+        run: |
+          mkdir -p _site
+          rsync -a --exclude 'README.md' --exclude '/tools/' website/ _site/
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

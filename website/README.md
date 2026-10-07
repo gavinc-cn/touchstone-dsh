@@ -31,6 +31,19 @@ cd website && python3 -m http.server 4610
 直接双击 `index.html`（`file://`）也能看，但字体与内页链接按相对路径解析，
 建议还是走本地服务器。
 
+## 线上发布
+
+线上地址：<https://gavinc-cn.github.io/touchstone-dsh/>
+
+由公开仓的 `.github/workflows/pages.yml` 在 `website/` 有改动时自动发布（GitHub Actions
+发布 `_site` 暂存目录：只带四个 HTML 与 `assets/`，本 README 与 `tools/` 不上站）。
+
+- 站点内部全用相对路径，挂在 `/<仓库名>/` 子路径下**无需改任何文件、不需要设 base**。
+- 新增页面/资源放进 `website/` 即自动带上；只改 `README.md` 或 `tools/` 不会触发发布。
+- 首次或异常时：仓库 `Settings → Pages → Source` 必须是 **GitHub Actions**——选「Deploy from
+  a branch」时 Pages 会用 Jekyll 把仓库根 `README.md` 渲染成首页，站点就显示成 README；
+  也可在 Actions 页手动 `Run workflow` 重发。
+
 ## 在线 Demo（demo.html / en-demo.html）
 
 从主站顶栏、首屏 CTA、上手章节与页脚都能点进去。**它不连后端**：不发任何网络请求、
