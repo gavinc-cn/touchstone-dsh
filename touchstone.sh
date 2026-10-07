@@ -288,7 +288,7 @@ cmd_test_full() {
         exit 1
     fi
     local f ran=0
-    for f in tests/e2e_board_continue.py tests/e2e_board_stream.py tests/e2e_chat_queue.py tests/e2e_unit_state.py tests/e2e_stress_case.py tests/e2e_board_archive.py tests/e2e_board_worktree.py; do
+    for f in tests/e2e_board_continue.py tests/e2e_board_stream.py tests/e2e_chat_queue.py tests/e2e_unit_state.py tests/e2e_stress_case.py tests/e2e_board_archive.py tests/e2e_board_worktree.py tests/e2e_ext_stale_recovery.py tests/e2e_subagent_no_occupancy.py; do
         if [ ! -f "$f" ]; then
             echo "(跳过: 未随附 $f)"
             continue

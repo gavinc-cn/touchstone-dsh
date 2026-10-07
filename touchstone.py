@@ -448,7 +448,8 @@ def cmd_test_full():
     ran = 0
     for name in ("e2e_board_continue.py", "e2e_board_stream.py", "e2e_chat_queue.py",
                  "e2e_unit_state.py", "e2e_stress_case.py", "e2e_board_archive.py",
-                 "e2e_board_worktree.py"):
+                 "e2e_board_worktree.py", "e2e_ext_stale_recovery.py",
+                 "e2e_subagent_no_occupancy.py"):
         script = os.path.join(ROOT, "tests", name)
         if not os.path.isfile(script):
             print(f"(跳过: 未随附 tests/{name})")
