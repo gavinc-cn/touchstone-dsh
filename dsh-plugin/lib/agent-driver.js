@@ -57,6 +57,21 @@ const QUESTION_CALL_MAX = 64;
 /** SSE keepalive 注释帧间隔（毫秒）：防中间层按空闲超时切断长连 */
 const KEEPALIVE_MS = 15000;
 
+/**
+ * 归档集兜底扫描间隔（毫秒；纯内存读，不产生任何 HTTP/磁盘 IO）。
+ *
+ * 2026-10-07 实测定因：宿主 `WorkspaceRegistry.setState()` 的顺序是
+ * `await global.set(state)` → `this.state = state`，而 `domain/changed` 正是在
+ * `global.set` 内部**同步**发出的 ⇒ 监听器执行时 registry 的
+ * `archivedSessionIds` 读到的仍是**旧快照**（官方 registry 的内存缓存尚未刷新）。
+ * 旧实现据此比对 key 判定「没变化」而早退，一次帧都不推——dsh 侧归档只能等
+ * 15s 的 `_keepalive` 兜底（真机四组实测：归档 RPC 13~19ms 返回，帧延迟
+ * 1.1/6.1/6.1/13.8s）。事件路径已改为**直接取事件载荷**里的权威新值
+ * （见 `_onDomainChanged`），本定时器只作二道兜底：事件再丢/形态再变时，
+ * 变化也能在 3s 内推出去（原兜底是 15s）。
+ */
+const ARCHIVE_SWEEP_MS = 3000;
+
 /** 请求体上限（字节）：提示词可能很长，给足余量 */
 const MAX_BODY = 8 * 1024 * 1024;
 
@@ -188,13 +203,17 @@ export class AgentDriver {
     this.fiber = null;
     this._routes = [];
     this._timer = null;
+    /** 归档集快速兜底扫描定时器（见 ARCHIVE_SWEEP_MS） */
+    this._sweepTimer = null;
     this._userMessageFactory = null;
     /** 平台侧审批 id 序号（`ap-<n>`；ApprovalRequestEvent 无 id，见 _onApprovalRequest） */
     this._approvalSeq = 0;
     /**
-     * 插件**认领中**的提问：callId → {sid, mark, resolve, reject, finish, ...}
-     * （2026-10-04 修 #791）。只装平台自持会话的提问——平台经 `/answer` 兑现，
-     * 兑现或中止即从表里摘除；外部会话的提问一律让位原生作答者，不入本表。
+     * 插件**认领中**的提问：callId → {sid, mark, resolve, reject, finish, lane, ...}
+     * （2026-10-04 修 #791 认领；2026-10-06 修 #837 起改为**双通道**：平台经
+     * `/answer` 兑现，dsh GUI 的原生作答同样兑现——先到者胜，见 `_holdQuestion`）。
+     * 只装平台自持会话的提问；兑现或中止即从表里摘除；外部会话的提问一律让位
+     * 原生作答者，不入本表。
      */
     this.questions = new Map();
     /**
@@ -290,22 +309,25 @@ export class AgentDriver {
       // 事件挂在注入作用域上（契约自检的桩 ctx 只有 agentCtx 有 on；真机两者同一总线）
       const bus = (wsCtx && typeof wsCtx.on === 'function') ? wsCtx : this.ctx;
       if (bus && typeof bus.on === 'function') {
-        bus.on('domain/changed', (change) => {
-          if (!change || change.domain !== 'workspace') return;
-          this._publishArchiveState(false);
-        });
+        bus.on('domain/changed', (change) => this._onDomainChanged(change));
       }
       this._publishArchiveState(true);
       this.logger.info('touchstone: workspaceRegistry 可用（归档集事件 + /archived//archive）');
     });
     this._timer = setInterval(() => this._keepalive(), KEEPALIVE_MS);
     if (this._timer.unref) this._timer.unref();
+    // 归档集快速兜底（2026-10-07）：事件为主路径已毫秒级，这里只是二道防线
+    this._sweepTimer = setInterval(() => this._publishArchiveState(false),
+                                   ARCHIVE_SWEEP_MS);
+    if (this._sweepTimer.unref) this._sweepTimer.unref();
   }
 
   /** 停用：注销路由、断开 SSE、释放常驻会话与观察表。 */
   async dispose() {
     if (this._timer) clearInterval(this._timer);
     this._timer = null;
+    if (this._sweepTimer) clearInterval(this._sweepTimer);
+    this._sweepTimer = null;
     for (const disposeRoute of this._routes) {
       try {
         disposeRoute();
@@ -328,11 +350,13 @@ export class AgentDriver {
       await this._disposeHandle(entry);
     }
     // 认领中的提问：插件要走了，兑现不了——reject 收口（宿主 `ask()` 见信号中止/
-    // 异常会归一，tool result 记中断），并清挂起标记，避免平台侧残留 pending
+    // 异常会归一，tool result 记中断），并清挂起标记、收起 dsh GUI 的提问框，
+    // 避免平台侧与浏览器侧各残留一个 pending
     for (const [callId, pending] of [...this.questions]) {
       this.questions.delete(callId);
       try {
         pending.finish();
+        pending.cancelLane();
         pending.reject(new Error('touchstone driver disposed before the question settled'));
       } catch {
         /* 已收口/已兑现：忽略 */
@@ -357,6 +381,8 @@ export class AgentDriver {
       usage: entry.usage || null,                  // 上下文用量（assistant/message 累积）
       permission: this._permissionState(entry),    // 会话级权限（{mode, preset}；进程内回读）
       started_at: entry.createdAt,        // 平台侧「运行中会话精确探测」的排序依据
+      // 会话头行 origin（子代理='subagent'，主会话=空串）：平台据此不建卡/不占位
+      origin: this._sessionOrigin(entry.agent && entry.agent.session),
     }));
     const external = [];
     for (const [sid, info] of this.observed) {
@@ -368,6 +394,7 @@ export class AgentDriver {
         cwd: info.cwd,
         status: live ? live.status : 'unknown',
         owned: false,
+        origin: info.origin || '',          // 子代理会话标记（见 _sessionOrigin）
         interaction: info.interaction || null,
         last_turn_reason: info.lastTurnReason || null,
       });
@@ -486,17 +513,31 @@ export class AgentDriver {
     entry.publish({ sid, ...trimEvent(relay) });
   }
 
+  /** 会话头行的 origin（dsh 子代理会话为 `'subagent'`，主会话/未上报为空串）。
+   *
+   * 为什么平台需要它（2026-10-07）：子代理会话与主会话同 bucket 同格式，平台侧
+   * 原本把每个会话都建成看板卡并在其运行时落 `ext:` 占用行——子代理是主会话的
+   * 实现细节，于是「一次派 8 个子代理」＝多 8 张卡 + 项目被占满不补位（实障：
+   * 卡 870 排队 5 小时）。平台据此把子代理排除在建卡与占用之外，判定源就是这里。
+   * 空串＝未知（绝不能推断成「非子代理」）。
+   */
+  _sessionOrigin(session) {
+    return String((session && session.header && session.header.origin) || '');
+  }
+
   /** `session/created`：登记全局可见会话（外部直跑会话的发现入口）。 */
   _observe(session) {
     const sid = String(session.id);
     const cwd = (session.header && session.header.cwd) || '';
     this.observed.set(sid, {
       cwd,
+      origin: this._sessionOrigin(session),
       lastTurnReason: null,
       interaction: null,
       updatedAt: Date.now(),
     });
-    this._publishState('session/created', { sid, data: { cwd, owned: this.sessions.has(sid) } });
+    this._publishState('session/created', {
+      sid, data: { cwd, owned: this.sessions.has(sid), origin: this._sessionOrigin(session) } });
   }
 
   /**
@@ -547,7 +588,7 @@ export class AgentDriver {
   }
 
   /**
-   * `user-questions/request`（waterfall，**prepend 注册**）：提问的观测 + 作答入口。
+   * `user-questions/request`（waterfall，**prepend 注册**）：提问的观测 + 双通道作答。
    *
    * 为什么必须 prepend（2026-10-04 隔离实例探针实测，修 #791）：
    * dsh Web 的客户端问答桥（`@deepseek-ai/dsh-api-remotes` 把该 waterfall 转发给
@@ -557,13 +598,17 @@ export class AgentDriver {
    * 由下面的分支决定，故 Web GUI 对**外部会话**的行为一个字节都没变。
    *
    * 两条分支：
-   *  1) 平台自持会话（`/session` 建的池内会话，看板卡与任务轮都走它）：**插件认领**，
-   *     返回一个由平台 `/answer` 兑现的 Promise。理由：dsh 阻塞式
-   *     `ask_user_question`（tool-ask-user 默认 legacy 模式）**不带
-   *     `request.wait.callId`**，而宿主 `userQuestions.answer(agent, callId, …)`
-   *     只受理「continued」（前台等待超时后）的提问——**在途提问只有 waterfall
-   *     链内返回答案这一条路**。旧实现既没 prepend 又没有 callId，平台的
-   *     answerable/作答通道全程空转（#791：Touchstone 会话窗不出现选择框）。
+   *  1) 平台自持会话（`/session` 建的池内会话，看板卡与任务轮都走它）：**双通道**——
+   *     插件认领（平台 `/answer` 兑现，Touchstone 会话窗渲染选择框可作答）**并且**
+   *     把请求交回下游原生链路（dsh Web GUI 同样弹提问框、同样可作答），两侧先答者胜
+   *     （竞速口径见 `_holdQuestion`）。
+   *      · 为什么必须认领：dsh 阻塞式 `ask_user_question`（tool-ask-user 默认 legacy
+   *        模式）**不带 `request.wait.callId`**，而宿主
+   *        `userQuestions.answer(agent, callId, …)` 只受理「continued」（前台等待超时
+   *        后）的提问——**在途提问只有 waterfall 链内返回答案这一条路**。只让位不认领，
+   *        平台的 answerable/作答通道全程空转（#791：Touchstone 会话窗不出现选择框）。
+   *      · 为什么要让位（2026-10-06 修 #837）：纯认领时该 waterfall 到插件为止，dsh Web
+   *        GUI 收不到提问 —— 提问框只在 Touchstone 侧出现。预期是**两侧都显示**。
    *  2) 其它会话（用户自己直跑/外部会话）：只旁听（发状态帧，平台据此把卡置阻塞、
    *     把 ext 行按挂起处置），`next()` 让原生作答者（dsh Web GUI）照旧作答。
    */
@@ -573,10 +618,14 @@ export class AgentDriver {
     const waitCallId = String((request && request.wait && request.wait.callId) || '');
     const entry = sid ? this.sessions.get(sid) : undefined;
     if (entry !== undefined) {
-      // 平台自持会话：认领。标识优先取宿主给的 wait.callId（timed 模式），
+      // 平台自持会话：双通道。标识优先取宿主给的 wait.callId（timed 模式），
       // 否则取 `ask_user_question` 的真实 tool callId（legacy 模式），再否则自造
       const callId = waitCallId || this._takeQuestionCallId(sid) || this._nextQuestionId();
-      return this._holdQuestion(entry, callId, request);
+      // 先留原宿主取消信号（轮次中止/停卡）：打开原生通道会替换请求对象上的
+      // `signal`（见 `_openNativeLane`），平台侧的收口仍要认**原信号**
+      const hostSignal = request && request.signal;
+      const lane = this._openNativeLane(request, next);
+      return this._holdQuestion(entry, callId, request, hostSignal, lane);
     }
     if (!sid) return next();
     this._publishQuestionMark(sid, waitCallId, request);
@@ -584,52 +633,123 @@ export class AgentDriver {
   }
 
   /**
-   * 认领一个平台自持会话的提问：登记进 `this.questions`、发挂起状态帧，返回的
-   * Promise 由平台 `/answer`（或提问被中止）兑现——返回值直接交回宿主
-   * `ask_user_question`，即与 Web GUI 作答同一条 waterfall 语义。
+   * 打开「原生作答通道」：把提问交回 waterfall 下游（dsh Web 客户端问答桥 → 浏览器
+   * 提问框），返回 `{promise, cancel}`。dsh GUI 的作答经该 promise 回到宿主
+   * `ask_user_question`，与平台 `/answer` 是同一条 waterfall 语义。
+   *
+   * 为什么转发前要替换 `request.signal`（修 #837 的关键；依据是读
+   * `@deepseek-ai/dsh-api-gateway` 两个半壳代码，不是猜测）：
+   *  · Host 半（`lib/index.js` `startRemoteEvent`）：请求对象上的 `signal` 被登记为该
+   *    pending 事件的**宿主取消信号**，一旦 abort 就 `finishRemoteEvent` 并向浏览器补发
+   *    `{type:'cancel', eventId}`；
+   *  · Client 半（`lib/client.js` 的 `frame.type === 'cancel'`）：收到 cancel 即 abort 该
+   *    次投递的 signal ⇒ 客户端问答桥的 `claimSignal` 中止 ⇒ 提问框自行收起、
+   *    定时等待（timed 模式）一并释放。
+   *  平台先在 Touchstone 侧作答时，这是插件**唯一**能让 dsh GUI 那张框消失的手段
+   *  （否则框会留在输入区，用户再答也无人接收）。
+   *  `request` 是宿主 `ask()` 里 `{...request, agent}` 造出来的**浅拷贝**，只被本链下游
+   *  看到；宿主 `ask()` 自身的取消判断读原对象，故替换不影响它。替换后仍把原信号接进来
+   *  （停卡/轮次中止时两端一起收口，行为与替换前一致）。
+   *
+   * 下游失败（无 Web 客户端问答桥的 profile 如 headless、客户端内部异常）只当该通道
+   * 不存在：这里先吃掉 rejection（平台通道仍等 `/answer`），调用方只竞速**成功**值。
+   *
+   * @returns {{promise: Promise<any>, cancel: (reason?: Error) => void}}
+   */
+  _openNativeLane(request, next) {
+    const upstream = request && request.signal;
+    const controller = new AbortController();
+    if (upstream) {
+      if (upstream.aborted) controller.abort(upstream.reason);
+      else if (typeof upstream.addEventListener === 'function') {
+        upstream.addEventListener('abort', () => controller.abort(upstream.reason), { once: true });
+      }
+    }
+    try {
+      request.signal = controller.signal;      // 网关据此登记取消/收框
+    } catch {
+      /* 请求对象被冻结（异常形态）：退化为「平台先答时 GUI 的框不自收」，不影响作答 */
+    }
+    let promise;
+    try {
+      promise = Promise.resolve(next());
+    } catch (err) {
+      promise = Promise.reject(err);
+    }
+    promise.catch(() => {});                   // 见 docstring：下游失败由平台通道兜底
+    return { promise, cancel: (reason) => { try { controller.abort(reason); } catch { /* 已中止 */ } } };
+  }
+
+  /**
+   * 认领一个平台自持会话的提问：登记进 `this.questions`、发挂起状态帧，返回的 Promise
+   * 由**两个作答通道先到者**兑现——① 平台 `/answer`；② 原生链路（dsh GUI 提问框，
+   * `_openNativeLane`）。返回值直接交回宿主 `ask_user_question`。
+   *
+   * 竞速口径（修 #837，两侧都显示、都可答）：
+   *  · 原生链路**成功**即胜出：清平台挂起标记（Touchstone 会话窗的框随之收起），
+   *    平台侧迟到的 `/answer` 落到 `svc.answer` 的 continued 通道（accepted=false，
+   *    平台按 40405 收口，不空转）。
+   *  · 原生链路**失败**不算数（GUI 点「取消」、客户端异常、无客户端的 profile…）：
+   *    平台通道继续等 `/answer`。真正的失败只由宿主取消信号（停卡/cancel）给出。
+   *  · 平台先答：`_settleQuestion` 主动 abort 原生通道的取消信号 → dsh GUI 的提问框
+   *    自行收起（见 `_openNativeLane`），不留「答了也没人收」的死框。
    *
    * 中止（用户停卡/cancel）：宿主 abort 信号触发 → reject 普通 Error，宿主 `ask()`
    * 见「信号已中止」会归一为 ASK_ABORTED（tool result 记中断，与旧行为一致）。
    */
-  _holdQuestion(entry, callId, request) {
+  _holdQuestion(entry, callId, request, hostSignal, lane) {
     const sid = entry.sessionId;
     return new Promise((resolve, reject) => {
-      const pending = { sid, callId, mark: null, done: false, finish: null, resolve, reject };
+      const pending = { sid, callId, mark: null, done: false, finish: null, resolve, reject,
+                        lane: lane || null,
+                        cancelLane: () => { if (lane) lane.cancel(new Error('the platform answered the question first')); } };
       this.questions.set(callId, pending);
       /** 收口（幂等）：摘表 + 解绑中止监听 + 清挂起标记 */
       pending.finish = () => {
         if (pending.done) return;
         pending.done = true;
         if (this.questions.get(callId) === pending) this.questions.delete(callId);
-        const signal = request && request.signal;
-        if (pending.onAbort && signal
-            && typeof signal.removeEventListener === 'function') {
-          signal.removeEventListener('abort', pending.onAbort);
+        if (pending.onAbort && hostSignal
+            && typeof hostSignal.removeEventListener === 'function') {
+          hostSignal.removeEventListener('abort', pending.onAbort);
         }
         this._clearQuestionMark(sid);
       };
-      const signal = request && request.signal;
-      if (signal) {
-        if (signal.aborted) {
+      // 原生通道（dsh GUI）：成功即胜出并清平台挂起标记；失败一律忽略（平台通道仍在）
+      if (lane) {
+        lane.promise.then((value) => {
+          if (pending.done) return;
           pending.finish();
+          resolve(value);
+        }, () => { /* 见 docstring：旁路故障不判死提问 */ });
+      }
+      if (hostSignal) {
+        if (hostSignal.aborted) {
+          pending.finish();
+          pending.cancelLane();
           reject(new Error('ask_user_question aborted before the platform answered'));
           return;
         }
         pending.onAbort = () => {
           pending.finish();
+          pending.cancelLane();
           reject(new Error('ask_user_question aborted before the platform answered'));
         };
-        signal.addEventListener('abort', pending.onAbort);
+        hostSignal.addEventListener('abort', pending.onAbort);
       }
       pending.mark = this._publishQuestionMark(sid, callId, request);
     });
   }
 
-  /** 兑现认领中的提问（平台 `/answer` 送达）：true=命中并已交付宿主。 */
+  /**
+   * 兑现认领中的提问（平台 `/answer` 送达）：true=命中并已交付宿主。
+   * 平台先答时顺带 abort 原生通道的取消信号——dsh GUI 的提问框随之收起（修 #837）。
+   */
   _settleQuestion(callId, answer) {
     const pending = this.questions.get(callId);
     if (pending === undefined) return false;
     pending.finish();
+    pending.cancelLane();
     pending.resolve(answer);
     return true;
   }
@@ -759,18 +879,43 @@ export class AgentDriver {
   }
 
   /**
+   * `domain/changed` → 归档集推帧（事件为主路径）。
+   *
+   * **为什么取事件载荷而不是回读 registry（2026-10-07 真机实测定因）**：官方
+   * `WorkspaceRegistry.setState()` 的写法是 `await this.global.set(state)` **之后**
+   * 才更新自己的内存缓存 `this.state`，而 `domain/changed` 正是在 `global.set`
+   * 内部**同步**发出的——监听器执行时 `registry.archivedSessionIds` 读到的还是
+   * **旧快照**，旧实现据此算出「key 没变」直接早退、一帧都不推；真机表现为
+   * 「dsh GUI 归档后要等 15s keepalive 才把卡片搬进『已完成』」（四组实测：
+   * RPC 13~19ms，帧延迟 1.1/6.1/6.1/13.8s，全部落在 keepalive 节拍上）。
+   * 事件载荷 `change.value` 就是刚落盘的整表状态（与 registry 随后缓存的是同一个
+   * 对象引用），取 `archivedSessionIds` 即权威新值；非全局态写入（`table` 非空，
+   * 如 workspaces 表记录）不携带该字段 → 回退读 registry（那类写入本就不改归档集）。
+   * @param {object} change - `{domain, table, key, operation, value}`
+   */
+  _onDomainChanged(change) {
+    if (!change || change.domain !== 'workspace') return;
+    const state = change.table ? null : change.value;
+    const ids = (state && Array.isArray(state.archivedSessionIds))
+      ? state.archivedSessionIds : undefined;
+    this._publishArchiveState(false, ids);
+  }
+
+  /**
    * 归档集变化 → 推一帧 `driver/archived` **整表快照**（进 stateRing + 广播）。
    * 整表而非增量：平台卡片绑定的 sid 可能不在会话池/观察表里（历史会话），
    * 整表帧覆盖任意 sid，且平台侧一次覆盖、无需逐会话记账。
    * @param {boolean} force - true=无条件发（启动基线）；false=与上次发布值比对
+   * @param {string[]|undefined} ids - 权威归档集（`domain/changed` 事件载荷优先）；
+   *   缺省＝回读 registry（keepalive / 快速兜底扫描路径）
    */
-  _publishArchiveState(force) {
-    const ids = this._archivedIds();
-    if (ids === null) return;                 // 服务缺失：不发帧（平台侧维持「未知」）
-    const key = ids.join('\n');
+  _publishArchiveState(force, ids) {
+    const list = Array.isArray(ids) ? ids.map(String) : this._archivedIds();
+    if (list === null) return;                // 服务缺失：不发帧（平台侧维持「未知」）
+    const key = list.join('\n');
     if (!force && key === this._archivedKey) return;
     this._archivedKey = key;
-    this._publishState('driver/archived', { data: { archived: ids } });
+    this._publishState('driver/archived', { data: { archived: list } });
   }
 
   /** `GET /archived`：归档集整表（平台 EventHub 在(重)连对齐时取一次）。 */
@@ -923,6 +1068,8 @@ export class AgentDriver {
       interaction: entry.interaction,
       cwd: entry.cwd,
       task: entry.task,
+      // 会话头行 origin（子代理='subagent'，主会话=空串）——与 /live 同口径
+      origin: this._sessionOrigin(entry.agent && entry.agent.session),
     });
   }
 
@@ -1122,15 +1269,16 @@ export class AgentDriver {
   }
 
   /**
-   * 回答挂起的提问（2026-10-04 修 #791 起分两路）：
+   * 回答挂起的提问（2026-10-04 修 #791 起分两路；2026-10-06 修 #837 起 dsh GUI 也可答）：
    *
    *  ① 插件**认领中**的提问（平台自持会话的在途提问，`this.questions` 命中）：
    *     兑现认领 Promise——返回值由 waterfall 直接交回宿主 `ask_user_question`。
-   *     这是平台唯一能答**在途**提问的通道（见 `_onQuestionRequest` 注释）。
+   *     这是平台答**在途**提问的通道（见 `_onQuestionRequest` 注释）。
    *  ② 认领表未命中：退回宿主 `ctx.userQuestions.answer(agent, callId, …)`——
    *     只对「continued」（前台等待超时后）的提问有效，覆盖 timed 模式超时后
-   *     平台迟到作答的场景；accepted=false 表示问题已不存在/已应答（平台侧按
-   *     40405「问题已不存在」放弃重试，不空转）。
+   *     平台迟到作答的场景；accepted=false 表示问题已不存在/已应答（含**用户在
+   *     dsh GUI 先答**的情形：#837 起两侧同题，先答者胜），平台侧按
+   *     40405「问题已不存在」放弃重试，不空转。
    */
   async _answer(res, req) {
     const body = await this._body(req);

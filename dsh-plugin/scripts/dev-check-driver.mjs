@@ -26,6 +26,19 @@ function check(name, ok, detail = '') {
   if (!ok) failures++;
 }
 
+/**
+ * 造一条「原生作答通道」桩：模拟 dsh Web 客户端问答桥交给插件的 promise。
+ * 手工 `resolve()` 表示浏览器侧作答、`fail()` 表示该通道取消/异常。永不自动兑现，
+ * 故插件必须靠平台侧 `/answer` 或竞速收口（正是要钉的语义）。
+ */
+function makeNativeLane() {
+  let ok = () => {};
+  let ng = () => {};
+  const promise = new Promise((resolve, reject) => { ok = resolve; ng = reject; });
+  promise.catch(() => {});                 // 与真机同形：无人接管也不算未处理拒绝
+  return { promise, resolve: ok, fail: ng };
+}
+
 /** 造一个假 agent（形状对齐 @deepseek-ai/dsh-agent 的 Agent 接口）。 */
 function makeAgent(id, cwd) {
   return {
@@ -60,11 +73,16 @@ function makeCtx() {
   });
   sockets.workspaces = new Map();
   sockets.archiveCalls = [];
-  // 宿主落盘归档集后广播 `domain/changed`（真机由 domain 存储层发出；桩同步触发，
-  // 用来验证驱动「事件为主」的推帧路径）
-  const fireDomainChanged = () => {
+  // 宿主落盘归档集后广播 `domain/changed`（真机由 domain 存储层发出）。
+  // **顺序必须照抄真机**（2026-10-07 定因）：官方 `WorkspaceRegistry.setState()` 是
+  // `await global.set(state)` → `this.state = state`，而事件在 `global.set` 内部**同步**
+  // 发出 ⇒ 监听器执行时 registry 的 `archivedSessionIds` 还是**旧值**，权威新值只在
+  // 事件载荷 `change.value` 里。桩若先改 `archived` 再发事件，就会掩盖
+  // 「回读 registry 拿到旧快照 ⇒ 一帧不推」这个真机故障（原桩即如此）。
+  const fireDomainChanged = (value) => {
+    sockets.cacheAtEmit = [...sockets.workspaceRegistry.archived];
     for (const fn of handlers['domain/changed'] || []) {
-      try { fn({ domain: 'workspace', table: '', operation: 'put' }); } catch { /* 桩忽略 */ }
+      try { fn({ domain: 'workspace', table: '', key: '', operation: 'put', value }); } catch { /* 桩忽略 */ }
     }
   };
   sockets.workspaceRegistry = {
@@ -76,6 +94,11 @@ function makeCtx() {
     knownSessions: new Set(),
     archived: [],
     get archivedSessionIds() { return [...this.archived]; },
+    /** 当前整表全局态（事件载荷 `change.value` 的真机同形：带 archivedSessionIds）。 */
+    stateValue(next) {
+      return { initialized: true, workspaceIds: [], pinnedSessionIds: [],
+               archivedSessionIds: [...next] };
+    },
     async archiveSession(sid, options) {
       sockets.archiveCalls.push(['archive', sid, !!(options && options.stopActivity)]);
       if (this.archived.includes(sid)) return;
@@ -84,14 +107,16 @@ function makeCtx() {
         err.name = 'WorkspaceUnknownSessionError';
         throw err;
       }
-      this.archived.push(sid);
-      fireDomainChanged();
+      const next = [...this.archived, sid];
+      fireDomainChanged(this.stateValue(next));   // 真机顺序：事件先行（带权威新值）
+      this.archived = next;                       // registry 内存缓存随后才刷新
     },
     async unarchiveSession(sid) {
       sockets.archiveCalls.push(['unarchive', sid]);
       if (!this.archived.includes(sid)) return;
-      this.archived = this.archived.filter((x) => x !== sid);
-      fireDomainChanged();
+      const next = this.archived.filter((x) => x !== sid);
+      fireDomainChanged(this.stateValue(next));   // 同上：事件在前、缓存更新在后
+      this.archived = next;
     },
     seed(p) {
       const ws = workspaceEntity(p);
@@ -425,16 +450,18 @@ async function main() {
     qHooks.length >= 1 && (opts['user-questions/request'] || [])[0]
     && opts['user-questions/request'][0].prepend === true,
     JSON.stringify(opts['user-questions/request']));
-  // 平台自持会话（池内 sid）：插件认领——不调用 next()，返回待兑现 Promise
+  // 平台自持会话（池内 sid）：**双通道**（修 #837）——插件认领（平台 /answer 兑现、
+  // Touchstone 会话窗渲染选择框）**且** next() 把请求交回原生链路（dsh Web GUI 也弹
+  // 提问框），两侧先答者胜。桩里的 next() 给一条手工兑现的通道，模拟浏览器作答。
   let nativeNext = 0;
   let claimResult = null;
-  const claimPromise = qHooks[0](
-    { agent: sockets.agents.get(sid), wait: { callId: 'call-1' },
-      signal: new AbortController().signal,
-      questions: [{ id: 'q1', header: 'H', question: 'Q?', detail: 'D',
-                    options: [{ label: 'A', description: '选项 A 说明' }] }] },
-    () => { nativeNext += 1; return Promise.resolve({ answers: [{ id: 'q1', selected: ['native'] }] }); },
-  );
+  const lane1 = makeNativeLane();
+  const host1 = new AbortController();
+  const req1 = { agent: sockets.agents.get(sid), wait: { callId: 'call-1' },
+                 signal: host1.signal,
+                 questions: [{ id: 'q1', header: 'H', question: 'Q?', detail: 'D',
+                               options: [{ label: 'A', description: '选项 A 说明' }] }] };
+  const claimPromise = qHooks[0](req1, () => { nativeNext += 1; return lane1.promise; });
   claimPromise.then((v) => { claimResult = v; }, () => {});
   const st3 = await (await call(base, token, 'GET', `/status?session_id=${sid}`)).json();
   check('提问 → interaction 标记（含 call_id 与逐题）',
@@ -443,17 +470,24 @@ async function main() {
     && st3.interaction.questions[0].options[0].description === '选项 A 说明'
     && st3.interaction.questions[0].detail === 'D',
     JSON.stringify(st3.interaction));
-  check('平台自持会话：插件认领（不 next()，原生作答者不参与）', nativeNext === 0,
-    `next 调用次数=${nativeNext}`);
+  check('平台自持会话：双通道都开——认领 + next() 交原生链路（dsh GUI 也弹框，修 #837）',
+    nativeNext === 1, `next 调用次数=${nativeNext}`);
+  check('转发前替换 request.signal（平台先答时可主动收起 GUI 提问框，修 #837）',
+    req1.signal !== host1.signal && typeof req1.signal.aborted === 'boolean',
+    `same=${req1.signal === host1.signal}`);
 
-  // --- 作答：认领中的提问由 /answer 兑现（waterfall 返回值 = 平台作答）---
+  // --- 平台先答：认领被兑现，同时原生通道被取消（GUI 的框自行收起） ---
   const ans = await (await call(base, token, 'POST', '/answer',
     { session_id: sid, call_id: 'call-1', answers: [{ id: 'q1', selected: ['A'] }] })).json();
   await new Promise((r) => setTimeout(r, 10));
-  check('作答 → 兑现认领（accepted=true，waterfall 返回值=平台作答）',
+  check('平台作答 → 兑现认领（accepted=true，waterfall 返回值=平台作答）',
     ans.accepted === true && claimResult
     && claimResult.answers[0].selected[0] === 'A',
     JSON.stringify({ ans, claimResult }));
+  check('平台先答 → 原生通道取消信号 abort（dsh GUI 提问框随之消失）',
+    req1.signal.aborted === true, `aborted=${req1.signal.aborted}`);
+  check('取消原生通道不碰宿主取消信号（停卡语义不受影响）',
+    host1.signal.aborted === false, `hostAborted=${host1.signal.aborted}`);
   const afterAnswer = await (await call(base, token, 'GET', `/status?session_id=${sid}`)).json();
   check('作答后挂起标记清除（平台不残留 pending）',
     afterAnswer.interaction === null, JSON.stringify(afterAnswer.interaction));
@@ -462,6 +496,44 @@ async function main() {
   const goneBody = await gone.json();
   check('已过期提问 accepted=false（平台据此按 40405 放弃重试）',
     gone.status === 200 && goneBody.accepted === false);
+
+  // --- 原生链路（dsh GUI）先答：返回值即 GUI 作答，平台挂起标记同步清除 ---
+  const lane2 = makeNativeLane();
+  const req2 = { agent: sockets.agents.get(sid), signal: new AbortController().signal,
+                 questions: [{ id: 'q2', question: 'GUI 先答？', options: [{ label: 'G' }] }] };
+  let guiResult = null;
+  const guiPromise = qHooks[0](req2, () => { nativeNext += 1; return lane2.promise; });
+  guiPromise.then((v) => { guiResult = v; }, () => {});
+  const stGui = await (await call(base, token, 'GET', `/status?session_id=${sid}`)).json();
+  check('GUI 未答时平台侧同样挂起（两侧都显示：平台框 + GUI 框）',
+    Boolean(stGui.interaction && stGui.interaction.kind === 'question'),
+    JSON.stringify(stGui.interaction));
+  lane2.resolve({ answers: [{ id: 'q2', selected: ['G'] }] });
+  await new Promise((r) => setTimeout(r, 10));
+  check('GUI 先答 → waterfall 返回值=GUI 作答（宿主 ask_user_question 照常收口）',
+    Boolean(guiResult && guiResult.answers[0].selected[0] === 'G'), JSON.stringify(guiResult));
+  const stGui2 = await (await call(base, token, 'GET', `/status?session_id=${sid}`)).json();
+  check('GUI 先答 → 平台挂起标记清除（Touchstone 会话窗的框随之收起）',
+    stGui2.interaction === null, JSON.stringify(stGui2.interaction));
+
+  // --- 原生链路失败不判死提问（GUI 点取消/客户端异常/无客户端的 profile） ---
+  const lane3 = makeNativeLane();
+  const req3 = { agent: sockets.agents.get(sid), signal: new AbortController().signal,
+                 questions: [{ id: 'q3', question: '旁路故障？', options: [{ label: 'P' }] }] };
+  let sideResult = null;
+  const sidePromise = qHooks[0](req3, () => { lane3.fail(new Error('ASK_CANCELLED')); return lane3.promise; });
+  sidePromise.then((v) => { sideResult = v; }, () => {});
+  await new Promise((r) => setTimeout(r, 10));
+  const stSide = await (await call(base, token, 'GET', `/status?session_id=${sid}`)).json();
+  check('原生链路失败不算数：平台侧提问仍在挂起（等 /answer）',
+    Boolean(stSide.interaction && stSide.interaction.kind === 'question'),
+    JSON.stringify(stSide.interaction));
+  const sideCallId = String((stSide.interaction || {}).call_id || '');
+  await (await call(base, token, 'POST', '/answer',
+    { session_id: sid, call_id: sideCallId, answers: [{ id: 'q3', selected: ['P'] }] })).json();
+  await new Promise((r) => setTimeout(r, 10));
+  check('旁路失败后平台作答照常兑现',
+    Boolean(sideResult && sideResult.answers[0].selected[0] === 'P'), JSON.stringify(sideResult));
 
   // --- 外部会话（不在池）：只旁听 + 让位原生作答者（dsh GUI 照旧可答）---
   for (const fn of handlers['session/created'] || []) {
@@ -486,6 +558,20 @@ async function main() {
   check('外部 legacy 提问 call_id 为空（平台只展示、不提供作答）',
     extRow && extRow.interaction.call_id === '', JSON.stringify(extRow && extRow.interaction));
 
+  // --- 子代理会话 origin 上报（2026-10-07：平台据此不建卡、不占项目运行位）---
+  // dsh 子代理会话与主会话同 bucket 同格式，只能靠头行区分（实测 origin=subagent、
+  // delegationDepth=1）；插件把 origin 上报给平台（/live 对齐 + session/created 状态帧）。
+  for (const fn of handlers['session/created'] || []) {
+    fn({ id: 'session-subagent-1',
+         header: { cwd: '/tmp/sub', origin: 'subagent', parentSession: sid,
+                   delegationDepth: 1 } });
+  }
+  const subLive = await (await call(base, token, 'GET', '/live')).json();
+  const subRow = (subLive.sessions || []).find((x) => x.session_id === 'session-subagent-1');
+  check('/live 上报 origin（子代理=subagent；主/外部会话=空串，不推断）',
+    Boolean(subRow) && subRow.origin === 'subagent' && extRow.origin === '',
+    JSON.stringify({ sub: subRow && subRow.origin, ext: extRow && extRow.origin }));
+
   // --- tool/call + tool/result：真实 callId 配提问、结果到达清挂起（外部会话收口）---
   for (const fn of handlers['session/event'] || []) {
     fn({ id: 'session-external-1' },
@@ -495,11 +581,12 @@ async function main() {
        { type: 'tool/call', seq: 91, time: Date.now(),
          data: { turn: 1, step: 1, callId: 'tc-pool-1', name: 'ask_user_question', arguments: '{}' } });
   }
-  // 池内会话：legacy 提问（无 wait.callId）用真实 tool callId 作提问标识
+  // 池内会话：legacy 提问（无 wait.callId）用真实 tool callId 作提问标识；
+  // 原生通道给一条永不兑现的通道（GUI 尚未作答），标记必须留着等平台 /answer
   const poolPromise = qHooks[0](
     { agent: sockets.agents.get(sid), signal: new AbortController().signal,
       questions: [{ id: 'qp', question: '池内？', options: [{ label: 'P' }] }] },
-    () => Promise.resolve({ answers: [] }),
+    () => makeNativeLane().promise,
   );
   let poolAnswered = null;
   poolPromise.then((v) => { poolAnswered = v; }, () => {});
@@ -869,6 +956,11 @@ async function main() {
   check('状态流：seq 全局单调（可作重连 since 基准）',
     sbuf.every((f, i) => i === 0 || f.seq > sbuf[i - 1].seq),
     sbuf.map((f) => f.seq).join(','));
+  const subCreated = ringFrames.find((f) => f.type === 'session/created'
+    && f.session_id === 'session-subagent-1');
+  check('状态流：session/created 帧带 origin（EventHub 折进注册表，重连对齐同源）',
+    Boolean(subCreated) && subCreated.data.origin === 'subagent',
+    JSON.stringify(subCreated && subCreated.data));
   ctrlS.abort();
   // abort 后 pending 的 read() 在 Node 里不保证立刻 reject，故只限时等一等，
   // 不阻塞后续检查（真正的收尾由进程退出完成）
@@ -938,6 +1030,41 @@ async function main() {
     un1.archived === false
     && !(await (await call(base, token, 'GET', '/archived')).json()).archived.includes(sid),
     JSON.stringify(un1));
+
+  // --- 宿主侧（dsh GUI）归档的事件路径（2026-10-07 定因回归）---
+  // 真机故障：`domain/changed` 监听器里回读 `registry.archivedSessionIds` 拿到的是
+  // **旧快照**（官方 setState 先 emit 后刷缓存）⇒ key 比对判定「没变化」而早退，
+  // 归档只能等 15s keepalive 才推帧（实测延迟 1.1~13.8s）。修法＝直接取事件载荷
+  // `change.value.archivedSessionIds`。本用例**不走** `/archive` 端点（那条路自带
+  // 显式补帧，会掩盖问题），直接调宿主 registry——与 GUI 点击同一条路径。
+  //
+  // 判定读**进程内状态环**而不是 SSE 读窗口：桩的 `archiveSession` 是同步 emit，
+  // 帧必须在 `await` 返回前就入环；定时器回调是宏任务、不可能插进这段同步执行，
+  // 所以「环里已有该帧」只可能来自事件路径（读窗口法会被 15s keepalive 撞上假通过）。
+  const seqGui = driver.stateSeq;
+  await sockets.workspaceRegistry.archiveSession(sid, { stopActivity: true });
+  const guiFrame = driver.stateRing[driver.stateRing.length - 1];
+  check('宿主侧归档走 domain/changed 当场推帧（不等 15s keepalive / 3s 兜底）',
+    driver.stateSeq === seqGui + 1 && guiFrame && guiFrame.type === 'driver/archived'
+    && Array.isArray(guiFrame.data.archived) && guiFrame.data.archived.includes(sid),
+    JSON.stringify({ seqDelta: driver.stateSeq - seqGui, last: guiFrame && guiFrame.type }));
+  check('用例确实复现了真机顺序：事件发出时 registry 缓存仍是旧值',
+    Array.isArray(sockets.cacheAtEmit) && !sockets.cacheAtEmit.includes(sid),
+    JSON.stringify(sockets.cacheAtEmit));
+  // 复位（后续用例假定 sid 未归档）
+  await sockets.workspaceRegistry.unarchiveSession(sid);
+
+  // 二道兜底：事件彻底丢失时，3s 快速扫描也能把变化推出去（直接改 registry、不发事件）
+  const seqSweep = driver.stateSeq;
+  sockets.workspaceRegistry.archived = [...sockets.workspaceRegistry.archived, sid];
+  const sweepFrames = await readFrames(base, token, `/events?scope=state&since=${seqSweep}`, 1, 4500);
+  check('兜底扫描：事件丢失时 3s 内仍推 driver/archived 帧',
+    sweepFrames.some((f) => f.type === 'driver/archived'
+      && Array.isArray(f.data.archived) && f.data.archived.includes(sid)),
+    JSON.stringify(sweepFrames.map((f) => f.type)));
+  sockets.workspaceRegistry.archived = sockets.workspaceRegistry.archived.filter((x) => x !== sid);
+  await new Promise((r) => setTimeout(r, 50));
+
   const unknownAr = await call(base, token, 'POST', '/archive',
                                { session_id: 'session-99999999-9999-9999-9999-999999999999',
                                  archived: true });
