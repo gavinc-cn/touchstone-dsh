@@ -8,6 +8,7 @@ import { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect, Fra
 import { boardApi, prefsApi, projectApi } from '../api'
 import { toast } from '../utils/toast'
 import { QUEUE_STATE_LABEL, queueStateChipClass } from '../utils/queueBadge'
+import { showUnreadBadge } from '../utils/unreadBadge'
 import { ST_LABEL } from '../utils/renderMd'
 import { findSlashToken } from '../utils/slashToken'
 import { isPlaceholderImage } from '../utils/media'
@@ -605,16 +606,21 @@ export default function BoardTab({ project }) {
     if (suppressClickRef.current) { suppressClickRef.current = false; return }
     openCard(card)
   }
-  // 打开卡片详情（点击卡面正文 / 详情按钮两个入口共用）：
-  // 卡片带「有更新」标记（card.unread，平台/agent 改过列且用户还没打开过）时，
-  // 打开即视为已查看——先乐观清本地标记（免标记在重取前闪一下），再通知服务端
-  // （不 await：失败也不打断打开；服务端写成功后经 SSE 触发重取对齐）
-  function openCard(card) {
-    setSelId(card.id)
+  // 清卡片「有更新」标记（card.unread，服务端权威）：卡片带标记（平台/agent 改过列且用户
+  // 还没打开过）时，「用户看过这张卡」的两类动作共用本函数——① 打开卡片详情（openCard）；
+  // ② 点卡面操作行上任意一个按钮（见下方 .board-card-ops 的点击处理——点了按钮说明人就在
+  // 这张卡前）。先乐观清本地标记（免标记在重取前闪一下），再通知服务端（不 await：失败也不
+  // 打断动作；服务端写成功后经 SSE 触发重取对齐）
+  function markCardSeen(card) {
     if (!card.unread) return
     setData((d) => !d ? d
       : { ...d, cards: d.cards.map((c) => (c.id === card.id ? { ...c, unread: false } : c)) })
     boardApi.markViewed(projectId, card.id).catch(() => {})
+  }
+  // 打开卡片详情（点击卡面正文 / 详情按钮两个入口共用）：打开即视为已查看
+  function openCard(card) {
+    setSelId(card.id)
+    markCardSeen(card)
   }
 
   if (!projectId) return null
@@ -724,11 +730,15 @@ export default function BoardTab({ project }) {
                     <div className="board-card-badges">
                       {/* 「有更新」标记（card.unread，服务端权威）：平台/agent 改过卡片状态
                           （会话结束→待审核、提问→阻塞、归档同步→已完成…）而用户还没打开过
-                          这张卡 ⇒ 打标记；打开卡片详情即清（openCard → markViewed）。
-                          用户自己拖列/开始/停止造成的列变化不置位（服务端 mark_unread=False） */}
-                      {card.unread && (
+                          这张卡 ⇒ 打标记；打开卡片详情（openCard）或点卡面操作行上任意一个
+                          按钮（markCardSeen）即清，二者同口径。
+                          用户自己拖列/开始/停止造成的列变化不置位（服务端 mark_unread=False）。
+                          「已完成」列不渲染（showUnreadBadge，2026-10-07 追加需求）：done 是
+                          终态归档列，没有要用户处理的东西，标记在那里只是噪音；字段与服务端
+                          置位口径不变（卡离开 done 时标记照旧可见） */}
+                      {showUnreadBadge(card) && (
                         <span className="board-card-new"
-                          title="状态有更新，打开卡片后标记消失">有更新</span>)}
+                          title="状态有更新，打开卡片或点卡片上的按钮后标记消失">有更新</span>)}
                       {/* 卡片 id（与详情弹窗标题行同款 #N）：日志/会话/bug 报告里说「卡 345」时可直接对上号 */}
                       <span className="board-card-id" title="卡片 id">#{card.id}</span>
                       {/* 队列态徽标＝服务端 queue_state 单枚举派生（P6，前端不拼条件；
@@ -752,8 +762,11 @@ export default function BoardTab({ project }) {
                     </div>
                     {card.last_error && <div className="board-card-err">{card.last_error}</div>}
                     <div className="board-card-ops" onClick={(e) => {
-                      // 仅按钮（含图标）点击不冒泡，避免误开详情；行内空白区域照常冒泡开详情
-                      if (e.target.closest('button')) e.stopPropagation()
+                      // 仅按钮（含图标）点击不冒泡，避免误开详情；行内空白区域照常冒泡开详情。
+                      // 点按钮 ⇒ 用户人就在这张卡前：顺带清「有更新」标记（与打开详情同口径，
+                      // 见 markCardSeen）。放在容器上做事件委托 ⇒ 操作行现有与将来新增的按钮
+                      // 一并覆盖，无需逐个按钮接线
+                      if (e.target.closest('button')) { e.stopPropagation(); markCardSeen(card) }
                     }}>
                       {card.column === 'todo' && (
                         // 分裂按钮：主按钮行为不变（统一队列排队开始），右侧 ▾ 另有

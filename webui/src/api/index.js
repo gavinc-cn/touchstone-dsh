@@ -243,7 +243,7 @@ export const boardApi = {
   removeWorktree: (pid, cid) => api.del(`/api/projects/${pid}/board/cards/${cid}/worktree`),
   // 停止卡片运行中的会话（CLI 杀进程组；web 走 REST abort）
   stopCard: (pid, cid) => api.post(`/api/projects/${pid}/board/cards/${cid}/stop`),
-  // 标记卡片已查看（打开卡片详情时调用，清「状态有更新」未读标记；幂等）
+  // 标记卡片已查看（打开卡片详情 / 点卡面操作行上任意按钮时调用，清「状态有更新」未读标记；幂等）
   markViewed: (pid, cid) => api.post(`/api/projects/${pid}/board/cards/${cid}/viewed`),
   addComment: (pid, cid, text) =>
     api.post(`/api/projects/${pid}/board/cards/${cid}/comments`, { text }),

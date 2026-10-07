@@ -1089,7 +1089,7 @@ def update_board_card(card_id, mark_unread=True, **fields):
 
 
 def mark_card_viewed(card_id):
-    """清卡片「状态有更新·用户未打开」标记（用户打开卡片详情时调用）。
+    """清卡片「状态有更新·用户未打开」标记（用户打开卡片详情 / 点卡面操作行按钮时调用）。
 
     只写 `unread=0`，**刻意不刷 updated_at**：查看不是卡片内容变更，顺带刷时间
     会污染「更新新→旧」排序口径与 `list_queued_board_cards` 的排队顺序（该查询
