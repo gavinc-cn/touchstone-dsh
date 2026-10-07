@@ -268,6 +268,106 @@ def status(project, card):
             "dirty": bool(out.strip()), "exists": True}
 
 
+# ---------- 合并就绪度（「通过」前判定：有没有待合并提交，2026-10-07 批次） ----------
+
+
+def head_branch(root):
+    """主仓库当前检出的分支名；游离 HEAD / 读取失败返回 ("", 中文原因)。
+
+    平台的「主分支」口径就是它——worktree 由该分支检出，改动也回流到它。
+    不猜 `master`/`main`：仓库默认分支名由仓库自己决定，猜错会把改动合到
+    错误的分支上（用户 2026-10-07 约定：以项目所在分支为准）。
+    """
+    rc, out, err = _git(["rev-parse", "--abbrev-ref", "HEAD"], root)
+    name = (out or "").strip()
+    if rc != 0:
+        return "", (err or "无法读取主仓库分支")
+    if not name or name == "HEAD":
+        return "", "主仓库处于游离 HEAD 状态，无法判定主分支"
+    return name, ""
+
+
+def merge_status(project, card):
+    """卡片 worktree 的合并就绪度（只读判定；「通过」时据此决定是否交给 agent 合并）。
+
+    返回 dict（**不抛异常**）：
+      {ok, error, path, branch, target, exists, branch_exists,
+       dirty, dirty_count, ahead, behind}
+    - `target`：主仓库当前分支（见 `head_branch`），空串=判定失败；
+    - `ahead`：`target..branch` 的提交数——**>0 即有改动还没回流主分支**，
+      平台据此弹「交给 agent 合并」；=0 表示无待合并提交（「通过」直接完成）；
+    - `behind`：`branch..target` 的提交数——主分支领先多少（agent 需先同步）；
+    - `dirty`/`dirty_count`：工作树未提交改动（含未跟踪；口径与 `status` 同）；
+    - `ok=False` 只在「工作树/主仓库读不到」时出现，调用方按「不拦用户」处置。
+    """
+    out = {"ok": False, "error": "", "path": "", "branch": branch_for(card["id"]),
+           "target": "", "exists": False, "branch_exists": False,
+           "dirty": False, "dirty_count": 0, "ahead": 0, "behind": 0}
+    path = (card["worktree"] or "").strip()
+    out["path"] = path
+    if not path:
+        out["error"] = "该卡片没有独立 worktree"
+        return out
+    if not os.path.isdir(path):
+        out["error"] = "worktree 目录不存在"
+        return out
+    out["exists"] = True
+    root, err = repo_root(project["project_dir"])
+    if err:
+        out["error"] = f"项目目录不是 git 仓库（{err}）"
+        return out
+    target, err = head_branch(root)
+    if err:
+        out["error"] = err
+        return out
+    out["target"] = target
+    branch = out["branch"]
+    rc, _, _ = _git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], root)
+    out["branch_exists"] = rc == 0
+    if not out["branch_exists"]:
+        # 分支不存在（被删/从未创建）：没有可合并的东西，按「无待合并」处置
+        out["ok"] = True
+        return out
+    rc, cout, err = _git(["rev-list", "--count", f"{target}..{branch}"], root)
+    if rc != 0:
+        out["error"] = f"无法读取待合并提交数：{err}"
+        return out
+    out["ahead"] = _int(cout)
+    rc, cout, err = _git(["rev-list", "--count", f"{branch}..{target}"], root)
+    if rc != 0:
+        out["error"] = f"无法读取落后提交数：{err}"
+        return out
+    out["behind"] = _int(cout)
+    ok, lines, err = _porcelain(path)
+    if not ok:
+        out["error"] = f"无法读取工作树状态：{err}"
+        return out
+    out["dirty"] = bool(lines)
+    out["dirty_count"] = len(lines)
+    out["ok"] = True
+    return out
+
+
+def _int(text):
+    """git 输出取整（异常输出归一 0，不抛）。"""
+    try:
+        return int((text or "").strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _porcelain(path):
+    """工作树 `git status --porcelain` 的非空行（含未跟踪）；读不到返回 (False, [], 原因)。
+
+    dirty 判据与 `status` 同口径（有输出即脏）——两处读的是同一条命令，
+    合并判定一次取到「脏不脏」与「脏几处」。
+    """
+    rc, out, err = _git(["status", "--porcelain"], path)
+    if rc != 0:
+        return False, [], err
+    return True, [ln for ln in (out or "").splitlines() if ln.strip()], ""
+
+
 def remove(project, card):
     """清理卡片 worktree（plan D8：**只在干净时**、绝不用 `--force`）；返回 (ok, err)。
 

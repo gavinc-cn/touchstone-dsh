@@ -1925,6 +1925,13 @@ def _execute_board_action(binding, intent, sender_open_id):
             return f"卡片 #{c['id']} 不在「待审核」列（当前 {c['column_key']}），无法通过"
         _, err = board.move_card(p, c["id"], "done")
         if err:
+            if "merge_pending" in err:
+                # 独立 worktree 卡的待合并闸（2026-10-07 批次）：飞书侧没有弹框，
+                # 不替用户选「交给 agent 合并 / 仅通过」，引导去网页看板操作
+                mp = err.get("merge_pending") or {}
+                return (f"卡片 #{c['id']} 还有 {mp.get('ahead', 0)} 个提交没回流主分支"
+                        f"（{mp.get('branch', '')} → {mp.get('target', '')}）；"
+                        f"请在网页看板上点「通过」，选择「交给 agent 合并」或「仅通过（不合并）」")
             return "审核失败：" + str(err.get("error") or err.get("blocked") or "门禁拦截")
         return f"✅ 卡片 #{c['id']} {(c['title'] or '')[:30]} 已审核通过"
     if action == "reject":

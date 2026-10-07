@@ -16,6 +16,7 @@ import { isPlaceholderImage } from '../utils/media'
 import ComposerBar, { PERM_OPTS } from './ComposerBar'
 import { effortChoices, effortText } from '../utils/sessionEffort'
 import FilePreview from './FilePreview'
+import MergeHandoffDialog from './MergeHandoffDialog'
 import { Button } from '@/components/ui/button'
 import { findSlashToken } from '../utils/slashToken'
 import { useDshHostCaps } from '../hooks/useDshHost'
@@ -670,6 +671,10 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   const [previewPath, setPreviewPath] = useState('')
   const [injecting, setInjecting] = useState('')       // 排队消息「立即注入」进行中的行 key
   const [passing, setPassing] = useState(false)        // 「通过」按钮进行中（防连点）
+  // 「通过」的 worktree 合并交接（2026-10-07 批次）：mergeFor=后端下发的待合并判定
+  // （{branch,target,ahead,behind,dirty,dirty_count,path}），merging=交接请求进行中
+  const [mergeFor, setMergeFor] = useState(null)
+  const [merging, setMerging] = useState(false)
   const [deliveringAnswer, setDeliveringAnswer] = useState(false)  // 「立即送达」进行中
   // 会话回退（用户提问动作行，dsh 插件族）：copiedSeq=刚复制成功的提问 seq（图标切 ✓
   // 1.4s）；rewinding=回退中的提问 mid（防连点）；成功后就地截断 entry 列表
@@ -960,6 +965,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
                   unit_state: d.unit_state,
                   queue_state: d.queue_state, project_busy: d.project_busy,
                   card_column: d.card_column, answer_pending: d.answer_pending,
+                  card_worktree: d.card_worktree,
                   queue: d.queue == null ? prev?.queue : d.queue }))
         setChatState(d.chat || { running: false })
         setConnected(true)
@@ -1316,10 +1322,38 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   }
   // 通过: 把当前卡片移入「已完成」列（看板语义同款；卡片在跑则会先停会话），
   // 成功后关闭会话详情弹窗（onPassed 由弹窗壳传入；toast 在关闭后照常展示）
+  // 2026-10-07 批次：独立 worktree 卡先查有没有待合并提交（看板卡片同款口径）——
+  // 有则弹合并交接框（交给 agent 合并 / 仅通过），没有才直接完成
   async function passCard() {
     setPassing(true)
     try {
+      if (board && meta?.card_worktree) {
+        let p = null
+        try { p = await boardApi.worktreePreview(boardPid, boardCid) } catch (e) { p = null }
+        if (p && p.merge && p.merge.ahead > 0) { setMergeFor(p.merge); return }
+      }
       await boardApi.moveCard(boardPid, boardCid, 'done')
+      toast('已通过，卡片移入「已完成」')
+      if (onPassed) onPassed()
+    } catch (e) { toast(e.message) } finally { setPassing(false) }
+  }
+  // 交给 agent 合并（worktree 改动回流主分支）：平台只投递指令 + 让卡片回开发队列
+  // 排队；合并由 agent 执行（先同步主分支、尽量快进、冲突自己解）。干完这轮卡片自动
+  // 回「待审核」，本弹窗不关闭——用户可以在会话窗里看这一轮怎么合的
+  async function handoffMerge() {
+    setMerging(true)
+    try {
+      await boardApi.mergeWorktree(boardPid, boardCid)
+      setMergeFor(null)
+      toast('已交给 agent 合并：卡片回到开发队列排队，完成后自动回「待审核」')
+    } catch (e) { toast(e.message) } finally { setMerging(false) }
+  }
+  // 仅通过（不合并）：带 merge_ack 再走一次 move（后端跳过待合并闸，分支与工作树保留）
+  async function passWithoutMerge() {
+    setMergeFor(null)
+    setPassing(true)
+    try {
+      await boardApi.moveCard(boardPid, boardCid, 'done', undefined, null, true)
       toast('已通过，卡片移入「已完成」')
       if (onPassed) onPassed()
     } catch (e) { toast(e.message) } finally { setPassing(false) }
@@ -1557,6 +1591,13 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
         <FilePreview pid={board ? boardPid : pid} path={previewPath}
           onClose={() => setPreviewPath('')} />
       )}
+      {/* 通过前的 worktree 合并交接（2026-10-07 批次，与看板卡片同款弹框）：
+          卡片跑在独立 worktree 里、还有提交没回流主分支时弹出 */}
+      <MergeHandoffDialog open={!!mergeFor} info={mergeFor} busy={merging}
+        disabledReason={(meta?.running || chatState?.running)
+          ? '会话运行中：等这一轮跑完，或先点「停止」再交接' : ''}
+        onHandoff={handoffMerge} onPass={passWithoutMerge}
+        onClose={() => !merging && setMergeFor(null)} />
     </div>
   )
 }

@@ -123,3 +123,76 @@ def test_path_occupied_reports_error(repo):
     open(os.path.join(path, "keep.txt"), "w").write("user data")
     _p, _b, err = worktree.create(proj, 836)
     assert "已存在" in err and os.path.exists(os.path.join(path, "keep.txt"))
+
+
+# ---------- 合并就绪度（「通过」前的待合并判定，2026-10-07 批次） ----------
+
+
+def test_merge_status_counts_ahead_behind_dirty(repo):
+    """merge_status：target=主仓库当前分支；ahead=分支还没回流的提交数；
+    dirty/dirty_count 取工作树未提交改动（含未跟踪）——这三项就是「通过」时
+    要不要弹合并交接框的全部依据。"""
+    proj, root = repo
+    target = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=root).stdout.strip()
+    path, branch, err = worktree.create(proj, 840)
+    assert err == ""
+    card = {"id": 840, "worktree": path}
+    st = worktree.merge_status(proj, card)
+    assert st["ok"] is True and st["target"] == target and st["branch"] == branch
+    assert st["ahead"] == 0 and st["behind"] == 0 and st["dirty"] is False
+    # 工作树里提交一次：ahead=1（改动还没回流主分支）
+    open(os.path.join(path, "f.txt"), "w").write("card work\n")
+    _git("add", "-A", cwd=path)
+    _git("commit", "-q", "-m", "card change", cwd=path)
+    st = worktree.merge_status(proj, card)
+    assert st["ok"] is True and st["ahead"] == 1 and st["behind"] == 0
+    # 未提交改动（含未跟踪文件）计入 dirty_count，但不改变 ahead
+    open(os.path.join(path, "wip.txt"), "w").write("wip\n")
+    st = worktree.merge_status(proj, card)
+    assert st["dirty"] is True and st["dirty_count"] == 1 and st["ahead"] == 1
+    assert st["path"] == path
+
+
+def test_merge_status_zero_after_branch_merged_back(repo):
+    """分支回流主分支后 ahead=0 —— 用户第二次点「通过」时平台据此直接完成。"""
+    proj, root = repo
+    path, branch, err = worktree.create(proj, 841)
+    assert err == ""
+    open(os.path.join(path, "f.txt"), "w").write("card work\n")
+    _git("add", "-A", cwd=path)
+    _git("commit", "-q", "-m", "card change", cwd=path)
+    assert worktree.merge_status(proj, {"id": 841, "worktree": path})["ahead"] == 1
+    # 快进回流（主分支没前进过，必成）——测试里只做 ff，平台侧同样不执行合并
+    r = _git("merge", "--ff-only", branch, cwd=root)
+    assert r.returncode == 0, r.stderr
+    st = worktree.merge_status(proj, {"id": 841, "worktree": path})
+    assert st["ahead"] == 0 and st["behind"] == 0
+
+
+def test_merge_status_without_worktree_marker(repo):
+    """非 worktree 卡（标记为空）：ok=False + 中文原因，调用方按「不拦用户」处置。"""
+    proj, _root = repo
+    st = worktree.merge_status(proj, {"id": 842, "worktree": ""})
+    assert st["ok"] is False and "没有独立 worktree" in st["error"]
+    assert st["ahead"] == 0
+
+
+def test_merge_status_deleted_worktree_dir(repo):
+    """工作树目录被用户手删：不抛异常，ok=False 带原因（「通过」不被卡住）。"""
+    proj, _root = repo
+    path, _branch, err = worktree.create(proj, 843)
+    assert err == ""
+    shutil.rmtree(path)
+    st = worktree.merge_status(proj, {"id": 843, "worktree": path})
+    assert st["ok"] is False and "不存在" in st["error"]
+
+
+def test_merge_status_detached_head(repo):
+    """主仓库处于游离 HEAD：判定失败并给中文原因（不猜 master/main）。"""
+    proj, root = repo
+    path, _branch, err = worktree.create(proj, 844)
+    assert err == ""
+    r = _git("checkout", "--detach", cwd=root)
+    assert r.returncode == 0, r.stderr
+    st = worktree.merge_status(proj, {"id": 844, "worktree": path})
+    assert st["ok"] is False and "游离 HEAD" in st["error"]

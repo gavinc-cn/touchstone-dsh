@@ -326,6 +326,20 @@ def test_execute_approve(monkeypatch):
     assert moved == [(2, 42, "done")] and "通过" in r
 
 
+def test_execute_approve_worktree_merge_pending(monkeypatch):
+    """独立 worktree 卡有待合并提交（2026-10-07 批次）：飞书侧没有弹框，不替用户选
+    「交给 agent 合并 / 仅通过」——回中文引导去网页看板操作，卡片列不变。"""
+    _patch_projects(monkeypatch, [_proj(2, "touchstone")])
+    monkeypatch.setattr(db, "list_board_cards",
+                        lambda pid: [_card(42, 2, "支付修复", col="review")])
+    monkeypatch.setattr(board, "move_card",
+                        lambda project, cid, target, block_text="", merge_ack=False:
+                        ({}, {"merge_pending": {"ahead": 3, "branch": "ts/card-42",
+                                                "target": "master"}}))
+    r = feishu.execute_intent(_binding(), {"action": "approve", "groups": ["42"]}, "ou_x")
+    assert "3 个提交" in r and "ts/card-42" in r and "网页看板" in r
+
+
 def test_execute_approve_requires_review(monkeypatch):
     _patch_projects(monkeypatch, [_proj(2, "touchstone")])
     monkeypatch.setattr(db, "list_board_cards",

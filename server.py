@@ -1086,6 +1086,11 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             self._api_board_card_action(int(m.group(1)), int(m.group(2)), m.group(3), body)
             return
+        # worktree 改动回流：把合并任务交给卡片会话（回统一队列排队，2026-10-07 批次）
+        m = re.match(r"^/api/projects/(\d+)/board/cards/(\d+)/worktree/merge$", path)
+        if m:
+            self._api_board_card_worktree_merge(int(m.group(1)), int(m.group(2)))
+            return
         # 卡片「已查看」（2026-10-07 批次）：前端打开卡片详情时调用，清「有更新」标记
         m = re.match(r"^/api/projects/(\d+)/board/cards/(\d+)/viewed$", path)
         if m:
@@ -2936,12 +2941,18 @@ class Handler(BaseHTTPRequestHandler):
                 before_id = int(body["before_id"]) if body.get("before_id") is not None else None
             except (TypeError, ValueError):
                 before_id = None
+            # merge_ack（2026-10-07 批次）：独立 worktree 卡进「已完成」的待合并闸。
+            # 默认 false ⇒ 有待合并提交时 move_card 回 {"merge_pending": ...} 且列不动，
+            # 前端弹「交给 agent 合并 / 仅通过」；用户选「仅通过」时前端带 true 再来一次，
+            # 后端跳过该闸（= 旧行为，分支保留）。
             card_dict, err = board.move_card(row, card_id, target,
                                              (body.get("block_text") or "")[:2000],
-                                             before_id=before_id)
+                                             before_id=before_id,
+                                             merge_ack=bool(body.get("merge_ack")))
             if err:
-                if "blocked" in err:  # 父任务拦截：前端弹确认框，不算错误
-                    self._respond(200, json.dumps(err).encode("utf-8"),
+                if "blocked" in err or "merge_pending" in err:
+                    # 父任务拦截 / 合并询问：前端弹确认框，不算错误（列未变）
+                    self._respond(200, json.dumps(err, ensure_ascii=False).encode("utf-8"),
                                   "application/json; charset=utf-8")
                     return
                 self._respond(400, json.dumps(err, ensure_ascii=False).encode("utf-8"),
@@ -3016,6 +3027,28 @@ class Handler(BaseHTTPRequestHandler):
                           "application/json; charset=utf-8")
             return
         self._respond(200, b'{"ok": true}', "application/json; charset=utf-8")
+
+    def _api_board_card_worktree_merge(self, project_id, card_id):
+        """把 worktree 改动回流主分支的合并任务交给卡片会话（2026-10-07 批次）。
+
+        `POST .../board/cards/<id>/worktree/merge`。「通过」时若判定有待合并提交
+        （move 端点回 `merge_pending`），前端弹框让用户选——这条端点即「交给 agent
+        合并」：平台只投递指令 + 把卡片送回统一队列，agent 在卡片会话里执行同步
+        主分支与合并回流（冲突由 agent 解），干完这轮卡片自动回待审核，用户再点
+        「通过」时已无待合并提交、直接进「已完成」。
+        硬错误 400（无待合并提交 / 无主会话 / 工作树读不到）；卡片运行中由
+        `board._enter_doing` 的入口预检拦下（同样 400 带中文原因）。
+        """
+        row, card = self._board_owned(project_id, card_id)
+        if row is None:
+            return
+        card_dict, err = board.handoff_worktree_merge(row, card)
+        if err:
+            self._respond(400, json.dumps(err, ensure_ascii=False).encode("utf-8"),
+                          "application/json; charset=utf-8")
+            return
+        self._respond(200, json.dumps({"card": card_dict}, ensure_ascii=False).encode("utf-8"),
+                      "application/json; charset=utf-8")
 
     def _api_board_compact(self, project_id, card_id, body):
         """卡片会话 compact（压缩上下文）。busy 拒绝（409）；族不支持 400；
@@ -3292,6 +3325,9 @@ class Handler(BaseHTTPRequestHandler):
             # 卡片当前所在列（会话窗标题「卡片队列」徽标，键值同看板列：todo/doing/
             # blocked/review/done；前端转列名展示，随 2s 轮询跟随卡片移列）
             data["card_column"] = owner["column_key"]
+            # 卡片是否跑在独立 worktree（2026-10-07 批次）：会话窗「通过」要按
+            # 看板同款口径弹「是否交给 agent 合并」（空串=普通卡）
+            data["card_worktree"] = str(db.row_opt(owner, "worktree") or "").strip()
             # 已作答·待送达（答案排队，2026-09-14）：前端在输入区上方渲染「待送达」行
             # 与「立即送达」按钮（POST .../cards/<cid>/answer/deliver，不等项目空闲）
             data["answer_pending"] = board.is_answer_pending(owner_cid)

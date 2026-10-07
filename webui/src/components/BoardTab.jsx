@@ -16,6 +16,7 @@ import { openSessionInDsh } from '../lib/dshHost'
 import { useDshHostCaps } from '../hooks/useDshHost'
 import BoardDetail from './BoardDetail.jsx'
 import BoardTrash from './BoardTrash.jsx'
+import MergeHandoffDialog from './MergeHandoffDialog.jsx'
 import SessionModal from './SessionModal'
 import SlashMenu from './SlashMenu'
 import ActionMenu from '@/components/ui/action-menu'
@@ -95,6 +96,9 @@ export default function BoardTab({ project }) {
   const [wtPrev, setWtPrev] = useState({})        // 预览缓存 {cardId: {supported,reason,path,branch}}（菜单打开时取）
   const [wtFor, setWtFor] = useState(null)        // 二次确认弹窗 {card, preview?}（preview 拿不到则路径/分支行不显示）
   const wtPrevRef = useRef({})                    // 预览镜像：异步回填时读最新（防闭包过期）
+  // 「通过」的 worktree 合并交接（2026-10-07 批次）：{card, info}；info 见后端 merge_pending
+  const [mergeFor, setMergeFor] = useState(null)
+  const [merging, setMerging] = useState(false)   // 交接请求进行中（防连点）
   const [settingsOpen, setSettingsOpen] = useState(false)  // 看板设置弹窗开关
   const [trashOpen, setTrashOpen] = useState(false)        // 回收站弹窗开关
   const [sessFor, setSessFor] = useState(null)        // 主会话直达弹窗 {sid, cid, title}（SessionModal board 模式）
@@ -212,12 +216,19 @@ export default function BoardTab({ project }) {
   function optimisticMove(card, col, index = Infinity) {
     setData((d) => !d ? d : { ...d, cards: localPlace(d.cards, card.id, col, index) })
   }
-  async function requestMove(card, column, block_text, beforeId = null) {
+  async function requestMove(card, column, block_text, beforeId = null, mergeAck = false) {
     try {
-      const r = await boardApi.moveCard(projectId, card.id, column, block_text, beforeId)
+      const r = await boardApi.moveCard(projectId, card.id, column, block_text, beforeId, mergeAck)
       if (r.blocked === 'parent-not-done') {
         await reload()
         setDepFor({ cardId: card.id, action: 'move', column })
+        return
+      }
+      if (r.merge_pending) {
+        // 独立 worktree 卡有待合并提交（后端权威判定；正常路径由 doApprove 提前拦下，
+        // 这里是并发兜底）：列未变，弹合并交接框
+        await reload()
+        setMergeFor({ card, info: r.merge_pending })
         return
       }
       await reload()
@@ -227,10 +238,41 @@ export default function BoardTab({ project }) {
     try { await boardApi.reorderCard(projectId, cardId, beforeId); await reload() }
     catch (e) { toast(e.message); await reload() }
   }
-  async function doMove(card, column, block_text) {
+  async function doMove(card, column, block_text, mergeAck = false) {
     flipSnap.current = snapshotRects()  // 按钮移列：从原位飞往新列
     optimisticMove(card, column)
-    await requestMove(card, column, block_text)
+    await requestMove(card, column, block_text, null, mergeAck)
+  }
+  // 通过（review → 已完成）：独立 worktree 卡先问一句「改动回流了没」——
+  // 有待合并提交 ⇒ 弹交接框（交给 agent 合并 / 仅通过）；没有 ⇒ 照旧直接完成
+  // （用户 2026-10-07 约定：没有可合并的 commit 就直接进已完成，不打扰用户）
+  async function doApprove(card) {
+    if (card.worktree) {
+      let p = null
+      try { p = await boardApi.worktreePreview(projectId, card.id) } catch (e) { p = null }
+      if (p && p.merge && p.merge.ahead > 0) { setMergeFor({ card, info: p.merge }); return }
+    }
+    await doMove(card, 'done')
+  }
+  // 交给 agent 合并：平台只投递合并指令 + 让卡片回开发队列排队，合并由 agent 执行
+  // （先同步主分支、尽量快进回流、冲突自己解）；干完这轮卡片自动回待审核
+  async function doHandoffMerge() {
+    const m = mergeFor
+    if (!m) return
+    setMerging(true)
+    try {
+      await boardApi.mergeWorktree(projectId, m.card.id)
+      setMergeFor(null)
+      toast('已交给 agent 合并：卡片回到开发队列排队，完成后自动回「待审核」')
+      await reload()
+    } catch (e) { toast(e.message) } finally { setMerging(false) }
+  }
+  // 仅通过（不合并）：带 merge_ack 再走一次 move，后端跳过待合并闸（分支与工作树都保留）
+  async function doPassWithoutMerge() {
+    const m = mergeFor
+    if (!m) return
+    setMergeFor(null)
+    await doMove(m.card, 'done', undefined, true)
   }
   // 切换列排序方案（逐列合并上报；reload 前快照让整列重排有动画）
   async function changeSort(col, mode) {
@@ -761,7 +803,7 @@ export default function BoardTab({ project }) {
                         <Button size="sm" variant="ghost" title="取消排队并移入待审核"
                           onClick={() => doStop(card)}>停止</Button>)}
                       {card.column === 'review' && (<>
-                        <Button size="sm" variant="outline" onClick={() => doMove(card, 'done')}><Check /> 通过</Button>
+                        <Button size="sm" variant="outline" onClick={() => doApprove(card)}><Check /> 通过</Button>
                         <Button size="sm" variant="outline" onClick={() => { setRejectFor(card); setRejectText('') }}><Undo2 /> 打回</Button>
                       </>)}
                       {card.column === 'done' && (
@@ -878,6 +920,12 @@ export default function BoardTab({ project }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {/* 通过前的 worktree 合并交接（2026-10-07 批次）：卡在独立工作树里、还有提交
+          没回流主分支时弹出；合并由 agent 执行（平台只投递指令 + 回队列排队） */}
+      <MergeHandoffDialog open={!!mergeFor} info={mergeFor?.info} busy={merging}
+        disabledReason={mergeFor?.card?.running ? '会话运行中：等这一轮跑完，或先点「停止」再交接' : ''}
+        onHandoff={doHandoffMerge} onPass={doPassWithoutMerge}
+        onClose={() => !merging && setMergeFor(null)} />
       {/* 看板设置弹窗：并行模式 + Jira */}
       <BoardSettings open={settingsOpen} onClose={() => setSettingsOpen(false)}
         projectId={projectId} settings={data?.settings} reload={reload} />

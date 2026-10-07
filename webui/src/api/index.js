@@ -219,18 +219,26 @@ export const boardApi = {
   createCard: (pid, body) => api.post(`/api/projects/${pid}/board/cards`, body),
   updateCard: (pid, cid, body) => api.patch(`/api/projects/${pid}/board/cards/${cid}`, body),
   removeCard: (pid, cid) => api.del(`/api/projects/${pid}/board/cards/${cid}`),
-  // 移列：beforeId=目标列 manual 时插入到该卡之前（null=落列尾），非 manual 忽略
-  moveCard: (pid, cid, column, block_text, beforeId = null) =>
+  // 移列：beforeId=目标列 manual 时插入到该卡之前（null=落列尾），非 manual 忽略；
+  // mergeAck=true 跳过「独立 worktree 卡待合并提交」闸（用户选「仅通过，不合并」时带），
+  // 不带且卡有未回流主分支的提交时返回 {merge_pending:{...}} 且列不变（前端弹合并交接框）
+  moveCard: (pid, cid, column, block_text, beforeId = null, mergeAck = false) =>
     api.post(`/api/projects/${pid}/board/cards/${cid}/move`,
-             { column, block_text, before_id: beforeId }),
+             { column, block_text, before_id: beforeId, merge_ack: !!mergeAck }),
   // 开始开发 / 打回续改（opinion 为打回意见，可空）；force=true 跳过父依赖与排队直接起会话（c: 行直落运行前缀）；
   // worktree=true 由平台新建独立 git worktree 执行该卡且不进项目开发队列（会话 cwd 指向工作树）
   startCard: (pid, cid, opinion, force, worktree) =>
     api.post(`/api/projects/${pid}/board/cards/${cid}/start`,
              { opinion, force: !!force, worktree: !!worktree }),
   // 「在新 worktree 中开始」预览（只读不落盘）：返回 {supported, reason, path, branch, exists}；
-  // supported=false（项目目录非 git 仓库 / 该卡已有主会话）时 reason 为给人看的中文原因
+  // supported=false（项目目录非 git 仓库 / 该卡已有主会话）时 reason 为给人看的中文原因；
+  // 另有 merge 字段（2026-10-07）：该 worktree 卡的待合并提交判定 {branch,target,ahead,
+  // behind,dirty,dirty_count,path}，null=无待合并（「通过」直接完成）
   worktreePreview: (pid, cid) => api.get(`/api/projects/${pid}/board/cards/${cid}/worktree`),
+  // 把 worktree 改动回流主分支的合并任务交给卡片会话（平台只投递指令 + 回统一队列排队，
+  // 合并本身由 agent 执行——冲突只有 agent 能解）；成功后卡片回「正在开发」列排队中
+  mergeWorktree: (pid, cid) =>
+    api.post(`/api/projects/${pid}/board/cards/${cid}/worktree/merge`, {}),
   // 清理该卡的独立 worktree（后端判据：会话运行中 409、工作树有未提交改动 400；不带 --force）
   removeWorktree: (pid, cid) => api.del(`/api/projects/${pid}/board/cards/${cid}/worktree`),
   // 停止卡片运行中的会话（CLI 杀进程组；web 走 REST abort）

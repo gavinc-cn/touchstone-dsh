@@ -283,11 +283,14 @@ def set_parent(project_id, card_id, parent_id):
     return None
 
 
-def move_card(project, card_id, target, block_text="", before_id=None):
+def move_card(project, card_id, target, block_text="", before_id=None,
+              merge_ack=False):
     """移列总入口（服务端仲裁）。返回 (card_dict, None) 或 (None, err_dict)。
 
-    err_dict 两种：{"error": "..."}（硬错误，列未变——含进 doing 起会话失败回滚原列）；
-    {"blocked": "parent-not-done"}（父任务拦截，列未变，前端弹确认）。
+    err_dict 三种：{"error": "..."}（硬错误，列未变——含进 doing 起会话失败回滚原列）；
+    {"blocked": "parent-not-done"}（父任务拦截，列未变，前端弹确认）；
+    {"merge_pending": {...}}（独立 worktree 卡进「已完成」且有提交没回流主分支，
+    列未变，前端弹「是否交给 agent 合并」，2026-10-07 批次）。
     queue 拦截不算错误：卡片落「正在开发」列排队占位（block_kind='queue'）入统一队列，正常返回。
     规则：doing 不可直接拖回 todo；离开 todo 清定时；doing→doing 同列拖放走
     手势映射（v2c T1，裁决 R10——before_id 不再丢弃、不再直接返回，force/停止/
@@ -307,6 +310,10 @@ def move_card(project, card_id, target, block_text="", before_id=None):
     即整体放弃本次移列并 400 报错，见 `_archive_card_sessions`）。
     2026-10-07 起本路径落列一律 `mark_unread=False`：拖列/按钮移列都是用户本人
     在看板上发起的操作，不是「用户没看见的状态更新」，不该由平台反过来提醒用户。
+    独立 worktree 卡进「已完成」的额外闸（2026-10-07 批次）：卡在独立工作树里开发
+    ⇒ 改动在 `ts/card-<id>` 分支上、主分支一无所知；`merge_ack=False`（默认）时先
+    查有没有待合并提交，有则返回 `{"merge_pending": ...}` **不动列**，由用户决定
+    「交给 agent 合并」还是「仅通过」（后者由前端带 `merge_ack=true` 再来一次）。
     """
     card = db.get_board_card(card_id)
     if card is None:
@@ -322,6 +329,13 @@ def move_card(project, card_id, target, block_text="", before_id=None):
         return _doing_gesture(project, card, before_id)
     if src == "doing" and target == "todo":
         return None, {"error": "doing 不可直接拖回 todo"}
+    # 待合并提交闸（2026-10-07 批次）：独立 worktree 卡进「已完成」前先问一句——
+    # 放在归档同步**之前**，因为这条分支要「列不动」地返回（先归档再问会把
+    # 会话归档了却没过卡，留下不一致状态）。
+    if target == "done" and src != "done" and not merge_ack:
+        pend = merge_pending(project, card)
+        if pend:
+            return None, {"merge_pending": pend}
     # 归档同步（2026-10-05）：进/出「已完成」先做归档面，失败即整体放弃本次移列
     # （硬失败 400 报前端，卡片列不变）。**归档先行**的理由：先落列再归档的话，
     # 失败回滚要连「已停会话/已出队/已改排序」一起退，代价与风险都大；先行失败
@@ -903,7 +917,8 @@ def _recover_ext_rows(queued=()):
     return changed
 
 
-def _enter_doing(project, card, extra="", force=False, worktree=False):
+def _enter_doing(project, card, extra="", force=False, worktree=False,
+                 queue_worktree=False):
     """进 doing 统一入口（start 端点 / 拖入 doing / 定时开工共用）。
 
     force=true：跳过父依赖与排队直接起会话（用户自担风险），reason 标签按实参分
@@ -941,6 +956,10 @@ def _enter_doing(project, card, extra="", force=False, worktree=False):
     已带 worktree 标记时**本条起跑路径整体转交 `_enter_doing_worktree`**——那条路
     不写 `wait_items` 行（不占项目运行位、不阻塞同项目其他单元），语义与失败收口
     见该函数 docstring；本函数其余分支保持原样（排队/force 直起一字未动）。
+
+    例外（2026-10-07 批次）：`queue_worktree=True` 时**不转交**，worktree 卡照常走
+    统一队列。唯一调用方是 `handoff_worktree_merge`（把合并任务交给 agent）——合并
+    要动主仓库工作区，必须与项目内其他单元串行，免排队语义在这里有害。
     """
     if _web_family(project) is None:
         # 退场族防呆（见 docstring）：不建行、不入队、不动列——直接明确报错
@@ -957,7 +976,9 @@ def _enter_doing(project, card, extra="", force=False, worktree=False):
     # 「在新 worktree 中开始」（worktree=True），或该卡此前已被标记为 worktree 卡
     # （card.worktree 非空 ⇒ 打回续改/重试/再进开发列自动复用同一工作树）——
     # 一律交给 `_enter_doing_worktree`：起跑但不入统一队列（不写 wait_items 行）。
-    if worktree or (_card_opt(card, "worktree") or "").strip():
+    # queue_worktree=True（合并回交，2026-10-07）是唯一例外：走下面的排队路径，
+    # 合并要动主仓库工作区，必须与项目内其他单元串行。
+    if not queue_worktree and (worktree or (_card_opt(card, "worktree") or "").strip()):
         return _enter_doing_worktree(project, card, extra, force=force,
                                      want=bool(worktree))
     if card["column_key"] == "doing" \
@@ -1085,12 +1106,14 @@ def _enter_doing(project, card, extra="", force=False, worktree=False):
     return card_json(db.get_board_card(card["id"])), None
 
 
-def start_into_doing(project, card, extra="", force=False, worktree=False):
+def start_into_doing(project, card, extra="", force=False, worktree=False,
+                     queue_worktree=False):
     """start 端点专用：语义全部由 _enter_doing 承载（保留函数名，server 调用点不动）。
 
     worktree=True = 用户在下拉里选「🌿 在新 worktree 中开始」（2026-10-06 批次）。
+    queue_worktree=True = worktree 卡也走统一队列（合并回交，2026-10-07 批次）。
     """
-    return _enter_doing(project, card, extra, force, worktree)
+    return _enter_doing(project, card, extra, force, worktree, queue_worktree)
 
 
 # ---------- 独立 worktree 卡起跑（2026-10-06 批次） ----------
@@ -1214,26 +1237,30 @@ def _enter_doing_worktree(project, card, extra="", force=False, want=False):
 def worktree_preview(project, card):
     """卡片「在新 worktree 中开始」入口的预览（server 端点用，**不落盘**）：
 
-    返回 {supported, reason, path, branch, exists}——supported=False 时 reason 是
-    给用户看的中文原因（项目不是 git 仓库 / 卡片已有主会话，D10）；前端据此把
+    返回 {supported, reason, path, branch, exists, merge}——supported=False 时 reason
+    是给用户看的中文原因（项目不是 git 仓库 / 卡片已有主会话，D10）；前端据此把
     菜单项置灰并显示原因，避免用户点了必然失败的入口。
+    `merge`（2026-10-07 批次）= 待合并提交判定（`merge_pending`，None=无待合并）：
+    已经是 worktree 卡的卡片走本端点时前端据它决定「通过」要不要弹合并框。
     """
     branch = worktree.branch_for(card["id"])
+    pend = merge_pending(project, card)
     if (_card_opt(card, "worktree") or "").strip():
         # 已是 worktree 卡：续跑自动复用，无需再选（前端一般不再显示该入口）
         return {"supported": False, "reason": "该卡片已在独立 worktree 中运行",
                 "path": _card_opt(card, "worktree"), "branch": branch,
-                "exists": os.path.isdir(_card_opt(card, "worktree"))}
+                "exists": os.path.isdir(_card_opt(card, "worktree")),
+                "merge": pend}
     if (card["session_id"] or "").strip():
         return {"supported": False,
                 "reason": "该卡片已有主会话，不能切换到独立 worktree（请新建卡片）",
-                "path": "", "branch": branch, "exists": False}
+                "path": "", "branch": branch, "exists": False, "merge": pend}
     pv = worktree.preview(project, card["id"])
     if not pv["ok"]:
         return {"supported": False, "reason": pv["error"], "path": "",
-                "branch": branch, "exists": False}
+                "branch": branch, "exists": False, "merge": pend}
     return {"supported": True, "reason": "", "path": pv["path"],
-            "branch": pv["branch"], "exists": pv["exists"]}
+            "branch": pv["branch"], "exists": pv["exists"], "merge": pend}
 
 
 def cleanup_card_worktree(project, card):
@@ -1251,6 +1278,105 @@ def cleanup_card_worktree(project, card):
         return False, err
     db.update_board_card(card["id"], worktree="")
     return True, ""
+
+
+# ---------- worktree 改动回流主分支（「通过」时的待合并闸，2026-10-07 批次） ----------
+#
+# 需求（用户 2026-10-07）：独立 worktree 卡的改动在 `ts/card-<id>` 分支上，主分支
+# 一无所知；点「通过」时应当先看有没有待合并提交——没有就直接完成，有就把合并
+# 交给 agent（冲突只有 agent 能解），**平台自己不执行任何 git 合并命令**。
+#
+# 分工与边界：
+# - 平台（本模块）：判定 `ahead`（见 `merge_pending`）+ 生成指令 + 把卡片连同指令
+#   送回统一队列（`handoff_worktree_merge`）；不碰分支、不替用户决定合并结果。
+# - agent：在卡片会话里执行同步主分支、解冲突、回流合并（指令原文
+#   `build_merge_instruction`），干完这轮会话结束 ⇒ 卡片按既有流程自动回待审核；
+#   用户再点「通过」时 `ahead` 已为 0，直接进「已完成」。
+# - worktree 卡平时**免排队**（不占项目运行位，plan D1）；但合并要动主仓库工作区，
+#   必须与项目内其他单元串行 ⇒ 这条路径显式走统一队列（`queue_worktree=True`），
+#   卡片在开发列显示「排队中」，轮到才起会话。
+
+# 合并任务指令的段落标记：投给卡片会话的指令以它开头，`build_start_prompt` 据此
+# 走专用提示词（不套打回意见的「【修改意见】…请按修改意见继续完善」壳——那会让
+# agent 以为要改代码，而不是合并分支）。生产者=`build_merge_instruction`。
+MERGE_TASK_MARK = "【合并任务】"
+
+
+def merge_pending(project, card):
+    """「通过」前的待合并提交判定（只服务独立 worktree 卡）。返回 dict 或 None。
+
+    None = 无需询问（非 worktree 卡 / 工作树读不到 / 没有待合并提交）——三种情形
+    都按普通卡直接完成（用户 2026-10-07 约定：没有可合并的 commit 就直接进已完成；
+    工作树被用户删掉等读不到的情形拦下来只会卡住「通过」，故一并放行）。
+    有值 = 前端弹「是否交给 agent 合并」（列不动），字段：
+    {branch, target, ahead, behind, dirty, dirty_count, path}。
+    """
+    if not (_card_opt(card, "worktree") or "").strip():
+        return None
+    st = worktree.merge_status(project, card)
+    if not st["ok"] or st["ahead"] <= 0:
+        return None
+    return {"branch": st["branch"], "target": st["target"],
+            "ahead": st["ahead"], "behind": st["behind"],
+            "dirty": st["dirty"], "dirty_count": st["dirty_count"],
+            "path": st["path"]}
+
+
+def build_merge_instruction(project, card, st):
+    """生成交给 agent 的合并指令（原文即 prompt，见 `MERGE_TASK_MARK`）。
+
+    指令把两个路径都写死（工作树 / 主仓库）——agent 的 cwd 是工作树，回流的
+    `git -C <主仓库> merge` 是跨目录操作，不写清楚它会去猜（plan D7 的教训）。
+    合并口径按用户 2026-10-07 约定：**先同步主分支最新代码，再回流；尽量 ff，
+    不能 ff 才普通 merge**；冲突由 agent 解，解不了必须 abort 回退，不留半合并态。
+    """
+    main = (project["project_dir"] or "").strip()
+    branch, target, path = st["branch"], st["target"], st["path"]
+    dirty = int(st.get("dirty_count") or 0)
+    head = [f"{MERGE_TASK_MARK}把卡片 #{card['id']} 的独立 worktree 改动合并回主分支。",
+            f"工作树：{path}（分支 {branch}，你的会话工作目录）",
+            f"主仓库：{main}（主分支 {target}）",
+            f"待合并提交：{st['ahead']} 个"]
+    if dirty:
+        head.append(f"工作树当前有 {dirty} 处未提交改动，第一步先提交它们。")
+    steps = [
+        "步骤：",
+        f"1. 提交工作树里的未提交改动（有的话），提交信息带上卡片号 #{card['id']}。",
+        f"2. 同步主分支最新代码：若项目有远端，先在主仓库执行"
+        f" `git -C {main} fetch`（无远端会失败，忽略即可）；然后在工作树执行"
+        f" `git -C {path} merge {target}`（主分支已合入过就跳过）。"
+        f"冲突在工作树内解决，并跑相关测试确认。",
+        f"3. 回流合并：在主仓库执行 `git -C {main} merge --ff-only {branch}`"
+        f"（能快进就快进，主分支保持线性）；若因主分支又前进而无法快进，"
+        f"改用 `git -C {main} merge {branch}` 生成合并提交，冲突自己解决。",
+        f"4. 不要 push，不要 rebase/重置主分支，不要改动与本卡无关的文件。",
+        f"5. 结束后用一两句话报告：合并是否成功、目标分支名、合并后的 HEAD 短 sha；"
+        f"失败就说明卡在哪一步。",
+        f"若第 2/3 步冲突无法解决：`git -C {path} merge --abort`（工作树侧）或"
+        f" `git -C {main} merge --abort`（主仓库侧）回退，"
+        f"绝不留半合并状态，并在报告里说明卡在哪里。",
+    ]
+    return "\n".join(head + [""] + steps)[:PROMPT_MAX]
+
+
+def handoff_worktree_merge(project, card):
+    """把「合并 worktree 改动回主分支」交给卡片会话（回统一队列排队）。
+
+    返回 (card_dict, None) 或 (None, err_dict)。平台**只投递不执行**：判定有
+    待合并提交后，把 `build_merge_instruction` 的指令当打回意见送进统一队列
+    （`queue_worktree=True` 让 worktree 卡走排队路径而不是免排队直起）——轮到该卡
+    时才起会话，agent 干完这轮卡片自动回待审核，用户再点「通过」即完成。
+    前置校验：无待合并提交 / 无主会话（没会话就没上下文可投递）直接报错。
+    """
+    if not (card["session_id"] or "").strip():
+        return None, {"error": "该卡片尚无主会话，无法交给 agent 合并"}
+    st = worktree.merge_status(project, card)
+    if not st["ok"]:
+        return None, {"error": f"无法判定待合并提交：{st['error']}"}
+    if st["ahead"] <= 0:
+        return None, {"error": "该卡片没有待合并的提交（可直接通过）"}
+    instruction = build_merge_instruction(project, card, st)
+    return start_into_doing(project, card, instruction, queue_worktree=True)
 
 
 def dequeue_start(project, card):
@@ -1367,7 +1493,12 @@ def build_start_prompt(project, card, extra="", sid=""):
     resume）传其 sid，否则传空串——无可续会话自动回落全量，避免给无上下文的
     新会话发「继续」。
     卡上标题/描述即便有编辑一并忽略（用户约定：有会话只发「继续」）。
+    合并回交指令（extra 以 MERGE_TASK_MARK 开头，2026-10-07 批次）：**原文直发**，
+    不套「【修改意见】…请按修改意见继续完善」壳——那是打回改代码的语义，合并
+    任务要的是执行 git 步骤，混在一起会让 agent 跑偏。
     """
+    if extra.startswith(MERGE_TASK_MARK):
+        return extra[:PROMPT_MAX]
     if sid:
         return build_continue_prompt(extra)
     return build_task_prompt(project, card, extra)
