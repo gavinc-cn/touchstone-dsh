@@ -14,7 +14,11 @@ chat/dshevents）走**原路径**跑起来。
 - **不落会话存储**：不写 `~/.dsh/sessions/**`，故会话窗的**消息内容**在替身下
   为空（本仓的隔离 e2e 断言的是队列/状态/徽标，不依赖消息正文）；
 - 忙时 `/prompt` 进 inbox（对齐宿主 followup 的排队语义），轮末自动取下一项；
-- `/_ctl/*` 是对照控制面（测试脚本用它制造提问/审批/错误/计数），真插件没有。
+- `/_ctl/*` 是对照控制面（测试脚本用它制造提问/审批/错误/计数），真插件没有；
+  `/_ctl/ask` 制造的挂起提问会**保持会话 running 并暂停轮计时**，直到 `/answer` 或
+  `/_ctl/end_interaction` 放行——对齐真插件「等作答时 agent 保持 busy」的实况
+  （平台 `_iw_interaction` 的 pending 判定要求 busy=True）；`/_ctl/ask` 传
+  `questions`（dsh 题目列表）时原样进 mark，平台阻塞徽标才能取到真题干。
 
 状态流帧（`?scope=state`）与真插件同形：`{seq, time, type, session_id, data}`，
 `dshevents.EventHub` 直接折叠（字段口径见该模块 `_on_frame`）。
@@ -292,6 +296,14 @@ class FakeDriver:
             while waited * 1000 < self.turn_ms:
                 if sess.turn_cancel.wait(step):
                     break
+                # 挂起提问/审批期间**不计入轮时长**（对齐真插件：agent 等作答时保持
+                # busy，平台 `_iw_interaction` 的 pending 判定要求 busy=True）。
+                # 作答（`/answer`）与 `/_ctl/end_interaction` 都会 set 该事件。
+                with sess.lock:
+                    held = sess.interaction is not None
+                if held:
+                    sess.await_answer.wait(step)
+                    continue
                 waited += step
             reason = "aborted" if sess.turn_cancel.is_set() else "completed"
             text = "" if reason == "aborted" else (
@@ -667,9 +679,17 @@ class _Handler(BaseHTTPRequestHandler):
             if sess is None:
                 return self._json(404, {"error": "session not found"})
             kind = str(body.get("kind") or "question")
+            questions = body.get("questions")
             if kind == "approval":
                 mark = {"kind": "approval", "answerable": bool(sess.held_approvals),
                         "id": "ap-1", "tool": "bash", "action": "执行命令"}
+            elif isinstance(questions, list) and questions:
+                # dsh 真形态：driver/interaction 帧里的题目列表**原样透传**——平台
+                # `_iw_interaction` 的 dsh 分支只认 `mark["questions"]`（真题干取
+                # q0.question 前 80 字进卡片阻塞徽标），平面 `question` 字段它读不到。
+                mark = {"kind": "question", "answerable": True,
+                        "call_id": str(body.get("call_id") or "call-1"),
+                        "questions": questions}
             else:
                 mark = {"kind": "question", "answerable": True, "call_id": "call-1",
                         "qid": "q-1", "question": str(body.get("question") or "继续吗？"),
@@ -688,6 +708,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(404, {"error": "session not found"})
             with sess.lock:
                 sess.interaction = None
+            sess.await_answer.set()      # 放行 `_run_turn` 的挂起等待（继续计轮时长）
             drv.publish_state("driver/interaction", sess.sid,
                               {"state": "resolved", "interaction": None})
             return self._json(200, {"ok": True})
