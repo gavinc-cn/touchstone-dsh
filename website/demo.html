@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>在线 Demo · Touchstone 试金石</title>
+<meta name="description" content="Touchstone（试金石）在线演示：不用安装、不用准备数据，在浏览器里体验开发看板、统一队列、会话提问作答、七阶段测试任务、监控面板与 Bug 报告的完整闭环。演示为前端静态模拟，不连后端、不发送任何数据。">
+<meta name="robots" content="index,follow">
+<link rel="alternate" hreflang="zh-CN" href="./demo.html">
+<link rel="alternate" hreflang="en" href="./en-demo.html">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="stylesheet" href="assets/demo/demo.css">
+<script>document.documentElement.classList.add('js');</script>
+</head>
+<body class="demo-body">
+
+<!-- ==================== 演示页顶栏（产品外壳之外的一条细带） ==================== -->
+<header class="dtop">
+  <a class="dtop-back" href="index.html">← 返回官网</a>
+  <span class="dtop-brand">
+    <svg width="17" height="17" viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="currentColor" fill-rule="evenodd"
+        d="M8.6 3H15.4A5.6 5.6 0 0 1 21 8.6V15.4A5.6 5.6 0 0 1 15.4 21H8.6A5.6 5.6 0 0 1 3 15.4V8.6A5.6 5.6 0 0 1 8.6 3Z
+           M7.6 6.6H16.4V9.8H13.6V17.8H10.4V9.8H7.6Z"/>
+    </svg>
+    <b>TOUCHSTONE</b><i>试金石</i>
+  </span>
+  <span class="dtop-tag" id="dtopTag">在线演示 · 静态模拟，不连后端</span>
+  <span class="dtop-gap"></span>
+  <span class="dtop-ctl">
+    <label class="dtop-sel"><span id="speedLabel">演示速度</span>
+      <select id="speed">
+        <option value="1">1×</option>
+        <option value="2" selected>2×</option>
+        <option value="4">4×</option>
+        <option value="8">8×</option>
+      </select>
+    </label>
+    <button type="button" class="dbtn dbtn-ghost" id="coachBtn">引导</button>
+    <button type="button" class="dbtn dbtn-ghost" id="resetBtn">重置演示</button>
+    <span class="lang"><span class="lang-on">中文</span><a class="lang-off" href="en-demo.html" hreflang="en">EN</a></span>
+  </span>
+</header>
+
+<!-- ==================== 应用（由 ui.js 全量渲染） ==================== -->
+<div id="app" class="dapp" aria-live="polite"></div>
+
+<!-- ==================== 引导字幕条 ==================== -->
+<div id="coach" class="coach" hidden></div>
+
+<!-- ==================== toast ==================== -->
+<div id="toast" class="dtoast" hidden></div>
+
+<!-- ==================== 弹窗/确认层 ==================== -->
+<div id="layer" class="dlayer" hidden></div>
+
+<script src="assets/demo/i18n.js"></script>
+<script src="assets/demo/engine.js"></script>
+<script src="assets/demo/ui.js"></script>
+</body>
+</html>

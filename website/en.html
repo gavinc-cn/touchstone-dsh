@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="en" class="lang-en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Touchstone · An AI agent that tests your real code</title>
+<meta name="description" content="Touchstone is an AI-agent-driven automated testing platform: six task types, a seven-stage lifecycle, and one development board. It drives an agent through multi-round sessions that write and run test cases in a case library and turn failures into bug reports — watchable, interruptible, steerable.">
+<link rel="alternate" hreflang="en" href="./en.html">
+<link rel="alternate" hreflang="zh-CN" href="./index.html">
+<link rel="stylesheet" href="assets/site.css">
+<script>document.documentElement.classList.add('js');</script>
+</head>
+<body>
+
+<!-- ==================== top bar ==================== -->
+<header class="top">
+  <div class="top-inner">
+    <a href="#top" style="display:flex;align-items:center;gap:10px">
+      <svg width="21" height="21" viewBox="0 0 24 24" aria-hidden="true" style="flex:none">
+        <defs>
+          <linearGradient id="markG" x1="0" y1="1" x2="1" y2="0">
+            <stop offset="0" stop-color="#E8B86D"/><stop offset="1" stop-color="#F2A65A"/>
+          </linearGradient>
+        </defs>
+        <path fill="url(#markG)" fill-rule="evenodd"
+          d="M8.6 3H15.4A5.6 5.6 0 0 1 21 8.6V15.4A5.6 5.6 0 0 1 15.4 21H8.6A5.6 5.6 0 0 1 3 15.4V8.6A5.6 5.6 0 0 1 8.6 3Z
+             M7.6 6.6H16.4V9.8H13.6V17.8H10.4V9.8H7.6Z"/>
+      </svg>
+      <span class="mark">TOUCHSTONE</span>
+    </a>
+    <nav class="top-nav">
+      <a href="#kanban">The board</a>
+      <a href="#marks">Task types</a>
+      <a href="#round">One round</a>
+      <a href="#stages">Stages</a>
+      <a href="#limits">Limits</a>
+      <a href="#start">Quick start</a>
+      <a class="nav-demo" href="en-demo.html">Live demo</a>
+      <span class="lang"><a class="lang-off" href="index.html" hreflang="zh-CN">中文</a><span class="lang-on">EN</span></span>
+      <a class="gh" href="https://github.com/gavinc-cn/touchstone-dsh">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ==================== hero ==================== -->
+<section class="wrap hero">
+  <p class="eyebrow">An AI-agent-driven test platform · Free-style testing</p>
+  <h1 class="h1-lat">An agent that tests your real code,<br>one round at a time.</h1>
+
+  <div class="hero-top">
+    <div class="hero-copy">
+      <p class="lead"><strong>Touchstone drives an AI agent through your repository.</strong>
+        Point it at a project and a working directory, and it runs multi-round sessions that write test cases into a case library, execute them, and cluster failures into bug reports — all dispatched from one development board. Watchable, steerable, interruptible.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="en-demo.html">Open the live demo</a>
+        <a class="btn btn-ghost" href="#start">Quick start</a>
+        <a class="btn btn-ghost" href="https://github.com/gavinc-cn/touchstone-dsh">Read the source ↗</a>
+      </div>
+    </div>
+    <ul class="facts">
+      <li><b>6</b><span>task types</span></li>
+      <li><b>7</b><span>stages</span></li>
+      <li><b>5</b><span>board columns</span></li>
+      <li><b>1</b><span>round = 1 session</span></li>
+      <li><b>1</b><span>queue per project</span></li>
+      <li><b>0</b><span>status polling</span></li>
+    </ul>
+  </div>
+
+  <!-- The board itself, straight from the product: five columns, cards that carry sessions.
+       Column names and chip wording are the real ones shipped in the UI. -->
+  <div class="bd bd-draw" id="board">
+    <div class="bd-top">
+      <span class="bd-proj"><i></i>touchstone-dsh</span>
+      <span>Serial: one task at a time</span>
+      <span class="bd-tail"><i></i>live</span>
+    </div>
+
+    <div class="bd-cols">
+      <div class="bd-col">
+        <div class="bd-head"><span class="bd-name">To do</span><span class="bd-count">2</span></div>
+        <article class="bd-card">
+          <b class="bd-title">Add boundary cases for the export endpoint</b>
+          <div class="bd-badges"><span class="bd-badge id">#392</span></div>
+          <div class="bd-ops"><span class="bd-op">Start<i class="bd-caret"></i></span></div>
+        </article>
+        <article class="bd-card">
+          <b class="bd-title">Rewrite the stress plan as a run.py driver</b>
+          <div class="bd-badges"><span class="bd-badge id">#393</span></div>
+        </article>
+        <div class="bd-add"><span>Add a task…</span><i>Enter lands in To do</i></div>
+      </div>
+
+      <div class="bd-col">
+        <div class="bd-head"><span class="bd-name">In progress</span><span class="bd-count">2</span></div>
+        <!-- test-task entry: tasks and cards share this column, and the order here is queue order -->
+        <div class="bd-task">
+          <b>Task #96</b>
+          <span class="bd-badge run"><i></i>Test · running</span>
+          <span class="bd-badge id">Regression</span>
+        </div>
+        <article class="bd-card is-run">
+          <b class="bd-title">Login: concurrent duplicate submits</b>
+          <div class="bd-badges">
+            <span class="bd-badge id">#391</span><span class="bd-badge run"><i></i>Session running</span>
+          </div>
+          <p class="bd-meta">round 3 · 12 tool calls</p>
+          <div class="bd-bar"><i></i></div>
+        </article>
+        <div class="bd-zone"><span>Waiting area · in queue order</span></div>
+        <article class="bd-card is-wait">
+          <b class="bd-title">Fix the duplicate-login false alarm</b>
+          <div class="bd-badges">
+            <span class="bd-badge id">#388</span><span class="bd-badge queue">Queued</span>
+          </div>
+        </article>
+      </div>
+
+      <div class="bd-col">
+        <div class="bd-head"><span class="bd-name">Blocked</span><span class="bd-count">1</span></div>
+        <article class="bd-card">
+          <b class="bd-title">Concurrent submits on one session</b>
+          <div class="bd-badges"><span class="bd-badge id">#390</span><span class="bd-badge ask">🤔 Waiting on you</span></div>
+          <div class="bd-ask">
+            <span class="bd-from">the agent asks</span>
+            <p>“On a concurrent duplicate submit, should we reject it or treat it as idempotent?”</p>
+            <div class="bd-opts">
+              <span class="bd-opt">Idempotent</span><span class="bd-opt">Reject</span><span class="bd-opt">Single thread</span>
+            </div>
+          </div>
+          <p class="bd-meta">Sent to Feishu · tap an option on your phone</p>
+        </article>
+      </div>
+
+      <div class="bd-col">
+        <div class="bd-head"><span class="bd-name">In review</span><span class="bd-count">2</span></div>
+        <article class="bd-card">
+          <b class="bd-title">Duplicate login still slips through</b>
+          <div class="bd-badges">
+            <span class="bd-badge id">#386</span><span class="bd-badge wt">🌿 worktree</span>
+          </div>
+          <p class="bd-meta">Session idle · your call</p>
+        </article>
+        <article class="bd-card">
+          <b class="bd-title">Export the case-library index</b>
+          <div class="bd-badges">
+            <span class="bd-badge id">#385</span><span class="bd-badge queue">Answered · pending delivery</span>
+          </div>
+        </article>
+      </div>
+
+      <div class="bd-col is-done">
+        <div class="bd-head"><span class="bd-name">Done</span><span class="bd-count">2</span></div>
+        <article class="bd-card">
+          <b class="bd-title">Login: concurrent case added</b>
+          <div class="bd-badges"><span class="bd-badge id">#379</span></div>
+          <p class="bd-meta">Retested, passing · session archived with it</p>
+        </article>
+        <article class="bd-card">
+          <b class="bd-title">Clear the build cache</b>
+          <div class="bd-badges"><span class="bd-badge id">#377</span></div>
+        </article>
+      </div>
+    </div>
+  </div>
+
+  <p class="bd-foot">
+    <span id="bdGloss">This is the board you actually work in: <em>one card is one dsh session</em>, and test tasks and cards share a single queue — one thing runs per project at a time, and a card only gets a session when its turn comes.</span>
+    <span class="bd-note">5 columns · 1 queue</span>
+  </p>
+
+</section>
+
+<!-- ==================== the board ==================== -->
+<section class="wrap band" id="kanban">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-lat">The board</span><span class="rail-cjk">看板</span></div></div>
+    <div>
+      <h2 class="h2-lat">Not a sticky-note wall — a control surface</h2>
+      <p class="sec-lead">The development board lays out five columns: who is running, who is waiting, who is stuck, who is finished. It shares one queue with the test tasks — a project runs exactly one thing at a time.</p>
+
+      <div class="truths">
+        <div class="truth">
+          <h3>One card is one session</h3>
+          <p>A card in <b>In progress</b> means its session is running; a card in <b>Blocked</b> means the agent stopped to ask you something; a card in <b>In review</b> means the session went idle and the work is waiting for your call. Open the card and you get the whole session: thinking, tool calls, results — steerable mid-round, compactable, forkable from any round.</p>
+        </div>
+        <div class="truth">
+          <h3>Cards and tasks share one queue</h3>
+          <p>Test tasks, board cards and chat messages line up in a single queue, and the top-to-bottom order of the In-progress column <em>is</em> that queue. A card that hasn't come up yet shows <b>Queued</b> and only gets a session when its turn arrives. In a hurry, <b>⚡ Force</b> jumps the queue at your own risk.</p>
+        </div>
+        <div class="truth">
+          <h3>The agent stops and asks</h3>
+          <p>Questions and approvals both go through one answer queue: the session suspends, the card lands in <b>Blocked</b>, and it resumes once the answer is delivered. Feishu pushes a card to your phone — reply “answer 390 1” or “approve 390” and it's answered. While it waits, the run slot is handed back and the head of the queue starts.</p>
+        </div>
+      </div>
+
+      <div class="flow">
+        <div class="flow-row">
+          <div class="flow-col"><span class="bd-name">To do</span><span class="flow-en">todo</span></div>
+          <p class="flow-what">No session yet. <b>Start</b> puts the card in the queue, or pick <b>🌿 Start in a new worktree</b> from the split button — that card runs immediately in its own git worktree: not queued, not holding the run slot, main checkout untouched.</p>
+        </div>
+        <div class="flow-row is-run">
+          <div class="flow-col"><span class="bd-name">In progress</span><span class="flow-en">doing</span></div>
+          <p class="flow-what">The top half is the run zone, the bottom half the waiting area, split by a <b>Waiting area · in queue order</b> line. A running card takes a mid-round injection; a queued card can be stopped, which cancels the queue entry and drops it into review.</p>
+        </div>
+        <div class="flow-row is-ask">
+          <div class="flow-col"><span class="bd-name">Blocked</span><span class="flow-en">blocked</span></div>
+          <p class="flow-what">The agent asked a question or requested approval, and the session sits here until you answer. Answer or approve and it resumes by itself; nothing times out — the 60-second tick only reconciles state against reality.</p>
+        </div>
+        <div class="flow-row">
+          <div class="flow-col"><span class="bd-name">In review</span><span class="flow-en">review</span></div>
+          <p class="flow-what">The session is idle and the diff plus its conclusions are waiting for your judgement. <b>Pass</b> moves it to Done; <b>Send back</b> returns it with a reason — that is not an undo, it puts the card back on the development side to keep working.</p>
+        </div>
+        <div class="flow-row">
+          <div class="flow-col"><span class="bd-name">Done</span><span class="flow-en">done</span></div>
+          <p class="flow-what">A card moved here takes its dsh session into the archive with it; archive the session in dsh and the card walks here on its own. <b>Reopen</b> un-archives the session and sends the card back to review.</p>
+        </div>
+      </div>
+
+      <ul class="rem-list flow-more">
+        <li class="rem-item">
+          <b>There are gates between the columns</b>
+          <p>Dragging a card into In progress queues it; an unfinished parent card blocks that and asks you to confirm <b>Force start (at your own risk)</b>; a dependency cycle is refused outright. A project runs either <b>Serial: one task at a time</b> or <b>Parallel: up to 5 at once</b>.</p>
+        </li>
+        <li class="rem-item">
+          <b>Leaving the column leaves the queue</b>
+          <p>There is no separate "release the slot" action: drag a card away, stop it or delete it, and its queue row is finalised on the spot — the run slot goes to the next unit immediately.</p>
+        </li>
+        <li class="rem-item">
+          <b>Delete means recycle bin</b>
+          <p>Deleted cards go to the recycle bin and can be restored to their original column and position; only permanent deletion from the bin is irreversible. Emptying the bin is one click, and it takes the comments with it.</p>
+        </li>
+        <li class="rem-item">
+          <b>Paste images into a card, or pull cards from Jira</b>
+          <p>Card descriptions take pasted images and files (10 MB each, served behind auth). With Jira credentials configured, <b>Import my to-dos</b> turns the 50 issues assigned to you and still open into cards, de-duplicated by key.</p>
+        </li>
+        <li class="rem-item">
+          <b>The platform never commits for you</b>
+          <p>A card stops when the work is done; committing is yours, or the optional autocommit guard asset's. Every session on the board also carries its own permission preset: confirm each step, approve automatically, or fully autonomous.</p>
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== six task types ==================== -->
+<section class="wrap band" id="marks">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-lat">Six task types</span><span class="rail-cjk">六类任务</span></div></div>
+    <div>
+      <h2 class="h2-lat">Six task types, six kinds of output</h2>
+      <p class="sec-lead">Each type leaves something different behind: cases, a report, or just a record of one load run. The left column is the task type; the right column is what lands on disk.</p>
+
+      <div class="marks">
+        <article class="mark-row" data-k="explore">
+          <div class="mark-name"><span class="mark-dot" style="background:#7BC8D6"></span>
+            <span class="mark-lat">Explore</span><span class="mark-cjk">探索</span></div>
+          <p class="mark-body">Starts on a codebase it has never seen: map the modules, grade every feature P0/P1/P2, then generate de-duplicated cases along that order, run them one by one, and cluster the failures into bug reports by root cause. What to test is the agent's call, and coverage is written back after every round.</p>
+          <div class="mark-out"><span>leaves <em>case directories</em></span><span>graded <em>INDEX.md</em> · rounds in <em>ROUNDS.md</em></span><span>clustered <em>bug reports</em></span></div>
+        </article>
+
+        <article class="mark-row" data-k="regression">
+          <div class="mark-name"><span class="mark-dot" style="background:#8FBC6E"></span>
+            <span class="mark-lat">Regression</span><span class="mark-cjk">回归</span></div>
+          <p class="mark-body">Writes no new cases, re-runs the ones you already have. Narrow it to what a commit date range touched, or re-run the whole library. Every case's verdict is written back to its own status file.</p>
+          <div class="mark-out"><span>leaves <em>execution records</em> (request and response)</span><span>verdicts in <em>status.md</em></span></div>
+        </article>
+
+        <article class="mark-row" data-k="stress">
+          <div class="mark-name"><span class="mark-dot" style="background:#F2A65A"></span>
+            <span class="mark-lat">Stress</span><span class="mark-cjk">压测</span></div>
+          <p class="mark-body">One agent round writes the plan: scope, target endpoints, load model, metric definitions, chart design and the command to reproduce it. The platform then drives the load itself — run it five times and you get five reports, each with its own logs and metrics.</p>
+          <div class="mark-out"><span>leaves a <em>plan package</em> plan.md / run.py / charts.json</span><span>per run: <em>metrics jsonl + report</em></span></div>
+        </article>
+
+        <article class="mark-row" data-k="fix">
+          <div class="mark-name"><span class="mark-dot" style="background:#E8B86D"></span>
+            <span class="mark-lat">Fix</span><span class="mark-cjk">修复</span></div>
+          <p class="mark-body">Starts at report analysis: find the root cause, propose a fix, change the code, and redeploy and retest when the project says how. A change that was never built and deployed is not claimed as verified — the status stays honest and says so.</p>
+          <div class="mark-out"><span>leaves a <em>fix record</em> (file:line + summary)</span><span>a retest <em>verdict</em></span></div>
+        </article>
+
+        <article class="mark-row" data-k="retest">
+          <div class="mark-name"><span class="mark-dot" style="background:#E07A8C"></span>
+            <span class="mark-lat">Retest</span><span class="mark-cjk">复测</span></div>
+          <p class="mark-body">Pick an existing bug report and one of three scopes: retest only, redeploy then retest, or deploy only. When every related case already has a frozen verify.py, the platform runs the script instead and answers in seconds.</p>
+          <div class="mark-out"><span>leaves a <em>verdict</em> written back into the report</span><span>marked <em>fixed</em> when all cases pass</span></div>
+        </article>
+
+        <article class="mark-row" data-k="reject">
+          <div class="mark-name"><span class="mark-dot" style="background:#9FB0C9"></span>
+            <span class="mark-lat">Reject</span><span class="mark-cjk">修例</span></div>
+          <p class="mark-body">When you decide a report doesn't hold, the agent goes back to the related cases and corrects them: wrong assertions get fixed, cases that were false positives get deleted. The lesson goes into <code>PITFALLS.md</code>, which is read before any new case is written.</p>
+          <div class="mark-out"><span>leaves <em>corrected cases</em></span><span>a lesson in <em>PITFALLS.md</em></span></div>
+        </article>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== one round ==================== -->
+<section class="wrap band" id="round">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-lat">One round</span><span class="rail-cjk">一轮</span></div></div>
+    <div>
+      <h2 class="h2-lat">One round is one session</h2>
+      <p class="sec-lead">A task isn't "run a script". Each round hands work to a resident session that lives inside the dsh host process — one follow-up call, then wait for that round to finish.</p>
+
+      <div class="chain">
+        <div class="chain-node"><b>Create task</b><span>pick a type, a start and an end</span></div>
+        <div class="chain-node"><b>One queue</b><span>one queue per project</span></div>
+        <div class="chain-node"><b>dshdriver</b><span>a round becomes one call</span></div>
+        <div class="chain-node"><b>Resident session</b><span>the agent works inside the host</span></div>
+        <div class="chain-node"><b>Results land</b><span>turn/end arrives, the round closes</span></div>
+      </div>
+      <div class="chain-loop"><i>↻</i> The next round continues in the same session. Context carries over; nothing restarts and nothing is re-read from scratch.</div>
+
+      <div class="truths">
+        <div class="truth">
+          <h3>One project runs one thing at a time</h3>
+          <p>Tasks, board cards and chat messages for the same project share one queue, and whoever is running holds the slot. Different projects run in parallel, up to six. When a session is waiting on your answer it gives the slot up so the next item can start.</p>
+        </div>
+        <div class="truth">
+          <h3>The session stays resident</h3>
+          <p>There is no local agent subprocess and no status polling: one round is one follow-up plus one SSE <code>turn/end</code>. The session lives in the dsh host, and its id is recorded the moment the round starts.</p>
+        </div>
+        <div class="truth">
+          <h3>You can cut in mid-run</h3>
+          <p><b>Send</b> queues a message for the next round; <b>Inject</b> steers it into the current one at the nearest step boundary. The session window shows every thought, tool call and result as it happens.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== seven stages ==================== -->
+<section class="wrap band" id="stages">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-lat">Seven stages</span><span class="rail-cjk">七阶段</span></div></div>
+    <div>
+      <h2 class="h2-lat">Seven stages</h2>
+      <p class="sec-lead">Every task picks a start and an end on the same track. The order on that track is a real order — this is a pipeline, not seven labels.</p>
+
+      <div class="stage-head">
+        <div class="stage-col"><span class="stage-num">01</span><span class="stage-cjk">Case generation</span><span class="stage-key">gen_case</span></div>
+        <div class="stage-col"><span class="stage-num">02</span><span class="stage-cjk">Execution</span><span class="stage-key">execute</span></div>
+        <div class="stage-col"><span class="stage-num">03</span><span class="stage-cjk">Report</span><span class="stage-key">report</span></div>
+        <div class="stage-col"><span class="stage-num">04</span><span class="stage-cjk">Analysis</span><span class="stage-key">analyze</span></div>
+        <div class="stage-col"><span class="stage-num">05</span><span class="stage-cjk">Fix</span><span class="stage-key">fix</span></div>
+        <div class="stage-col"><span class="stage-num">06</span><span class="stage-cjk">Redeploy</span><span class="stage-key">deploy</span></div>
+        <div class="stage-col"><span class="stage-num">07</span><span class="stage-cjk">Retest</span><span class="stage-key">retest</span></div>
+      </div>
+
+      <div class="spans">
+        <div class="span-row">
+          <span class="span-name">Explore</span>
+          <span class="span-bar" style="grid-column:2 / 5;background:linear-gradient(90deg,rgba(123,200,214,.95),rgba(123,200,214,.55))"></span>
+          <span class="span-bar" style="grid-column:5 / 9;background:linear-gradient(90deg,rgba(123,200,214,.28),rgba(123,200,214,.06))"></span>
+        </div>
+        <div class="span-row">
+          <span class="span-name">Regression</span>
+          <span class="span-bar" style="grid-column:3 / 5;background:linear-gradient(90deg,rgba(143,188,110,.95),rgba(143,188,110,.55))"></span>
+          <span class="span-bar" style="grid-column:5 / 9;background:linear-gradient(90deg,rgba(143,188,110,.28),rgba(143,188,110,.06))"></span>
+        </div>
+        <div class="span-row">
+          <span class="span-name">Fix</span>
+          <span class="span-bar" style="grid-column:5 / 7;background:linear-gradient(90deg,rgba(232,184,109,.95),rgba(232,184,109,.55))"></span>
+          <span class="span-bar" style="grid-column:7 / 9;background:linear-gradient(90deg,rgba(232,184,109,.28),rgba(232,184,109,.06))"></span>
+        </div>
+        <div class="span-row">
+          <span class="span-name">Retest</span>
+          <span class="span-bar" style="grid-column:7 / 9;background:linear-gradient(90deg,rgba(224,122,140,.9),rgba(224,122,140,.5))"></span>
+        </div>
+        <div class="span-row">
+          <span class="span-name">Stress · Reject</span>
+          <span class="span-note" style="grid-column:2 / 9">Off the track: Stress is "one agent round writes the plan, then N platform load runs"; Reject is a single fixed round.</span>
+        </div>
+      </div>
+
+      <p class="stage-foot">Solid spans are the default range; faded spans are optional end points. <b>When Explore or Regression ends past "Report", the platform appends a follow-on task</b> that carries on through analysis, fix, redeploy and retest — you don't create it yourself.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== what remains ==================== -->
+<section class="wrap band" id="remains">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-lat">What remains</span><span class="rail-cjk">遗留物</span></div></div>
+    <div>
+      <h2 class="h2-lat">What's on disk after a round</h2>
+      <p class="sec-lead">The output is plain files, not rows locked inside a database. Read them, diff them, commit them — and the derived indexes can be deleted and rebuilt at any time.</p>
+
+      <div class="remains">
+        <div class="tree">
+          <ul>
+            <li><span class="t-name t-dir">free_style/</span> <span class="t-dim"># the case library, accumulated across rounds and sessions</span>
+              <ul>
+                <li><span class="t-name">INDEX.md</span> <span class="t-dim"># feature grades · id cursor · totals</span></li>
+                <li><span class="t-name">ROUNDS.md</span> <span class="t-dim"># the angle and outcome of every round</span></li>
+                <li><span class="t-name">PITFALLS.md</span> <span class="t-dim"># false-positive lessons, read before writing cases</span></li>
+                <li><span class="t-name">login/session/</span>
+                  <ul>
+                    <li><span class="t-name t-dir">FS0007_duplicate-login/</span>
+                      <ul>
+                        <li><span class="t-name">case.md</span> <span class="t-dim"># the case definition (single source of truth)</span></li>
+                        <li><span class="t-name">status.md</span> <span class="t-dim"># pass / fail / skipped / needs retest</span></li>
+                        <li><span class="t-name">execution_20261007_0930.md</span> <span class="t-dim"># this run's request and response</span></li>
+                      </ul>
+                    </li>
+                  </ul>
+                </li>
+              </ul>
+            </li>
+            <li><span class="t-name t-dir">bug_report/</span>
+              <ul>
+                <li><span class="t-name t-dir">20261007_0930_FS_duplicate-login-still-passes/</span>
+                  <ul>
+                    <li><span class="t-name">bug_report.md</span> <span class="t-dim"># symptom · evidence · root cause · related cases</span></li>
+                  </ul>
+                </li>
+              </ul>
+            </li>
+            <li><span class="t-name t-dir">.live/live.json</span> <span class="t-dim"># the monitor's data source (stage · progress · grades)</span></li>
+            <li><span class="t-name t-dir">.web/</span> <span class="t-dim"># task logs · load-test metrics · board session logs</span></li>
+            <li><span class="t-name t-dir">board_media/</span> <span class="t-dim"># images and files attached to board cards</span></li>
+          </ul>
+        </div>
+
+        <ul class="rem-list">
+          <li class="rem-item">
+            <b>De-duplication reads the library, not the agent's memory</b>
+            <p>A new case is checked against the library before it is accepted, and its id comes from the cursor in the root <code>INDEX.md</code>. Only the main agent hands out ids, so two parallel lines can't take the same number.</p>
+          </li>
+          <li class="rem-item">
+            <b>Derived indexes rebuild on demand</b>
+            <p><code>.live/cases.jsonl</code>, <code>similar.jsonl</code> and <code>rag_index.jsonl</code> are all derived from the case library. Deleting them touches no source data.</p>
+          </li>
+          <li class="rem-item">
+            <b>Monitoring and notifications ride on the same files</b>
+            <p>The monitor reads <code>live.json</code> for stage and progress, board cards carry their session, and Feishu sends a card when a task blocks or needs an answer — you can answer it by tapping on your phone.</p>
+          </li>
+          <li class="rem-item">
+            <b>The library is searchable by meaning</b>
+            <p>With an embedding model configured, a retest ranks cases by semantic similarity to the changed files first. Without one it falls back to keyword matching, and never blocks a task over it.</p>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== limits ==================== -->
+<section class="wrap band" id="limits">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-lat">Limits</span><span class="rail-cjk">边界</span></div></div>
+    <div>
+      <h2 class="h2-lat">What we don't do, and what we only half do</h2>
+      <p class="sec-lead">Half of a test platform's value is in the boundaries it will admit to. Here is what we deliberately don't do, or only do partly.</p>
+
+      <div class="limits">
+        <div class="limit"><div>
+          <b>The platform never commits for you</b>
+          <p>A fix stops at the file. If you want automatic commits, install the optional guard asset: by default it blocks once and tells the agent to commit, and only commits by itself when <code>commitOnApproval</code> is on.</p>
+        </div></div>
+        <div class="limit"><div>
+          <b>There is exactly one agent family: the dsh plugin</b>
+          <p>kimi / claude / opencode / hermes and the bare dsh CLI are gone. An old binding fails loudly at start-up and tells you to rebind — it never silently degrades into a different runner.</p>
+        </div></div>
+        <div class="limit"><div>
+          <b>The two run modes share one database</b>
+          <p>The standalone site and the dsh plugin both default to <code>~/.touchstone/touchstone.db</code>, guarded by a file lock so only one runs at a time. The second instance exits and prints who is holding it.</p>
+        </div></div>
+        <div class="limit"><div>
+          <b>Rewind and "compact into a new session" are approximations</b>
+          <p>Both fork a new session from a given round; the old one is still there and you can switch back to it. They mean "branch from here", not "undo in place".</p>
+        </div></div>
+        <div class="limit"><div>
+          <b>There is no "model request failed" entry</b>
+          <p>dsh has no event channel for it, so the session window shows no error banner. To see what didn't work, read the tool calls and results that actually happened.</p>
+        </div></div>
+        <div class="limit"><div>
+          <b>dsh on Windows has not been verified on real hardware</b>
+          <p>The platform itself behaves the same on Windows and Linux — launcher, port fallback, path handling — but parent-death detection there has only the stdin pipe channel, and that has not been tested on a real machine.</p>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== quick start ==================== -->
+<section class="wrap band" id="start">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-lat">Quick start</span><span class="rail-cjk">上手</span></div></div>
+    <div>
+      <h2 class="h2-lat">Get it running</h2>
+      <p class="sec-lead">No environment yet? The <a class="lead-link" href="en-demo.html">live demo</a> needs neither an install nor any data: create a project, create a task, watch it queue, answer the agent's question, and see cases and bug reports grow — all in the browser (a front-end simulation, no backend).</p>
+      <p class="sec-lead">To run the real thing you need Python 3 and Node. Pick one of the two modes.</p>
+
+      <div class="start">
+        <div class="start-block">
+          <h3>Standalone site</h3>
+          <p class="start-sub">ships its own front end · 127.0.0.1:4601 by default</p>
+<pre class="term">./touchstone.sh build   <span class="t-dim"># build the front end</span>
+./touchstone.sh start   <span class="t-dim"># start in the background</span>
+./touchstone.sh status
+<span class="t-dim"># Windows: python touchstone.py start</span></pre>
+          <p class="start-note">Without <code>webui/dist</code>, <code>server.py</code> exits immediately — build first. The first start seeds one admin account: a random initial password is printed once in the start-up banner and must be changed at first login. The database lives at <code>~/.touchstone/touchstone.db</code> and must be on a local disk — SQLite file locks don't work on network shares.</p>
+        </div>
+
+        <div class="start-block">
+          <h3>dsh plugin</h3>
+          <p class="start-sub">embedded in dsh web · this mode or the site, not both</p>
+<pre class="term">./dsh-plugin/install.sh
+<span class="t-dim"># idempotent install into ~/.dsh/profiles/web</span>
+<span class="t-dim"># restart dsh web to take effect, then open the panel</span></pre>
+          <p class="start-note">This mode puts the panel in dsh's side rail. The agent session lives inside the host process, and the board, session window and live monitoring are identical to the standalone site. Only one of the two modes runs at a time.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ==================== footer ==================== -->
+<footer class="foot">
+  <div class="wrap">
+    <div class="foot-inner">
+      <div>
+        <div class="foot-brand">TOUCHSTONE</div>
+        <p class="foot-line">An AI-agent-driven automated testing platform: six task types, a seven-stage lifecycle, one development board, and output that lands as files you can read. MIT licensed.</p>
+      </div>
+      <div class="foot-cols">
+        <div class="foot-col">
+          <h4>Repository</h4>
+          <a href="https://github.com/gavinc-cn/touchstone-dsh">GitHub ↗</a>
+          <a href="https://github.com/gavinc-cn/touchstone-dsh/blob/master/README.md">Capability list ↗</a>
+          <a href="https://github.com/gavinc-cn/touchstone-dsh/blob/master/LICENSE">MIT License ↗</a>
+        </div>
+        <div class="foot-col">
+          <h4>Try it</h4>
+          <a href="./en-demo.html">Live demo (EN)</a>
+          <a href="./demo.html" hreflang="zh-CN">在线 Demo（中文）</a>
+        </div>
+        <div class="foot-col">
+          <h4>Language</h4>
+          <a href="./index.html" hreflang="zh-CN">中文</a>
+          <a href="./en.html">English</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/site.js"></script>
+</body>
+</html>

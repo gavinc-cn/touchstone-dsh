@@ -1,0 +1,19 @@
+字体来源与许可 / Font sources and licenses
+==========================================
+
+本目录下的 .woff2 是**子集**（只含官网页面实际用到的字符），由
+../tools/fetch_fonts.py 从 Google Fonts 下载生成，随站点自托管分发。
+Google 的切片服务会剥离字体内部的版权/许可 name 记录，故完整声明见下表的上游地址。
+
+家族 / Family            字重 / Weights   上游 / Upstream                             许可 / License
+------------------------ ----------------- ------------------------------------------- ---------------------------
+Noto Serif SC            700, 900          https://fonts.google.com/noto/specimen/Noto+Serif+SC   SIL OFL 1.1
+Noto Sans SC             400, 500, 700     https://fonts.google.com/noto/specimen/Noto+Sans+SC    SIL OFL 1.1
+Fraunces                 900 (opsz 144)    https://fonts.google.com/specimen/Fraunces             SIL OFL 1.1
+IBM Plex Sans            400, 500, 600     https://fonts.google.com/specimen/IBM+Plex+Sans        SIL OFL 1.1
+JetBrains Mono           400, 700          https://fonts.google.com/specimen/JetBrains+Mono       SIL OFL 1.1
+
+SIL Open Font License 1.1 全文：https://scripts.sil.org/OFL
+
+OFL 允许把字体嵌入、修改与再分发（包含子集化），条件是保留版权与许可声明、
+且不得单独售卖字体本身。上面列出的上游页面各自带有该字族的完整版权行与许可文本。
