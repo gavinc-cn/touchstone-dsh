@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <defs>
+    <linearGradient id="tsGrad" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#E8B86D"/>
+      <stop offset="1" stop-color="#F2A65A"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="30" height="30" rx="9.33" fill="url(#tsGrad)"/>
+  <path fill="#0B1426" d="M8.67 6.67H23.33V13.07H19.2V25.33H12.8V13.07H8.67Z"/>
+</svg>

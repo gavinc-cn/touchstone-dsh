@@ -5,20 +5,30 @@
 
 ```
 website/
-├── index.html          中文版（默认入口）
-├── en.html             英文版（与 index.html 同骨架，中英层级倒置）
+├── index.html          英文版（站点默认入口，挂站点根 `/`）
+├── zh.html             中文版（与 index.html 同骨架，中英层级倒置）
+├── en.html             跳转壳（0 秒转到 `/`；只为改版前的旧链接 /en.html 不 404）
 ├── demo.html           在线 Demo（中文，可玩模拟器）
 ├── en-demo.html        在线 Demo（英文）
+├── favicon.ico         站点图标（16/32/48 三档；file:// 直开与老浏览器用）
 ├── assets/
 │   ├── site.css        主站样式（设计 token + 布局 + 响应式）
 │   ├── site.js         一件事：首屏看板的卡片入场动画
+│   ├── favicon.svg     站点图标（矢量，现代浏览器用）
+│   ├── apple-touch-icon.png  iOS 主屏图标（180×180，满幅不透明）
+│   ├── og-zh.png       分享卡片（中文，1200×630）＝ og:image
+│   ├── og-en.png       分享卡片（英文，1200×630）＝ og:image
 │   ├── demo/
 │   │   ├── i18n.js     Demo 的全部可见文案（中英字典 + T() 取值）
 │   │   ├── engine.js   Demo 的模拟引擎（队列 / 调度 / 会话 / 任务 / 产物）
 │   │   ├── ui.js       Demo 的渲染与交互
 │   │   └── demo.css    Demo 的产品界面样式
 │   └── fonts/*.woff2   自托管字体子集（按全站实际用字切片）
-└── tools/fetch_fonts.py  字体子集生成器（改了文案要重跑）
+└── tools/
+    ├── fetch_fonts.py  字体子集生成器（改了文案要重跑）
+    ├── make_icons.py   三个图标文件的生成器（改了图形/配色要重跑）
+    ├── og_card.html    分享卡片的设计源（1200×630，可直接用浏览器打开看）
+    └── make_og.py      把 og_card.html 渲成两张 og:image
 ```
 
 ## 本地预览
@@ -36,7 +46,7 @@ cd website && python3 -m http.server 4610
 线上地址：<https://gavinc-cn.github.io/touchstone-dsh/>
 
 由公开仓的 `.github/workflows/pages.yml` 在 `website/` 有改动时自动发布（GitHub Actions
-发布 `_site` 暂存目录：只带四个 HTML 与 `assets/`，本 README 与 `tools/` 不上站）。
+发布 `_site` 暂存目录：只带 HTML 页面与 `assets/`，本 README 与 `tools/` 不上站）。
 
 - 站点内部全用相对路径，挂在 `/<仓库名>/` 子路径下**无需改任何文件、不需要设 base**。
 - 新增页面/资源放进 `website/` 即自动带上；只改 `README.md` 或 `tools/` 不会触发发布。
@@ -77,6 +87,13 @@ board.py / waitq.py 的判定同构」）：五列门禁、
 
 ## 几个必须知道的约定
 
+**首页是英文版（2026-10-07 中英角色互换）**：站点根 `/` = `index.html`（英文），中文版在
+`zh.html`；旧的 `/en.html` 只剩一个 0 秒跳转壳（`noindex` + canonical 指向根），只为改版前
+分享出去的链接不 404。改语言角色时下面这些必须一起改，漏一处就会出现「点 EN 回到中文」或
+被搜索引擎判成重复页：`canonical` / `hreflang`（`en`、`zh-CN`、`x-default`）/ `og:url` 三处
+绝对 URL；顶栏语言条与页脚「Language / 语言」列；`demo.html`「← 返回官网」→ `zh.html`、
+`en-demo.html`「← Back to site」→ `./`；以及 `tools/fetch_fonts.py` 的 `PAGES`。
+
 ### 1. 两版共用一套 CSS，靠 `class="lang-en"` 倒置中英层级
 
 `<html lang="zh-CN">` 与 `<html lang="en" class="lang-en">` 使用同一份 HTML 骨架与同一份
@@ -108,8 +125,8 @@ board.py / waitq.py 的判定同构」）：五列门禁、
 
 `assets/fonts/` 里的 woff2 不是完整字库，而是用 Google Fonts 的 `text=` 接口按**全站用字**
 切出来的（四个页面 + `assets/demo/i18n.js` 的字符串字面量；中文宋体两个字重、中文黑体三个字重、
-Fraunces / IBM Plex Sans / JetBrains Mono）。全站 11 个文件合计约 668 KB，用字 807 个
-（中日韩 709 个）。拉丁字族只请求非中日韩字符。
+Fraunces / IBM Plex Sans / JetBrains Mono）。全站 11 个文件合计 667 KB，用字 805 个
+（中日韩 707 个）。拉丁字族只请求非中日韩字符。
 
 ```bash
 python3 tools/fetch_fonts.py            # 重新切片并落盘（改了文案就重跑）
@@ -139,6 +156,48 @@ JetBrains Mono），均为 SIL OFL 或 Apache-2.0 许可，随站点自托管分
 `builtin_prompts/free_style/flow.md`、`prompts.py` 的任务类型说明）。
 **改产品行为时要回来对一遍官网文案**，不要让它成为过时宣传。
 
+### 5. 站点图标与链接预览（favicon / og:image）是生成物，改图形配色要重跑脚本
+
+这两样都不在页面正文里，所以最容易漏：
+
+- **站点图标**：标签页、书签栏、历史记录、手机「添加到主屏」用的那张小图。
+- **链接预览图**：把链接粘进微信 / 飞书 / Slack / X / Telegram / Discord 时，平台爬虫
+  来读 `<head>` 里的 `og:image`，拿它当卡片的缩略图。**它们不认 SVG**，所以卡片必须是
+  栅格图（1200×630，各平台通用的 1.91:1）。
+
+```bash
+python3 tools/make_icons.py            # 生成 assets/favicon.svg + favicon.ico + apple-touch-icon.png
+python3 tools/make_icons.py --check    # 核对三个文件有没有漂移（不重渲染）
+python3 tools/make_og.py               # 把 tools/og_card.html 渲成 assets/og-zh.png / og-en.png
+python3 tools/make_og.py --check       # 核对两张图的存在、尺寸、以及 token 是否与 site.css 一致
+```
+
+两个脚本都依赖 Playwright + Chromium（`pip install -r requirements-dev.txt &&
+python3 -m playwright install chromium`）；`make_icons.py` 缺 Playwright 时仍会写出
+`favicon.svg`（矢量部分是纯标准库）。
+
+图标与字标同源：`make_icons.py` 里那枚「圆角方块 + 负形 T」的几何就是从产品字标
+（`webui/src/components/TouchstoneLogo.jsx`，24 单位原稿）按比例算出来的，只有两处偏差——
+方块放大到几乎满画布、T 的笔画加粗 20%——都是为 16px 让路。**改图形改配色都改脚本**，
+别直接改 `favicon.svg`（`--check` 会报漂移）。
+
+四条维护约定：
+
+1. **`og:image` / `twitter:image` 必须写绝对 URL**，爬虫不解析相对路径。换域名要改的是
+   每个 HTML 的 head（含 `rel="canonical"` 与 `hreflang`）——正文四页 + 一个跳转壳，共五个文件：
+   `https://gavinc-cn.github.io/touchstone-dsh/`。
+2. **`og:title` 与页面 `<title>` 同值，`og:description` 是另写的短版**（`<meta name="description">`
+   偏长，卡片上会被截断）。只维护页面标题这一处，别让两串文案各自漂移。
+3. **浏览器在「页面没给 link」时的兜底请求打的是源站根** `/favicon.ico`——本站挂在
+   `/touchstone-dsh/` 子路径下，那个地址不属于本站，放文件也管不到。所以真正生效的永远是
+   HTML 里那几行 `<link rel="icon">`；根目录那份 `favicon.ico` 只服务于 `file://` 直开与老浏览器。
+4. **分享卡的设计 token 抄自 `site.css`**，两边是同一批值：`make_og.py` 每次出图前都会逐值
+   核对，不一致直接报错拒绝出图——防止「站点换了色、分享卡还是旧色」。
+
+分享卡只画三层：字标、与首屏同一句话、产品那张看板的五列（列名照抄 `BoardTab.jsx`，
+不放数字与文案，免得看图的人把示意图当成真实数据）。**Demo 两页沿用同一张卡**，
+没有为它们单独出图；卡片换了要重跑 `make_og.py`。
+
 ## 无障碍与降级
 
 - 全站可 Tab 到达导航与语言互链，`:focus-visible` 有 2px 星金描边
@@ -150,3 +209,15 @@ JetBrains Mono），均为 SIL OFL 或 Apache-2.0 许可，随站点自托管分
 
 验收口径（16 例：两版 × 1440/1024/820/390 × 常规/reduced-motion）：逐例对照上面五条
 无障碍与降级约定检查一遍。
+
+另加两类：
+
+- **元数据**（正文四页：`index.html` / `zh.html` / `demo.html` / `en-demo.html`）：`og:*` /
+  `twitter:*` 齐备且 `og:url` == `rel="canonical"`、`twitter:image` == `og:image`；
+  `og:image` 取得到且是 1200×630；三条 `<link>` 图标（`.ico` / `.svg` / apple-touch）
+  都能解析到 200。跳转壳 `en.html` 另按三条单独断言：有 `meta refresh` 指向 `./`、
+  `noindex`、`canonical` == 站点根。
+- **Demo 两页冒烟**：1440 与 390 下无控制台报错、无 ≥400 请求、无横向溢出。
+
+因为浏览器在 headless 下**不会主动去要** `/favicon.ico`，光跑页面级断言是测不出图标缺没缺的，
+必须另外直接请求那几个 URL。

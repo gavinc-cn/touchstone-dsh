@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Touchstone 试金石 · AI agent 驱动的自动化测试平台</title>
+<meta name="description" content="Touchstone（试金石）是一个 AI agent 驱动的自动化测试平台：六类任务、七阶段生命周期、一张开发看板。它以多轮会话驱动 agent 在案例库中生成并执行用例、沉淀 bug 报告，全过程可观测、可插话、可中断。">
+<!-- 图标与链接预览（og / twitter）。三条维护约定：
+     ① og:description 是给链接卡片用的短版（比上面的 description 短，卡片上会被截断）；
+     ② og:image 必须是**绝对 URL**——平台爬虫不解析相对路径；换域名要改的是这一段；
+     ③ 浏览器没见着 link 时的兜底请求打的是**源站根** /favicon.ico（本站挂在
+        /touchstone-dsh/ 子路径下，那个地址不属于本站），所以真正生效的是这几行 link。
+     图标由 website/tools/make_icons.py 生成，分享卡由 tools/make_og.py 生成。 -->
+<link rel="canonical" href="https://gavinc-cn.github.io/touchstone-dsh/zh.html">
+<link rel="alternate" hreflang="zh-CN" href="https://gavinc-cn.github.io/touchstone-dsh/zh.html">
+<link rel="alternate" hreflang="en" href="https://gavinc-cn.github.io/touchstone-dsh/">
+<link rel="alternate" hreflang="x-default" href="https://gavinc-cn.github.io/touchstone-dsh/">
+<link rel="icon" href="favicon.ico" sizes="32x32">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Touchstone 试金石">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:locale:alternate" content="en_US">
+<meta property="og:title" content="Touchstone 试金石 · AI agent 驱动的自动化测试平台">
+<meta property="og:description" content="六类任务、七阶段生命周期、一张开发看板。以多轮会话驱动 agent 在案例库中生成并执行用例、把失败沉淀成 bug 报告——全程可观测、可插话、可中断。">
+<meta property="og:url" content="https://gavinc-cn.github.io/touchstone-dsh/zh.html">
+<meta property="og:image" content="https://gavinc-cn.github.io/touchstone-dsh/assets/og-zh.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Touchstone 试金石：把测试交给 agent，跑在真实代码上">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Touchstone 试金石 · AI agent 驱动的自动化测试平台">
+<meta name="twitter:description" content="六类任务、七阶段生命周期、一张开发看板。以多轮会话驱动 agent 在案例库中生成并执行用例、把失败沉淀成 bug 报告。">
+<meta name="twitter:image" content="https://gavinc-cn.github.io/touchstone-dsh/assets/og-zh.png">
+<link rel="stylesheet" href="assets/site.css">
+<script>document.documentElement.classList.add('js');</script>
+</head>
+<body>
+
+<!-- ==================== 顶栏 ==================== -->
+<header class="top">
+  <div class="top-inner">
+    <a href="#top" style="display:flex;align-items:center;gap:10px">
+      <svg width="21" height="21" viewBox="0 0 24 24" aria-hidden="true" style="flex:none">
+        <defs>
+          <linearGradient id="markG" x1="0" y1="1" x2="1" y2="0">
+            <stop offset="0" stop-color="#E8B86D"/><stop offset="1" stop-color="#F2A65A"/>
+          </linearGradient>
+        </defs>
+        <path fill="url(#markG)" fill-rule="evenodd"
+          d="M8.6 3H15.4A5.6 5.6 0 0 1 21 8.6V15.4A5.6 5.6 0 0 1 15.4 21H8.6A5.6 5.6 0 0 1 3 15.4V8.6A5.6 5.6 0 0 1 8.6 3Z
+             M7.6 6.6H16.4V9.8H13.6V17.8H10.4V9.8H7.6Z"/>
+      </svg>
+      <span class="mark">TOUCHSTONE</span><span class="mark-cjk">试金石</span>
+    </a>
+    <nav class="top-nav">
+      <a href="#kanban">看板</a>
+      <a href="#marks">六类任务</a>
+      <a href="#round">一轮</a>
+      <a href="#stages">七阶段</a>
+      <a href="#limits">边界</a>
+      <a href="#start">上手</a>
+      <a class="nav-demo" href="demo.html">在线 Demo</a>
+      <span class="lang"><span class="lang-on">中文</span><a class="lang-off" href="./" hreflang="en">EN</a></span>
+      <a class="gh" href="https://github.com/gavinc-cn/touchstone-dsh">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ==================== 首屏 ==================== -->
+<section class="wrap hero">
+  <p class="eyebrow">AI agent 驱动的自动化测试平台 · Free-style testing</p>
+  <h1 class="h1-cjk">把测试交给 <span class="lat">agent</span>，<br>跑在真实代码上。</h1>
+
+  <div class="hero-top">
+    <div class="hero-copy">
+      <p class="lead"><strong>Touchstone 是一个 AI agent 驱动的自动化测试平台。</strong>
+        你建好项目、挂上被测代码目录与工作目录，它就以多轮会话驱动 agent 在案例库里生成并执行用例、把失败聚类成 bug 报告；这一切都在一张开发看板上调度——过程可观测、可插话、可中断。</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="demo.html">打开在线 Demo</a>
+        <a class="btn btn-ghost" href="#start">快速开始</a>
+        <a class="btn btn-ghost" href="https://github.com/gavinc-cn/touchstone-dsh">读源码 ↗</a>
+      </div>
+    </div>
+    <ul class="facts">
+      <li><b>6</b><span>类任务</span></li>
+      <li><b>7</b><span>个阶段</span></li>
+      <li><b>5</b><span>列看板</span></li>
+      <li><b>1</b><span>轮 = 1 次会话</span></li>
+      <li><b>1</b><span>个项目 1 条队</span></li>
+      <li><b>0</b><span>状态轮询</span></li>
+    </ul>
+  </div>
+
+  <!-- 开发看板（首屏签名视觉）：不放示意图，直接放产品里那张板。
+       五列列名、卡面徽标与操作按钮文案全部照抄产品前端：
+       列名 = webui/src/components/BoardTab.jsx 的 COLUMNS；
+       队列徽标 = webui/src/utils/queueBadge.js 的 QUEUE_STATE_LABEL。 -->
+  <div class="bd bd-draw" id="board">
+    <div class="bd-top">
+      <span class="bd-proj"><i></i>touchstone-dsh</span>
+      <span>串行：同时只跑一个任务</span>
+      <span class="bd-tail"><i></i>实时</span>
+    </div>
+
+    <div class="bd-cols">
+      <div class="bd-col">
+        <div class="bd-head"><span class="bd-name">待开发</span><span class="bd-count">2</span></div>
+        <article class="bd-card">
+          <b class="bd-title">给导出接口补边界用例</b>
+          <div class="bd-badges"><span class="bd-badge id">#392</span></div>
+          <div class="bd-ops"><span class="bd-op">开始<i class="bd-caret"></i></span></div>
+        </article>
+        <article class="bd-card">
+          <b class="bd-title">把压测方案改成 run.py 驱动</b>
+          <div class="bd-badges"><span class="bd-badge id">#393</span></div>
+        </article>
+        <!-- 待开发列底部的快速添加框（产品里就是这一列独有的入口） -->
+        <div class="bd-add"><span>添加任务…</span><i>Enter 落待开发</i></div>
+      </div>
+
+      <div class="bd-col">
+        <div class="bd-head"><span class="bd-name">正在开发</span><span class="bd-count">2</span></div>
+        <!-- 测试任务条目：与看板卡片同在开发列，队序即展示序 -->
+        <div class="bd-task">
+          <b>任务 #96</b>
+          <span class="bd-badge run"><i></i>测试·运行中</span>
+          <span class="bd-badge id">回归</span>
+        </div>
+        <article class="bd-card is-run">
+          <b class="bd-title">登录接口：补并发重复提交的用例</b>
+          <div class="bd-badges">
+            <span class="bd-badge id">#391</span><span class="bd-badge run"><i></i>会话运行中</span>
+          </div>
+          <p class="bd-meta">第 3 轮 · 12 次工具调用</p>
+          <div class="bd-bar"><i></i></div>
+        </article>
+        <div class="bd-zone"><span>等待区 · 按队列顺序</span></div>
+        <article class="bd-card is-wait">
+          <b class="bd-title">修掉重复登录的误报</b>
+          <div class="bd-badges">
+            <span class="bd-badge id">#388</span><span class="bd-badge queue">排队中</span>
+          </div>
+        </article>
+      </div>
+
+      <div class="bd-col">
+        <div class="bd-head"><span class="bd-name">阻塞</span><span class="bd-count">1</span></div>
+        <article class="bd-card">
+          <b class="bd-title">并发提交同一会话</b>
+          <div class="bd-badges"><span class="bd-badge id">#390</span><span class="bd-badge ask">🤔 等待回答</span></div>
+          <div class="bd-ask">
+            <span class="bd-from">agent 的提问</span>
+            <p>「并发提交同一会话时，期望是拒绝，还是幂等放行？」</p>
+            <div class="bd-opts">
+              <span class="bd-opt">幂等放行</span><span class="bd-opt">拒绝</span><span class="bd-opt">先只测单线程</span>
+            </div>
+          </div>
+          <p class="bd-meta">已推到飞书 · 手机上点一下也能答</p>
+        </article>
+      </div>
+
+      <div class="bd-col">
+        <div class="bd-head"><span class="bd-name">待审核</span><span class="bd-count">2</span></div>
+        <article class="bd-card">
+          <b class="bd-title">重复登录仍放行</b>
+          <div class="bd-badges">
+            <span class="bd-badge id">#386</span><span class="bd-badge wt">🌿 worktree</span>
+          </div>
+          <p class="bd-meta">会话空闲 · 等你过目</p>
+        </article>
+        <article class="bd-card">
+          <b class="bd-title">导出案例库索引</b>
+          <div class="bd-badges">
+            <span class="bd-badge id">#385</span><span class="bd-badge queue">已作答·待送达</span>
+          </div>
+        </article>
+      </div>
+
+      <div class="bd-col is-done">
+        <div class="bd-head"><span class="bd-name">已完成</span><span class="bd-count">2</span></div>
+        <article class="bd-card">
+          <b class="bd-title">登录接口补并发用例</b>
+          <div class="bd-badges"><span class="bd-badge id">#379</span></div>
+          <p class="bd-meta">复测通过 · 会话随之归档</p>
+        </article>
+        <article class="bd-card">
+          <b class="bd-title">清理构建缓存</b>
+          <div class="bd-badges"><span class="bd-badge id">#377</span></div>
+        </article>
+      </div>
+    </div>
+  </div>
+
+  <p class="bd-foot">
+    <span id="bdGloss">这一屏就是平台的开发看板：<em>一张卡就是一次 dsh 会话</em>，测试任务和看板卡片排在同一条队里——一个项目同时只跑一件事，轮到的卡才真正起会话。</span>
+    <span class="bd-note">五列状态 · 一条队列</span>
+  </p>
+
+</section>
+
+<!-- ==================== 开发看板 ==================== -->
+<section class="wrap band" id="kanban">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-cjk">看板</span><span class="rail-lat">The board</span></div></div>
+    <div>
+      <h2 class="h2-cjk">看板不是便签墙，是操作面</h2>
+      <p class="sec-lead">开发看板把「谁在跑、谁在等、谁卡住了、谁干完了」摆成五列。它和测试任务共用同一条队列：一个项目同时只跑一件事。</p>
+
+      <div class="truths">
+        <div class="truth">
+          <h3>一张卡就是一次会话</h3>
+          <p>卡在「正在开发」＝会话在跑；卡落「阻塞」＝agent 停下来问了句话；卡到「待审核」＝会话空闲，活干完了等你过目。点开卡片就是完整会话窗口：思考、工具调用、返回都在，能插话、能压缩、能从某一轮 fork。</p>
+        </div>
+        <div class="truth">
+          <h3>卡片和任务抢同一条队</h3>
+          <p>测试任务、看板卡片、会话消息排在同一条队列里，开发列的上下顺序就是队序。没轮到的卡显示「排队中」，轮到才真正起会话；急就点「⚡ 强制」跳过队列，风险自担。</p>
+        </div>
+        <div class="truth">
+          <h3>agent 会停下来问你</h3>
+          <p>提问和审批都走同一条作答队列：会话挂起时卡落「阻塞」，答案送达才接着跑。飞书会推一张卡片到你手机上——回一句「作答 390 1」或「同意 390」就能答，等待期间运行位让出来，队首照常起跑。</p>
+        </div>
+      </div>
+
+      <div class="flow">
+        <div class="flow-row">
+          <div class="flow-col"><span class="bd-name">待开发</span><span class="flow-en">todo</span></div>
+          <p class="flow-what">还没有会话。点「开始」入队排队，或在「开始 ▾」里选「🌿 在新 worktree 中开始」——那张卡立刻跑，不进队列、不占运行位，改动落在独立工作树里，主仓库不受影响。</p>
+        </div>
+        <div class="flow-row is-run">
+          <div class="flow-col"><span class="bd-name">正在开发</span><span class="flow-en">doing</span></div>
+          <p class="flow-what">上半是运行位区，下半是等待区，中间一条「等待区 · 按队列顺序」。会话在跑的卡可以「立即注入」插话；排队中的卡可以「停止」（取消排队、移入待审核）。</p>
+        </div>
+        <div class="flow-row is-ask">
+          <div class="flow-col"><span class="bd-name">阻塞</span><span class="flow-en">blocked</span></div>
+          <p class="flow-what">agent 提问或请求审批，会话挂在这里等你。作答、批准后自动续跑；一直等到你答为止，超时兜底只是每 60 秒对一次状态。</p>
+        </div>
+        <div class="flow-row">
+          <div class="flow-col"><span class="bd-name">待审核</span><span class="flow-en">review</span></div>
+          <p class="flow-what">会话空闲，改动和结论摆在这里等你判断。「通过」移入已完成，「打回」连同一句理由退回——打回不是撤销，是把卡放回开发侧接着改。</p>
+        </div>
+        <div class="flow-row">
+          <div class="flow-col"><span class="bd-name">已完成</span><span class="flow-en">done</span></div>
+          <p class="flow-what">搬进这一列的卡，对应的 dsh 会话一起归档；在 dsh 里归档主会话，这张卡也会自己搬进来。想接着干就「重开」，会话随之取消归档、卡回待审核。</p>
+        </div>
+      </div>
+
+      <ul class="rem-list flow-more">
+        <li class="rem-item">
+          <b>五列之间有门禁</b>
+          <p>拖进「正在开发」即入队；父卡没干完会拦一下，确认「强制开始（自担风险）」才放行；依赖成环直接拒绝。项目可以设「串行：同时只跑一个任务」或「并行：最多 5 个并行」。</p>
+        </li>
+        <li class="rem-item">
+          <b>卡离开开发列就出队</b>
+          <p>没有单独的「释放占用」动作：卡被拖走、被停止、被删除，它在队列里的那一行当场终态化，运行位立刻让给下一个。</p>
+        </li>
+        <li class="rem-item">
+          <b>删除只是移进回收站</b>
+          <p>删掉的卡进回收站，能还原回原来的列和位置；只有回收站里的「彻底删除」不可恢复。清空回收站是一键的，也会一并删掉评论。</p>
+        </li>
+        <li class="rem-item">
+          <b>描述里能贴图，也能从 Jira 建卡</b>
+          <p>卡片描述里可以直接粘贴图片和文件（单个 10MB 上限，走鉴权读取）；配好 Jira 凭据后，「导入我的待办」会把指派给你且未解决的 50 条按 key 去重建成卡。</p>
+        </li>
+        <li class="rem-item">
+          <b>平台不替你提交代码</b>
+          <p>卡干完就停手，提交由你或者「自动提交守卫」这个可选资产来做。看板上的每个会话也都能单独切权限档：逐条确认、自动通过、完全自主。</p>
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 六类任务 ==================== -->
+<section class="wrap band" id="marks">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-cjk">六类任务</span><span class="rail-lat">Six task types</span></div></div>
+    <div>
+      <h2 class="h2-cjk">六类任务，六种产物</h2>
+      <p class="sec-lead">每类任务留下的东西不一样：有的留下用例，有的只留下一份报告或一次发压记录。左列是任务类型，右列是它落在磁盘上的产物。</p>
+
+      <div class="marks">
+        <article class="mark-row" data-k="explore">
+          <div class="mark-name"><span class="mark-dot" style="background:#7BC8D6"></span>
+            <span class="mark-cjk">探索</span><span class="mark-lat">Explore</span></div>
+          <p class="mark-body">从一个还不认识的代码库开始：先摸清模块、给出 P0/P1/P2 功能分级，再按分级生成去重用例、逐条执行，把失败按根因聚类成 bug 报告。测什么由 agent 自主决定，覆盖状态逐轮回写。</p>
+          <div class="mark-out"><span>留下 <em>用例目录</em></span><span>分级 <em>INDEX.md</em> · 轮次 <em>ROUNDS.md</em></span><span>失败聚类后的 <em>bug 报告</em></span></div>
+        </article>
+
+        <article class="mark-row" data-k="regression">
+          <div class="mark-name"><span class="mark-dot" style="background:#8FBC6E"></span>
+            <span class="mark-cjk">回归</span><span class="mark-lat">Regression</span></div>
+          <p class="mark-body">不生成新用例，重跑存量用例。可以只跑某个提交日期范围改动涉及的部分，也可以整库重跑；每条用例的结论写回它自己的状态文件。</p>
+          <div class="mark-out"><span>留下 <em>执行记录</em>（每次请求与返回）</span><span>状态回写 <em>status.md</em></span></div>
+        </article>
+
+        <article class="mark-row" data-k="stress">
+          <div class="mark-name"><span class="mark-dot" style="background:#F2A65A"></span>
+            <span class="mark-cjk">压测</span><span class="mark-lat">Stress</span></div>
+          <p class="mark-body">先用一轮 agent 出方案包——目标与范围、被测接口、加压模型、指标定义、图表设计、复现命令；然后由平台照着方案发压，跑几次就有几份报告，每次都按运行键切分日志与指标。</p>
+          <div class="mark-out"><span>留下 <em>方案包</em> plan.md / run.py / charts.json</span><span>每次发压一份 <em>指标 jsonl + 报告</em></span></div>
+        </article>
+
+        <article class="mark-row" data-k="fix">
+          <div class="mark-name"><span class="mark-dot" style="background:#E8B86D"></span>
+            <span class="mark-cjk">修复</span><span class="mark-lat">Fix</span></div>
+          <p class="mark-body">从报告分析开始：定位根因、给出方案，必要时按项目约定重新部署、再复测。改动未经构建部署时不会假装验证过，状态如实写「已修复（未验证）」。</p>
+          <div class="mark-out"><span>留下 <em>修复记录</em>（文件:行号 + 摘要）</span><span>复测通过的 <em>结论</em></span></div>
+        </article>
+
+        <article class="mark-row" data-k="retest">
+          <div class="mark-name"><span class="mark-dot" style="background:#E07A8C"></span>
+            <span class="mark-cjk">复测</span><span class="mark-lat">Retest</span></div>
+          <p class="mark-body">挑一份已有的 bug 报告，范围三选一：只复测、先重新部署再复测、只部署。关联用例全部固化了 verify.py 时走平台脚本复测，秒级出结论。</p>
+          <div class="mark-out"><span>留下 <em>复测结论</em>（写回报告）</span><span>全部通过时自动标 <em>已修复</em></span></div>
+        </article>
+
+        <article class="mark-row" data-k="reject">
+          <div class="mark-name"><span class="mark-dot" style="background:#9FB0C9"></span>
+            <span class="mark-cjk">修例</span><span class="mark-lat">Reject</span></div>
+          <p class="mark-body">报告被你判为不成立时，按拒绝理由回头改关联用例：断言错了就改，因误报而不成立的就删；教训写进 <code>PITFALLS.md</code>，后续生成用例前必读，同类误报不再犯。</p>
+          <div class="mark-out"><span>留下 <em>改过的用例</em></span><span>沉淀 <em>PITFALLS.md</em> 误报教训录</span></div>
+        </article>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 一轮 ==================== -->
+<section class="wrap band" id="round">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-cjk">一轮</span><span class="rail-lat">One round</span></div></div>
+    <div>
+      <h2 class="h2-cjk">一轮 = 一次会话</h2>
+      <p class="sec-lead">任务不是「跑一个脚本」，而是把一轮工作交给一个常驻会话。会话活在 dsh 宿主进程里，一轮就是一次 followup，等它把这一轮做完。</p>
+
+      <div class="chain">
+        <div class="chain-node"><b>建任务</b><span>选类型、起点与终点</span></div>
+        <div class="chain-node"><b>统一队列</b><span>一个项目一条队</span></div>
+        <div class="chain-node"><b>dshdriver</b><span>一轮翻译成一次调用</span></div>
+        <div class="chain-node"><b>常驻会话</b><span>agent 在宿主里干活</span></div>
+        <div class="chain-node"><b>结果落库</b><span>turn/end 到达即收口</span></div>
+      </div>
+      <div class="chain-loop"><i>↻</i> 下一轮从同一个会话继续，上下文续接，不重启会话、不重读整库。</div>
+
+      <div class="truths">
+        <div class="truth">
+          <h3>一个项目，一次只跑一件事</h3>
+          <p>同一项目的任务、看板卡片、会话消息排在同一条队里，谁在跑谁占运行位。不同项目并行，上限 6。会话挂起等你作答时会主动让出运行位，队首照常起跑。</p>
+        </div>
+        <div class="truth">
+          <h3>会话常驻，不轮询</h3>
+          <p>没有本地 agent 子进程，也没有状态轮询：一轮 = 一次 followup + 等一次 SSE 的 <code>turn/end</code>。会话在 dsh 宿主内常驻，sid 在轮次开始就精确入库。</p>
+        </div>
+        <div class="truth">
+          <h3>跑着也能插话</h3>
+          <p>「发送」把消息排到队尾等下一轮，「立即注入」用 steer 插进当前轮最近的 step 边界。会话里能看到完整的思考、工具调用与结果。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 七阶段 ==================== -->
+<section class="wrap band" id="stages">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-cjk">七阶段</span><span class="rail-lat">Seven stages</span></div></div>
+    <div>
+      <h2 class="h2-cjk">任务的七个阶段</h2>
+      <p class="sec-lead">每个任务在轨道上选一个起点和一个终点。轨道上的先后是真实的先后——这是一条流水线，不是七张标签。</p>
+
+      <div class="stage-head">
+        <div class="stage-col"><span class="stage-num">01</span><span class="stage-cjk">测试用例生成</span><span class="stage-key">gen_case</span></div>
+        <div class="stage-col"><span class="stage-num">02</span><span class="stage-cjk">测试</span><span class="stage-key">execute</span></div>
+        <div class="stage-col"><span class="stage-num">03</span><span class="stage-cjk">生成报告</span><span class="stage-key">report</span></div>
+        <div class="stage-col"><span class="stage-num">04</span><span class="stage-cjk">报告分析</span><span class="stage-key">analyze</span></div>
+        <div class="stage-col"><span class="stage-num">05</span><span class="stage-cjk">问题修复</span><span class="stage-key">fix</span></div>
+        <div class="stage-col"><span class="stage-num">06</span><span class="stage-cjk">重新部署</span><span class="stage-key">deploy</span></div>
+        <div class="stage-col"><span class="stage-num">07</span><span class="stage-cjk">复测</span><span class="stage-key">retest</span></div>
+      </div>
+
+      <div class="spans">
+        <div class="span-row">
+          <span class="span-name">探索 Explore</span>
+          <span class="span-bar" style="grid-column:2 / 5;background:linear-gradient(90deg,rgba(123,200,214,.95),rgba(123,200,214,.55))"></span>
+          <span class="span-bar" style="grid-column:5 / 9;background:linear-gradient(90deg,rgba(123,200,214,.28),rgba(123,200,214,.06))"></span>
+        </div>
+        <div class="span-row">
+          <span class="span-name">回归 Regression</span>
+          <span class="span-bar" style="grid-column:3 / 5;background:linear-gradient(90deg,rgba(143,188,110,.95),rgba(143,188,110,.55))"></span>
+          <span class="span-bar" style="grid-column:5 / 9;background:linear-gradient(90deg,rgba(143,188,110,.28),rgba(143,188,110,.06))"></span>
+        </div>
+        <div class="span-row">
+          <span class="span-name">修复 Fix</span>
+          <span class="span-bar" style="grid-column:5 / 7;background:linear-gradient(90deg,rgba(232,184,109,.95),rgba(232,184,109,.55))"></span>
+          <span class="span-bar" style="grid-column:7 / 9;background:linear-gradient(90deg,rgba(232,184,109,.28),rgba(232,184,109,.06))"></span>
+        </div>
+        <div class="span-row">
+          <span class="span-name">复测 Retest</span>
+          <span class="span-bar" style="grid-column:7 / 9;background:linear-gradient(90deg,rgba(224,122,140,.9),rgba(224,122,140,.5))"></span>
+        </div>
+        <div class="span-row">
+          <span class="span-name">压测 · 修例</span>
+          <span class="span-note" style="grid-column:2 / 9">不落阶段列：压测是「一轮 agent 出方案 + N 次平台发压」，修例是固定一轮的改用例</span>
+        </div>
+      </div>
+
+      <p class="stage-foot">实心段是默认范围，淡段是可选的终点延伸。<b>探索与回归的终点一旦越过「生成报告」，平台会自动追加一个后段任务</b>，接着做分析、修复、部署、复测——不需要你再建一次任务。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 遗留物 ==================== -->
+<section class="wrap band" id="remains">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-cjk">遗留物</span><span class="rail-lat">What remains</span></div></div>
+    <div>
+      <h2 class="h2-cjk">一轮跑完，磁盘上多了什么</h2>
+      <p class="sec-lead">产物是普通文件，不是锁在数据库里的记录：可以读、可以 diff、可以进版本库，也可以随时删掉重建派生索引。</p>
+
+      <div class="remains">
+        <div class="tree">
+          <ul>
+            <li><span class="t-name t-dir">free_style/</span> <span class="t-dim"># 案例库，跨轮次跨会话持续积累</span>
+              <ul>
+                <li><span class="t-name">INDEX.md</span> <span class="t-dim"># 功能分级 · id 游标 · 统计</span></li>
+                <li><span class="t-name">ROUNDS.md</span> <span class="t-dim"># 每轮的角度与结果</span></li>
+                <li><span class="t-name">PITFALLS.md</span> <span class="t-dim"># 误报教训录，生成用例前必读</span></li>
+                <li><span class="t-name">登录/会话/</span>
+                  <ul>
+                    <li><span class="t-name t-dir">FS0007_重复登录/</span>
+                      <ul>
+                        <li><span class="t-name">case.md</span> <span class="t-dim"># 用例定义（唯一权威）</span></li>
+                        <li><span class="t-name">status.md</span> <span class="t-dim"># 通过 / 失败 / 跳过 / 需要复测</span></li>
+                        <li><span class="t-name">execution_20261007_0930.md</span> <span class="t-dim"># 本次的请求与返回</span></li>
+                      </ul>
+                    </li>
+                  </ul>
+                </li>
+              </ul>
+            </li>
+            <li><span class="t-name t-dir">bug_report/</span>
+              <ul>
+                <li><span class="t-name t-dir">20261007_0930_FS_重复登录仍放行/</span>
+                  <ul>
+                    <li><span class="t-name">bug_report.md</span> <span class="t-dim"># 现象 · 证据 · 根因 · 关联用例</span></li>
+                  </ul>
+                </li>
+              </ul>
+            </li>
+            <li><span class="t-name t-dir">.live/live.json</span> <span class="t-dim"># 监控页数据源（阶段 · 进度 · 分级）</span></li>
+            <li><span class="t-name t-dir">.web/</span> <span class="t-dim"># 任务日志 · 压测指标 · 看板会话日志</span></li>
+            <li><span class="t-name t-dir">board_media/</span> <span class="t-dim"># 看板卡片的图片与附件</span></li>
+          </ul>
+        </div>
+
+        <ul class="rem-list">
+          <li class="rem-item">
+            <b>判重靠案例库，不靠记忆</b>
+            <p>新用例入库前先在案例库里查重，id 由根 <code>INDEX.md</code> 的游标统一分配——只有主 agent 能取号，不会两条并线同时用掉一个号。</p>
+          </li>
+          <li class="rem-item">
+            <b>派生索引随时可重建</b>
+            <p><code>.live/cases.jsonl</code>、<code>similar.jsonl</code>、<code>rag_index.jsonl</code> 都是从案例库派生出来的，删掉不影响任何原始数据。</p>
+          </li>
+          <li class="rem-item">
+            <b>监控与通知接着产物走</b>
+            <p>监控面板读 <code>live.json</code> 展示阶段与进度；看板卡片挂着会话；飞书在任务阻塞、需要作答题时推一张卡片过来，你在手机上点选就能作答。</p>
+          </li>
+          <li class="rem-item">
+            <b>案例库还能被语义检索</b>
+            <p>配置嵌入模型后，复测任务会按改动文件先做一次语义粗筛，把最相关的用例排在前面；没配置就退回关键字匹配，永远不会因此卡住任务。</p>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 边界 ==================== -->
+<section class="wrap band" id="limits">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-cjk">边界</span><span class="rail-lat">Limits</span></div></div>
+    <div>
+      <h2 class="h2-cjk">明确不做的，和只做到一半的</h2>
+      <p class="sec-lead">一个测试平台的价值有一半在它敢承认的边界上。下面这些是我们明确不做、或者明确只做到某一程度的。</p>
+
+      <div class="limits">
+        <div class="limit"><div>
+          <b>平台不替你提交代码</b>
+          <p>修复改完文件就停手。需要自动提交就自己装「自动提交守卫」这个内置资产：默认只拦一下并提示 agent 去提交，只有把 <code>commitOnApproval</code> 打开它才自己提交。</p>
+        </div></div>
+        <div class="limit"><div>
+          <b>智能体族只有 dsh 插件一族</b>
+          <p>kimi / claude / opencode / hermes 与裸 dsh CLI 已退场删除。旧绑定在起跑处直接报错并提示改绑，不静默降级成另一种跑法。</p>
+        </div></div>
+        <div class="limit"><div>
+          <b>两种形态同库互斥</b>
+          <p>独立站点与 dsh 插件形态默认共用 <code>~/.touchstone/touchstone.db</code>，靠文件锁保证同一时刻只跑一个：第二个实例启动即退出，并打印占用者是谁。</p>
+        </div></div>
+        <div class="limit"><div>
+          <b>rewind 与「压缩并新建」是近似</b>
+          <p>都是从某一轮 fork 出一支新会话，旧会话仍在、可以切回。它们是「从这里另起一支」，不是原地撤销。</p>
+        </div></div>
+        <div class="limit"><div>
+          <b>没有「模型请求失败」的错误条目</b>
+          <p>dsh 不提供这条事件通道，所以会话窗口不会显示错误横幅。哪一步没跑通，看的是会话里实际发生的工具调用与结果。</p>
+        </div></div>
+        <div class="limit"><div>
+          <b>Windows 还没实机验证过 dsh</b>
+          <p>平台本体在 Windows 与 Linux 功能一致（启停器、端口顺延、路径处理都做了），但 dsh 在 Windows 上的父死感知只剩 stdin 管道这一条通道，尚未实机核验。</p>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 上手 ==================== -->
+<section class="wrap band" id="start">
+  <div class="band-grid">
+    <div class="rail"><div class="rail-sticky"><span class="rail-cjk">上手</span><span class="rail-lat">Quick start</span></div></div>
+    <div>
+      <h2 class="h2-cjk">跑起来</h2>
+      <p class="sec-lead">不想先装环境？<a class="lead-link" href="demo.html">在线 Demo</a> 不用安装、不用准备数据：建项目、建任务、看排队、答 agent 的提问、看用例与 bug 报告长出来，全部在浏览器里跑一遍（静态模拟，不连后端）。</p>
+      <p class="sec-lead">要跑真的，需要 Python 3 与 Node，两种形态二选一。</p>
+
+      <div class="start">
+        <div class="start-block">
+          <h3>独立站点</h3>
+          <p class="start-sub">自带前端，默认 127.0.0.1:4601</p>
+<pre class="term">./touchstone.sh build   <span class="t-dim"># 构建前端</span>
+./touchstone.sh start   <span class="t-dim"># 后台启动，日志在 .run/</span>
+./touchstone.sh status
+<span class="t-dim"># Windows: python touchstone.py start</span></pre>
+          <p class="start-note">没有 <code>webui/dist</code> 时 <code>server.py</code> 会直接退出，所以先 build 再 start。首次启动会种下一个 admin 账号：随机初始口令只在启动横幅打印一次，首次登录强制改密。数据库在 <code>~/.touchstone/touchstone.db</code>，必须放本地盘——SQLite 的文件锁在网盘同步目录里不可用。</p>
+        </div>
+
+        <div class="start-block">
+          <h3>dsh 插件形态</h3>
+          <p class="start-sub">内嵌 dsh web，与独立站点二选一</p>
+<pre class="term">./dsh-plugin/install.sh
+<span class="t-dim"># 幂等装到 ~/.dsh/profiles/web</span>
+<span class="t-dim"># 重启 dsh web 生效，之后在 dsh 里开面板</span></pre>
+          <p class="start-note">这一形态把平台面板嵌进 dsh 的半侧栏：agent 会话就活在宿主进程内，看板卡片、会话窗口、实时监控与独立站点完全一致。两种形态同一时刻只跑一个。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ==================== 页脚 ==================== -->
+<footer class="foot">
+  <div class="wrap">
+    <div class="foot-inner">
+      <div>
+        <div class="foot-brand">TOUCHSTONE</div>
+        <p class="foot-line">AI agent 驱动的自动化测试平台。六类任务、七阶段生命周期、一张开发看板，产物落成可读的文件。MIT 许可。</p>
+        <p class="foot-line"><a class="lead-link" href="demo.html">在线 Demo</a> · 不用安装，先在浏览器里玩一遍。</p>
+      </div>
+      <div class="foot-cols">
+        <div class="foot-col">
+          <h4>仓库</h4>
+          <a href="https://github.com/gavinc-cn/touchstone-dsh">GitHub ↗</a>
+          <a href="https://github.com/gavinc-cn/touchstone-dsh/blob/master/README.md">能力清单 README ↗</a>
+          <a href="https://github.com/gavinc-cn/touchstone-dsh/blob/master/LICENSE">MIT License ↗</a>
+        </div>
+        <div class="foot-col">
+          <h4>在线体验</h4>
+          <a href="./demo.html">在线 Demo（中文）</a>
+          <a href="./en-demo.html" hreflang="en">Live demo (EN)</a>
+        </div>
+        <div class="foot-col">
+          <h4>语言</h4>
+          <a href="./zh.html">中文</a>
+          <a href="./" hreflang="en">English</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/site.js"></script>
+</body>
+</html>

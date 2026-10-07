@@ -10,7 +10,7 @@ assets/fonts/ 下，由 site.css 的 @font-face 引用。
     python3 tools/fetch_fonts.py            # 生成（覆盖同名文件）
     python3 tools/fetch_fonts.py --measure  # 只报告每个字体的切片体积，不落盘
 
-注意：改了 index.html / en.html 的文案后要重跑本脚本，否则新增的字会
+注意：改了 index.html / zh.html 的文案后要重跑本脚本，否则新增的字会
 回落到系统字体（site.css 的字体栈里留了 PingFang SC / Microsoft YaHei 兜底）。
 """
 
@@ -22,7 +22,10 @@ import urllib.parse
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PAGES = ("index.html", "en.html", "demo.html", "en-demo.html")
+# 扫哪些页面 = 承载正文的四页（英文首页 / 中文页 / 中英 Demo）。
+# en.html 自 2026-10-07 起是**跳转壳**（0 秒转到站点根，正文只剩一行兜底链接），
+# 有意不入列表：实测它的 31 个用字全部是这四页的子集 ⇒ 改壳的文案不必重跑本脚本。
+PAGES = ("index.html", "zh.html", "demo.html", "en-demo.html")
 # 在线 Demo 的界面文案集中在字典里（ui.js 只是渲染器，不含可见文案），
 # 所以额外扫这份 js 的**字符串字面量**：注释里的中文不算（先剥注释再取引号内容）。
 JS_SOURCES = ("assets/demo/i18n.js",)
