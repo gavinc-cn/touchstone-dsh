@@ -2909,7 +2909,8 @@ class Handler(BaseHTTPRequestHandler):
         """标记卡片已查看（POST /api/projects/<pid>/board/cards/<cid>/viewed）。
 
         2026-10-07 批次「卡片状态有更新·用户还没打开过 ⇒ 卡面打标记」的清除端：
-        前端打开卡片详情（点击卡面正文 / 详情按钮）时调用，清 `board_cards.unread`。
+        前端打开卡片详情（点击卡面正文 / 详情按钮）或点卡面操作行上任意一个按钮时调用，
+        清 `board_cards.unread`。
         幂等：本来就未读/标记已被别的标签页清掉都回 200；`changed` 说明本次是否真的
         清了标记（不清就不发看板变更信号，前端也不必重取）。归属校验走
         `_board_owned`（多用户隔离红线：越权访问他人卡片一律 404）。
@@ -5303,6 +5304,11 @@ def main():
     # 状态流），再起调和器——调和器改为等它的事件唤醒，不再固定 5s 轮询 dsh。
     # 独立形态（未下发驱动地址）下 start() 直接返回 False，不起线程。
     dshevents.start()
+    # 启动补跑（2026-10-07 僵尸 ext 行实障修复）：上面 board.recover() 里的 ext 行
+    # 对账执行时中枢尚未连接 ⇒ 探测「不可用」、一律保行；上一进程留下的僵尸占用行
+    # （会话已结束、行仍 running）会继续堵死该项目补位，重启也救不回来。这里等首连
+    # 就绪后补跑一次对账（后台线程，不阻塞启动与端口绑定；未就绪直接结束）。
+    board.start_ext_recover_after_connect()
     board.start_interaction_watcher()
     runner.start_unit_selfcheck()  # 等待项周期自检线程（首轮宽限+年龄豁免），替代已退场的影子比对线程
     feishu.start_notifier()  # 飞书 outbox 投递线程（未配置时空转）

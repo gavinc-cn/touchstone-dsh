@@ -801,6 +801,34 @@ def _session_card_map(cards):
     return bound
 
 
+def _subagent_session(sid, origin=None):
+    """该会话是否 dsh **子代理会话**（占用豁免判据，2026-10-07）。
+
+    子代理是主会话的实现细节：它不构成项目外部占用（不建 ext 行、也不触发补投影）——
+    否则「一次派 8 个子代理」＝项目被占满、排队单元永不补位（实障：卡 870 排队
+    5 小时，成因即两条子代理会话的 ext 行）。
+
+    `origin` 显式传入时用调用方手上的值（`_ext_candidates` 已在快照行里）；
+    未传/为空＝未知（旧插件未上报）→ 回落 `sessparse.is_subagent` 的会话头读口
+    （磁盘，按 stamp 缓存）。两处都判不了＝False（按主会话处理：占用判定宁可多等，
+    不可误放行，与「断连=未知」同向）。
+    """
+    val = origin
+    if val is None:
+        try:
+            val = (dshevents.get(sid) or {}).get("origin") or ""
+        except Exception:
+            val = ""
+    if str(val or "") == "subagent":
+        return True
+    if str(val or ""):
+        return False                     # 明确上报了别的 origin（主会话）
+    try:
+        return sessparse.is_subagent("dsh", sid)
+    except Exception:
+        return False
+
+
 def _ext_candidates(project, cards):
     """项目活跃会话集合 → 占位目标/探测不明卡集（探测对象改造核，R15）。
 
@@ -847,6 +875,10 @@ def _ext_candidates(project, cards):
         sid = str(r.get("session_id") or "")
         if not sid or r.get("status") != "running":
             continue                         # 空闲/未知不构成占用
+        # 子代理会话不是外部占用（2026-10-07）：既不建行，也不进 unbound 触发投影
+        # （它本就不该有卡；旧插件未上报 origin 时回落会话头判定，见 _subagent_session）
+        if _subagent_session(sid, r.get("origin")):
+            continue
         # 只认本项目工作目录下的会话：dsh 会话池是宿主全局的，跨项目的在跑
         # 会话不能算到本项目头上（ext 行按项目工作目录归属）
         if os.path.abspath(str(r.get("cwd") or "")) != pdir:
@@ -915,6 +947,65 @@ def _recover_ext_rows(queued=()):
         if _ext_refresh(proj):
             changed = True
     return changed
+
+
+def refresh_ext_rows(reason="外部条目周期对账"):
+    """按项目活跃 ext 行的实况对账刷新（周期自检 / 启动补跑共用入口）。
+
+    对「有活跃 ext 行的项目」逐个跑 `_ext_refresh`（快照口径：中枢在线时以对齐过的
+    注册表为准——不在场即收口；未连接时返回 None＝保行，绝不把未知当空闲）。有行
+    变化即唤醒补位（前缀成员变化，时机③），无变化不空唤醒。返回是否有行变化。
+
+    与 `_recover_ext_rows` 的分工（2026-10-07 实障修复）：那个是**重启恢复**专用
+    （刷新面=有行项目 ∪ 有排队卡项目），执行点在 server 启动序里 `dshevents.start()`
+    之前 ⇒ 探测必然不可用、一律保行；本函数是**运行期兜底与启动补跑**——调和器的
+    逐卡探测（`_iw_once`）修好「在线但会话不在池」的口径后已能自动收口，本入口
+    覆盖「调和器未跑到/被 hold 语义挡住」的漏网行，也用于中枢首连后的启动补跑。
+
+    项目已删（行残留）走 `_finish_all_ext` 防御收口（同 recover 口径）。"""
+    changed = False
+    for pid in {row["project_id"] for row in waitq.active_ext_items()}:
+        proj = db.get_project(pid)
+        if proj is None:
+            if _finish_all_ext(pid, reason):
+                changed = True
+            continue
+        if _ext_refresh(proj):
+            changed = True
+    if changed and runner.INSTANCE is not None:
+        runner.INSTANCE.notify_busy_change()   # 前缀成员变化：唤醒排队单元重新挑选
+    return changed
+
+
+# 启动补跑等中枢首连的上限（秒）：dsh 宿主同机，正常对齐是毫秒级；给足抖动余量
+EXT_RECOVER_WAIT_SECONDS = 30.0
+
+
+def start_ext_recover_after_connect(timeout=EXT_RECOVER_WAIT_SECONDS):
+    """启动补跑线程：等中枢首连就绪后跑一次 ext 行对账（2026-10-07 实障修复）。
+
+    `board.recover()` 尾部的 `_recover_ext_rows` 执行在 server 启动序里
+    `dshevents.start()` **之前**（顺序硬约束不变）⇒ 那时探测必然「不可用」、按
+    「宁可多等」一律保行——上一进程留下的僵尸 ext 行（会话早已结束、行仍
+    running）会继续占位，**重启也救不回来**（实障：卡 870 排队 5 小时、项目 119
+    积 10 条僵尸行堵死调度）。本函数由 server 在 `dshevents.start()` 之后调用：
+    后台线程等首连（上限 timeout，不阻塞启动与端口绑定），就绪即跑一次
+    `refresh_ext_rows`（快照口径收口僵尸行 + 唤醒补位）。
+
+    未配置驱动（独立形态）/超时未就绪：直接结束——行保原样，等调和器与自检
+    线程接手（它们的收口口径同样不把未知当空闲）。返回线程对象供测试 join。
+    """
+    def _run():
+        try:
+            if not dshevents.wait_connected(timeout):
+                return                          # 未就绪：保行，交给运行期兜底
+            refresh_ext_rows("启动补跑")
+        except Exception as e:                  # noqa: BLE001 — 守护线程不 crash
+            print(f"[board] 启动补跑 ext 行对账异常: {e}", flush=True)
+
+    th = threading.Thread(target=_run, daemon=True, name="board-ext-recover")
+    th.start()
+    return th
 
 
 def _enter_doing(project, card, extra="", force=False, worktree=False,
@@ -3165,6 +3256,11 @@ SYNC_BUSY_MTIME_S = 120
 SYNC_TITLE_MAX = 200   # 标题上限（沿用建卡既有截断：insert_board_card 调用处 [:200]）
 SYNC_DESC_MAX = 2000   # 描述上限（防一次长提问把看板负载撑大）
 
+# 已跑过「存量子代理卡软删收口」的项目 id（`sync_sessions` 尾巴，2026-10-07）。
+# 枚举侧过滤后不会再产生子代理卡，故每项目一轮足够；也保证用户从回收站还原后
+# 不被反复软删（进程重启后重建空集，重跑一轮幂等）。
+_SYNC_SUBAGENT_SWEPT = set()
+
 
 def _split_first_prompt(text):
     """首问原文 → (标题, 描述)：首行=标题、其余行=描述。
@@ -3235,7 +3331,8 @@ def sync_sessions(project):
     描述；首问未落盘时回落会话标题、再回落 sid 短码，落盘后由本函数补齐），绑定
     主会话，busy→doing / 空闲→review；存量 sync 卡：首问补齐标题/描述（用户改过
     名的不动）+ dsh 族列映射移交调和器（事件驱动），此处仅归档→done（人工拖到
-    todo/blocked/done 后不再自动搬）；会话存储被删的 sync 卡自动进 done。
+    todo/blocked/done 后不再自动搬）；会话存储被删的 sync 卡自动进 done；绑子代理
+    会话的存量 sync 卡收口进回收站（每项目一轮，见函数尾注释）。
     sync 卡不占 runner 项目占用（外部会话平台控制不了，防堵死统一队列）。
     """
     if not settings_of(project["id"]).get("sync_sessions", True):
@@ -3287,13 +3384,32 @@ def sync_sessions(project):
                 want = "done" if archived else None
                 if want and c["column_key"] != want:
                     db.update_board_card(c["id"], column_key=want)
+    # —— 存量子代理卡收口（2026-10-07 实障修复）——
+    # 新口径下 `sessparse.list_sessions` 已过滤子代理会话（不再建新卡），但历史版本按
+    # 子代理会话建出的卡还留在板面上（实测全机 72 张、70 张永留「待审核」——子代理
+    # 不会被归档、存储也不会被删，归档同步与下面「存储被删→done」两条规则都够不着）。
+    # 这里**软删进回收站**（可还原；不删会话文件、不动会话与依赖）。两条边界：
+    #   ① 只认 origin='sync' 自动卡——用户自建卡即便绑了子代理会话也是用户的东西，不碰；
+    #   ② 每项目只跑一轮——A 之后不会再产生这类卡，一轮足够；用户从回收站**还原**后
+    #      同一进程内不会被反复软删（尊重显式操作），进程重启后重跑一轮（幂等）。
+    if project["id"] not in _SYNC_SUBAGENT_SWEPT:
+        dropped = 0
+        for c in cards:
+            sids = set(_card_sids(c))
+            if c["origin"] != "sync" or not sids or _has_active_run(c["id"]):
+                continue
+            if any(sessparse.is_subagent(family, s) for s in sids):
+                db.trash_board_card(c["id"])
+                dropped += 1
+        _SYNC_SUBAGENT_SWEPT.add(project["id"])
+        if dropped:
+            print(f"[board-sync] 子代理会话卡收口: 软删 {dropped} 张"
+                  f"（项目 {project['id']}，见 spec/queue/排队与占用.md）")
     # 存储被删 → done（list 只回 50 条，不能用「不在列表」判定删除，必须逐卡查存在性）
     for c in cards:
         if c["origin"] != "sync" or c["column_key"] == "done" or _has_active_run(c["id"]):
             continue
-        sids = set(json.loads(c["sessions"] or "[]"))
-        if c["session_id"]:
-            sids.add(c["session_id"])
+        sids = set(_card_sids(c))
         if sids and not any(sessparse.session_exists(family, s) for s in sids):
             db.update_board_card(c["id"], column_key="done")
     return created
@@ -3317,6 +3433,42 @@ def _has_active_run(card_id):
     """卡片是否有平台在管的运行中会话（_RUNS 条目存在即运行中，同 _watch_once 判定）。"""
     with _runs_lock:
         return card_id in _RUNS
+
+
+def _wt_in_flight(card_id):
+    """worktree 直起窗口在场判定（`_WT_STARTING`，见 `_enter_doing_worktree`）。
+
+    worktree 卡不落 c: 行（「不进统一队列」语义），起跑窗口只能靠这个进程内
+    登记集表征：`_wt_start_begin` 在入口登记、`finally` 在 `start_card`（内部
+    登记 `_RUNS`）之后才 `_wt_start_end` 释放 ⇒ 在场区间恰好覆盖起跑窗口。"""
+    with _WT_STARTING_LOCK:
+        return card_id in _WT_STARTING
+
+
+def _starting_window(card_id, starting_ids=None):
+    """卡片是否处于「起跑窗口」：占位保护已解除，但会话尚未证实起跑。
+
+    窗口的成因（2026-10-07 卡 902/903 实障）：`dequeue_start` / `_enter_doing_worktree`
+    先落 `doing` + 清 `block_kind='queue'` 占位，**之后**才起会话；而 `_RUNS`
+    在 `_start_web` 末尾（create_session → 会话默认值 → turn 基线 → `dsh_send`
+    全跑完）才登记。这段 1～2 秒里 dsh 侧读到的 busy=False 是「turn 还没开始」，
+    不是「会话已结束」——调和器若据此按忙/闲搬列，正在起跑的卡会被搬去
+    「待审核」（用户约定：运行中的卡都在「正在开发」列），且随后 `has_run`
+    早退不再自愈，卡片整轮滞留错列。
+
+    三条起跑路径各自的窗口表征：
+      - 统一队列路径（含 force 落表行）：c: 行 `state=starting`（拾取 →
+        `card_started` 置 running）；
+      - worktree 直起路径（无 c: 行）：`_WT_STARTING` 在场（见 `_wt_in_flight`）；
+      - 已登记在管条目（`_RUNS`）＝已证实起跑，**一律不算窗口**——正常忙/闲
+        映射（含「送达恢复」那种 running 行而无在管条目的形态：会话结束要能
+        落回待审核，这条口径不能被本判据吞掉）。
+    `starting_ids` 为调用方的批量读口预取值（`waitq.starting_card_ids()`，
+    调和器一轮一次），缺省自行单查（`_iw_apply` 写前复核用）。"""
+    if _has_active_run(card_id):
+        return False
+    ids = waitq.starting_card_ids() if starting_ids is None else starting_ids
+    return card_id in ids or _wt_in_flight(card_id)
 
 
 def run_pid(card_id):
@@ -3367,7 +3519,9 @@ def _iw_interaction(family, proj, sid, busy_hint=None):
     交互卡片（选项+描述+自定义输入 / 批准-拒绝）。
     options 逐项 = `_dsh_option` 归一后的 `{id, label, description}`（2026-10-04
     起带选项描述，修 #791）；qid 取自插件的提问标识（认领中的提问非空 ⇒
-    answerable=True ⇒ 会话窗渲染单选/多选框 + 「提交」）。
+    answerable=True ⇒ 会话窗渲染单选/多选框 + 「提交」）。2026-10-06 修 #837 起
+    dsh Web GUI 同时弹同一个提问框（插件的原生作答通道）：两侧都能答、先答者胜，
+    GUI 先答时平台迟到作答拿 accepted=false（上层按 40405 收口）。
     异常/无 sid 返回 None（该轮跳过，不误移不报错）。
     单族化后只有 dsh_plugin：读 `dshevents` 注册表（busy 来自 agent/status
     事件，挂起来自 `user-questions/request` waterfall 与 `approval/asked`
@@ -3451,7 +3605,7 @@ _RECONCILE_FIELDS = {
 
 
 def _reconcile_action_for(family, card, r, has_run=False, live_msg=False,
-                          stop_recent=False, archived=None):
+                          stop_recent=False, archived=None, starting=False):
     """调和状态机（纯函数，单测覆盖）：按会话实况 r（pending/busy）、归档态
     archived 与当前卡状态得出动作，action ∈
     {'block'（进阻塞+interaction）,
@@ -3470,8 +3624,15 @@ def _reconcile_action_for(family, card, r, has_run=False, live_msg=False,
     并不 busy，仅凭 busy 会漏判；阻塞列卡片在消息投递后即应回开发列（用户
     约定：所有正在运行的卡片都在「正在开发」列）。
     不干预规则：退场族不动（调用方已过滤，此处兜底保纯函数安全）；
-    todo/done 终态不动；平台在管运行（has_run=True）的卡只做交互 block/recover，
-    busy/空闲流转归 _finish_run 拥有（防与轮收尾抢写）。
+    todo/done 终态不动；平台在管运行（has_run=True）的卡只做交互 block/recover、
+    busy/空闲流转归 _finish_run 拥有（防与轮收尾抢写）——**唯一例外**是卡片在
+    「待审核」而会话确实在跑（起跑窗口误判的遗留形态）→ 归位 doing，见
+    `starting` 段与 2026-10-07 批次说明。
+    `starting`（起跑窗口，判据见 `_starting_window`）：占位已清、会话尚未证实
+    起跑——此窗口内 busy=False 是「turn 还没开始」而非「已结束」，**不做忙/闲
+    列映射**，只防御性放行 block（2026-10-07 修卡 902/903：此前正在起跑的
+    doing 卡被误判空闲搬去「待审核」，`_RUNS` 登记后早退不再自愈，卡片整轮
+    滞留错列——用户约定：运行中的卡都在「正在开发」列）。
     queue 排队占位卡只放行 block（2026-09-10 修复）：占位不等于会话已停——
     运行中卡交互阻塞解除后落 doing/queue 排队等串行位（_recover_to_doing），
     dsh 会话照跑、稍后仍可能再提问；此前 queue 卡被一律跳过，这类提问
@@ -3511,6 +3672,12 @@ def _reconcile_action_for(family, card, r, has_run=False, live_msg=False,
         return "to_doing" if running else None
     if card["block_kind"] == "queue":
         return "block" if pending else None
+    if starting:
+        # 起跑窗口（`_starting_window`）：占位已清、会话尚未证实起跑——此时的
+        # busy=False 是「turn 还没开始」而非「已结束」，**不做忙/闲列映射**
+        # （否则 doing 卡被判空闲搬去待审核；2026-10-07 卡 902/903 实障）。
+        # 窗口内提问不可能出现（prompt 还没下发），仅作防御性放行。
+        return "block" if pending else None
     if pending:
         if card["column_key"] == "blocked" and card["block_kind"] == "interaction":
             return None                      # 已在交互阻塞，等待作答
@@ -3526,6 +3693,13 @@ def _reconcile_action_for(family, card, r, has_run=False, live_msg=False,
     if card["column_key"] == "blocked" and not card["block_kind"]:
         return "to_doing" if (running or has_run) else "to_review"
     if has_run:
+        # 在管运行：列流转归 _finish_run（防与轮收尾抢写）。唯一例外——卡片在
+        # 「待审核」而会话确实在跑：只可能来自起跑窗口内的误判（本批次修复前的
+        # 遗留形态：窗口内被搬去待审核、`_RUNS` 登记后早退不再自愈），按用户
+        # 约定「运行中的卡都在正在开发列」归位。stop_recent 宽限内不搬：刚被
+        # 平台停过会话（停止/拖离开发列）的卡，busy 可能是 abort 生效前的残留。
+        if card["column_key"] == "review" and running and not stop_recent:
+            return "to_doing"
         return None                          # 在管运行：列流转归 _finish_run
     if card["column_key"] == "doing":
         return None if running else "to_review"
@@ -3536,7 +3710,8 @@ def _reconcile_action_for(family, card, r, has_run=False, live_msg=False,
 
 def _iw_apply(family, card, action, r):
     """执行调和动作（read-verify-write）。写库前用 get_board_card 重读当前行，
-    并重评 has_run/live_msg/stop_recent、重跑状态机：仅当动作仍成立才写库；
+    并重评 has_run/live_msg/stop_recent/起跑窗口（`_starting_window`）、重跑状态机：
+    仅当动作仍成立才写库；
     否则跳过——保护用户手动拖卡/其他写者不被调和窗口内的旧判定覆盖
     （事件快照到落库之间卡状态可能已变/已删；live_msg 实时重取
     ——消息单元刚结束/被取消时状态机结论可能翻转为不动；stop_recent 实时
@@ -3556,7 +3731,8 @@ def _iw_apply(family, card, action, r):
     live_msg = chat.live_of_sid((cur["session_id"] or "").strip())
     if _reconcile_action_for(family, cur, r, has_run, live_msg,
                              _stop_recent(cur["id"]),
-                             dshevents.archived(cur["session_id"] or "")) != action:
+                             dshevents.archived(cur["session_id"] or ""),
+                             _starting_window(cur["id"])) != action:
         return                    # 状态已变：跳过，不写库
     if action == "to_done":
         # dsh 侧归档 → 卡片进「已完成」（2026-10-05 反向规则）：走容器迁移原语收口
@@ -3684,6 +3860,8 @@ def _iw_once():
     now = int(time.time() * 1000)
     ext_changed = False
     seen_sids = set()      # 本轮在场的归档判定 sid（_ARCH_SEEN 有界清理用）
+    # 起跑窗口批量读口（一轮一次；逐卡点查会成 N+1，见 `_starting_window`）
+    starting_ids = waitq.starting_card_ids()
     for proj in db.list_projects_all():
         if proj["archived"]:
             continue
@@ -3724,14 +3902,25 @@ def _iw_once():
                     continue               # 无会话（从未起跑的真排队卡等）无可探测
                 r = _iw_interaction(fam, proj, sid)
                 if r is None:
-                    if not _platform_holds(card["id"]):
+                    # 实况读不到：两种语义必须分开（2026-10-07 实障修复，卡 870）——
+                    # ① 中枢**断连**＝真未知：保行（宁多等不可误放行，原口径）；
+                    # ② 中枢**在线**而注册表无此 sid ＝ 该会话已不在 dsh 会话池
+                    #    （`session/disposed` 摘条目，或重连对齐时被 `/live` 快照
+                    #    覆盖掉）⇒ 外部会话已结束：不 hold，交本轮
+                    #    `_ext_stale_finish` 按「不在目标集」收口。
+                    # 旧口径把两者混为一谈，一律 hold 保行——子代理会话留下的 ext
+                    # 行因此永久占位（项目常驻「有外部会话在跑」⇒ 永不补位，实障
+                    # 里卡 870 排队 5 小时、项目 119 积 10 条僵尸行）。
+                    if not dshevents.connected() and not _platform_holds(card["id"]) \
+                            and not _subagent_session(sid):
                         ext_hold.add(card["id"])   # 占用未知：保留既有行（old 探针口径）
                     continue               # 实况读不到：该卡本轮跳过，不搬列
                 # —— 外部条目占用候选（v2d T4）：busy 且非挂起、且平台不持有 ——
                 # 挂起（pending）不算占用（豁免面②：挂起即出队，不建行）；平台
                 # 持有者（活跃 c: 行/在管条目）自占前缀位，不建行（防 ext:/c: 双计）。
                 if r.get("busy") and not r.get("pending") \
-                        and not _platform_holds(card["id"]):
+                        and not _platform_holds(card["id"]) \
+                        and not _subagent_session(sid, r.get("origin")):
                     ext_busy[card["id"]] = sid
                 if _has_active_run(card["id"]):
                     # 平台在管运行卡：行心跳 + 证据（v3c：证据迁行，直调；
@@ -3746,7 +3935,9 @@ def _iw_once():
                 live_msg = chat.live_of_sid(sid)   # 本卡消息在跑/排队（消息驱动的会话）
                 action = _reconcile_action_for(fam, card, r,
                                                _has_active_run(card["id"]), live_msg,
-                                               _stop_recent(card["id"]), arch)
+                                               _stop_recent(card["id"]), arch,
+                                               _starting_window(card["id"],
+                                                                starting_ids))
                 if action:
                     _iw_apply(fam, card, action, r)
             except Exception:

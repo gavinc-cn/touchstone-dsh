@@ -104,8 +104,10 @@ class EventHub:
     def get(self, sid):
         """单会话实时态；未连接或未知会话返回 None（＝未知，不是空闲）。
 
-        字段：`session_id/status/cwd/task/owned/interaction/last_turn_reason/
-        updated_at`——与 `dshdriver.status()` 同形，供 board 直接替换读口。
+        字段：`session_id/status/cwd/task/owned/origin/interaction/
+        last_turn_reason/updated_at`——与 `dshdriver.status()` 同形，供 board 直接
+        替换读口。`origin`（2026-10-07 增）：`"subagent"` = dsh 子代理会话，
+        `""` = 未知（旧插件未上报，board 侧另有磁盘兜底判据）。
         """
         if not sid:
             return None
@@ -174,6 +176,24 @@ class EventHub:
             self._cond.wait(timeout)
             return self._changed != before
 
+    def wait_connected(self, timeout):
+        """等（首）次连接就绪：就绪返回 True，超时返回 False。
+
+        启动补跑用（server 在 `dshevents.start()` 之后等它就绪，再对账 ext 行
+        ——2026-10-07 僵尸占用修复）：`board.recover()` 执行时中枢尚未 start，
+        那次 ext 对账必然「探测不可用」而保行，需要一次连接就绪后的补跑。
+        未配置驱动/宿主不可达时至多等满 timeout；绝不把「未连接」当成就绪
+        （不变量 1「断连=未知」）。
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._cond:
+            while not self._connected:
+                remain = deadline - time.monotonic()
+                if remain <= 0:
+                    return False
+                self._cond.wait(remain)
+            return True
+
     # ---------- 内部：连接与折叠 ----------
 
     def _run(self):
@@ -227,6 +247,9 @@ class EventHub:
                     "cwd": row.get("cwd") or old.get("cwd") or "",
                     "task": row.get("task") or old.get("task") or "",
                     "owned": bool(row.get("owned", old.get("owned", False))),
+                    # origin 是会话固有属性（subagent / 空＝未知）：快照没带就保留
+                    # 事件里学到的值，别把已认出的子代理会话在重连对齐时又变成未知
+                    "origin": str(row.get("origin") or old.get("origin") or ""),
                     # /live 的 interaction 可能为 None（此刻无等待）；已挂起的
                     # interaction 若快照里没带，保留事件里学到的值，避免抖动
                     "interaction": row.get("interaction", old.get("interaction")),
@@ -293,7 +316,8 @@ class EventHub:
                 item = self._sessions.get(sid)
                 if item is None:
                     item = {"session_id": sid, "status": "", "cwd": "", "task": "",
-                            "owned": False, "interaction": None,
+                            "owned": False, "origin": "",
+                            "interaction": None,
                             "last_turn_reason": None, "last_seq": 0,
                             "usage": None, "permission": None, "inbox": [],
                             "updated_at": time.time()}
@@ -345,6 +369,9 @@ class EventHub:
                                      "cache_read": int(data.get("cache_read") or 0)}
                 elif typ == "session/created":
                     item["cwd"] = data.get("cwd") or item["cwd"]
+                    # 子代理会话标记（2026-10-07）：插件在 `session/created` 里上报
+                    # 会话头行的 origin。缺字段保持旧值/空串＝未知，绝不推断。
+                    item["origin"] = str(data.get("origin") or item.get("origin") or "")
                 elif typ == "session/disposed":
                     self._sessions.pop(sid, None)
             self._changed += 1
@@ -428,6 +455,11 @@ def stats():
 
 def wait(timeout):
     return HUB.wait(timeout)
+
+
+def wait_connected(timeout):
+    """等中枢（首）次连接就绪（单例薄壳）：就绪 True / 超时 False。"""
+    return HUB.wait_connected(timeout)
 
 
 def subscribe(callback):

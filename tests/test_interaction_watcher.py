@@ -724,3 +724,190 @@ def test_dsh_plugin_interaction_reads_hub_memory(monkeypatch):
         "status": "idle", "interaction": {"kind": "question"}})
     r3 = board._iw_interaction("dsh_plugin", {"id": 1}, "s-1")
     assert r3["pending"] is False and r3["busy"] is False
+
+
+# ---------- 起跑窗口误搬「待审核」（2026-10-07 修卡 902/903 实障） ----------
+# 成因：dequeue_start/_enter_doing_worktree 先落 doing + 清 queue 占位，**之后**
+# 才起会话；_RUNS 在 _start_web 末尾（dsh_send 之后）才登记。这段 1～2 秒里
+# 调和器读到 busy=False（实际是「turn 还没开始」），把正在起跑的卡判空闲搬去
+# 「待审核」（unread=1）；`_RUNS` 登记后 has_run 早退，卡片整轮滞留错列。
+# 修法：①起跑窗口内不做忙/闲列映射（`_starting_window`）；②在管运行卡若在
+# 「待审核」而会话确实在跑（误判遗留态）→ 归位 doing。
+
+
+def test_starting_window_idle_not_mapped_to_review():
+    """起跑窗口 + 空闲实况：不搬列（此前搬去待审核，正是实障根因）。"""
+    r = {"pending": False, "busy": False, "text": ""}
+    assert board._reconcile_action_for("dsh_plugin", _card(), r,
+                                       starting=True) is None
+
+
+def test_starting_window_busy_not_mapped():
+    """起跑窗口 + busy：同样不搬列（窗口内实况不可信，交起跑证实后判定）。"""
+    r = {"pending": False, "busy": True, "text": ""}
+    assert board._reconcile_action_for("dsh_plugin", _card(), r,
+                                       starting=True) is None
+
+
+def test_starting_window_pending_still_blocks():
+    """起跑窗口内若已有等待（防御面）：照常落阻塞，不因窗口丢掉等待态。"""
+    r = {"pending": True, "busy": True, "text": "q"}
+    assert board._reconcile_action_for("dsh_plugin", _card(), r,
+                                       starting=True) == "block"
+
+
+def test_starting_window_does_not_cover_queue_or_run_card():
+    """窗口判据不越界：queue 占位卡与已登记在管条目的卡仍走原规则。"""
+    r = {"pending": False, "busy": False, "text": ""}
+    assert board._reconcile_action_for(
+        "dsh_plugin", _card(block_kind="queue"), r, starting=True) is None
+    # has_run 卡（已证实起跑）即便 starting=True 也归在管分支，不误判窗口
+    assert board._reconcile_action_for("dsh_plugin", _card(), r,
+                                       has_run=True, starting=True) is None
+
+
+def test_starting_window_predicate(monkeypatch):
+    """`_starting_window` 口径：starting 行/worktree 直起=窗口；已登记在管条目
+    或仅 running 行（「送达恢复」形态）=非窗口——后者的「空闲→待审核」口径
+    不能被本判据吞掉（卡 388 实障修复面）。"""
+    monkeypatch.setattr(board, "_has_active_run", lambda cid: cid == 1)
+    monkeypatch.setattr(board.waitq, "starting_card_ids", lambda: {2, 3})
+    monkeypatch.setattr(board, "_wt_in_flight", lambda cid: cid == 4)
+    assert board._starting_window(1) is False          # 已证实起跑
+    assert board._starting_window(2) is True           # c: 行 starting
+    assert board._starting_window(3, {2, 3}) is True   # 复用批量预取集
+    assert board._starting_window(4) is True           # worktree 直起窗口
+    assert board._starting_window(9) is False          # running 行/无行
+
+
+def test_platform_run_review_running_heals_to_doing():
+    """在管运行卡落在「待审核」而会话在跑：按用户约定归位「正在开发」。"""
+    r = {"pending": False, "busy": True, "text": ""}
+    assert board._reconcile_action_for(
+        "dsh_plugin", _card(column_key="review"), r, has_run=True) == "to_doing"
+
+
+def test_platform_run_review_stop_recent_not_healed():
+    """刚被平台停过（stop_recent 宽限内）不归位：busy 可能是 abort 残留。"""
+    r = {"pending": False, "busy": True, "text": ""}
+    assert board._reconcile_action_for(
+        "dsh_plugin", _card(column_key="review"), r, has_run=True,
+        stop_recent=True) is None
+
+
+def test_platform_run_review_idle_stays():
+    """在管卡在待审核且会话空闲（turn 间隙）：维持现状，列流转归 _finish_run。"""
+    r = {"pending": False, "busy": False, "text": ""}
+    assert board._reconcile_action_for(
+        "dsh_plugin", _card(column_key="review"), r, has_run=True) is None
+
+
+def _starting_window_once_setup(monkeypatch, pid, cid):
+    """起跑窗口集成夹具：只扫本卡（隔离共享临时库），实况=窗口内（busy=False）。"""
+    monkeypatch.setattr(board.db, "list_projects_all",
+                        lambda: [db.get_project(pid)])
+    monkeypatch.setattr(board.db, "list_board_cards",
+                        lambda p: [db.get_board_card(cid)])
+    monkeypatch.setattr(board, "_iw_interaction",
+                        lambda *a, **k: {"pending": False, "busy": False,
+                                         "qid": None, "question": None,
+                                         "options": None, "answerable": True,
+                                         "text": ""})
+    monkeypatch.setattr(board.dshevents, "archived", lambda sid: False)
+    monkeypatch.setattr(board.chat, "live_of_sid", lambda sid: False)
+
+
+def test_iw_once_starting_window_keeps_card_in_doing(monkeypatch):
+    """实障复现（卡 903，真实 `_iw_apply`）：起跑窗口内跑一轮调和，卡留在
+    「正在开发」，且不因误判给用户打「有更新」标记。
+
+    时序照抄线上：enqueue_card（doing+queue 占位）→ worker claim（行 starting）
+    → dequeue_start（清占位落 doing）→ create_session 已入库但 turn 未起。"""
+    pid = db.insert_project(0, "startwin", "/tmp/startwin",
+                            "dsh-plugin:/usr/bin/dsh", "/tmp/startwin/w")
+    cid = db.insert_board_card(pid, "起跑窗口卡")
+    waitq.enqueue_card(cid, pid, from_column="todo")
+    row = waitq.get_active(waitq.KIND_CARD, cid)
+    waitq.claim(row["id"], "worker")                     # 拾取 → 行 starting
+    db.update_board_card(cid, column_key="doing", block_kind=None,
+                         block_text="", last_error="")   # dequeue_start 清占位
+    db.update_board_card(cid, session_id="s-startwin")   # create_session 已入库
+    _starting_window_once_setup(monkeypatch, pid, cid)
+
+    board._iw_once()
+
+    cur = db.get_board_card(cid)
+    assert cur["column_key"] == "doing", "起跑窗口内被误搬出「正在开发」列"
+    assert cur["unread"] == 0, "起跑窗口内的写不该给用户打「有更新」标记"
+    assert waitq.get_active(waitq.KIND_CARD, cid)["state"] == "starting"
+
+
+def test_iw_once_heals_running_card_stuck_in_review(monkeypatch):
+    """误判遗留态自愈：在管运行卡停在「待审核」→ 下一轮调和归位「正在开发」。
+
+    （修复前 `has_run` 早退遮蔽了 review→doing 规则，卡片自起跑窗口被误搬后
+    整轮不再回来——用户看到的「会话运行中却显示在待审核」。）"""
+    pid = db.insert_project(0, "healrev", "/tmp/healrev",
+                            "dsh-plugin:/usr/bin/dsh", "/tmp/healrev/w")
+    cid = db.insert_board_card(pid, "误判遗留卡")
+    db.update_board_card(cid, column_key="review", session_id="s-heal",
+                         mark_unread=False)
+    board._RUNS[cid] = {"proc": None, "sid": "s-heal", "family": "dsh_plugin",
+                        "project_dir": "/tmp/healrev", "started_at": 0,
+                        "seen_busy": True, "aborted": False,
+                        "turn_baseline": None, "log_path": ""}
+    monkeypatch.setattr(board.db, "list_projects_all",
+                        lambda: [db.get_project(pid)])
+    monkeypatch.setattr(board.db, "list_board_cards",
+                        lambda p: [db.get_board_card(cid)])
+    monkeypatch.setattr(board, "_iw_interaction",
+                        lambda *a, **k: {"pending": False, "busy": True,
+                                         "qid": None, "question": None,
+                                         "options": None, "answerable": True,
+                                         "text": ""})
+    monkeypatch.setattr(board.dshevents, "archived", lambda sid: False)
+    monkeypatch.setattr(board.chat, "live_of_sid", lambda sid: False)
+
+    board._iw_once()
+
+    assert db.get_board_card(cid)["column_key"] == "doing"
+
+
+def test_iw_once_worktree_start_window_keeps_card_in_doing(monkeypatch):
+    """worktree 直起窗口（卡 902 走的路径，无 c: 行）：`_WT_STARTING` 在场期间
+    同样不做忙/闲列映射——修复前这条路径一样会被搬去「待审核」。"""
+    pid = db.insert_project(0, "wtw", "/tmp/wtw", "dsh-plugin:/usr/bin/dsh",
+                            "/tmp/wtw/w")
+    cid = db.insert_board_card(pid, "worktree 起跑卡")
+    # `_enter_doing_worktree` 的落列写（清占位落 doing），会话已建、turn 未起
+    db.update_board_card(cid, column_key="doing", block_kind=None,
+                         block_text="", last_error="",
+                         worktree="/tmp/wtw/worktrees/card_%d" % cid)
+    db.update_board_card(cid, session_id="s-wt")
+    assert board._wt_start_begin(cid) is True          # 进入 worktree 起跑窗口
+    _starting_window_once_setup(monkeypatch, pid, cid)
+    try:
+        board._iw_once()
+    finally:
+        board._wt_start_end(cid)
+
+    assert db.get_board_card(cid)["column_key"] == "doing"
+
+
+def test_iw_once_running_row_without_run_still_falls_to_review(monkeypatch):
+    """口径边界（不许被吞）：c: 行 running 但无在管条目（「送达恢复」形态）且
+    会话空闲 ⇒ 仍按空闲落「待审核」（卡 388 实障的修复面，见 `_starting_window`）。"""
+    pid = db.insert_project(0, "rowrun", "/tmp/rowrun",
+                            "dsh-plugin:/usr/bin/dsh", "/tmp/rowrun/w")
+    cid = db.insert_board_card(pid, "送达恢复卡")
+    waitq.enqueue_card(cid, pid, from_column="todo")
+    waitq.claim(waitq.get_active(waitq.KIND_CARD, cid)["id"], "worker")
+    waitq.mark_running(waitq.KIND_CARD, cid)           # 行 running、不在 _RUNS
+    db.update_board_card(cid, column_key="doing", block_kind=None,
+                         block_text="", last_error="")
+    db.update_board_card(cid, session_id="s-rowrun")
+    _starting_window_once_setup(monkeypatch, pid, cid)
+
+    board._iw_once()
+
+    assert db.get_board_card(cid)["column_key"] == "review"

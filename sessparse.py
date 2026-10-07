@@ -139,7 +139,8 @@ def _dsh_session_file(sid):
     """按会话 id 跨工作区 bucket 定位 zstd 会话文件（返回路径或 None）。
 
     id 形态两代并存（本机实测 2026-10-02）：`session-<uuid>`（dsh web/headless 新建）
-    与裸 `<uuid>`（早期/桌面端写入，如 64655aea-… 的会话目录名即其 id）。
+    与裸 `<uuid>`（**绝大多数是子代理会话**，少数是老主会话，如 64655aea-…；
+    2026-10-07 实测 82 个裸 uuid 目录里 73 个 origin=subagent、9 个主会话）。
     文件名也带格式版本：`session.v4.jsonl.zstd`（62 个）/ `session.v3.jsonl.zstd`（1 个）
     / 无版本的 `session.jsonl.zstd`（9 个存量）——**只认无版本名会让 v3/v4 会话全部
     found=false**（真机踩中），故按 `session*.jsonl.zstd` 通配并优先取版本号最大者。
@@ -158,6 +159,93 @@ def _dsh_format_version(path):
     """从会话文件名解析格式版本（无版本号记 0，保证「有版本 > 无版本」）。"""
     m = re.search(r"session\.v(\d+)\.jsonl\.zstd$", os.path.basename(path))
     return int(m.group(1)) if m else 0
+
+
+# dsh 会话**头行**缓存：{path: (stamp, header)}。头行承载 origin/delegationDepth/cwd，
+# 是判「子代理会话」的唯一可靠依据（目录名不是判据，见 is_subagent）。
+_DSH_HEADER_CACHE = {}
+_DSH_HEADER_FRAMES = 4      # 头行最多向前找几帧（真机 304 个会话全在第 1 帧第 1 行）
+
+
+def _dsh_header(path):
+    """读 dsh 会话**头行**（`{"type":"session","id":…,"origin":…,"delegationDepth":…}`），
+    读不到/无头行返回 {}（老样本与异常一律降级为空）。
+
+    只解前 `_DSH_HEADER_FRAMES` 帧即停（头行就是第 1 帧第 1 行，实测 278 字节）——
+    与 `_dsh_decompressed` 的全量解压相比，判一个会话是不是子代理不该付整段解压的
+    代价（枚举 300+ 会话时差一个量级）。按 (mtime_ns, size) 缓存：会话只追加，
+    stamp 变即失效重读。
+    """
+    try:
+        st = os.stat(path)
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}
+    hit = _DSH_HEADER_CACHE.get(path)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    header = {}
+    try:
+        with open(path, "rb") as f:
+            rest = f.read()
+    except OSError:
+        return {}
+    for _ in range(_DSH_HEADER_FRAMES):
+        if not rest:
+            break
+        obj = _DSH_DEC.decompressobj()
+        try:
+            text = obj.decompress(rest).decode("utf-8", "replace")
+        except zstandard.ZstdError:
+            break                       # 坏帧：头行读不到就按「未知」（=主会话）
+        rest = obj.unused_data          # 余量即下一帧（逐帧解压，同 _dsh_decompressed）
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            d = _obj(line)
+            if d is not None and d.get("type") == "session":
+                header = d
+                break
+        if header:
+            break
+    _DSH_HEADER_CACHE[path] = (stamp, header)
+    return header
+
+
+def _header_subagent(header):
+    """头行 → 是否子代理会话：`origin=subagent` 为主判据，`delegationDepth>0` 兜底。
+
+    2026-10-07 全机实测 304 个会话目录：73 个 `origin=subagent`（且 delegationDepth
+    全为 1）、231 个主会话（origin 字段缺失、delegationDepth 全为 0），两集合严格互斥。
+    两个判据都留，是防 dsh 后续只写其一。
+    """
+    if str(header.get("origin") or "") == "subagent":
+        return True
+    try:
+        return int(header.get("delegationDepth") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def is_subagent(family, sid):
+    """该会话是否 dsh **子代理会话**（主会话派生的调研/审计子代理，非用户会话）。
+
+    子代理会话与主会话同 bucket、同格式，只能靠头行区分（见 `_header_subagent`；
+    **目录名不是判据**——裸 uuid 目录 82 个里 73 个是子代理，另 9 个是老主会话）。
+    子代理是主会话的实现细节：不建看板卡、不进「绑定已有会话」下拉、不按「外部会话
+    在跑」占项目运行位（看板 sync 投影 / server 绑定下拉 / board 占用三处共用本读口）。
+
+    族不在白名单 / 存储不存在 / 头行缺失一律 False（未知按主会话处理——占用判定
+    宁多等不可误放行，与 `dshevents` 的「断连=未知」同向）。
+    """
+    if family not in FAMILIES:
+        return False
+    try:
+        path = _dsh_session_file(sid)
+    except Exception:
+        return False
+    return _header_subagent(_dsh_header(path)) if path else False
 
 
 def dsh_bucket(cwd):
@@ -580,6 +668,10 @@ def _list_dsh(cwd):
 
     目录名两代并存：`session-<uuid>` 与裸 `<uuid>`；文件名带格式版本
     （session.v4.jsonl.zstd 等），故目录匹配与文件匹配都用通配（见 _dsh_session_file）。
+    **子代理会话不进列表**（2026-10-07 实障修复）：它由主会话派生，被当成独立会话
+    会各自建卡（实测 72 张、70 张永留「待审核」）并在跑时占项目运行位，判据取会话
+    头行的 origin/delegationDepth（见 `is_subagent`）。裸 uuid 目录**不代表**是子代理：
+    实测 82 个里 73 个是子代理、9 个是老主会话。
     归档只影响归档标记：会话目录仍在 bucket 里，列表照常枚举到它（平台据此把
     归档会话建成落在「已完成」的 sync 卡 / 在绑定下拉里标 [已归档]）。
     """
@@ -594,6 +686,8 @@ def _list_dsh(cwd):
         except OSError:
             continue
         sid = os.path.basename(sdir)
+        if _header_subagent(_dsh_header(zfile)):
+            continue            # 子代理会话：先判头行再解全量（省一次整段解压）
         # 一次解压同时取标题与首问（同 stamp 缓存）：看板 sync 卡建卡/补齐标题都要
         # 首问，逐会话各调一次读口会重复解压同一个文件（见 _dsh_meta）
         title, first_prompt = _dsh_meta(zfile)

@@ -49,6 +49,7 @@ def _isolated_roots(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(sessparse, "DSH_SESSIONS", str(tmp_path / "dsh" / "sessions"))
     monkeypatch.setattr(sessparse, "_DSH_TITLE_CACHE", {})
+    monkeypatch.setattr(sessparse, "_DSH_HEADER_CACHE", {})
     monkeypatch.setattr(sessparse, "_ARCHIVE_CACHE", {"key": None, "ids": frozenset()})
     sessparse.cache_clear()
     yield
@@ -485,6 +486,44 @@ def test_list_sessions_dsh_sorted_limit_and_edges(monkeypatch):
     assert len(sessparse.list_sessions("dsh", CWD)) == 1
     assert sessparse.list_sessions("dsh", "") == []
     assert sessparse.list_sessions("dsh", "/ws/none") == []
+
+
+# 子代理会话样本（2026-10-07 实障：卡 872/873 绑定的两个只读子代理会话，裸 uuid 目录名）
+SUBAGENT_SID = "27f8d546-b8b9-4b70-bf5d-0d401aeadbe4"
+DEPTH_SID = "496b808d-b53d-4822-9159-d07515a24b95"
+
+
+def _mk_subagent(sid, depth=1, origin="subagent", mtime=1000):
+    """建 dsh **子代理会话**样本：头行带 origin/delegationDepth（真机形态），
+    后接标题帧。origin="" 用于只靠 delegationDepth 判定的对照样本。"""
+    header = {"type": "session", "version": 4, "id": sid, "cwd": CWD,
+              "parentSession": DSH_SID, "isSeeded": False}
+    if origin:
+        header["origin"] = origin
+    header["delegationDepth"] = depth
+    return _mk_dsh(frames=[[header],
+                           [{"type": "session/title", "seq": 1, "time": 1,
+                             "data": {"title": "只读调研"}}]],
+                   sid=sid, mtime=mtime)
+
+
+def test_list_sessions_skips_subagent_sessions():
+    """list_sessions 不列子代理会话：头行 origin=subagent 或 delegationDepth>0 一律跳过。
+
+    看板 sync 投影与「绑定已有会话」下拉共用本读口——子代理是主会话的实现细节，
+    被当成独立会话就会各自建卡（2026-10-07 实测 72 张子代理卡、70 张永留「待审核」，
+    且其在跑时落 ext 行堵死项目补位）。头行缺失或无这两字段（老样本/主会话）按
+    主会话处理，不得误滤；存储不存在 / 族白名单外一律 False（未知不豁免占用）。
+    """
+    _mk_dsh(sid=DSH_SID, mtime=2000)                 # 主会话（样本无 session 头行）
+    _mk_subagent(SUBAGENT_SID, mtime=3000)           # origin=subagent
+    _mk_subagent(DEPTH_SID, depth=2, origin="", mtime=4000)   # 只有 delegationDepth>0
+    assert [i["sid"] for i in sessparse.list_sessions("dsh", CWD)] == [DSH_SID]
+    assert sessparse.is_subagent("dsh", SUBAGENT_SID) is True
+    assert sessparse.is_subagent("dsh", DEPTH_SID) is True
+    assert sessparse.is_subagent("dsh", DSH_SID) is False
+    assert sessparse.is_subagent("dsh", ABSENT_SID) is False       # 存储不存在
+    assert sessparse.is_subagent("nope", SUBAGENT_SID) is False    # 族白名单外
 
 
 def _write_archive_state(ids):

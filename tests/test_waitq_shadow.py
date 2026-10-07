@@ -763,3 +763,27 @@ def test_pick_locked_dirty_answer_target_cancelled():
     waitq.enqueue(waitq.KIND_ANSWER, "dirty", 9)   # 非数字 target（理论脏行）
     assert r._pick_locked() is None                          # 跳过且不抛
     assert waitq.get_active(waitq.KIND_ANSWER, "dirty") is None   # 行已摘除
+
+
+def test_unit_selfcheck_reconciles_ext_rows(monkeypatch):
+    """自检每拍顺带 ext 行对账（2026-10-07 僵尸占用修复的兜底入口）。
+
+    调和器逐卡探测修好「在线但会话不在池」的口径后已能自动收口僵尸 ext 行；
+    本拍覆盖「调和器线程未跑到 / 被保守 hold 语义挡住」的漏网行——否则僵尸行
+    永久占位、项目永不补位（实障卡 870）。对账异常不得打断自检线程。"""
+    stop = threading.Event()
+    calls = []
+    monkeypatch.setattr(waitq, "selfcheck_units",
+                        lambda probe=None, min_age=0.0, managed=None: [])
+    monkeypatch.setattr(runner, "INSTANCE", _bare_runner())
+    import board                # 函数内 import：与产品侧同款防循环口径
+    monkeypatch.setattr(board, "refresh_ext_rows",
+                        lambda reason="": calls.append(reason) or False)
+    runner.start_unit_selfcheck(interval=0.05, min_age=1.0, stop=stop)
+    try:
+        deadline = time.time() + 3
+        while not calls and time.time() < deadline:
+            time.sleep(0.02)
+        assert calls                                    # 每拍对账（无变化也不空唤醒）
+    finally:
+        stop.set()

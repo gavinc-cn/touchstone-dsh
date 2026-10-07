@@ -127,6 +127,40 @@ def test_fold_interaction_attach_detach_disposed(monkeypatch):
     assert hub.get("s1") is None                    # 会话消失：读口回未知
 
 
+def test_fold_session_created_origin(monkeypatch):
+    """`session/created` 帧带 `origin`：折进注册表（board 据此把子代理会话排除在
+    建卡投影与项目占用之外，2026-10-07）。未上报（旧插件）记空串＝**未知**，
+    绝不推断成「非子代理」——占用硬化在 board 侧另有磁盘兜底。"""
+    hub = _hub(monkeypatch, [
+        {"seq": 1, "type": "session/created", "session_id": "sub1",
+         "data": {"cwd": "/a", "owned": False, "origin": "subagent"}},
+        {"seq": 2, "type": "session/created", "session_id": "main1",
+         "data": {"cwd": "/a", "owned": False}},
+    ])
+    assert hub.get("sub1")["origin"] == "subagent"
+    assert hub.get("main1")["origin"] == ""
+    # 后续帧（agent/status 等）不得把 origin 清掉
+    hub._on_frame(_status_frame("sub1", "idle", 9))
+    assert hub.get("sub1")["origin"] == "subagent"
+
+
+def test_align_carries_origin(monkeypatch):
+    """`/live` 对齐同样折 `origin`：断连期间起跑的子代理会话必须在对齐后也认得出，
+    否则硬化只在事件路径生效（重连即漏）。快照缺 origin 时保留事件里学到的值。"""
+    hub = _hub(monkeypatch, live_rows=[
+        {"session_id": "sub1", "status": "running", "owned": False, "cwd": "/a",
+         "origin": "subagent"},
+        {"session_id": "main1", "status": "running", "owned": False, "cwd": "/a"},
+    ])
+    assert hub.get("sub1")["origin"] == "subagent"
+    assert hub.get("main1")["origin"] == ""
+    # 再对齐一次：快照不带 origin ⇒ 保留旧值（origin 是会话固有的，不会变化）
+    monkeypatch.setattr(dshdriver, "live", lambda: {"sessions": [
+        {"session_id": "sub1", "status": "running", "owned": False, "cwd": "/a"}]})
+    hub._align()
+    assert hub.get("sub1")["origin"] == "subagent"
+
+
 def test_disconnected_means_unknown(monkeypatch):
     """断连 ⇒ 一切状态读口返回 None（绝不推断空闲），恢复后照常可读。"""
     hub = _hub(monkeypatch, [_status_frame("s1", "running", 1)])
@@ -317,3 +351,33 @@ def test_idle_no_driver_requests(monkeypatch):
             f"状态流应只有一条长连（单连接消费），实际 {after.get('/events')}"
     finally:
         srv.stop()
+
+
+# ---------- 启动补跑等待口（2026-10-07：ext 行僵尸占用修复的配套接线） ----------
+
+def test_wait_connected_false_when_never_connected():
+    """中枢未连上 → `wait_connected` 等满超时返回 False（启动补跑据此跳过，
+    不把「未连接」当成就绪）。"""
+    hub = dshevents.EventHub()
+    t0 = time.monotonic()
+    assert hub.wait_connected(0.05) is False
+    assert time.monotonic() - t0 >= 0.05         # 确实等到超时，不是立刻返回
+
+
+def test_wait_connected_true_when_already_connected(monkeypatch):
+    """已连接 → 立即返回 True。"""
+    hub = _hub(monkeypatch)
+    assert hub.wait_connected(0.5) is True
+
+
+def test_wait_connected_wakes_on_late_connect():
+    """等待期间由消费线程置为已连接 → 立即唤醒返回 True（不等满超时）。"""
+    hub = dshevents.EventHub()
+    got = []
+    th = threading.Thread(target=lambda: got.append(hub.wait_connected(5.0)))
+    th.start()
+    time.sleep(0.1)
+    hub._set_connected(True)
+    th.join(2.0)
+    assert not th.is_alive()                     # 被唤醒而非等满 5s
+    assert got == [True]

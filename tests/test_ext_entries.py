@@ -589,3 +589,189 @@ def test_ext_refresh_dsh_driver_down_keeps_rows(monkeypatch):
     monkeypatch.setattr(board.dshevents, "snapshot",
                         lambda: pytest.fail("断连时不应取快照"))
     assert board._ext_refresh(proj) is None
+
+
+# ---------- 12. 会话已不在 dsh 池（disposed）→ 僵尸 ext 行当轮收口 ----------
+# 2026-10-07 实障（卡 870 排队 5 小时未被启动）：dsh 会话结束走 `session/disposed`
+# （`dshevents` 摘条目）或从 `/live` 快照消失，`_iw_interaction` 读不到即回 None；
+# 旧口径把这种「在线但会话不在池」与「中枢断连＝真未知」混为一谈、一律 hold 保行，
+# 子代理会话留下的 ext 行因此永久占位（项目常驻「有外部会话在跑」⇒ 永不补位）。
+
+def test_iw_once_hub_online_missing_session_closes_ext_rows(monkeypatch):
+    """中枢在线、注册表却无该会话（外部会话已被 dsh 释放）→ 当轮收口 ext 行并
+    唤醒补位；这是 ext 行唯一的自动收口路径（旧实现要等用户动作触发
+    `_ext_refresh`，实障里等了 271 分钟）。"""
+    proj = _mk_project(agent_path="dsh-plugin:/usr/bin/dsh", name="extgone")
+    pid = proj["id"]
+    sc = _mk_card(pid, "外部同步卡", sid="s-ext-gone", origin="sync")
+    waitq.insert_ext(pid, sc, "s-ext-gone")
+    monkeypatch.setattr(board.dshevents, "connected", lambda: True)
+    inst = _tick(monkeypatch, proj, {})          # 在线但注册表无该 sid
+    assert _ext_rows(pid) == []                  # 占用行当轮收口
+    assert board.ext_active(pid) is False
+    assert inst._cond.notifies >= 1              # 前缀成员消失 → 唤醒补位
+
+
+def test_iw_once_hub_offline_keeps_ext_rows(monkeypatch):
+    """中枢断连（真未知）→ 仍然保行（「宁可多等不可误放行」原口径不动）。
+
+    与上例互为对照：同样 `_iw_interaction` 回 None，只有 `connected()` 为真才
+    按「会话不在池」收口——断连时的读不到绝不推断成空闲。"""
+    proj = _mk_project(agent_path="dsh-plugin:/usr/bin/dsh", name="extoff")
+    pid = proj["id"]
+    sc = _mk_card(pid, "外部同步卡", sid="s-ext-off", origin="sync")
+    waitq.insert_ext(pid, sc, "s-ext-off")
+    monkeypatch.setattr(board.dshevents, "connected", lambda: False)
+    inst = _tick(monkeypatch, proj, {})
+    assert [r["target_id"] for r in _ext_rows(pid)] == [str(sc)]   # 行保留
+    assert _ext_rows(pid)[0]["state"] == "running"
+    assert inst._cond.notifies == 0              # 未误唤醒补位
+
+
+def test_refresh_ext_rows_closes_stale_and_wakes(monkeypatch):
+    """`refresh_ext_rows`（周期自检/启动补跑共用入口）：按中枢快照对账活跃 ext 行
+    ——不在快照里的会话（已结束）行收口并唤醒补位；有变化即唤醒，无变化不唤醒。"""
+    proj = _mk_project(agent_path="dsh-plugin:/usr/bin/dsh", name="extrefresh")
+    pid = proj["id"]
+    sc = _mk_card(pid, "外部同步卡", sid="s-ext-1", origin="sync")
+    waitq.insert_ext(pid, sc, "s-ext-1")
+    monkeypatch.setattr(board.dshevents, "connected", lambda: True)
+    monkeypatch.setattr(board.dshevents, "snapshot", lambda: {})   # 会话已不在池
+    monkeypatch.setattr(board.db, "list_projects_all", lambda: [proj])
+    inst = _bare_runner()
+    inst._cond.notifies = 0
+    monkeypatch.setattr(board.runner, "INSTANCE", inst)
+    before = inst._cond.notifies
+    assert board.refresh_ext_rows() is True
+    assert _ext_rows(pid) == []
+    assert inst._cond.notifies > before          # 占用消失 → 唤醒补位
+    after = inst._cond.notifies
+    assert board.refresh_ext_rows() is False     # 无活跃行：无变化、不空唤醒
+    assert inst._cond.notifies == after
+
+
+def test_refresh_ext_rows_keeps_rows_when_hub_offline(monkeypatch):
+    """中枢未连接 → `refresh_ext_rows` 一律保行（探测不可用不改动任何行）。"""
+    proj = _mk_project(agent_path="dsh-plugin:/usr/bin/dsh", name="extrefoff")
+    pid = proj["id"]
+    sc = _mk_card(pid, "外部同步卡", sid="s-ext-2", origin="sync")
+    waitq.insert_ext(pid, sc, "s-ext-2")
+    monkeypatch.setattr(board.dshevents, "connected", lambda: False)
+    monkeypatch.setattr(board.dshevents, "snapshot",
+                        lambda: pytest.fail("断连时不应取快照"))
+    monkeypatch.setattr(board.db, "list_projects_all", lambda: [proj])
+    inst = _bare_runner()
+    inst._cond.notifies = 0
+    monkeypatch.setattr(board.runner, "INSTANCE", inst)
+    assert board.refresh_ext_rows() is False
+    assert [r["target_id"] for r in _ext_rows(pid)] == [str(sc)]
+    assert inst._cond.notifies == 0
+
+
+def _stub_hub_snapshot(monkeypatch):
+    """把中枢打桩成「已连接但池内无任何会话」（外部会话已结束的实况）。"""
+    monkeypatch.setattr(board.dshevents, "connected", lambda: True)
+    monkeypatch.setattr(board.dshevents, "snapshot", lambda: {})
+
+
+def test_start_ext_recover_after_connect_runs_refresh(monkeypatch):
+    """启动补跑：等中枢首连就绪后收口僵尸 ext 行（`board.recover()` 里那次对账
+    执行在 `dshevents.start()` 之前，探测必然不可用、一律保行）。"""
+    proj = _mk_project(agent_path="dsh-plugin:/usr/bin/dsh", name="extboot")
+    pid = proj["id"]
+    sc = _mk_card(pid, "外部同步卡", sid="s-ext-boot", origin="sync")
+    waitq.insert_ext(pid, sc, "s-ext-boot")
+    _stub_hub_snapshot(monkeypatch)
+    inst = _bare_runner()
+    inst._cond.notifies = 0
+    monkeypatch.setattr(board.runner, "INSTANCE", inst)
+    monkeypatch.setattr(board.dshevents, "wait_connected", lambda t: True)
+    th = board.start_ext_recover_after_connect(timeout=0.5)
+    th.join(5.0)
+    assert not th.is_alive()
+    assert _ext_rows(pid) == []                  # 僵尸行已收口
+    assert inst._cond.notifies >= 1              # 占用消失 → 唤醒补位
+
+
+def test_start_ext_recover_after_connect_skips_when_not_connected(monkeypatch):
+    """中枢未就绪（独立形态/宿主不可达）→ 不跑对账（保行，等调和器与自检接手）。"""
+    calls = []
+    monkeypatch.setattr(board.dshevents, "wait_connected", lambda t: False)
+    monkeypatch.setattr(board, "refresh_ext_rows",
+                        lambda reason="": calls.append(reason))
+    th = board.start_ext_recover_after_connect(timeout=0.05)
+    th.join(5.0)
+    assert not th.is_alive()
+    assert calls == []
+
+
+def test_stale_ext_row_cleared_by_watcher_unblocks_queued_card(monkeypatch):
+    """实障链路回归（2026-10-07 卡 870）：外部会话 busy 建 ext 行挡住平台排队卡 →
+    会话结束、注册表摘条目（中枢在线却读不到）→ 调和器当轮收口 → 排队卡立即补位。
+
+    ① 段即旧实现的行为（读不到＝未知 ⇒ 保行 ⇒ 排队卡永不启动）；② 段是修复后的
+    行为。两段合起来才能证明这条测试抓的就是实障根因，而不是别的路径顺手收了口。"""
+    proj = _mk_project(agent_path="dsh-plugin:/usr/bin/dsh", name="extstale")
+    pid = proj["id"]
+    sc = _mk_card(pid, "外部同步卡", sid="s-ext-1", origin="sync")
+    _tick(monkeypatch, proj, {"s-ext-1": {"pending": False, "busy": True}})
+    cid = _mk_card(pid, "平台卡", column="todo")
+    waitq.enqueue_card(cid, pid)
+    r = _bare_runner()
+    assert r._pick_locked() is None                  # 外部占用：排队卡留队
+    # ① 中枢未连接（真未知）：保行——旧口径下这条行会一直留到用户动作
+    _tick(monkeypatch, proj, {})
+    assert board.ext_active(pid) is True
+    assert r._pick_locked() is None
+    # ② 中枢在线、注册表无该会话（外部会话已结束）：当轮收口 → 立即补位
+    monkeypatch.setattr(board.dshevents, "connected", lambda: True)
+    _tick(monkeypatch, proj, {})
+    assert board.ext_active(pid) is False
+    assert r._pick_locked() == f"c:{cid}"
+
+
+# ------------------------------------- 子代理会话不构成占用（2026-10-07）
+
+def test_ext_candidates_skips_subagent_sessions(monkeypatch):
+    """子代理会话不算项目外部占用：注册表 `origin=subagent` 的行既不进 desired
+    （不建 ext 行）也不进 unbound（不触发一次 sync 投影）——子代理是主会话的实现
+    细节，它占位会让项目永不补位（2026-10-07 实障：卡 870 排队 5 小时）。
+    对照：同形主会话（origin 空）照旧进 desired。"""
+    proj = _mk_project(agent_path="dsh-plugin:/usr/bin/dsh", name="extsubcand")
+    pid = proj["id"]
+    card = _mk_card(pid, "主会话卡", sid="session-main-1")
+    monkeypatch.setattr(board, "_RUNS", {})
+    monkeypatch.setattr(board.dshevents, "connected", lambda: True)
+    monkeypatch.setattr(board.dshevents, "snapshot", lambda: {
+        "session-main-1": {"session_id": "session-main-1", "status": "running",
+                           "owned": False, "origin": "", "cwd": proj["project_dir"]},
+        "session-sub-1": {"session_id": "session-sub-1", "status": "running",
+                          "owned": False, "origin": "subagent",
+                          "cwd": proj["project_dir"]},
+    })
+    desired, hold, unbound, unknown = board._ext_candidates(
+        proj, db.list_board_cards(pid))
+    assert desired == {card: "session-main-1"}
+    assert unbound == set() and hold == set() and unknown == set()
+
+
+def test_iw_once_subagent_card_creates_no_ext_row(monkeypatch):
+    """存量遗留卡（绑子代理会话）实况 busy ⇒ 调和器**不建 ext 行**、排队卡立即补位。
+
+    测点走磁盘兜底：注册表未上报 origin（旧插件形态）时，占用豁免回落
+    `sessparse.is_subagent` 的会话头读口。对照段：主会话 busy 卡照旧建行挡位
+    （证明本用例抓的是子代理豁免，不是别的路径顺手放行）。"""
+    proj = _mk_project(agent_path="dsh-plugin:/usr/bin/dsh", name="extsubocc")
+    pid = proj["id"]
+    _mk_card(pid, "子代理卡", sid="sub-1", origin="sync")
+    _mk_card(pid, "主会话同步卡", sid="main-1", origin="sync")
+    monkeypatch.setattr(board.sessparse, "is_subagent", lambda fam, s: s == "sub-1")
+    _tick(monkeypatch, proj, {"sub-1": {"pending": False, "busy": True}})
+    assert _ext_rows(pid) == []                      # 子代理 busy：不落行
+    cid = _mk_card(pid, "平台卡", column="todo")
+    waitq.enqueue_card(cid, pid)
+    r = _bare_runner()
+    assert r._pick_locked() == f"c:{cid}"            # 不算占用：立即补位
+    _tick(monkeypatch, proj, {"main-1": {"pending": False, "busy": True}})
+    assert board.ext_active(pid) is True             # 对照：主会话照旧挡位
+    assert r._pick_locked() is None

@@ -2462,6 +2462,17 @@ def start_unit_selfcheck(interval=SELFCHECK_INTERVAL, min_age=SELFCHECK_MIN_AGE,
                     # 等下个外部事件会让排队单元无谓停滞一个周期以上）
                     with inst._cond:
                         inst._cond.notify_all()
+                # 外部条目（ext 行）周期对账（2026-10-07 僵尸占用修复的兜底入口）：
+                # 调和器逐卡探测已修好「中枢在线、会话已不在 dsh 池」的口径
+                # （见 `board._iw_once`）；本拍覆盖「调和器线程未跑到 / 被保守
+                # hold 语义挡住」的漏网行——否则僵尸 ext 行永久占位、项目永不
+                # 补位（实障：卡 870 排队 5 小时）。中枢未连接时 `_ext_refresh`
+                # 收敛为 None＝保行（绝不把未知当空闲）；行有变化时唤醒补位，
+                # 异常只打一行、不打断自检线程。
+                try:
+                    board.refresh_ext_rows("外部条目周期对账")
+                except Exception as e:      # noqa: BLE001 — 同兜底口径
+                    print(f"[waitq-selfcheck] 外部条目对账异常: {e}", flush=True)
                 n = waitq.prune_finished()      # 周期尾部：终态等待项回收（R14）
                 if n:
                     print(f"[waitq-selfcheck] 终态等待项回收 {n} 条", flush=True)

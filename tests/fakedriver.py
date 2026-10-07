@@ -45,12 +45,15 @@ PNG_1PX = bytes.fromhex(
 class _Session:
     """一个替身会话的实时态（字段对齐 `dshdriver.status()` 与插件 `/live`）。"""
 
-    def __init__(self, sid, cwd, task, model="", provider=""):
+    def __init__(self, sid, cwd, task, model="", provider="", origin=""):
         self.sid = sid
         self.cwd = cwd
         self.task = task
         self.model = model
         self.provider = provider
+        # 会话头行 origin（真插件口径）：'subagent' = dsh 子代理会话（平台据此不建卡、
+        # 不算项目占用）；'' = 主会话/旧插件未上报（平台回落会话头判定）。
+        self.origin = origin
         self.effort = ""               # 思考等级（reasoningEffort；真插件 entry.model.reasoningEffort）
         self.status = "idle"           # idle | running
         self.last_seq = 0              # 会话事件 seq（单调；状态帧的 event_seq 取它）
@@ -240,18 +243,23 @@ class FakeDriver:
 
     # ---------- 会话与轮次引擎 ----------
 
-    def create(self, sid="", cwd="", task="", model="", provider=""):
-        """建/恢复会话（sid 为空则生成），发 session/created + driver/attached。"""
+    def create(self, sid="", cwd="", task="", model="", provider="", origin=""):
+        """建/恢复会话（sid 为空则生成），发 session/created + driver/attached。
+
+        `origin` 对齐真插件：真 dsh 子代理会话头行带 `origin=subagent`，插件在
+        `session/created` 状态帧与 `/live` 行里上报（见 agent-driver._sessionOrigin）。
+        """
         with self.lock:
             if not sid:
                 self.sid_seq += 1
                 sid = f"fake-drv-{self.sid_seq}"
             sess = self.sessions.get(sid)
             if sess is None:
-                sess = _Session(sid, cwd, task, model, provider)
+                sess = _Session(sid, cwd, task, model, provider, origin)
                 self.sessions[sid] = sess
                 self.publish_state("session/created", sid,
-                                   {"cwd": cwd, "task": task, "session_id": sid})
+                                   {"cwd": cwd, "task": task, "session_id": sid,
+                                    "origin": origin})
                 self.publish_state("driver/attached", sid,
                                    {"cwd": cwd, "task": task,
                                     "model": {"provider": provider, "model": model}})
@@ -364,6 +372,7 @@ class FakeDriver:
                     "cancelled": sess.cancelled,
                     "interaction": sess.interaction, "cwd": sess.cwd,
                     "task": sess.task, "model": model,
+                    "origin": sess.origin,
                     "inbox": list(sess.inbox),
                     "owned": True,
                     "started_at": sess.started_at,

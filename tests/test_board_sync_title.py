@@ -172,3 +172,85 @@ def test_list_sessions_item_without_first_prompt_key(monkeypatch):
     created = board.sync_sessions(proj)
     assert len(created) == 1
     assert db.get_board_card(created[0])["title"] == "会话标题"
+
+
+# -------------------------------------------------- 存量子代理卡收口（2026-10-07）
+
+# 真机子代理会话样本（卡 872/873 绑定的两个只读子代理会话，裸 uuid 目录名）
+SUB_SID = "27f8d546-b8b9-4b70-bf5d-0d401aeadbe4"
+
+
+def test_sync_trashes_legacy_subagent_card(monkeypatch):
+    """存量子代理卡收口：历史版本按子代理会话建过卡（实测 72 张、70 张永留「待审核」
+    ——子代理不会被归档、存储也不会被删，归档与「存储被删→done」两条规则都够不着），
+    新口径的枚举已过滤子代理会话（不再建新卡），存量卡由本拍**软删进回收站**
+    （可还原；不删会话文件、列与位置保留）。范围只限 origin='sync' 自动卡：用户
+    自建卡即便绑了子代理会话也不碰；已在「已完成」的子代理卡同样收口。"""
+    proj = _mk_project()
+    review = _mk_card(proj["id"], title="你是只读调研员", column="review", sid=SUB_SID)
+    done = _mk_card(proj["id"], title="已完成的子代理卡", column="done", sid=SUB_SID)
+    manual = _mk_card(proj["id"], title="手工卡", column="review", sid=SUB_SID, origin="")
+    _patch(monkeypatch, [])                 # 枚举已过滤子代理会话：items 里没有它
+    monkeypatch.setattr(board.sessparse, "is_subagent", lambda fam, s: s == SUB_SID)
+    board.sync_sessions(proj)
+    assert db.get_board_card(review)["trashed"] == 1
+    assert db.get_board_card(review)["column_key"] == "review"   # 软删：原位待还原
+    assert db.get_board_card(done)["trashed"] == 1
+    assert db.get_board_card(manual)["trashed"] == 0             # 用户自建卡不碰
+
+
+MAIN_SID = "session-cccc1111-2222-3333-4444-555555555555"
+
+
+def _mk_session_file(cwd, sid, origin="", title="会话标题"):
+    """真实 dsh 会话存储样本（多帧 zstd，每帧 JSONL 多行）：头行 + 标题帧。
+    子代理样本带 origin/delegationDepth/parentSession（真机会话头三件套）。"""
+    import zstandard
+    header = {"type": "session", "version": 4, "id": sid, "cwd": cwd}
+    if origin:
+        header["origin"] = origin
+        header["delegationDepth"] = 1
+        header["parentSession"] = MAIN_SID
+    frames = [[header], [{"type": "session/title", "seq": 1, "time": 1,
+                          "data": {"title": title}}]]
+    path = os.path.join(board.sessparse.dsh_bucket(cwd), sid, "session.v4.jsonl.zstd")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    comp = zstandard.ZstdCompressor()
+    blob = b"".join(
+        comp.compress("".join(json.dumps(r, ensure_ascii=False) + "\n"
+                              for r in frame).encode("utf-8"))
+        for frame in frames)
+    with open(path, "wb") as f:
+        f.write(blob)
+    return path
+
+
+def test_sync_sessions_skips_subagent_storage(monkeypatch, tmp_path):
+    """真实会话存储路径（不打桩）走完整链路：项目 bucket 里的子代理会话不建卡、
+    主会话照常建卡——覆盖「会话头 origin → list_sessions 过滤 → sync_sessions 建卡」
+    三段，防哪一段被单独改回去（单测的打桩桩面看不到这条缝）。"""
+    import sessparse
+    monkeypatch.setattr(sessparse, "DSH_SESSIONS", str(tmp_path / "dsh" / "sessions"))
+    monkeypatch.setattr(sessparse, "_DSH_HEADER_CACHE", {})
+    monkeypatch.setattr(sessparse, "_DSH_TITLE_CACHE", {})
+    monkeypatch.setattr(sessparse, "_ARCHIVE_CACHE", {"key": None, "ids": frozenset()})
+    proj = _mk_project()
+    _mk_session_file(proj["project_dir"], MAIN_SID, origin="")
+    _mk_session_file(proj["project_dir"], SUB_SID, origin="subagent")
+    monkeypatch.setattr(board, "_sync_session_busy", lambda *a, **k: False)
+    created = board.sync_sessions(proj)
+    assert [db.get_board_card(c)["session_id"] for c in created] == [MAIN_SID]
+
+
+def test_sync_subagent_sweep_respects_restore(monkeypatch):
+    """收口每项目只跑一轮（A 之后不会再产生子代理卡）：用户把卡从回收站**还原**后，
+    同一进程内不再被反复软删（尊重显式操作；进程重启后重跑一轮，幂等）。"""
+    proj = _mk_project()
+    cid = _mk_card(proj["id"], title="子代理卡", column="review", sid=SUB_SID)
+    _patch(monkeypatch, [])
+    monkeypatch.setattr(board.sessparse, "is_subagent", lambda fam, s: s == SUB_SID)
+    board.sync_sessions(proj)
+    assert db.get_board_card(cid)["trashed"] == 1
+    db.restore_board_card(cid)               # 用户显式还原
+    board.sync_sessions(proj)
+    assert db.get_board_card(cid)["trashed"] == 0
