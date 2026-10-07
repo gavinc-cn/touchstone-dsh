@@ -22,7 +22,7 @@
  *   两条与正常 dispose 共用同一个幂等 `teardown()`, 因此正常路径行为不变。
  */
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import http from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,11 +48,146 @@ const UNMOUNT_WATCH_MS = 2000;
 /** 进程级存活壳注册表键（同一 dsh 进程内只允许一份有效壳） */
 const LIVE_KEY = Symbol.for('touchstone.live');
 
+/**
+ * 后端 Python 依赖预检（2026-10-07 增）:
+ *  为什么——插件模式下 server.py 由本壳直接 spawn, 用户若只 `dsh plugin add` 而没跑
+ *  `pip install -r requirements.txt`, Python 侧在**导入期**就退出（server.py 的
+ *  `import sessparse` → sessparse.py 模块级 `import zstandard`; `import feishu`
+ *  → feishu.py 模块级 `import requests`）。此时面板只会看到 503 JSON、日志只有一行
+ *  traceback, 新用户无从下手 —— 而 npm 安装的预期是「装完就能用」。
+ *  做法——spawn 前用**同一个解释器**探一次: 硬依赖用真 import 验（将来新增模块级硬依赖
+ *  要同步这个列表）, requirements.txt 里其余发行名用 importlib.metadata 验, 只作告警。
+ *  铁律——预检自身任何异常/超时一律**放行**, 绝不因为预检挡住启动。
+ */
+const FATAL_PY_MODULES = ['zstandard', 'requests'];
+const PREFLIGHT_TIMEOUT_MS = 10000;
+
 /** 子进程句柄与解析出的后端端口（每 profile 一个插件实例, 模块级单例即可） */
 let child = null;
 let backendPort = 0;
 /** agent 驱动实例（模块级单例: 与 child 同生命周期, 热重载时整体替换） */
 let driver = null;
+/** 依赖缺失时的提示页 HTML: 非空 ⇒ proxy 用它代替 503 JSON（每次 apply 重算） */
+let backendHint = '';
+
+/**
+ * HTML 转义: 提示页里要嵌路径与命令原文（含用户配置的 pythonPath）
+ */
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"]/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+/**
+ * 读 requirements.txt 的发行名清单（注释/空行/选项行跳过, 剥掉版本与 extras 约束）。
+ * 读不到就返回空数组 —— 预检降级为「只验硬依赖」, 不影响启动。
+ */
+function readRequirementNames(repoDir) {
+  try {
+    return readFileSync(join(repoDir, 'requirements.txt'), 'utf8')
+      .split('\n')
+      .map((line) => line.split('#')[0].trim())
+      .filter((line) => line && !line.startsWith('-'))
+      .map((line) => line.split(/[<>=!~;[\s]/, 1)[0].trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 用 pythonPath 探一次运行依赖, 返回 { fatal, advisory, skipped }:
+ *   fatal    —— 缺失的硬依赖（会导致 server.py 导入期退出）
+ *   advisory —— requirements.txt 里缺失的可选依赖（只影响对应功能）
+ *   skipped  —— 预检本身没跑成（解释器缺失/超时/输出不可解析）⇒ 调用方照常启动
+ */
+function preflightDeps(pythonPath, repoDir, logger) {
+  const advisory = readRequirementNames(repoDir)
+    .filter((name) => !FATAL_PY_MODULES.includes(name.toLowerCase()));
+  const script = [
+    'import importlib, importlib.metadata as md, json, sys',
+    'fatal, rest = sys.argv[1].split(","), sys.argv[2].split(",")',
+    'out = {"fatal": [], "advisory": []}',
+    'for mod in fatal:',
+    '    try: importlib.import_module(mod)',
+    '    except Exception: out["fatal"].append(mod)',
+    'for dist in rest:',
+    '    if not dist: continue',
+    '    try: md.version(dist)',
+    '    except Exception: out["advisory"].append(dist)',
+    'print(json.dumps(out))',
+  ].join('\n');
+  const argv = ['-c', script, FATAL_PY_MODULES.join(','), advisory.join(',')];
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const skip = (why) => {
+      if (settled) return;   // error 与 close 可能都到, 只记一次
+      logger.warn(`touchstone: 依赖预检未完成（${why}）, 照常启动后端`);
+      settle({ fatal: [], advisory: [], skipped: true });
+    };
+    const proc = spawn(pythonPath, argv, { cwd: repoDir, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    const timer = setTimeout(() => {
+      skip(`超过 ${PREFLIGHT_TIMEOUT_MS}ms`);
+      try {
+        proc.kill('SIGKILL');
+      } catch { /* 已退出：忽略 */ }
+    }, PREFLIGHT_TIMEOUT_MS);
+    if (timer.unref) timer.unref();
+    proc.stdout.on('data', (buf) => { stdout += String(buf); });
+    proc.stderr.on('data', (buf) => logger.warn(`touchstone[py-preflight]: ${String(buf).trim()}`));
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      skip(err.message);
+    });
+    // 必须用 close 而不是 exit: exit 可能在 stdout 最后一个数据块**之前**触发,
+    // 那会把正常输出读成空串而静默放行（缺依赖的机器上照样拉起注定退出的后端）。
+    // close = 子进程已退出且 stdio 全部关闭, 此时 stdout 一定收全。
+    proc.on('close', () => {
+      clearTimeout(timer);
+      const text = stdout.trim().split('\n').pop() || '';
+      if (!text) {
+        // 解释器存在但什么都没输出（如非 Python 的解释器、启动即崩）⇒ 放行
+        skip('无输出');
+        return;
+      }
+      try {
+        const parsed = JSON.parse(text);
+        settle({
+          fatal: parsed.fatal || [], advisory: parsed.advisory || [], skipped: false,
+        });
+      } catch {
+        skip('输出不可解析');
+      }
+    });
+  });
+}
+
+/**
+ * 依赖缺失时的面板提示页（代替 503 JSON）: 缺什么 + 一条可直接复制的修复命令
+ * + 修完怎么让插件重来（停用再启用即会重跑 apply, 按 spec §8.8 不必重启 dsh web）。
+ */
+function renderDepHint(pythonPath, repoDir, missing) {
+  const cmd = `${pythonPath} -m pip install -r ${join(repoDir, 'requirements.txt')}`;
+  return '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
+    + '<title>Touchstone 后端未启动</title></head>'
+    + '<body style="margin:0;padding:2rem;font:14px/1.75 ui-monospace,Menlo,Consolas,monospace;'
+    + 'background:#14161a;color:#e6e6e6">'
+    + '<h2 style="color:#ffb454;margin:0 0 .9rem">Touchstone 后端未启动：Python 运行依赖缺失</h2>'
+    + `<p>缺少：<b style="color:#ff6b6b">${escapeHtml(missing.join(', '))}</b></p>`
+    + '<p>在本机执行一次（用下面这个解释器，也就是插件启动后端用的那个）：</p>'
+    + '<pre style="background:#0d0f12;border:1px solid #2a2f36;border-radius:6px;'
+    + `padding:.8rem 1rem;overflow:auto">${escapeHtml(cmd)}</pre>`
+    + '<p>装完把本插件<b>停用再启用</b>（Plugins 面板里那一行的开关）即会重试，不必重启 dsh web。</p>'
+    + '<p style="color:#8b949e">若这个解释器不对，可在 profile patch 的 touchstone 条目里配置 '
+    + '<code>pythonPath</code> 指向含这些依赖的解释器。</p>'
+    + '</body></html>';
+}
 
 /**
  * 反代 /touchstone/* 到本机 server.py 子进程: 剥掉 /touchstone 前缀后原样转发
@@ -60,6 +195,12 @@ let driver = null;
  */
 function proxy(req, res) {
   if (!backendPort) {
+    // 依赖缺失导致后端没起来时给可操作的提示页, 其余未就绪窗口仍回 503 JSON
+    if (backendHint) {
+      res.writeHead(503, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(backendHint);
+      return;
+    }
     res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' });
     res.end('{"error":"touchstone 后端尚未就绪, 稍后重试"}');
     return;
@@ -188,28 +329,46 @@ export async function apply(ctx, config = {}) {
     extraEnv.TS_AGENT_DRIVER_URL = driverUrl;
     extraEnv.TS_AGENT_DRIVER_TOKEN = myDriver.token;
   }
-  logger.info(`touchstone: 启动后端 ${config.pythonPath || 'python3'} ${args.join(' ')}`);
-  // stdio[0] 必须是 pipe 且**永不写入**：这是父死感知的 A 通道——dsh 进程无论
-  // 优雅退出还是被 kill -9，OS 都会关闭该管道写端，Python 侧 os.read(0) 收到
-  // EOF 即自主退出（实测父 kill -9 后 1.94s 退出）。改成 'ignore' 会让该通道失效。
-  const myChild = spawn(config.pythonPath || 'python3', args, {
-    cwd: repoDir,
-    env: { ...process.env, ...extraEnv },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  child = myChild;
-  myChild.stdout.on('data', (buf) => {
-    for (const line of String(buf).split('\n')) {
-      const m = line.match(/^TOUCHSTONE_LISTEN (\d+)/);
-      if (m) {
-        backendPort = Number(m[1]);
-        logger.info(`touchstone: 后端就绪 127.0.0.1:${backendPort}`);
-      }
+
+  // 依赖预检（2026-10-07）: 缺硬依赖时**不 spawn** —— spawn 了也必然在导入期退出,
+  // 日志里只留一行 traceback。改为把「缺什么 + 一条可复制的修复命令」同时送进
+  // 日志与面板（backendHint 由 proxy 渲染）, 让 npm 安装真正做到「装完就知道缺什么」。
+  const pythonPath = config.pythonPath || 'python3';
+  const deps = await preflightDeps(pythonPath, repoDir, logger);
+  let myChild = null;
+  if (deps.fatal.length) {
+    backendHint = renderDepHint(pythonPath, repoDir, deps.fatal);
+    logger.warn(`touchstone: 后端未启动 —— Python 运行依赖缺失: ${deps.fatal.join(', ')}`);
+    logger.warn(`touchstone: 修复: ${pythonPath} -m pip install -r ${join(repoDir, 'requirements.txt')}`);
+    logger.warn('touchstone: 装完把本插件停用再启用即会重试（不必重启 dsh web）');
+  } else {
+    backendHint = '';
+    if (deps.advisory.length) {
+      logger.warn(`touchstone: 可选依赖未安装（只影响对应功能, 不影响启动）: ${deps.advisory.join(', ')}`);
     }
-  });
-  myChild.stderr.on('data', (buf) => logger.warn(`touchstone[py]: ${String(buf).trim()}`));
-  myChild.on('exit', (code, sig) => logger.warn(`touchstone: 后端退出 code=${code} sig=${sig}`));
-  myChild.on('error', (err) => logger.warn(`touchstone: 后端拉起失败: ${err.message}`));
+    logger.info(`touchstone: 启动后端 ${pythonPath} ${args.join(' ')}`);
+    // stdio[0] 必须是 pipe 且**永不写入**：这是父死感知的 A 通道——dsh 进程无论
+    // 优雅退出还是被 kill -9，OS 都会关闭该管道写端，Python 侧 os.read(0) 收到
+    // EOF 即自主退出（实测父 kill -9 后 1.94s 退出）。改成 'ignore' 会让该通道失效。
+    myChild = spawn(pythonPath, args, {
+      cwd: repoDir,
+      env: { ...process.env, ...extraEnv },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    child = myChild;
+    myChild.stdout.on('data', (buf) => {
+      for (const line of String(buf).split('\n')) {
+        const m = line.match(/^TOUCHSTONE_LISTEN (\d+)/);
+        if (m) {
+          backendPort = Number(m[1]);
+          logger.info(`touchstone: 后端就绪 127.0.0.1:${backendPort}`);
+        }
+      }
+    });
+    myChild.stderr.on('data', (buf) => logger.warn(`touchstone[py]: ${String(buf).trim()}`));
+    myChild.on('exit', (code, sig) => logger.warn(`touchstone: 后端退出 code=${code} sig=${sig}`));
+    myChild.on('error', (err) => logger.warn(`touchstone: 后端拉起失败: ${err.message}`));
+  }
 
   let disposeRoute = null;
   if (!webServer) {
