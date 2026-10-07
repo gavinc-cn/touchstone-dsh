@@ -3003,14 +3003,82 @@ def _archive_unarchive_edge(card):
 # 最后活动，近似语义为「刚开始不久」）
 SYNC_BUSY_MTIME_S = 120
 
+# sync 卡标题/描述口径（2026-10-07）：标题与描述都取「主会话第一次用户提问」——
+# 首行进标题、其余进描述（与手工建卡的 QuickAdd「首行=标题、其余行=描述」同约定）。
+SYNC_TITLE_MAX = 200   # 标题上限（沿用建卡既有截断：insert_board_card 调用处 [:200]）
+SYNC_DESC_MAX = 2000   # 描述上限（防一次长提问把看板负载撑大）
+
+
+def _split_first_prompt(text):
+    """首问原文 → (标题, 描述)：首行=标题、其余行=描述。
+
+    - 首行超 SYNC_TITLE_MAX 的溢出部分并入描述开头（截断不丢内容）；
+    - 描述超 SYNC_DESC_MAX 截断并补省略号；
+    - 原文为空 → ('', '')（调用方自行兜底标题）。
+    """
+    text = (text or "").strip()
+    if not text:
+        return "", ""
+    lines = text.split("\n")
+    first = lines[0].strip()
+    rest = "\n".join(lines[1:]).strip()
+    if len(first) > SYNC_TITLE_MAX:
+        overflow = first[SYNC_TITLE_MAX:].strip()
+        rest = "\n".join(x for x in (overflow, rest) if x)
+        first = first[:SYNC_TITLE_MAX]
+    if len(rest) > SYNC_DESC_MAX:
+        rest = rest[:SYNC_DESC_MAX] + "…"
+    return first, rest
+
+
+def _sync_card_fields(item, sid):
+    """sync 卡**新建**时的 (标题, 描述)。
+
+    优先「主会话第一次用户提问」（首行→标题、其余→描述）；会话还没收到提问时
+    回落会话标题事件、再回落 sid 短码——建卡后首问一旦落盘，由
+    `_sync_card_follow` 在同步节拍里补齐（会话目录先建、提问后到的真实竞态，
+    见 board spec「sync 会话归类」）。
+    """
+    title, desc = _split_first_prompt(item.get("first_prompt") or "")
+    if not title:
+        title = ((item.get("title") or "") or sid[:12])[:SYNC_TITLE_MAX]
+    return title, desc
+
+
+def _sync_card_follow(card, item, sid):
+    """存量 sync 卡按首问补齐的字段 dict（无变化返回 {}，调用方直接 update）。
+
+    只认「主会话」：遍历到的会话不是卡的主会话（多会话并集里的子会话）时不动，
+    对齐需求「主会话的第一次用户提问」。
+    只在卡仍由平台自动写入时动：标题为空 / 等于 sid 短码 / 等于旧口径写入的会话
+    标题事件文本 —— 用户在卡面行内改过标题（title 三者都不等）就整张卡不再自动
+    覆盖；描述只在卡描述为空时填，用户写过的描述不覆盖。
+    """
+    if (card["session_id"] or sid) != sid:
+        return {}
+    title, desc = _split_first_prompt(item.get("first_prompt") or "")
+    if not title:
+        return {}
+    cur_title = (card["title"] or "").strip()
+    auto_titles = {"", sid[:12], ((item.get("title") or "") or "")[:SYNC_TITLE_MAX]}
+    if cur_title not in auto_titles:
+        return {}
+    out = {}
+    if cur_title != title:
+        out["title"] = title
+    if desc and not (card["description"] or "").strip():
+        out["description"] = desc
+    return out
+
 
 def sync_sessions(project):
     """自动同步项目 agent 会话到看板。返回新建卡 id 列表。
 
-    新建卡（origin='sync'）：标题=会话标题（兜底 sid 短码），绑定主会话，
-    busy→doing / 空闲→review；存量 sync 卡：dsh 族列映射移交调和器（事件驱动），
-    此处仅归档→done（人工拖到 todo/blocked/done 后不再自动搬）；会话存储被删的
-    sync 卡自动进 done。
+    新建卡（origin='sync'）：标题/描述=主会话第一次用户提问（首行→标题、其余→
+    描述；首问未落盘时回落会话标题、再回落 sid 短码，落盘后由本函数补齐），绑定
+    主会话，busy→doing / 空闲→review；存量 sync 卡：首问补齐标题/描述（用户改过
+    名的不动）+ dsh 族列映射移交调和器（事件驱动），此处仅归档→done（人工拖到
+    todo/blocked/done 后不再自动搬）；会话存储被删的 sync 卡自动进 done。
     sync 卡不占 runner 项目占用（外部会话平台控制不了，防堵死统一队列）。
     """
     if not settings_of(project["id"]).get("sync_sessions", True):
@@ -3041,22 +3109,27 @@ def sync_sessions(project):
         if c is None:
             busy = _sync_session_busy(project, raw_family, sid, it["mtime"])
         if c is None:
-            cid = db.insert_board_card(project["id"],
-                                       (it["title"] or sid[:12])[:200], "")
+            title, desc = _sync_card_fields(it, sid)
+            cid = db.insert_board_card(project["id"], title, desc)
             # 归档会话：不参与 busy 判定，直接落「已完成」
             col = "done" if archived else ("doing" if busy else "review")
             db.update_board_card(cid, session_id=sid, sessions=json.dumps([sid]),
                                  column_key=col, origin="sync")
             created.append(cid)
-        elif (c["origin"] == "sync" and c["column_key"] in ("doing", "review")
-              and not _has_active_run(c["id"])):
-            # dsh 的 busy/空闲 列映射已移交调和器（事件驱动，异常不搬列）；
-            # 此处保留归档→done（archived 来源=list_sessions 的宿主归档集文件读，
-            # 与调和器读驱动帧是两条独立通道：文件读不依赖驱动链路，重启/断连时
-            # 也能把归档会话归类，故不删——两者同向、幂等）
-            want = "done" if archived else None
-            if want and c["column_key"] != want:
-                db.update_board_card(c["id"], column_key=want)
+        elif c["origin"] == "sync":
+            # 首问补齐（2026-10-07）：标题/描述仍是平台自动写入形态时按首问覆盖
+            # （覆盖「建卡时提问还没到」的竞态与旧口径的存量卡；用户改过名不动）
+            fields = _sync_card_follow(c, it, sid)
+            if fields:
+                db.update_board_card(c["id"], **fields)
+            if c["column_key"] in ("doing", "review") and not _has_active_run(c["id"]):
+                # dsh 的 busy/空闲 列映射已移交调和器（事件驱动，异常不搬列）；
+                # 此处保留归档→done（archived 来源=list_sessions 的宿主归档集文件读，
+                # 与调和器读驱动帧是两条独立通道：文件读不依赖驱动链路，重启/断连时
+                # 也能把归档会话归类，故不删——两者同向、幂等）
+                want = "done" if archived else None
+                if want and c["column_key"] != want:
+                    db.update_board_card(c["id"], column_key=want)
     # 存储被删 → done（list 只回 50 条，不能用「不在列表」判定删除，必须逐卡查存在性）
     for c in cards:
         if c["origin"] != "sync" or c["column_key"] == "done" or _has_active_run(c["id"]):

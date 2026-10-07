@@ -193,33 +193,104 @@ def dsh_latest_session(cwd):
     return best
 
 
-_DSH_TITLE_CACHE = {}  # path -> (stamp, title)：标题查询走全量解压，按 stamp 缓存
+# path -> (stamp, title, first_prompt)：标题与首问同源同缓存——两者都要全量解压
+# 会话文件，一次扫描一起取（30s 同步节拍里同一文件只解压一次）
+_DSH_TITLE_CACHE = {}
 
 
-def dsh_title(sid):
-    """读取 dsh 会话标题（session/title 事件），无/不可读返回 ''。"""
-    path = _dsh_session_file(sid)
-    if not path:
+def _line_at(text, idx):
+    """取 text 中 idx 所在的那一行（不含换行符）。
+
+    find 定位 + 切一行，避免为找一处事件把上千行文本 split 成全量列表再 Python
+    逐行循环（会话动辄上千行，标题与首问都在文件开头附近）。
+    """
+    start = text.rfind("\n", 0, idx) + 1
+    end = text.find("\n", idx)
+    return text[start:] if end < 0 else text[start:end]
+
+
+def _dsh_scan_title(text):
+    """首个 session/title 事件的标题（无该事件 / 解析失败返回 ''）。"""
+    idx = text.find('"session/title"')
+    if idx < 0:
         return ""
+    d = _obj(_line_at(text, idx))
+    if d is None or d.get("type") != "session/title":
+        return ""
+    return str((d.get("data") or {}).get("title") or "")
+
+
+def _dsh_scan_prompt(text):
+    """主会话第一条真实用户提问的原文（可多行；无返回 ''）。
+
+    判定与会话窗口的 user entry 同口径：`user/message` 且 `source.kind == "user"`
+    （系统注入的 plugin / agent-instructions 消息被过滤）；文本块按换行拼接、
+    **原样保留内部换行**——调用方（看板同步卡）再按「首行进标题、其余进描述」切。
+    只有图片没有文本的提问返回 `[图片]`（沿用会话窗的图片占位口径）。
+
+    「第一条」按**文件顺序**取（会话窗的展示顺序；真机 20 个会话核对：文件序首条
+    与 seq 最小那条一致）。
+    """
+    pos = 0
+    while True:
+        idx = text.find('"user/message"', pos)
+        if idx < 0:
+            return ""
+        pos = idx + 1
+        d = _obj(_line_at(text, idx))
+        if d is None or d.get("type") != "user/message":
+            continue            # 别的行里出现同名字符串（工具输出等）：跳过
+        data = d.get("data") or {}
+        if (data.get("source") or {}).get("kind", "") != "user":
+            continue            # 系统注入消息：不是用户提问
+        blocks = [b for b in (data.get("content") or []) if isinstance(b, dict)]
+        texts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
+        body = "\n".join(t for t in texts if t).strip()
+        if body:
+            return body
+        if any(b.get("type") == "image" for b in blocks):
+            return "[图片]"
+        continue                # 既无文本也无图片：不是有效提问
+
+
+def _dsh_meta(path):
+    """一次解压取出 (会话标题, 主会话首问原文)，按文件 stamp 缓存。
+
+    - 会话标题 = **首个** `session/title` 事件的 title。dsh 对同一会话会写多枚标题
+      事件（先 fallback 截断句、再由 LLM 标题覆盖、用户显式改名再追加），本平台
+      此处沿用既有「首个」口径（会话窗 / 任务标题同源），与 dsh GUI 的 last-wins
+      当前标题不一致——差异与取舍见 doc_ai/spec/board/看板增强.md「sync 会话归类」。
+    - 首问 = 见 `_dsh_scan_prompt`，是看板 sync 卡标题/描述的数据源。
+    """
     try:
         st = os.stat(path)
         stamp = (st.st_mtime_ns, st.st_size)
     except OSError:
-        return ""
+        return "", ""
     hit = _DSH_TITLE_CACHE.get(path)
     if hit and hit[0] == stamp:
-        return hit[1]
-    title = ""
-    for line in _dsh_decompressed(path).split("\n"):
-        if '"session/title"' not in line:
-            continue
-        d = _obj(line)
-        if d is None:
-            continue
-        title = str((d.get("data") or {}).get("title") or "")
-        break
-    _DSH_TITLE_CACHE[path] = (stamp, title)
-    return title
+        return hit[1], hit[2]
+    text = _dsh_decompressed(path)
+    title = _dsh_scan_title(text)
+    prompt = _dsh_scan_prompt(text)
+    _DSH_TITLE_CACHE[path] = (stamp, title, prompt)
+    return title, prompt
+
+
+def dsh_title(sid):
+    """读取 dsh 会话标题（首个 session/title 事件），无/不可读返回 ''。"""
+    path = _dsh_session_file(sid)
+    return _dsh_meta(path)[0] if path else ""
+
+
+def dsh_first_prompt(sid):
+    """读取主会话第一条真实用户提问的原文（可多行），无/不可读返回 ''。
+
+    看板 sync 卡的标题/描述数据源（见 board.sync_sessions）：会话还没收到提问时
+    返回 ''，调用方按会话标题 / sid 短码兜底，首问落盘后由同步节拍补齐。
+    """
+    path = _dsh_session_file(sid)
+    return _dsh_meta(path)[1] if path else ""
 
 
 def _parse_dsh(path):
@@ -523,14 +594,20 @@ def _list_dsh(cwd):
         except OSError:
             continue
         sid = os.path.basename(sdir)
-        out.append({"sid": sid, "title": dsh_title(sid), "mtime": mtime,
-                    "archived": sid in archived})
+        # 一次解压同时取标题与首问（同 stamp 缓存）：看板 sync 卡建卡/补齐标题都要
+        # 首问，逐会话各调一次读口会重复解压同一个文件（见 _dsh_meta）
+        title, first_prompt = _dsh_meta(zfile)
+        out.append({"sid": sid, "title": title, "first_prompt": first_prompt,
+                    "mtime": mtime, "archived": sid in archived})
     return out
 
 
 def list_sessions(family, cwd):
-    """按工作区枚举 dsh 会话 [{sid, title, mtime秒, archived}]，mtime 降序、
-    上限 LIST_SESSIONS_LIMIT。
+    """按工作区枚举 dsh 会话 [{sid, title, first_prompt, mtime秒, archived}]，
+    mtime 降序、上限 LIST_SESSIONS_LIMIT。
+
+    `title` = 首个会话标题事件，`first_prompt` = 主会话第一条真实用户提问原文
+    （看板 sync 卡取它做「首行=标题、其余=描述」）。
 
     供看板「绑定已有会话」下拉与「自动同步」共用；`archived` 读宿主归档集
     （`<dsh home>/storages/workspace.json` 的 `global.archivedSessionIds`，读不到
