@@ -1,6 +1,7 @@
 // 任务 session 对话视图(复刻 kimi code web 的会话页)
 // - 展示 agent 会话原始对话(用户/助手/思考/工具调用与结果/图片), SSE 实时增量更新
 // - 支持 main/子 agent 切换、token 用量与耗时汇总、窗口内直接向会话续发消息
+// - 头部信息行右侧「在 dsh 界面打开当前会话」入口(仅 dsh 插件面板形态渲染, 见 lib/dshHost)
 // - 三种形态: SessionModal(任务列表弹窗) / BugsTab 修复页(常驻内嵌) / 看板会话查看(board 模式)
 // - board 模式({projectId, sid, cid}): 不看任务看卡片会话, 无 SSE 走 2s 轮询增量,
 //   输入区按 meta.capabilities 门控(评论投递主会话), 图片因 media 端点按任务寻址而降级为占位
@@ -17,7 +18,10 @@ import { effortChoices, effortText } from '../utils/sessionEffort'
 import FilePreview from './FilePreview'
 import { Button } from '@/components/ui/button'
 import { findSlashToken } from '../utils/slashToken'
-import { List, Wrench, CircleX, Check, Zap, TriangleAlert, Copy, Undo2, ChevronDown, ChevronUp } from 'lucide-react'
+import { useDshHostCaps } from '../hooks/useDshHost'
+import { openSessionInDsh } from '../lib/dshHost'
+import { List, Wrench, CircleX, Check, Zap, TriangleAlert, Copy, Undo2, ChevronDown, ChevronUp,
+         ExternalLink } from 'lucide-react'
 
 /** token 数 → 紧凑文本(1234 → 1.2k) */
 function fmtTokens(n) {
@@ -713,6 +717,12 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   const taskRunning = ['running', 'queued'].includes(task?.status) || boardRunning
   const chatRunning = !!chatState?.running
   const caps = meta?.capabilities || {}
+  // dsh 宿主能力位（仅 dsh 插件面板形态非空，独立 web 形态恒 null）：决定头部信息行右侧
+  // 「在 dsh 界面打开当前会话」按钮的显隐（能力位缺席=按钮不渲染，不是点了没反应）
+  const dshCaps = useDshHostCaps()
+  // 可打开的会话 id：board 模式取卡片当前会话 sid（弹窗内切会话/fork 后即跟随新值），
+  // 任务模式取 meta 推送的 session_id（会话尚未生成时为空 → 按钮置灰）
+  const dshSid = boardSid || meta?.session_id || ''
   // 2026-09-10：会话消息统一进平台队列——项目忙/任务运行中不再锁输入（发出即排队，
   // 项目空闲后按入队顺序执行），只有会话不可用(meta.found=false)才锁输入；
   // dsh 会话自身在跑时消息入宿主 inbox 排队（caps.queue；平台队列行可「立即注入」）
@@ -1455,6 +1465,18 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
           </span>
         )}
         <span style={{ flex: 1 }}></span>
+        {/* 在 dsh 界面打开当前会话（仅 dsh 插件面板形态渲染；独立 web 形态宿主桥不应答
+            caps，按钮不存在）：宿主半收请求后调 uiWorkspace.openSession 在 dsh 主界面
+            显示该会话，同时关掉 Touchstone 全屏面板，与看板卡片上那枚 ⧉ 同一条桥
+            （契约见 spec/dsh_plugin/dsh插件形态.md §13） */}
+        {!!dshCaps?.openSession && (
+          <Button size="sm" variant="ghost" className="sess-open-dsh"
+            title={dshSid ? '在 dsh 界面打开当前会话' : '尚无会话'}
+            disabled={!dshSid}
+            onClick={() => openSessionInDsh(dshSid)}>
+            <ExternalLink className="h-3.5 w-3.5" />
+          </Button>
+        )}
         {/* 通过：把当前任务（卡片）移入「已完成」列（看板同语义——卡片在跑会先停会话，
             标题加 -- 前缀；仅在 正在开发/待审核 列显示） */}
         {board && ['doing', 'review'].includes(board.column) && (

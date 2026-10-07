@@ -1130,6 +1130,9 @@ body.tabbar-dragging, body.tabbar-dragging * { cursor: grabbing !important; user
 .sess-ctl-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 会话窗头部「通过」按钮（通过=卡片移入已完成列） */
 .sess-pass { height: 24px; padding: 0 8px; font-size: calc(11.5px * var(--fs)); gap: 4px; }
+/* 会话窗头部「在 dsh 界面打开当前会话」图标按钮（仅 dsh 插件面板形态渲染；
+   与同行「通过」同高，纯图标故左右 padding 收窄） */
+.sess-open-dsh { height: 24px; padding: 0 6px; }
 /* 会话弹窗标题行「队列」徽标（该会话所属任务/卡片在统一队列中的态；P6 起
    文案/色板直读服务端 queue_state 七枚举（v2a T4 加 starting；映射唯一出处
    utils/queueBadge.js），
