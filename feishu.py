@@ -83,22 +83,33 @@ def notify_events(project_id):
     「启用推送」与全部事件取消勾选后仍持续收到推送。
 
     口径（先到先算）：
+    - **用户级总控 `push_enabled`**（设置页「飞书推送总控」，2026-10-10 新增）：
+      关 ⇒ 返回空集，**一票否决**——项目行开着也照样全通道静默。它必须先算：
+      旧用户级 `enabled` 只在下面的「无绑定行回落」分支参与判定，项目有绑定行时
+      完全不看它，故用户关掉旧开关仍会收到作答卡（实障观感「设置了不生效」）。
+      缺键按开处理（`.get(..., True)`）⇒ 存量配置升级后行为不变，零迁移。
     - 有绑定行：`enabled=0` ⇒ **该项目全通道静默**（显式关闭，不回落用户配置）；
       `enabled=1` ⇒ 取行内勾选的事件（可为空集＝都不推）。
     - 无绑定行：回落项目所有者的默认集 `FEISHU_DEFAULT_EVENTS`，并受其用户级
-      总开关 `enabled` 约束（关 ⇒ 空集）。项目被删（取不到 owner）时按 user_id=0
+      旧开关 `enabled` 约束（关 ⇒ 空集）。项目被删（取不到 owner）时按 user_id=0
       的配置判定，与 `hook_of` 同口径。
+
+    「按类别」开关不在本函数里另开用户级字段：项目行的 `events` 勾选即可分类
+    （作答卡片=`blocked_interaction`），且群与单聊卡片共用同一份。
 
     返回 set[str]；空集 = 该项目不推任何事件。
     """
     row = db.get_feishu_hook(project_id)
+    proj = db.get_project(project_id)
+    owner_id = proj["user_id"] if proj else 0
+    cfg = user_config(owner_id)
+    if not cfg.get("push_enabled", True):   # 用户级总控：一票否决（先于项目行判定）
+        return set()
     if row is not None:
         if not row["enabled"]:
             return set()
         return {e for e in FEISHU_EVENTS if e in (row["events"] or "")}
-    proj = db.get_project(project_id)
-    owner_id = proj["user_id"] if proj else 0
-    if not user_config(owner_id).get("enabled", True):
+    if not cfg.get("enabled", True):
         return set()
     return set(FEISHU_DEFAULT_EVENTS)
 
@@ -3146,6 +3157,10 @@ def save_user_config(user_id, body):
     填错只能翻日志；`verify` 随响应回给页面做即时提示（凭据不全时为 None，零请求）。
     返回 {"inbound_started": bool, "verify": {...}|None}。"""
     cfg = user_config(user_id)
+    # 推送总控（2026-10-10）：与旧 `enabled` 是两个独立开关——旧键只管「无绑定行回落
+    # 默认 webhook」与入站，本键一票否决全部自动推送。缺省=不改（不在 body 里就不动）。
+    if "push_enabled" in body:
+        cfg["push_enabled"] = 1 if body["push_enabled"] else 0
     if "enabled" in body:
         cfg["enabled"] = 1 if body["enabled"] else 0
     for key in ("default_webhook", "default_secret", "base_url",

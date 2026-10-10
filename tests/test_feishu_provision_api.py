@@ -62,3 +62,23 @@ def test_provision_status_reports_configured_app(isolated_server):
     assert code == 200 and d["verify"] is None
     code, st = isolated_server.admin.json("/api/me/feishu/provision")
     assert code == 200 and st["state"] == "idle" and st["app_id"] == "cli_cfg_only"
+
+
+def test_cfg_master_switch_roundtrip(isolated_server):
+    """推送总控 `push_enabled` 的读写契约（2026-10-10）：
+
+    ① 新用户没配过 ⇒ GET 回 true（存量配置零迁移，前端据此渲染勾选态）；
+    ② PATCH false ⇒ 落库为 0 且 GET 回 false；
+    ③ PATCH true ⇒ 回到 true。"""
+    code, d = isolated_server.admin.json("/api/me/feishu-cfg")
+    assert code == 200 and d["push_enabled"] is True
+    code, d = isolated_server.admin.json("/api/me/feishu-cfg", "PATCH",
+                                        {"push_enabled": False})
+    assert code == 200 and d["ok"] is True
+    code, d = isolated_server.admin.json("/api/me/feishu-cfg")
+    assert code == 200 and d["push_enabled"] is False
+    code, d = isolated_server.admin.json("/api/me/feishu-cfg", "PATCH",
+                                        {"push_enabled": True})
+    assert code == 200
+    code, d = isolated_server.admin.json("/api/me/feishu-cfg")
+    assert code == 200 and d["push_enabled"] is True

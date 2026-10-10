@@ -1733,11 +1733,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_me_feishu_cfg_get(self):
         """当前用户飞书配置读取（所有用户可访问，各看各的）：
-        webhook 打码、secret 只回布尔 + 本人入站长连接状态。"""
+        webhook 打码、secret 只回布尔 + 本人入站长连接状态。
+
+        `push_enabled` = 推送总控（2026-10-10 新增，默认 true）——与旧 `enabled`
+        （只管「未单独设置的项目按默认事件推送」那条回落腿 + 入站连接）是两个开关，
+        前端把两者分别渲染并各自加文案说明。"""
         user = self._current_user()
         cfg = feishu.user_config(user["id"])
         self._respond(200, json.dumps({
             "enabled": bool(cfg.get("enabled", True)),
+            # 缺键按开回显，与 feishu.notify_events 的判定口径一致（存量配置零迁移）
+            "push_enabled": bool(cfg.get("push_enabled", True)),
             "default_webhook": self._mask_webhook(cfg.get("default_webhook", "")),
             "has_default_secret": bool(cfg.get("default_secret")),
             "base_url": cfg.get("base_url", ""),

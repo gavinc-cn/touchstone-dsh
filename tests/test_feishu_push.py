@@ -139,6 +139,69 @@ def test_dm_card_respects_project_gate(monkeypatch):
     assert len(sent) == 1                                    # 无行 + 总开关关 ⇒ 不发
 
 
+def test_user_master_switch_silences_all_channels(monkeypatch):
+    """用户级总控 `push_enabled`（设置页飞书区，2026-10-10）：关 ⇒ 一票否决。
+
+    既有用户级 `enabled` 只在「项目**无**绑定行 ⇒ 回落默认 webhook」分支生效
+    （feishu.user_config 的旧语义，见 `test_notify_events_gate_levels` 末两行）；
+    项目有绑定行时它完全不参与判定 ⇒ 用户在设置页关掉「总开关」仍会持续收到
+    飞书单聊作答卡片（实障观感「设置了不生效」）。本用例钉住新总控的口径：
+    取到项目 owner 后**先**看 `push_enabled`，为假直接空集，不再看任何项目行。"""
+    monkeypatch.setattr(db, "get_project", lambda pid: _proj())
+    # 项目行开着、三个事件全勾 ⇒ 唯一变量就是用户级总控
+    monkeypatch.setattr(db, "get_feishu_hook", lambda pid: {
+        "project_id": pid, "webhook_url": "https://h", "webhook_secret": "",
+        "events": "blocked_interaction,task_failed,card_review", "enabled": 1})
+    monkeypatch.setattr(feishu, "user_config", lambda uid: {"push_enabled": 0})
+    assert feishu.notify_events(9) == set()               # 关 ⇒ 空集（一票否决）
+    assert feishu.hook_of(9) is None                      # 群 webhook 一并停（同一闸门）
+    monkeypatch.setattr(feishu, "user_config", lambda uid: {"push_enabled": False})
+    assert feishu.notify_events(9) == set()               # 布尔 False 同样算关
+    monkeypatch.setattr(feishu, "user_config", lambda uid: {"push_enabled": True})
+    assert feishu.notify_events(9) == {"blocked_interaction", "task_failed",
+                                       "card_review"}     # 开 ⇒ 按项目勾选，不额外收窄
+
+
+def test_master_switch_off_blocks_dm_card(monkeypatch):
+    """总控关 ⇒ 飞书单聊作答卡也不发（`_dm_interaction_card` 与群 webhook 同一闸门）。
+
+    作答卡是用户实际收到的那条通道（本项目群 webhook URL 为空时群通道本就不出声），
+    总控必须能关掉它——旧 `enabled` 管不到这条腿。"""
+    monkeypatch.setattr(db, "get_project", lambda pid: _proj())
+    monkeypatch.setattr(db, "get_feishu_binding_by_user",
+                        lambda uid: {"open_id": "ou_x", "user_id": uid})
+    monkeypatch.setattr(feishu, "app_config",
+                        lambda uid: {"app_id": "cli_x", "app_secret": "sec"})
+    sent = []
+    monkeypatch.setattr(feishu, "rest_send_card",
+                        lambda oid, card, cfg: sent.append(card))
+    monkeypatch.setattr(db, "get_feishu_hook", lambda pid: {
+        "project_id": pid, "webhook_url": "", "webhook_secret": "",
+        "events": "blocked_interaction", "enabled": 1})
+    card = {"id": 7, "title": "探针卡"}
+    inter = {"kind": "question", "question": "继续吗", "options": [],
+             "answerable": True, "qid": "call_1"}
+    monkeypatch.setattr(feishu, "user_config", lambda uid: {"push_enabled": 0})
+    feishu.card_blocked(9, card, inter)
+    assert sent == []                                     # 总控关 ⇒ 不发作答卡
+    monkeypatch.setattr(feishu, "user_config", lambda uid: {"push_enabled": 1})
+    feishu.card_blocked(9, card, inter)
+    assert len(sent) == 1                                 # 总控开 + 项目勾选 ⇒ 照发
+
+
+def test_master_switch_defaults_on_for_legacy_configs(monkeypatch):
+    """存量用户配置**没有** `push_enabled` 键 ⇒ 按开处理，升级后行为逐字不变。
+
+    这是零迁移的前提：旧配置只写了 `enabled`（旧语义），加总控不能把老用户静默停掉。"""
+    monkeypatch.setattr(db, "get_project", lambda pid: _proj())
+    monkeypatch.setattr(db, "get_feishu_hook", lambda pid: {
+        "project_id": pid, "webhook_url": "https://h", "webhook_secret": "",
+        "events": "task_failed", "enabled": 1})
+    for legacy in ({}, {"enabled": 0}, {"enabled": 1, "app_id": "cli_x"}):
+        monkeypatch.setattr(feishu, "user_config", lambda uid, _c=legacy: dict(_c))
+        assert feishu.notify_events(9) == {"task_failed"}
+
+
 def test_push_event_filters_and_enqueues(monkeypatch):
     monkeypatch.setattr(feishu, "user_config", lambda uid: {})
     monkeypatch.setattr(db, "get_project", lambda pid: _proj())

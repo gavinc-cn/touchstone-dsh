@@ -495,6 +495,24 @@ def test_save_user_config_skips_verify_without_creds(monkeypatch):
     assert out == {"inbound_started": False, "verify": None} and called == []
 
 
+def test_save_user_config_keeps_master_switch_independent(monkeypatch):
+    """用户级总控 `push_enabled`（2026-10-10）：缺省=不改，且与旧 `enabled` 互不牵连。
+
+    设置页只改总控时 body 只带 `push_enabled` ⇒ 旧 `enabled` 的值必须原样保留；
+    反之只保存其他字段时也不能把总控静默改回。"""
+    store = {1: {"enabled": 0, "push_enabled": 1, "app_id": ""}}
+    monkeypatch.setattr(db, "get_feishu_user_cfg", lambda uid: dict(store.get(uid, {})))
+    monkeypatch.setattr(db, "set_feishu_user_cfg",
+                        lambda uid, cfg: store.update({uid: dict(cfg)}))
+    monkeypatch.setattr(feishu, "start_inbound_for", lambda uid: False)
+    assert feishu.save_user_config(1, {"push_enabled": False})["verify"] is None
+    assert store[1]["push_enabled"] == 0 and store[1]["enabled"] == 0   # 旧键原样
+    feishu.save_user_config(1, {"base_url": "http://x"})                # 缺省=不改
+    assert store[1]["push_enabled"] == 0 and store[1]["base_url"] == "http://x"
+    feishu.save_user_config(1, {"push_enabled": True})
+    assert store[1]["push_enabled"] == 1
+
+
 # ---------- Task 7：CLI 子命令 ----------
 
 def _argv(monkeypatch, *args):

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { meApi, projectApi } from '../../api'
 import { toast } from '../../utils/toast'
 import { applyResultText, hookSaveRequest } from '../../utils/feishuHook'
+import { buildCfgBody, withPushEnabled, pushStatusText } from '../../utils/feishuPush'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -46,11 +47,8 @@ export default function FeishuPanel() {
   async function save() {
     setBusy(true)
     try {
-      const body = {
-        enabled: !!cfg?.enabled,
-        base_url: (cfg?.base_url || '').trim(),
-        app_id: (cfg?.app_id || '').trim(),
-      }
+      // 基础字段由 utils/feishuPush 统一构造（含推送总控 push_enabled）
+      const body = buildCfgBody(cfg)
       // webhook/secret 未输入则不下发该键（后端语义：缺省=保持不变，空串=清除）
       if (input.webhook_url.trim()) body.default_webhook = input.webhook_url.trim()
       if (input.secret) body.default_secret = input.secret
@@ -125,11 +123,38 @@ export default function FeishuPanel() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4 px-5">
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={!!cfg?.enabled}
-              onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} />
-            启用飞书推送（总开关：未单独设置的项目按默认事件推送，关闭后这些项目的推送全停）
-          </label>
+          {/* 推送总控（2026-10-10）：用户级一票否决——关掉后飞书不再收到**自动推送**
+              （作答卡片/审批卡、群 webhook 事件）；用户主动询问、查询与对话答复不受影响。
+              按下后需点「保存配置」生效，与卡内其他字段同一写口。 */}
+          <div className="space-y-1.5">
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-0.5" checked={isPushEnabled(cfg)}
+                onChange={(e) => setCfg(withPushEnabled(cfg, e.target.checked))} />
+              <span>
+                推送总控：允许飞书接收自动推送
+                <span className="text-xs text-muted-foreground">
+                  （关掉后飞书不再收到自动推送；你在飞书发指令的查询、会话对话的答复不受影响）
+                </span>
+              </span>
+            </label>
+            <div className={'text-xs ' + (isPushEnabled(cfg)
+              ? 'text-muted-foreground' : 'text-[var(--star-text)]')}>
+              {pushStatusText(cfg)}
+            </div>
+          </div>
+          {/* 旧开关：语义比名称窄得多（只管未单独设置的项目回落默认 webhook 那条腿），
+              文案必须写清，否则用户会把它当总控——2026-10-10 实障的观感来源 */}
+          <div className="space-y-1">
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={!!cfg?.enabled}
+                onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} />
+              启用飞书推送（默认 webhook 回落）
+            </label>
+            <div className="hint" style={{ textAlign: 'left', margin: 0 }}>
+              只管「未单独设置推送绑定」的项目：它们回落下方默认 Webhook 并按默认事件推送；
+              已单独设置推送绑定的项目由那张卡里的开关说了算，不受本项影响。
+            </div>
+          </div>
           <div className="text-xs leading-relaxed text-muted-foreground">
             每个用户配置自己的飞书机器人：入站长连接按用户各自拉起，推送未绑定项目时
             回落项目所有者的默认 webhook。凭据（App Secret/签名密钥）仅存服务端，不回显。
