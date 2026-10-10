@@ -19,6 +19,8 @@ import FilePreview from './FilePreview'
 import MergeHandoffDialog from './MergeHandoffDialog'
 import { Button } from '@/components/ui/button'
 import { findSlashToken } from '../utils/slashToken'
+// 提问索引侧栏的纯派生（用户提问 + agent 问答混排 / 回答文本解析 / 占位与悬浮文案）
+import { buildQuestionIndex, questionLabel, questionTitle } from '../utils/sessionQa'
 import { useDshHostCaps } from '../hooks/useDshHost'
 import { openSessionInDsh } from '../lib/dshHost'
 import { List, Wrench, CircleX, Check, Zap, TriangleAlert, Copy, Undo2, ChevronDown, ChevronUp,
@@ -78,7 +80,7 @@ function rowAt(off, y) {
 }
 
 /** 单条消息渲染; entries 为 append-only 不可变数据, memo 后历史消息不随新消息重渲染(避免 O(n²) renderMd) */
-const Entry = memo(function Entry({ e, taskId, agent, pid, boardPid, boardSid, flash,
+const Entry = memo(function Entry({ e, taskId, agent, pid, boardPid, boardSid, flash, expand,
                                     rwState, copied,
                                     onCopy, onRewind, onOpenPath }) {
   // 回答正文里的路径链接（.md-path）：点击开文件预览弹窗。内容由
@@ -90,6 +92,11 @@ const Entry = memo(function Entry({ e, taskId, agent, pid, boardPid, boardSid, f
     ev.preventDefault()
     onOpenPath(p)
   }, [onOpenPath])
+  // 跳转展开（提问索引点 agent 问答项）：把该条的 details 打开——否则落点只是一行
+  // 折叠的 `ask_user_question` 标题，看不到问答内容。非受控写法（直接写 DOM open），
+  // details 保持浏览器原生开合行为；只在 false→true 时写一次，用户手动折叠不被打扰
+  const detRef = useRef(null)
+  useEffect(() => { if (expand && detRef.current) detRef.current.open = true }, [expand])
   // 外层包 .sess-entry: data-seq 供提问索引跳转定位; flash 触发背景闪烁高亮
   const body = (() => {
   if (e.kind === 'user') {
@@ -163,7 +170,7 @@ const Entry = memo(function Entry({ e, taskId, agent, pid, boardPid, boardSid, f
   }
   if (e.kind === 'tool_call') {
     return (
-      <details className="sess-msg tool">
+      <details className="sess-msg tool" ref={detRef}>
         <summary><Wrench className="inline h-3 w-3" /> {e.name || '工具调用'}</summary>
         <pre>{prettyArgs(e.args)}</pre>
       </details>
@@ -171,7 +178,7 @@ const Entry = memo(function Entry({ e, taskId, agent, pid, boardPid, boardSid, f
   }
   if (e.kind === 'tool_result') {
     return (
-      <details className={'sess-msg tool result' + (e.is_error ? ' err' : '')}>
+      <details className={'sess-msg tool result' + (e.is_error ? ' err' : '')} ref={detRef}>
         <summary>
           {e.is_error ? '错误' : '结果'}{e.name ? ` · ${e.name}` : ''}
           （{String(e.text || '').trim().length} 字符{e.truncated ? ' · 已截断' : ''}）
@@ -225,7 +232,7 @@ const Entry = memo(function Entry({ e, taskId, agent, pid, boardPid, boardSid, f
      (贴底分支保持 state 引用) —— 否则用户小幅上滑会被任何一次重渲染拉回底部
    - props 全传原始值/稳定引用: 击键时(entries 引用不变)整棵子树被 memo 跳过 */
 const MessageList = memo(function MessageList({ entries, metaNull, found, reason,
-    taskId, agent, pid, boardPid, boardSid, flashSeq, chatRunning, exitCode, boxRef,
+    taskId, agent, pid, boardPid, boardSid, flashSeq, expandSeqs, chatRunning, exitCode, boxRef,
     atBottomRef, onScroll,
     jumpSeq, onJumpHandled, rwEnabled, rwBusy, rewindingMid, copiedSeq, onCopy, onRewind,
     onSwitchSession,
@@ -239,6 +246,8 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
   const stickRef = useRef(true)             // 贴底模式(新消息跟随)
   const rafRef = useRef(0)
   const jumpRef = useRef(null)              // 待定位的跳转 seq(渲染后定位)
+  const holdRafRef = useRef(0)              // 跳转落点连钉帧(rAF 句柄)
+  const pinRef = useRef(false)              // 连钉窗口内: 跳过 deltaAbove 补偿(防把落点推走)
   // 上次提交时的滚动容器尺寸 {sh 内容高, ch 视口高}: 贴底 snap 的判据(有变化才跟随)
   const boxViewRef = useRef(null)
 
@@ -279,7 +288,7 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
       })
     })
   }, [boxRef, onScroll, n, off])
-  useEffect(() => () => cancelAnimationFrame(rafRef.current), [])
+  useEffect(() => () => { cancelAnimationFrame(rafRef.current); cancelAnimationFrame(holdRafRef.current) }, [])
 
   // 新消息 / 会话切换: 贴底时窗口向右增长跟随; 非贴底保持阅读位置(仅尾随到新长度)
   // n=0 = 会话切换/重置: 清掉高度缓存与尺寸快照(不同会话 seq 可能复用, 残留会算错
@@ -347,7 +356,7 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
         if (rs + i < firstVis) deltaAbove += hh - (old ?? EST_ROW_H)
       }
     }
-    if (deltaAbove && !stickRef.current) box.scrollTop += deltaAbove
+    if (deltaAbove && !stickRef.current && !pinRef.current) box.scrollTop += deltaAbove
     // 贴底 snap: 仅当"确实有新东西要跟"时执行 —— 内容变高(新消息/展开/图片加载)或
     // 视口变矮(composer 长高、弹窗变矮)。此前是无条件写 scrollTop=scrollHeight,
     // 任何一次无关重渲染(滚动自身、chat 态翻转、RO tick……)都会把用户刚滚出的位置
@@ -374,6 +383,35 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
       if (el) {
         el.scrollIntoView({ block: 'start' })
         jumpRef.current = null
+        // 落点连钉：跳转当帧窗口内的高度缓存刚从「估算值」换成「实测值」，紧随其后的
+        // deltaAbove 补偿（长会话实测可把落点推出视口数百 px）与 details 展开触发的
+        // ResizeObserver 记账还会再动几次滚动位置。故在随后若干帧里：①补偿暂停
+        // （pinRef）；②每帧把目标重新钉回顶部，连续 6 帧（≈100ms）都在顶部才收手
+        // （上限 20 帧，防记账迟迟不收敛时空转）。
+        // 一次性窗口，不常驻监听；用户在此期间的滚动会被这几帧拉回，窗口 ≤330ms 可接受
+        cancelAnimationFrame(holdRafRef.current)
+        pinRef.current = true
+        let left = 20
+        let okN = 0
+        const repin = () => {
+          const b = boxRef.current
+          const e2 = b && b.querySelector(`[data-seq="${js}"]`)
+          if (!e2 || !b) {
+            pinRef.current = false
+            holdRafRef.current = 0
+            return
+          }
+          const d = Math.round(e2.getBoundingClientRect().top - b.getBoundingClientRect().top)
+          okN = d === 0 ? okN + 1 : 0
+          if (d !== 0) e2.scrollIntoView({ block: 'start' })
+          if (--left > 0 && okN < 6) {
+            holdRafRef.current = requestAnimationFrame(repin)
+          } else {
+            pinRef.current = false
+            holdRafRef.current = 0
+          }
+        }
+        holdRafRef.current = requestAnimationFrame(repin)
         onJumpHandled(js)
       }
     }
@@ -398,7 +436,7 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
               : (rewindingMid === e.mid ? 'running' : (rwBusy ? 'busy' : 'on'))
             return <Entry key={e.seq} e={e} taskId={taskId} agent={agent}
               pid={pid} boardPid={boardPid} boardSid={boardSid}
-              flash={flashSeq === e.seq} rwState={rw}
+              flash={flashSeq === e.seq} expand={!!expandSeqs && expandSeqs.has(e.seq)} rwState={rw}
               copied={copiedSeq === e.seq} onCopy={onCopy} onRewind={onRewind}
               onOpenPath={onOpenPath} />
           })}
@@ -415,7 +453,9 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
   )
 })
 
-/* 提问索引侧边栏: 同上抽 memo,  questions 引用(useMemo 依赖 entries)不变时整棵跳过 */
+/* 提问索引侧边栏: 同上抽 memo,  questions 引用(useMemo 依赖 entries)不变时整棵跳过。
+   2026-10-09 起列表=用户提问 + agent 问答(ask_user_question)混排：后者以 🤔 前缀与
+   .ask 配色区分，文字取用户回答（未答/被中断为占位文案），未答的整条压暗 */
 const QuestionBar = memo(function QuestionBar({ withQBar, qbarOpen, questions, flashSeq, onJump }) {
   if (!withQBar || !qbarOpen) return null
   return (
@@ -423,16 +463,24 @@ const QuestionBar = memo(function QuestionBar({ withQBar, qbarOpen, questions, f
       <div className="sess-qbar-t">提问索引 <span className="sess-qbar-n">{questions.length}</span></div>
       <div className="sess-qbar-list">
         {questions.length === 0 && <div className="sess-qbar-empty">暂无提问</div>}
-        {questions.map((q, i) => (
-          <button key={q.seq} type="button"
-            className={'sess-qitem' + (flashSeq === q.seq ? ' on' : '')}
-            onClick={() => onJump(q.seq)} title={q.text}>
-            <span className="sess-qitem-i">{i + 1}</span>
-            <span className="sess-qitem-t">
-              {q.text.replace(/\s+/g, ' ').slice(0, 60)}{q.text.length > 60 ? '…' : ''}
-            </span>
-          </button>
-        ))}
+        {questions.map((q, i) => {
+          // 显示文案由 utils/sessionQa 出（user=提问原文；ask=回答/占位），此处只截断折叠
+          const label = questionLabel(q).replace(/\s+/g, ' ')
+          const ask = q.kind === 'ask'
+          return (
+            <button key={q.key} type="button"
+              className={'sess-qitem' + (ask ? ' ask' : '')
+                + (ask && q.state !== 'answered' ? ' pend' : '')
+                + (flashSeq === q.seq ? ' on' : '')}
+              onClick={() => onJump(q)} title={questionTitle(q)}>
+              <span className="sess-qitem-i">{i + 1}</span>
+              <span className="sess-qitem-t">
+                {ask && <span className="sess-qitem-ask">🤔</span>}
+                {label.slice(0, 60)}{label.length > 60 ? '…' : ''}
+              </span>
+            </button>
+          )
+        })}
       </div>
     </aside>
   )
@@ -699,10 +747,12 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   const [caretPos, setCaretPos] = useState(-1)
   const [slashDismissed, setSlashDismissed] = useState(false)
   const [slashItems, setSlashItems] = useState([])     // [{key,label,desc,type}]
-  // 提问索引侧边栏：本会话用户提问列表，点击跳转到对应消息（data-seq 锚点 + 闪烁高亮）
+  // 提问索引侧边栏：本会话「用户提问 + agent 问答」混排列表，点击跳转到对应消息
+  //（data-seq 锚点 + 闪烁高亮；agent 问答项额外展开提问卡与结果条，见 expandSeqs）
   const [qbarOpen, setQbarOpen] = useState(true)
   const [flashSeq, setFlashSeq] = useState(null)
   const [jumpSeq, setJumpSeq] = useState(null)   // 待跳转 seq: 交给 MessageList 扩窗定位(虚拟滚动)
+  const [expandSeqs, setExpandSeqs] = useState(() => new Set())  // 跳转后要展开的条目 seq
   const flashTimerRef = useRef(null)
   const boxRef = useRef(null)
   const atBottomRef = useRef(true)
@@ -1086,13 +1136,20 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   }, [meta?.queue, chatState, pendingMsgs])
 
   /* ---------- 提问索引侧边栏 ---------- */
-  // 本会话所有用户提问（去空白文本）；随增量更新
-  const questions = useMemo(() => entries
-    .filter((e) => e.kind === 'user' && (e.text || '').trim())
-    .map((e) => ({ seq: e.seq, text: e.text.trim() })), [entries])
+  // 本会话索引：用户提问（kind='user'）+ agent 问答（kind='ask'，锚定 ask_user_question
+  // 那条；回答取配对的 tool_result，未答/中断为占位）混排按 seq 升序；随增量更新。
+  // 派生规则与回答文本解析全在 utils/sessionQa（纯函数，单测覆盖）
+  const questions = useMemo(() => buildQuestionIndex(entries), [entries])
   // 点击提问项 → 交给 MessageList 扩窗定位（虚拟滚动下目标可能不在渲染窗口内），
-  // 定位完成后回调 onJumpHandled 闪烁高亮（data-seq 锚点）
-  const jumpTo = useCallback((seq) => setJumpSeq(seq), [])
+  // 定位完成后回调 onJumpHandled 闪烁高亮（data-seq 锚点）。
+  // agent 问答项额外登记要展开的条目（提问条 + 配对的结果条）——否则落点只是一行折叠的
+  // `ask_user_question` 标题；登记集每次跳转整体替换（只保留本次目标，避免旧目标反复自动展开）
+  const jumpTo = useCallback((item) => {
+    const q = (item && typeof item === 'object') ? item : { seq: item, kind: 'user' }
+    setExpandSeqs(q.kind === 'ask'
+      ? new Set([q.seq, q.ansSeq].filter((s) => s != null)) : new Set())
+    setJumpSeq(q.seq)
+  }, [])
   const onJumpHandled = useCallback((seq) => {
     setJumpSeq(null)
     setFlashSeq(seq)
@@ -1467,7 +1524,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   return (
     <div className="sess-view">
       <div className="sess-wrap">
-        {/* 提问索引侧边栏（仅弹窗版；列表=本会话用户提问，点击跳转对应消息） */}
+        {/* 提问索引侧边栏（仅弹窗版；列表=本会话用户提问 + agent 问答，点击跳转对应消息） */}
         <QuestionBar withQBar={withQBar} qbarOpen={qbarOpen}
           questions={questions} flashSeq={flashSeq} onJump={jumpTo} />
         <div className="sess-main">
@@ -1526,7 +1583,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       <MessageList entries={entries} metaNull={!meta} found={!!meta?.found} reason={meta?.reason}
         taskId={taskId} agent={meta?.agent || agent} pid={board ? boardPid : pid}
         boardPid={board ? boardPid : ''} boardSid={board ? boardSid : ''}
-        flashSeq={flashSeq} chatRunning={chatRunning} exitCode={chatState?.exit_code}
+        flashSeq={flashSeq} expandSeqs={expandSeqs} chatRunning={chatRunning} exitCode={chatState?.exit_code}
         boxRef={boxRef} atBottomRef={atBottomRef} onScroll={onScroll}
         jumpSeq={jumpSeq} onJumpHandled={onJumpHandled}
         rwEnabled={rewindEnabled} rwBusy={rewindBusy} rewindingMid={rewinding}
