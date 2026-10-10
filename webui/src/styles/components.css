@@ -624,7 +624,30 @@ body.projlist-dragging { cursor: grabbing; user-select: none; }
   font-size: calc(11px * var(--fs)); font-weight: 600; line-height: 16px;
   color: var(--logo-fg); background: var(--star);
 }
-.board-card-ops { display: flex; gap: 4px; margin-top: 6px; }
+/* 卡片操作行（2026-10-10 窄屏自适应批次）：flex-wrap 让按钮在窄列折行，不再被卡片裁掉
+   ——此前是 flex 默认 nowrap，而 Button 基类带 shrink-0 + whitespace-nowrap ⇒ 放不下就溢出被裁。
+   窄列（≤236px，即卡片内容盒放不下「带文字的按钮行」）再把带文字的按钮收紧成纯图标：
+   文字进 .board-oplabel、紧凑图标进 .board-opicon，宽列反之（两者由 CSS 二选一显示）；
+   纯图标按钮只需 .board-opbtn 即可跟随收窄内边距。阈值依据见
+   doc_ai/spec/webui/前端结构与约定.md「看板卡片操作行」与
+   doc_ai/plan/202610/20261010_1150_看板卡片按钮行窄屏自适应（量测与候选方案）.md。
+   判定用容器查询（按**列宽**，与侧栏/窗口宽度无关） */
+.board-card-ops { display: flex; gap: 4px; row-gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+.board-oplabel { white-space: nowrap; }
+.board-opwide { display: inline-flex; align-items: center; }
+.board-opicon { display: none; }
+.board-col { container-type: inline-size; container-name: bcol; }
+/* 列头（2026-10-10 同批）：flex-wrap + 标签不缩、包一层 .board-col-label（文本节点无法被
+   选择器命中）。此前 nowrap flex 会把列名压到 13px ⇒ 中文逐字竖排（「待/开/发」），
+   或整体需要 245px 而列宽只有 239px ⇒ 横向溢出 4px；现在空间不足时下拉整体落到第二行 */
+.board-col-head { flex-wrap: wrap; row-gap: 4px; }
+.board-col-label { white-space: nowrap; flex: 0 0 auto; }
+@container bcol (max-width: 240px) {
+  .board-card-ops .board-opbtn { padding-left: 6px; padding-right: 6px; gap: 0; }
+  .board-card-ops .board-opbtn .board-oplabel { display: none; }
+  .board-card-ops .board-opbtn .board-opwide { display: none; }
+  .board-card-ops .board-opbtn .board-opicon { display: inline-flex; align-items: center; }
+}
 /* 「开始」分裂按钮（2026-10-06 独立 worktree 起跑入口）：主按钮 + ▾ 下拉触发并排，
    间距与同一操作行其它按钮一致（▾ 由 ActionMenu 外包一层 inline-flex，不改按钮样式） */
 .board-split { display: inline-flex; align-items: center; gap: 4px; }

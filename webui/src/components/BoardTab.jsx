@@ -27,7 +27,29 @@ import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
-import { Play, Trash2, Check, Undo2, ArrowRight, Plus, Settings, MessageSquare, FileText, Maximize2, ExternalLink, X } from 'lucide-react'
+import { Play, Trash2, Check, Undo2, ArrowRight, Plus, Settings, MessageSquare, FileText, Maximize2, ExternalLink, X, Zap } from 'lucide-react'
+
+// 卡片操作行按钮（2026-10-10 窄屏自适应批次）——两种形态，样式全在 CSS：
+//   OpsTextButton 带文字：<icon(宽列)> + <icon(窄列)> + <label> 三个兄弟节点，由
+//     components.css 的容器查询二选一（列宽 > 236px 显示图标+文字，≤ 236px 只显示图标）。
+//     窄屏只显示图标时靠 title/aria-label 保住可读性（悬浮有文案、读屏可识别）。
+//   OpsIconButton 纯图标：只挂 .board-opbtn，跟随窄列收窄内边距。
+// 为什么不用 <span> 包住原图标：Button 基类只有兄弟级 `[&_svg]:size-4` 规则，
+// 包一层会让图标尺寸规则失配（图标变大）；三个兄弟节点则与既有样式零冲突。
+function OpsTextButton({ icon: Icon, iconNarrow: IconNarrow, label, className = '', ...props }) {
+  return (
+    <Button size="sm" className={`board-opbtn ${className}`.trim()}
+      aria-label={label} title={label} {...props}>
+      <span className="board-opwide"><Icon /></span>
+      <span className="board-opicon"><IconNarrow /></span>
+      <span className="board-oplabel">{label}</span>
+    </Button>
+  )
+}
+
+function OpsIconButton({ className = '', ...props }) {
+  return <Button size="sm" className={`board-opbtn ${className}`.trim()} {...props} />
+}
 
 const DRAG_THRESHOLD = 6  // 拖拽触发阈值（px）：低于该位移视为点击
 const MEDIA_MAX = 10 * 1024 * 1024  // 卡片附件单文件上限（与后端 board/media、描述编辑框一致）
@@ -668,7 +690,9 @@ export default function BoardTab({ project }) {
               data-col={col.key}
               className={'board-col' + (dragOver === col.key ? ' dragover' : '')}>
               <div className="board-col-head">
-                {col.label}
+                {/* 列名包一层 .board-col-label：窄列下要 nowrap（文本节点无法被选择器命中），
+                    否则列名会被 flex 压成逐字竖排；见 components.css 的容器查询 */}
+                <span className="board-col-label">{col.label}</span>
                 {/* 列统计口径=看板卡片（v2 §4 已定 3，裁决 R16：不含测试任务） */}
                 <span className="board-col-count">{list.length}</span>
                 <select className="board-col-sort" title="列表过滤：开发任务=卡片，测试任务=平台测试任务"
@@ -773,15 +797,16 @@ export default function BoardTab({ project }) {
                         // 分裂按钮：主按钮行为不变（统一队列排队开始），右侧 ▾ 另有
                         // 「🌿 在新 worktree 中开始」（平台新建独立工作树、立即执行不入队）
                         <div className="board-split">
-                          <Button size="sm" variant="outline" disabled={archived || agentMissing}
-                            title={archived ? '项目已归档' : agentMissing ? '未配置智能体' : ''}
-                            onClick={() => doStart(card)}><Play /> 开始</Button>
+                          <OpsTextButton icon={Play} iconNarrow={Play} label="开始"
+                            variant="outline" disabled={archived || agentMissing}
+                            title={archived ? '项目已归档' : agentMissing ? '未配置智能体' : '开始'}
+                            onClick={() => doStart(card)} />
                           <ActionMenu align="end"
                             trigger={
-                              <Button size="sm" variant="outline" disabled={archived || agentMissing}
+                              <OpsIconButton variant="outline" disabled={archived || agentMissing}
                                 title={archived ? '项目已归档'
                                   : agentMissing ? '未配置智能体' : '更多开始方式'}
-                                onClick={() => loadWorktreePreview(card.id)}>▾</Button>
+                                onClick={() => loadWorktreePreview(card.id)} />
                             }
                             items={[
                               { key: 'queue', label: '开始（入队排队）', onSelect: () => doStart(card) },
@@ -792,55 +817,67 @@ export default function BoardTab({ project }) {
                             ]} />
                         </div>)}
                       {card.column === 'doing' && !card.running && card.block_kind !== 'queue' && (
-                        <Button size="sm" variant="outline" onClick={() => doMove(card, 'review')}><ArrowRight /> 待审核</Button>)}
+                        <OpsTextButton icon={ArrowRight} iconNarrow={ArrowRight} label="待审核"
+                          variant="outline" onClick={() => doMove(card, 'review')} />)}
                       {card.column === 'blocked' && (
-                        <Button size="sm" variant="outline" disabled={archived || agentMissing}
-                          onClick={() => doStart(card)}><Play /> 重试</Button>)}
+                        <OpsTextButton icon={Play} iconNarrow={Play} label="重试"
+                          variant="outline" disabled={archived || agentMissing}
+                          onClick={() => doStart(card)} />)}
                       {/* 已作答·待送达：立即送达答案（不等项目空闲）——此时排队主体
                           是答案，「⚡强制」（起新会话）语义不符，故改为送达入口 */}
                       {card.answer_pending && (
-                        <Button size="sm" variant="ghost"
-                          title="不等项目空闲，立即把答案送达等待中的会话"
-                          onClick={() => doDeliverAnswer(card)}>⚡ 送达</Button>)}
+                        <OpsTextButton icon={Zap} iconNarrow={Zap} label="送达"
+                          variant="ghost" title="不等项目空闲，立即把答案送达等待中的会话"
+                          onClick={() => doDeliverAnswer(card)} />)}
                       {/* 排队中卡片的强制入口：跳过队列立即开始（用户自担风险）；
                           已作答·待送达的卡不显示（答案排队走上方「送达」） */}
                       {card.block_kind === 'queue' && !card.answer_pending && (
-                        <Button size="sm" variant="ghost" title="跳过队列立即开始（用户自担风险）"
+                        <OpsTextButton icon={Zap} iconNarrow={Zap} label="强制"
+                          variant="ghost" title="跳过队列立即开始（用户自担风险）"
                           disabled={archived || agentMissing}
                           onClick={async () => {
                             if (!window.confirm('强制开始将跳过队列立即执行，可能与在跑任务冲突，继续？')) return
                             await doStart(card, undefined, true)
-                          }}>⚡ 强制</Button>)}
+                          }} />)}
                       {/* 等待区卡停止入口（v2b T3）：取消排队并移入待审核；
                           对已作答·待送达卡同显（停止即放弃待送达答案，后端一并取消） */}
                       {card.block_kind === 'queue' && (
-                        <Button size="sm" variant="ghost" title="取消排队并移入待审核"
-                          onClick={() => doStop(card)}>停止</Button>)}
+                        <OpsTextButton icon={X} iconNarrow={X} label="停止"
+                          variant="ghost" title="取消排队并移入待审核"
+                          onClick={() => doStop(card)} />)}
                       {card.column === 'review' && (<>
-                        <Button size="sm" variant="outline" onClick={() => doApprove(card)}><Check /> 通过</Button>
-                        <Button size="sm" variant="outline" onClick={() => { setRejectFor(card); setRejectText('') }}><Undo2 /> 打回</Button>
+                        <OpsTextButton icon={Check} iconNarrow={Check} label="通过"
+                          variant="outline" onClick={() => doApprove(card)} />
+                        <OpsTextButton icon={Undo2} iconNarrow={Undo2} label="打回"
+                          variant="outline"
+                          onClick={() => { setRejectFor(card); setRejectText('') }} />
                       </>)}
                       {card.column === 'done' && (
-                        <Button size="sm" variant="outline" onClick={() => doMove(card, 'todo')}><Undo2 /> 重开</Button>)}
+                        <OpsTextButton icon={Undo2} iconNarrow={Undo2} label="重开"
+                          variant="outline" onClick={() => doMove(card, 'todo')} />)}
                       {/* 卡片详情显式入口（与点击卡片正文同语义）：正文点击要过拖拽阈值判定，
                           卡片被编辑标题/拖拽占位时不稳，给按钮一个确定入口 */}
-                      <Button size="sm" variant="ghost" title="打开卡片详情"
-                        onClick={() => openCard(card)}><Maximize2 /></Button>
-                      <Button size="sm" variant="ghost" title="删除卡片" onClick={() => removeCard(card)}><Trash2 /></Button>
+                      <OpsIconButton variant="ghost" title="打开卡片详情"
+                        onClick={() => openCard(card)}><Maximize2 /></OpsIconButton>
                       {/* 主会话直达：一键打开卡片主会话（SessionModal board 模式）；尚无会话时禁用 */}
-                      <Button size="sm" variant="ghost"
+                      <OpsIconButton variant="ghost"
                         title={card.session_id ? '进入主会话' : '尚无会话'}
                         disabled={!card.session_id}
                         onClick={() => setSessFor({ sid: card.session_id, cid: card.id, column: card.column, title: card.title || '未命名' })}>
-                        <MessageSquare /></Button>
+                        <MessageSquare /></OpsIconButton>
                       {/* 在 dsh 界面打开主会话（仅 dsh 插件面板形态渲染；独立 web 形态宿主桥
                           不应答 caps，按钮不存在）：宿主半收请求后调 uiWorkspace.openSession
                           并在 dsh 主界面显示该会话，同时关掉全屏面板 */}
                       {!!dshCaps?.openSession && (
-                        <Button size="sm" variant="ghost"
+                        <OpsIconButton variant="ghost"
                           title={card.session_id ? '在 dsh 界面打开该卡片主会话' : '尚无会话'}
                           disabled={!card.session_id}
-                          onClick={() => openSessionInDsh(card.session_id)}><ExternalLink /></Button>)}
+                          onClick={() => openSessionInDsh(card.session_id)}><ExternalLink /></OpsIconButton>)}
+                      {/* 删除放操作行**末位**（2026-10-10 用户要求）：窄列折行时它落在最后，
+                          与其余按钮之间自然有换行/间距区隔，降低误点风险。
+                          刻意不加 margin-left:auto——实测 auto 会在放得下时也把删除顶到单独一行 */}
+                      <OpsIconButton variant="ghost" title="删除卡片"
+                        onClick={() => removeCard(card)}><Trash2 /></OpsIconButton>
                     </div>
                   </div>
                   </Fragment>
