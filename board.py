@@ -3320,6 +3320,26 @@ def _is_empty_session(item):
         and not str(item.get("title") or "").strip()
 
 
+def _is_placeholder_card(card, sids):
+    """卡面是否仍是「自动写入的占位形态」——存量收口的**前置硬闸**（2026-10-09 二版）。
+
+    占位形态 = 标题为空，或等于主会话 sid 短码（`sid[:12]`，即 `_sync_card_fields`
+    的兜底名、`_sync_card_follow` 认的自动写入形态之一）。建卡时首问未落盘才会
+    长这样；一旦有首问/任务提示词写进来，标题就成了真实内容。
+
+    为什么要有这道闸：存量收口的另两条判据（会话枚举是否为空 / sid 是否在
+    tasks·飞书登记里）都依赖**易变的一次性输入**——首版上线真机首跑就因这种输入
+    异常误删 13 张有真实标题的卡（918、697、709 等，事后复算判据全不成立）。
+    卡面标题是卡自身的证据，不随会话解析成败摇摆；**真实标题的卡一律不自动收口**
+    （宁漏不误删，漏下的交用户自己删）。
+    """
+    title = (card["title"] or "").strip()
+    if not title:
+        return True
+    # 标题 == 某个绑定会话的 sid 短码（`sids` 是集合，故用 any 而非取首元素）
+    return any(title == str(s or "").strip()[:12] for s in sids if s)
+
+
 def _platform_owned_sids(project_id):
     """本项目「平台自己持有会话位」的 sid 集合（B 类闸，2026-10-09）。
 
@@ -3494,13 +3514,21 @@ def sync_sessions(project):
         if dropped:
             print(f"[board-sync] 子代理会话卡收口: 软删 {dropped} 张"
                   f"（项目 {project['id']}，见 spec/queue/排队与占用.md）")
-    # —— 存量误建卡收口（2026-10-09，两类新闸对应的存量）——
+    # —— 存量误建卡收口（2026-10-09；二版：「卡面占位形态」为前置硬闸）——
     # A/B 两闸只挡新建，历史版本已经建出的两类卡还留在板面上（实测：任务会话卡
     # 12 张、空会话占位卡 10 张，跨 4 个项目）。这里**软删进回收站**（可还原；
     # 不删会话文件、不动会话与依赖、不碰任务的任何记录）。判据与新建闸同源：
     #   ① B 类：卡绑的 sid 是平台自持会话（tasks/飞书）——重复投影，收回；
     #   ② A 类：卡绑的会话**全部**是空会话（首问/标题皆空）——没有任何内容可看；
     #      任一 sid 不在本轮枚举里（存储被删等）即不判空，交「存储被删→done」规则。
+    # **首版实障（2026-10-09 当天）**：上述两条都依赖「易变的一次性输入」（会话
+    # 枚举的解析结果 / tasks·飞书登记），真机首跑即在三个项目误删 13 张**有真实
+    # 标题**的卡（918「现在TS作为DSH的插件…」、697/709 等；事后在库副本上复算，
+    # 它们连判据中间值都不成立 ⇒ 属判据输入的一次性异常）。故补**前置硬闸**
+    # `_is_placeholder_card`：只收口「卡面标题仍是自动写入占位形态（空 / 主会话
+    # sid 短码）」的卡——卡面标题是卡自身的证据，不随会话解析成败摇摆；真实标题
+    # （用户提问首行 / 任务提示词首行）一律不自动收口。代价＝标题已补齐的误建卡
+    # （任务会话卡）会漏删，交用户自行处理（**宁漏不误删**）。
     # 三条边界与子代理卡收口一致：只认 origin='sync' 自动卡（用户自建卡一字节
     # 不动）、平台在管的运行中卡跳过（`_has_active_run`）、每项目只跑一轮
     # （用户从回收站还原后同一进程内不再被反复软删；重启后重跑一轮，幂等）。
@@ -3511,8 +3539,8 @@ def sync_sessions(project):
             if c["origin"] != "sync" or _has_active_run(c["id"]):
                 continue
             sids = set(_card_sids(c))
-            if not sids:
-                continue
+            if not sids or not _is_placeholder_card(c, sids):
+                continue          # 卡面已有真实标题 ⇒ 非自动占位卡，绝不自动收口
             if any(s in owned for s in sids) or \
                     all(_is_empty_session(by_sid.get(s)) for s in sids):
                 db.trash_board_card(c["id"])

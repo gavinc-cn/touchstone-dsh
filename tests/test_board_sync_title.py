@@ -127,17 +127,17 @@ def test_feishu_bound_session_not_projected(monkeypatch):
 
 
 def test_misbuilt_cards_swept_once(monkeypatch):
-    """存量误建卡收口（2026-10-09）：平台自持会话卡与空会话占位卡按「每项目一轮 +
-    软删可还原」口径收进回收站（判据与新建闸同源）；用户在回收站**还原**后同一
-    进程内不再被反复软删（尊重显式操作，口径同子代理卡收口）。"""
+    """存量误建卡收口（2026-10-09）：**占位形态**（标题=空 或 sid 短码）的平台自持
+    会话卡与空会话卡按「每项目一轮 + 软删可还原」口径收进回收站；用户在回收站
+    **还原**后同一进程内不再被反复软删（尊重显式操作，口径同子代理卡收口）。"""
     proj = _mk_project()
     pid = proj["id"]
     tid = db.insert_task(pid, "压测任务", 0, "不复测", "rounds", "1")
     db.update_task(tid, session_id=SID)                        # 平台自持会话
-    owned_card = _mk_card(pid, title="压测任务（第 1 步/共 2 步）：", sid=SID)
-    empty_card = _mk_card(pid, title=SID2[:12], sid=SID2)      # 空会话占位卡
+    owned_card = _mk_card(pid, title=SID[:12], sid=SID)        # B 类（sid 命中 tasks）
+    empty_card = _mk_card(pid, title=SID2[:12], sid=SID2)      # A 类（空会话）
     _patch(monkeypatch, [
-        {"sid": SID, "title": "", "mtime": 0, "first_prompt": "任务首问\n其余"},
+        {"sid": SID, "title": "任务首问", "mtime": 0, "first_prompt": "任务首问\n其余"},
         {"sid": SID2, "title": "", "mtime": 0, "first_prompt": ""},
     ])
     board.sync_sessions(proj)
@@ -148,13 +148,33 @@ def test_misbuilt_cards_swept_once(monkeypatch):
     assert db.get_board_card(empty_card)["trashed"] == 0
 
 
-def test_misbuilt_sweep_spares_cards_with_content(monkeypatch):
-    """收口不误伤：有内容的会话卡（首问非空）既不在 B 类判据里、也不满足 A 类
-    「绑的会话全空」，照旧留在板上（919 那种「建卡后被真实使用」的卡属正常演进）。"""
+def test_sweep_never_touches_real_titled_cards(monkeypatch):
+    """**误删回归钉子**（2026-10-09 真机实障）：判据输入被污染（会话枚举把有内容的
+    会话读成空壳 ⇒ A 类"成立"）时，**卡面已有真实标题**的卡也不得被收口——卡面
+    标题是卡自身的证据。首版缺这道硬闸，真机首跑在三个项目误删 13 张真实卡
+    （918「现在TS作为DSH的插件…」、697/709 等，事后复算判据全不成立）。"""
     proj = _mk_project()
-    keep = _mk_card(proj["id"], title="任务卡片919是啥? 怎么没有标题?", sid=SID)
-    _patch(monkeypatch, [{"sid": SID, "title": "会话标题", "mtime": 0,
-                          "first_prompt": "任务卡片919是啥? 怎么没有标题?"}])
+    pid = proj["id"]
+    keep = _mk_card(pid, title="现在TS作为DSH的插件, UI风格应与DSH一致.", sid=SID)
+    placeholder = _mk_card(pid, title=SID2[:12], sid=SID2)
+    _patch(monkeypatch, [                                      # 两条输入都被污染
+        {"sid": SID, "title": "", "mtime": 0, "first_prompt": ""},
+        {"sid": SID2, "title": "", "mtime": 0, "first_prompt": ""},
+    ])
+    board.sync_sessions(proj)
+    assert db.get_board_card(keep)["trashed"] == 0             # 真实标题 ⇒ 永不自动收口
+    assert db.get_board_card(placeholder)["trashed"] == 1       # 占位卡照收
+
+
+def test_sweep_never_touches_real_titled_task_cards(monkeypatch):
+    """同一道硬闸对 B 类同样生效：sid 命中 tasks/飞书登记、但卡面已是真实标题
+    （如任务提示词首行）时不自动收口——**宁漏不误删**，漏下的交用户自己删。"""
+    proj = _mk_project()
+    tid = db.insert_task(proj["id"], "压测任务", 0, "不复测", "rounds", "1")
+    db.update_task(tid, session_id=SID)
+    keep = _mk_card(proj["id"], title="压测任务（第 1 步/共 2 步）：", sid=SID)
+    _patch(monkeypatch, [{"sid": SID, "title": "任务首问", "mtime": 0,
+                          "first_prompt": "压测任务（第 1 步/共 2 步）：\n细节"}])
     board.sync_sessions(proj)
     assert db.get_board_card(keep)["trashed"] == 0
 
