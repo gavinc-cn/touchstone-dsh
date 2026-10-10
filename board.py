@@ -2009,10 +2009,13 @@ def start_card(project, card, extra=""):
     return _start_web(project, card, family, extra)
 
 
-def deliver_comment(project, card, comment_row, inject=False, raw=False):
-    """评论投递主会话（默认包装【看板评论】前缀；raw=True 直发原文——会话
-    详情页发送路径专用，用户本就在会话中对话，无需任务上下文包装；卡片评论
-    区「投递」维持前缀以区分消息来源。两条路径都照旧落评论记录 sent_text）。
+def deliver_comment(project, card, comment_row, inject=False):
+    """评论投递主会话（恒发评论原文，不包任何前缀——2026-10-10 去前缀）。
+
+    2026-09-06 起会话详情页路径 `raw=True` 直发原文、卡片评论区「投递」仍包
+    「【看板评论】任务「标题」: 」前缀以区分消息来源；2026-10-10 用户裁定**所有
+    投递路径一律原文**（前缀在会话里是噪音）——前缀构造与 `raw` 开关一并删除，
+    `sent_text` 照旧落实际发送文本（= 评论原文，评论记录仍可追溯）。
 
     2026-09-10（统一队列消息单元）：不再立即投递——登记会话消息单元进 runner
     统一队列，项目忙（同项目有任务/卡片会话在跑）时按入队顺序等待，项目空闲才
@@ -2023,10 +2026,7 @@ def deliver_comment(project, card, comment_row, inject=False, raw=False):
     """
     family = _web_family(project)
     sid = card["session_id"]
-    if raw:
-        wrapped = comment_row["text"]
-    else:
-        wrapped = f"【看板评论】任务「{card['title']}」: {comment_row['text']}"
+    text = comment_row["text"]
     # 进队前的前置校验：拦住必然失败的投递（无会话 / 退场族无投递通道）
     if family is None:
         raise RuntimeError(agents.RETIRED_MSG)
@@ -2035,12 +2035,12 @@ def deliver_comment(project, card, comment_row, inject=False, raw=False):
     inst = runner.INSTANCE
     if inst is None:
         # 无统一队列（单测/独立脚本）：保持既有立即投递行为
-        _deliver_now(project, card, comment_row, wrapped, inject)
+        _deliver_now(project, card, comment_row, text, inject)
         return None
     # 排队中的消息可「立即注入」（见 chat.inject_now）：family/model/
     # comment_id 提交时定格进等待项 meta（chat_msgs 零加列，P3 裁决 R1），执行时
     # 由 chat 侧按行＋快照重建 _deliver_unit/_deliver_now
-    return chat.submit(project["id"], sid, wrapped,
+    return chat.submit(project["id"], sid, text,
                        card_id=card["id"], comment_id=comment_row["id"],
                        inject=inject,
                        family=runner.agent_family(project["agent_path"] or ""),
@@ -2048,7 +2048,7 @@ def deliver_comment(project, card, comment_row, inject=False, raw=False):
                              or (project["model"] or "").strip())
 
 
-def _deliver_unit(project, card, comment_row, wrapped, inject):
+def _deliver_unit(project, card, comment_row, text, inject):
     """统一队列消息单元执行体：投递评论并等该会话结束（执行期间持有项目占用）。
 
     返回即释放占用：dsh 会话的等轮次走 `chat.wait_turn` 分流口（外部会话订阅全局
@@ -2056,7 +2056,7 @@ def _deliver_unit(project, card, comment_row, wrapped, inject):
     chat.STATE_YIELDED = turn 挂起等作答、已让位（chat.run_unit 据此落终态）。
     尾部 proc 分支为 CLI 时代的防御残留（单族化后 _RUNS 条目恒为 dsh，proc=None）。
     """
-    _deliver_now(project, card, comment_row, wrapped, inject)
+    _deliver_now(project, card, comment_row, text, inject)
     family = _web_family(project)
     if family is not None:
         return chat.wait_turn(project["project_dir"], card["session_id"],
@@ -2104,8 +2104,8 @@ def _ensure_card_session(project, card, sid):
                                     task=f"card-{cid}")
 
 
-def _deliver_now(project, card, comment_row, wrapped, inject=False):
-    """评论真正送达（立即路径与统一队列消息单元执行体共用；wrapped 为最终文本）。
+def _deliver_now(project, card, comment_row, text, inject=False):
+    """评论真正送达（立即路径与统一队列消息单元执行体共用；text 即评论原文）。
 
     单族化后只有 dsh_plugin：followup 忙时排进 agent inbox（等同服务端排队
     语义，不拒绝）；inject=True 走 steer，注入当前 turn 的最近 step 边界
@@ -2136,11 +2136,11 @@ def _deliver_now(project, card, comment_row, wrapped, inject=False):
             # dsh 的「立即注入」= steer（注入当前 turn 的最近 step 边界）；
             # 普通投递 = followup（忙时排进 inbox，等同服务端排队）；
             # 统一走 _web_send（单族投递唯一出口，测试打桩面也在此）
-            _web_send(family, project, sid, wrapped, inject=bool(inject))
+            _web_send(family, project, sid, text, inject=bool(inject))
         except dshdriver.DshDriverError as e:
             raise RuntimeError(f"评论投递失败: {e}")
         db.update_board_comment(comment_row["id"], sent=1, session_id=sid,
-                                sent_text=wrapped)
+                                sent_text=text)
         return
     # 退场族无投递通道（单族化）：明确报错，不落已删除的 CLI 起子进程路径
     raise RuntimeError(agents.RETIRED_MSG)

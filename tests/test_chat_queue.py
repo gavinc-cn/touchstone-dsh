@@ -309,11 +309,11 @@ def test_deliver_comment_queues_when_project_busy(monkeypatch):
     _stub_project(monkeypatch)
     sent = {}
     _patch_delivery(monkeypatch, sent)
-    rec = board.deliver_comment(_proj(), _card(), _cmt(), raw=True)
+    rec = board.deliver_comment(_proj(), _card(), _cmt())
     assert rec is not None and rec["queued"] is True
     assert sent == {}                      # 排队阶段不投递
     chat.run_unit(rec["id"])
-    assert sent["t"] == "直接改吧"          # 拾起后投递原文（raw）
+    assert sent["t"] == "直接改吧"          # 拾起后投递原文（恒去前缀）
     assert sent["kw"]["sent_text"] == "直接改吧"
 
 
@@ -325,7 +325,7 @@ def test_deliver_comment_busy_session_enqueues_followup(monkeypatch):
     _stub_project(monkeypatch)
     sent = {}
     _patch_delivery(monkeypatch, sent)
-    rec = board.deliver_comment(_proj(), _card(), _cmt(), raw=True)
+    rec = board.deliver_comment(_proj(), _card(), _cmt())
     assert rec is not None and rec["queued"] is True    # 不因会话忙走旁路
     assert calls["sub"] == [(rec["id"], 9, "s-1")]
     assert sent == {}                      # 排队阶段不投递
@@ -339,7 +339,7 @@ def test_deliver_comment_no_session_raises(monkeypatch):
     monkeypatch.setattr(runner, "INSTANCE", fake)
     card = dict(_card(), session_id="")
     try:
-        board.deliver_comment(_proj(), card, _cmt(), raw=True)
+        board.deliver_comment(_proj(), card, _cmt())
         raise AssertionError("应抛 RuntimeError")
     except RuntimeError as e:
         assert "尚无会话" in str(e)

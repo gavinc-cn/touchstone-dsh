@@ -185,7 +185,7 @@ def test_deliver_comment_wires_inject_for_dsh_plugin(monkeypatch):
     monkeypatch.setattr(board.dshdriver, "status", lambda sid: {})
     monkeypatch.setattr(board.dshdriver, "steer",
                         lambda sid, text: steered.append((sid, text)))
-    rec = board.deliver_comment(_proj(), _card(), {"id": 77, "text": "直接改吧"}, raw=True)
+    rec = board.deliver_comment(_proj(), _card(), {"id": 77, "text": "直接改吧"})
     assert rec is not None
     wrow = waitq.get_active(waitq.KIND_MSG, rec["id"])
     assert wrow is not None and chat._msg_meta(wrow)["family"] == "dsh_plugin"

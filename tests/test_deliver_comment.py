@@ -1,4 +1,4 @@
-# deliver_comment raw 直达单测：web 分支 monkeypatch，不触网络
+# deliver_comment 投递原文单测（2026-10-10 去前缀）：web 分支 monkeypatch，不触网络
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import board
@@ -28,17 +28,24 @@ def _patch(monkeypatch, sent):
                         lambda mid, **kw: sent.setdefault("kw", kw))
 
 
-def test_raw_sends_plain_text(monkeypatch):
+def test_delivers_plain_text_without_prefix(monkeypatch):
+    """评论投递（评论区「保存并投递」/「投递」路径，不再传 raw）：会话收到纯原文，
+    sent_text 同落原文——看板评论投递一律不带【看板评论】任务前缀。"""
     sent = {}
     _patch(monkeypatch, sent)
-    board.deliver_comment(_proj(), _card(), _cmt(), raw=True)
+    board.deliver_comment(_proj(), _card(), _cmt())
     assert sent["t"] == "直接改吧"
     assert sent["kw"]["sent_text"] == "直接改吧"
 
 
-def test_default_keeps_prefix(monkeypatch):
+def test_raw_parameter_is_gone(monkeypatch):
+    """`raw` 形参随前缀一并退场（结构钉子）：再按旧签名传 raw 属调用方错误，
+    防止「无实际作用的开关」被重新加回来。"""
     sent = {}
     _patch(monkeypatch, sent)
-    board.deliver_comment(_proj(), _card(), _cmt())
-    assert sent["t"] == "【看板评论】任务「修复登录」: 直接改吧"
-    assert sent["kw"]["sent_text"] == "【看板评论】任务「修复登录」: 直接改吧"
+    try:
+        board.deliver_comment(_proj(), _card(), _cmt(), raw=True)
+        raise AssertionError("raw 形参应已删除")
+    except TypeError:
+        pass
+    assert sent == {}

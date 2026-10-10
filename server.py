@@ -3317,10 +3317,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             # inject=true 时立即注入运行中的当前轮（dsh 等 steer 能力会话生效）；
             # 项目忙（同项目有单元在跑）时登记统一队列消息单元，返回 queued=true
-            #（前端显示「排队中」，注释见 board.deliver_comment）
+            #（前端显示「排队中」，注释见 board.deliver_comment）；投递文本恒为评论
+            # 原文、不包【看板评论】前缀（2026-10-10 去前缀；旧客户端多传的 body.raw
+            # 字段静默忽略，不再透传）
             rec = board.deliver_comment(row, card, target,
-                                        inject=bool(body.get("inject")),
-                                        raw=bool(body.get("raw")))
+                                        inject=bool(body.get("inject")))
         except dshdriver.DshDriverError as e:
             # 409 = 会话运行中（deliver_comment 的忙拒绝）；其余 code 按 500
             if e.args and e.args[0] == 409:

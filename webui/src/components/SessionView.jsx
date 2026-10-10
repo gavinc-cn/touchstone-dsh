@@ -1059,7 +1059,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
           lastSeqRef.current = fresh[fresh.length - 1].seq
           setEntries((prev) => [...prev, ...fresh])
           // 排队评论被真实会话收录(新增 user entry 含其文本)后, 清掉本地乐观 chip
-          // (board 评论带【看板评论】包装, 原文本仍被包含, includes 判定有效)
+          // (投递文本=评论原文, includes 判定有效)
           setPendingMsgs((arr) => arr.filter((p) =>
             !fresh.some((e) => e.kind === 'user' && (e.text || '').includes(p.text.slice(0, 50)))))
         }
@@ -1331,12 +1331,12 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     try {
       if (board) {
         // board 模式: 先存评论再投递主会话(投递记录回卡片详情可见);
-        // raw=true 直发原文——本就在会话中对话, 不加【看板评论】任务前缀;
+        // 投递文本恒为评论原文(2026-10-10 起所有路径都去【看板评论】前缀);
         // 2026-09-19 起不再带 inject(底栏「立即注入」勾选框已移除): 发送即排队,
         // 运行中要立刻插话改由排队行的「立即注入」按钮(平台队列 inject 端点);
         // 项目忙则后端排队(queued=true)
         const c = await boardApi.addComment(boardPid, boardCid, msg)
-        const r = await boardApi.sendComment(boardPid, boardCid, c.id, false, true)
+        const r = await boardApi.sendComment(boardPid, boardCid, c.id, false)
         if (r?.queued) setPendingMsgs((arr) => [...arr, {
           text: msg, ts: Date.now(), id: r.msg_id || '' }])
       } else {

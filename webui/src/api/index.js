@@ -258,9 +258,9 @@ export const boardApi = {
   addComment: (pid, cid, text) =>
     api.post(`/api/projects/${pid}/board/cards/${cid}/comments`, { text }),
   // 投递评论到主会话; inject=true 时立即注入运行中的当前轮(仅 steer 能力会话生效);
-  // raw=true 直发原文不加【看板评论】前缀(会话详情页发送路径专用)
-  sendComment: (pid, cid, mid, inject = false, raw = false) =>
-    api.post(`/api/projects/${pid}/board/cards/${cid}/comments/${mid}/send`, { inject, raw }),
+  // 投递文本恒为评论原文, 不包任何前缀(2026-10-10 去【看板评论】前缀, 原 raw 开关已退场)
+  sendComment: (pid, cid, mid, inject = false) =>
+    api.post(`/api/projects/${pid}/board/cards/${cid}/comments/${mid}/send`, { inject }),
   removeComment: (pid, cid, mid) =>
     api.del(`/api/projects/${pid}/board/cards/${cid}/comments/${mid}`),
   // 项目工作区已有会话列表（绑定下拉用；bound=已绑定某卡片）
