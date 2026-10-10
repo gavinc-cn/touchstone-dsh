@@ -192,7 +192,7 @@ cd touchstone-dsh
 安装脚本会打印**可选**的 profile 覆盖（指向本机工作副本、或指定解释器）；不写就用包自身目录：
 
 ```yaml
-- id: touchstone
+- id: touchstone-dsh
   config: { repoDir: /path/to/touchstone-dsh, pythonPath: /path/to/python3 }
 ```
 

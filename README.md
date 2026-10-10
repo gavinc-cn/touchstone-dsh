@@ -212,7 +212,7 @@ The installer prints the optional profile patch for pointing the plugin at your 
 specific interpreter); skip it to use the package's own directory:
 
 ```yaml
-- id: touchstone
+- id: touchstone-dsh
   config: { repoDir: /path/to/touchstone-dsh, pythonPath: /path/to/python3 }
 ```
 

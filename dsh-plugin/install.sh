@@ -15,8 +15,8 @@
 #
 # 机器相关配置（repoDir / pythonPath）**可省**（2026-10-07 自包含包起）: 缺省 repoDir = 包自身目录,
 # 包里就有 server.py 与 webui/dist-plugin; 只有要指向别的检出、或指定解释器时才在 profile 覆盖:
-#   - id: touchstone
-#     config: { pythonPath: <解释器> }        # 条目 id 仍是 touchstone
+#   - id: touchstone-dsh
+#     config: { pythonPath: <解释器> }        # 条目 id 是 touchstone-dsh（= 包名去掉 scope）
 # 环境变量: TS_DSH_PROFILE(默认 web) / TS_DSH_PYTHON(显式指定解释器, 优先)
 set -euo pipefail
 
@@ -75,5 +75,5 @@ echo "完成（包名 $PKG_NAME）。重启 dsh web 生效（package.json 变更
 echo "之后侧栏 Plugins 面板里会出现 Touchstone 卡片与该行开关。"
 echo "repoDir 不再必填（缺省 = 包自身目录, 包里自带 Python 平台与预构建前端）;"
 echo "只有要指向本机开发检出、或指定解释器时才在 $PROFILE_DIR/cordis.patch.yml 里加:"
-echo "  - id: touchstone"
+echo "  - id: touchstone-dsh"
 echo "    config: { repoDir: $REPO_DIR, pythonPath: $PYTHON_PATH }"

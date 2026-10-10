@@ -8,14 +8,18 @@
 #   面板里就会出现 Touchstone 卡片与该行开关（开关写回 profile patch 的 disabled）。
 #
 # config 约定: repoDir 是**机器相关**路径（Touchstone 平台根，须含 server.py 与 webui/dist-plugin），
-#   不写死在这里 —— 由各 profile 的 cordis.patch.yml 用 `- id: touchstone` + `config:` 覆盖提供
+#   不写死在这里 —— 由各 profile 的 cordis.patch.yml 用 `- id: touchstone-dsh` + `config:` 覆盖提供
 #   （覆盖是整键替换，且 profile 层后于 bundle 层应用）。**2026-10-07 起 repoDir 可省**:
 #   包已自包含（Python 平台 + 预构建 webui/dist-plugin 都在包内），薄壳缺省回退到**包自身目录**
 #   （lib/index.js 里 PACKAGE_DIR），只有要指向别的检出、或指定 pythonPath 时才写 config。
 #   pythonPath 缺省 python3。
 #
 # name 必须是**完整包名**（与仓库根 package.json 的 name、scripts/build.mjs 生成的
-# client.bundle.js 里的模块 id 三者逐字一致）；条目 id 仍是 touchstone（profile 覆盖按 id 命中）。
+# client.bundle.js 里的模块 id 三者逐字一致）；条目 id 是 touchstone-dsh（= 包名去掉 scope）。
+# id 只是组合树里的**本地行键**（profile 覆盖行按它命中、Plugins 面板行开关按它写回），
+# **不是包名**，改它必须与各 profile 的覆盖行同步 —— 否则覆盖落空（repoDir/pythonPath/disabled
+# 全丢，回落包自身目录 + python3），面板开关还会在 profile patch 里追加一行、把旧行留成孤儿。
+# 2026-10-09 由旧名 touchstone 改名（旧名是 2026-10-07 包改名前的残留）。
 - insert:
-    - id: touchstone
+    - id: touchstone-dsh
       name: "@gavinc-cn/touchstone-dsh"
