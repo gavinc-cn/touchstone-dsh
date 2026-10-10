@@ -165,6 +165,14 @@ grep '一次性初始口令' .run/server.log     # or: ./touchstone.sh status
 You will be asked to change it on first login. Set `TS_ADMIN_PASSWORD=<your-password>` before the first
 start to skip the one-time password (and the forced change).
 
+> **Plugin mode (`dsh`) is password-free by default** (2026-10-08): the shell passes
+> `TS_ADMIN_PASSWORDLESS=1`, so the seeded `admin` has an **empty password** and no forced change — the
+> panel is auto-logged-in as `admin` anyway. Set a password in **Settings → Change password** whenever you
+> want one (it then becomes the password used for direct/standalone logins). The plugin also writes the
+> backend's stdout/stderr line by line to `<db dir>/plugin-backend.log` (next to
+> `~/.touchstone/touchstone.db`) — that is where the plugin-mode startup banner and the
+> `[board]`/`[waitq]`/`[runner]` diagnostics can be read.
+
 > Standalone mode gives you the full site — projects, case library, bug reports, board, queue, monitoring —
 > but **agent execution needs plugin mode** (below), because the agent runs inside the `dsh` host process.
 
@@ -236,6 +244,7 @@ python touchstone.py start | stop | restart | status | build | test
 | `TS_PYTHON` | `python3` | Interpreter used by the launcher (must have the runtime dependencies) |
 | `TOUCHSTONE_DB` | `~/.touchstone/touchstone.db` | SQLite database. Must live on a local disk — file locking does not work on CIFS/network shares |
 | `TS_ADMIN_PASSWORD` | *(random, printed once)* | Initial `admin` password; setting it skips the forced change |
+| `TS_ADMIN_PASSWORDLESS` | `1` in plugin mode | Seed `admin` with an empty password and no forced change (the plugin shell sets this); ignored when `TS_ADMIN_PASSWORD` is set |
 | `TS_WEB_DIR` | `webui/dist` | Static front-end directory the server serves |
 | `TOUCHSTONE_RUN_DIR` | `.run/` in the repository | PID / log / port files |
 | `TS_EXT_DIR` | `extensions` | Root of the built-in asset manifests |

@@ -570,13 +570,17 @@ def _ensure_users_columns(conn):
 def seed_admin():
     """无任何用户时插入 admin，返回是否实际创建（bool，供启动横幅决定是否提示）。
 
-    口令来源（2026-10-02 起）：
+    口令来源（按优先级）：
       - 环境变量 TS_ADMIN_PASSWORD 非空：用之（部署方自定义初始口令，视为有意设定，
         不强制改密）——保持 CI/隔离实例夹具的既有行为；
-      - 未设置：用 secrets 随机生成 16 位一次性初始口令（URL-safe），并置
+      - 环境变量 TS_ADMIN_PASSWORDLESS=1（插件形态，薄壳下发，2026-10-08）：种**空口令**
+        admin、不强制改密。面板本来就是免登 admin（信任头），口令只用于独立形态/直连
+        登录；用户之后在设置页设了密码就按设置的来（change_password 存 MD5）；
+      - 都没有：用 secrets 随机生成 16 位一次性初始口令（URL-safe），并置
         must_change_pw=1，登录后必须先改密才能调用其他 API。
     随机口令经 take_seed_password() 交启动横幅打印一次，不落库明文、不常态打印。
-    PBKDF2 哈希 + 随机盐（哈希算法为需求约定，勿改）。
+    哈希：自定义口令/随机口令沿用 PBKDF2 哈希 + 随机盐（哈希算法为需求约定，勿改）；
+    空口令走 auth.md5_password("")（与「新写入密码统一 MD5」同口径，且登录时空串即通过）。
     """
     global _SEED_PASSWORD
     import auth
@@ -587,10 +591,12 @@ def seed_admin():
         _ensure_users_columns(conn)
         env_pw = os.environ.get("TS_ADMIN_PASSWORD")
         if env_pw:
-            password, must_change = env_pw, 0
+            password, must_change, seed_hash = env_pw, 0, None
+        elif os.environ.get("TS_ADMIN_PASSWORDLESS") == "1":
+            password, must_change, seed_hash = "", 0, auth.md5_password("")
         else:
-            password, must_change = secrets.token_urlsafe(12), 1
-        pw_hash, salt = auth.hash_password(password)
+            password, must_change, seed_hash = secrets.token_urlsafe(12), 1, None
+        pw_hash, salt = seed_hash or auth.hash_password(password)
         conn.execute(
             "INSERT INTO users(username, pass_hash, salt, must_change_pw, created_at)"
             " VALUES(?,?,?,?,?)",

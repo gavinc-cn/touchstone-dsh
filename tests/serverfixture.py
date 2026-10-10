@@ -42,6 +42,9 @@ from fakedriver import FakeDriver      # noqa: E402 — 与夹具同目录的测
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# 插件形态免登信任头（与 server.TRUST_USER_HEADER / 薄壳 TRUST_HEADER 逐字一致）
+TRUST_HEADER = "X-TS-Internal-User"
+
 
 def free_port():
     """向内核申请一个空闲端口（bind 0 后立即释放，供隔离实例使用）。"""
@@ -65,17 +68,22 @@ def wait_port(port, timeout=30):
 
 
 class Api:
-    """标准库 HTTP 客户端（cookie 会话）；非 2xx 也返回响应体由调用方断言。"""
+    """标准库 HTTP 客户端（cookie 会话）；非 2xx 也返回响应体由调用方断言。
 
-    def __init__(self, base):
+    headers 为额外请求头：插件形态的免登信任头（`X-TS-Internal-User: admin`）走这里。
+    """
+
+    def __init__(self, base, headers=None):
         self.base = base
+        self.headers = dict(headers or {})
         self.opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
     def __call__(self, path, method="GET", body=None):
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(self.base + path, data=data, method=method,
-                                     headers={"Content-Type": "application/json"})
+                                     headers={**self.headers,
+                                              "Content-Type": "application/json"})
         try:
             with self.opener.open(req, timeout=30) as r:
                 return r.status, r.read().decode("utf-8")
@@ -98,19 +106,25 @@ class IsolatedServer:
     沙箱，隔离「内置资产安装」这类会写用户 HOME 的端点）。
     seed_random_pw=True 时不设 TS_ADMIN_PASSWORD（走随机一次性口令 + 强制改密链路），
     此时不自动登录，调用方从 server_log() 的启动横幅里取口令自行登录。
+    trust_internal=True 按**插件形态**起（`--trust-internal-user`，仅回环）：请求带
+    `X-TS-Internal-User: admin` 即免登 admin（`srv.trust` 客户端已带该头），同样不
+    自动口令登录——用于验证「免登路径跳过强制改密门 / 存量库不再锁死」。
     """
 
-    def __init__(self, sleep="1", extra_env=None, seed_random_pw=False):
+    def __init__(self, sleep="1", extra_env=None, seed_random_pw=False,
+                 trust_internal=False):
         self.sleep = sleep
         self.extra_env = dict(extra_env or {})   # 追加/覆盖给 server 子进程的环境变量
         self.seed_random_pw = seed_random_pw     # True=不设初始口令, 验证随机种子链路
+        self.trust_internal = trust_internal     # True=按插件形态起（--trust-internal-user）
         # 隔离实例初始口令：每次实例化随机生成（不再固定弱口令；env 注入与登录夹具共用）
         self.admin_pw = secrets.token_urlsafe(9)
         self.sandbox = None
         self.port = None
         self.proc = None
         self.driver = None      # 假 driver（P7a：dsh_plugin 族的替身服务）
-        self.admin = None       # 已登录 admin 的 Api（seed_random_pw 时为 None）
+        self.admin = None       # 已登录 admin 的 Api（seed_random_pw/trust_internal 时为 None）
+        self.trust = None       # 免登信任头客户端（trust_internal 时可用）
         self._logf = None
 
     # ---------- 生命周期 ----------
@@ -157,16 +171,23 @@ class IsolatedServer:
         )
         env.update(self.extra_env)
         self._logf = open(os.path.join(self.sandbox, "server.log"), "w", encoding="utf-8")
+        args = [sys.executable, "server.py", "--port", str(self.port),
+                "--web-dir", "webui/dist"]
+        if self.trust_internal:
+            # 插件形态：仅回环监听 + 免登信任头（server.py 侧硬校验 host 必须是回环）
+            args += ["--host", "127.0.0.1", "--trust-internal-user"]
         self.proc = subprocess.Popen(
-            [sys.executable, "server.py", "--port", str(self.port),
-             "--web-dir", "webui/dist"],
+            args,
             cwd=ROOT, env=env, stdout=self._logf, stderr=subprocess.STDOUT,
             start_new_session=True)
         if not wait_port(self.port):
             self.stop()
             raise RuntimeError(f"隔离实例启动失败（见 {self.sandbox}/server.log）")
-        if self.seed_random_pw:
-            return self       # 随机种子模式：口令在启动横幅里，由调用方取用后自行登录
+        if self.trust_internal:
+            self.trust = Api(self.base, headers={TRUST_HEADER: "admin"})
+        if self.seed_random_pw or self.trust_internal:
+            # 随机种子/插件形态：口令在启动横幅里（或根本不需要），由调用方自行取用
+            return self
         self.admin = Api(self.base)
         code, d = self.admin.json("/api/auth/login", "POST",
                                   {"username": "admin", "password": self.admin_pw})

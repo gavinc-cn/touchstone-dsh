@@ -3,12 +3,22 @@
 背景：早期启动横幅无条件打印「admin / 123456」；2026-09-27 整改为仅在种子发生的那一次
 提示并支持 TS_ADMIN_PASSWORD 自定义初始口令；2026-10-02 起未设该变量时不再回落固定
 口令，改为随机生成 16 位一次性初始口令（必须首次登录改密），随机口令只在横幅打印一次。
+2026-10-08 增：插件形态（薄壳下发 `TS_ADMIN_PASSWORDLESS=1`）种子为空口令 admin、
+不强制改密——面板本来就是免登 admin，口令只用于独立形态/直连登录。
 conftest 已置套件级临时库并建表，但 admin 在套件级 init_db 时已被种子——
 各用例先清空 users 复原「空库」前提（users 无外键引用，直接 DELETE 即可）。
 """
+import pytest
+
 import auth
 import db
 from server import _seed_hint
+
+
+@pytest.fixture(autouse=True)
+def _no_passwordless_leak(monkeypatch):
+    """默认清掉插件形态开关：只有显式设置它的用例才走空口令分支。"""
+    monkeypatch.delenv("TS_ADMIN_PASSWORDLESS", raising=False)
 
 
 def _wipe_users():
@@ -99,3 +109,46 @@ def test_seed_hint_no_pw_after_taken(monkeypatch):
     assert "口令" in hint
     for token in ("123456", "token_urlsafe"):
         assert token not in hint
+
+
+# ---------- 插件形态空口令种子（2026-10-08） ----------
+
+def test_seed_admin_passwordless_in_plugin_mode(monkeypatch):
+    """`TS_ADMIN_PASSWORDLESS=1`（插件形态）：空口令 admin、不强制改密、不进横幅。
+
+    用户口径：插件形态默认 admin + 空密码，用户设置了密码就按设置的来。
+    空口令 = 「没设置密码」，面板免登进来就能用；独立形态/直连登录时空密码即可进。
+    """
+    monkeypatch.delenv("TS_ADMIN_PASSWORD", raising=False)
+    monkeypatch.setenv("TS_ADMIN_PASSWORDLESS", "1")
+    _wipe_users()
+    db.take_seed_password()
+    assert db.seed_admin() is True
+    row = db.get_user_by_name("admin")
+    assert row["must_change_pw"] == 0, "空口令不该触发强制改密门"
+    assert auth.verify_password("", row["pass_hash"], row["salt"]) is True
+    assert auth.verify_password("123456", row["pass_hash"], row["salt"]) is False
+    assert db.take_seed_password() == "", "空口令没有可打印的一次性口令"
+
+
+def test_seed_admin_env_password_beats_passwordless(monkeypatch):
+    """显式 `TS_ADMIN_PASSWORD` 优先于插件形态开关（部署方有意设定的口令不被覆盖）。"""
+    _wipe_users()
+    monkeypatch.setenv("TS_ADMIN_PASSWORD", "env-secret-9")
+    monkeypatch.setenv("TS_ADMIN_PASSWORDLESS", "1")
+    assert db.seed_admin() is True
+    row = db.get_user_by_name("admin")
+    assert auth.verify_password("env-secret-9", row["pass_hash"], row["salt"])
+    assert auth.verify_password("", row["pass_hash"], row["salt"]) is False
+    assert row["must_change_pw"] == 0
+
+
+def test_seed_admin_default_random_when_no_switch(monkeypatch):
+    """两个开关都没有 → 保持现状（随机一次性口令 + 强制首登改密）。"""
+    monkeypatch.delenv("TS_ADMIN_PASSWORD", raising=False)
+    _wipe_users()
+    db.take_seed_password()
+    assert db.seed_admin() is True
+    row = db.get_user_by_name("admin")
+    assert row["must_change_pw"] == 1
+    assert auth.verify_password(db.take_seed_password(), row["pass_hash"], row["salt"])

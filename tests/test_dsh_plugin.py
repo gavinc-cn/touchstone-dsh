@@ -798,6 +798,33 @@ def test_shell_lifecycle_harness():
     assert "✗" not in out, out
 
 
+def test_shell_stdout_sink_harness():
+    """跑 `dsh-plugin/scripts/dev-check-shell-stdout.mjs`：子进程输出落盘 + 跨 chunk marker。
+
+    背景（2026-10-08 缺陷定位，见 doc_ai/bug_report/20261008_1856）：薄壳此前只解析
+    `TOUCHSTONE_LISTEN`，其余 stdout 行**既不转发也不落盘**——首启随机一次性口令横幅
+    恰在其中（设计上唯一出口、内存读后即清），插件形态首装必然拿不到口令，再撞上
+    「首次登录强制改密」门就是死锁；`[board]`/`[waitq]`/`[runner]` 运行诊断同样不可见。
+    同一处理器还没有跨 chunk 行缓冲，marker 被管道切开就永远解析不到端口（面板固定 503）。
+    本档用假 server.py 把四条钉死：① stdout/stderr 逐行落 `<库目录>/plugin-backend.log`
+    （0600，超 5MiB 轮转）；② marker 跨 chunk 仍解析（经注册的反代 handler 真取上游响应）；
+    ③ 日志不可写时只 warn、绝不阻断启动；④ `TS_ADMIN_PASSWORDLESS=1` 已下发子进程。
+    """
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node 不可用（跳过插件侧薄壳输出落盘自检）")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proc = subprocess.run([node, "scripts/dev-check-shell-stdout.mjs"],
+                          cwd=os.path.join(root, "dsh-plugin"),
+                          capture_output=True, text=True, timeout=120)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, f"薄壳输出落盘自检失败：\n{out}"
+    assert "OVERALL: PASS" in out
+    assert "✗" not in out, out
+
+
 def test_client_shortcut_harness():
     """跑 `dsh-plugin/scripts/dev-check-shortcuts.mjs`：客户端快捷键两条通道（2026-10-04）。
 

@@ -453,6 +453,7 @@ PUBLIC_PAGES = {"/login"}
 
 # 「首次登录强制改密」白名单：must_change_pw=1 的账号只放行这三个端点，其余 API 一律 403
 # （2026-10-02：未设 TS_ADMIN_PASSWORD 时种子口令改为随机生成，登录后必须先改密）
+# 2026-10-08 增例外：dsh 插件形态的免登信任头路径**整体跳过**此门（见 _must_change_pw_blocked）
 MUST_CHANGE_PW_ALLOW = ("/api/auth/me", "/api/auth/change_password", "/api/auth/logout")
 
 # 压测指标 SSE 首次连接的回放行数上限（2026-09-19 压测面板重构批次）：
@@ -1531,11 +1532,18 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _api_change_password(self):
+        """改密。插件形态（免登信任头）下**不校验原口令**（2026-10-08）。
+
+        为什么：插件形态首装的随机一次性口令只印在启动横幅里（薄壳曾整段丢弃），
+        存量库的旧口令用户也可能不知道——要求原口令等于把面板锁死。信任头本就等价
+        admin 全权（_current_user），这里放行不新增任何权限面。
+        """
         user = self._current_user()
         data = self._read_json() or {}
         old_pw = _pw_str(data.get("old_password"))
         new_pw = _pw_str(data.get("new_password"))
-        if not auth.verify_password(old_pw, user["pass_hash"], user["salt"]):
+        if not self._trusted_admin_request() and \
+                not auth.verify_password(old_pw, user["pass_hash"], user["salt"]):
             self._respond(400, '{"error":"原密码错误"}'.encode("utf-8"),
                           "application/json; charset=utf-8")
             return
@@ -5029,8 +5037,15 @@ class Handler(BaseHTTPRequestHandler):
 
         返回 True 表示已回 403、调用方直接 return。前端据 /api/auth/me 的
         must_change_password 渲染改密门；此处是服务端兜底（防绕过前端直调 API）。
+
+        例外（2026-10-08，插件形态死锁修复）：免登信任头路径整体跳过此闸。
+        插件形态下用户拿不到随机一次性口令（薄壳曾把横幅整段丢弃），拦在这里只会
+        把面板锁死——而信任头本已等价 admin（见 _current_user），跳过不降安全等级；
+        存量库 must_change_pw=1 在插件形态亦据此不再锁死，用户进面板后可在设置页设密码。
         """
         if not user or not user["must_change_pw"]:
+            return False
+        if self._trusted_admin_request():
             return False
         if path in MUST_CHANGE_PW_ALLOW:
             return False
@@ -5038,11 +5053,20 @@ class Handler(BaseHTTPRequestHandler):
                       "application/json; charset=utf-8")
         return True
 
+    def _trusted_admin_request(self):
+        """本次请求是否由薄壳反代注入的免登信任头判为 admin（--trust-internal-user）。
+
+        仅回环监听 + 显式开关时才可能为真（main() 已限制）；该头等价 admin 全权，
+        故以此为据的放行（跳过强制改密门、免原口令改密）不新增任何权限面。
+        """
+        return bool(TRUST_INTERNAL_USER
+                    and self.headers.get(TRUST_USER_HEADER) == "admin")
+
     def _current_user(self):
         """按 cookie 取会话用户，无效返回 None。"""
         # dsh 插件形态免登：--trust-internal-user 时反代注入的信任头视为 admin 登录
         # （main() 已限制仅回环监听可开启）；后续 _owned_project 等隔离逻辑不变
-        if TRUST_INTERNAL_USER and self.headers.get(TRUST_USER_HEADER) == "admin":
+        if self._trusted_admin_request():
             admin = db.get_user_by_name("admin")
             if admin is not None:
                 return admin

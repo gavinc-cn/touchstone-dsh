@@ -22,9 +22,11 @@
  *   两条与正常 dispose 共用同一个幂等 `teardown()`, 因此正常路径行为不变。
  */
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync }
+  from 'node:fs';
 import http from 'node:http';
-import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AgentDriver, loadUserMessageFactory, loadModelSelectionInstaller }
   from './agent-driver.js';
@@ -44,6 +46,10 @@ const BACKEND_EXIT_GRACE_MS = 5000;
 
 /** 掉线自检节拍（ms）：热重载把本条目换下却不 dispose 时的兜底发现窗口 */
 const UNMOUNT_WATCH_MS = 2000;
+
+/** 插件形态后端日志（2026-10-08）：与库同目录追加写；启动时超过该体积先轮转一份 `.1` */
+const BACKEND_LOG_NAME = 'plugin-backend.log';
+const BACKEND_LOG_MAX_BYTES = 5 * 1024 * 1024;
 
 /** 进程级存活壳注册表键（同一 dsh 进程内只允许一份有效壳） */
 const LIVE_KEY = Symbol.for('touchstone.live');
@@ -190,6 +196,62 @@ function renderDepHint(pythonPath, repoDir, missing) {
 }
 
 /**
+ * 插件形态后端日志路径：与子进程用的**同一个库**同目录（`<库目录>/plugin-backend.log`）。
+ * 不落 node_modules 下的 .run：装机目录可能只读、重装即清，而且日志跟着库走才对得上
+ * 首启口令与运行审计。库路径优先级与 server.py 侧一致：extraEnv（profile 显式配置）
+ * > 宿主环境 > 缺省 `~/.touchstone/touchstone.db`。
+ */
+function backendLogPath(extraEnv) {
+  const dbPath = resolve(extraEnv.TOUCHSTONE_DB || process.env.TOUCHSTONE_DB
+    || join(homedir(), '.touchstone', 'touchstone.db'));
+  return join(dirname(dbPath), BACKEND_LOG_NAME);
+}
+
+/**
+ * 打开后端日志追加流（必要时先把超限的旧日志轮转成 `.1`）。任何失败都只 warn 并返回
+ * null —— 日志不可用**绝不阻断后端启动**，调用方退化为只走 dsh 日志。
+ */
+function openBackendLog(logPath, logger) {
+  try {
+    mkdirSync(dirname(logPath), { recursive: true, mode: 0o700 });
+    if (existsSync(logPath) && statSync(logPath).size > BACKEND_LOG_MAX_BYTES) {
+      try {
+        rmSync(logPath + '.1', { force: true });   // Windows 不允许改名覆盖已存在文件
+        renameSync(logPath, logPath + '.1');
+      } catch { /* 轮转失败照样追加：不因轮转挡启动 */ }
+    }
+    const stream = createWriteStream(logPath, { flags: 'a', mode: 0o600 });
+    let broken = false;
+    stream.on('error', (error) => {
+      if (broken) return;                          // 只报一次，避免刷屏
+      broken = true;
+      logger.warn(`touchstone: 后端日志写入失败（${error && error.message}）, 后续只走 dsh 日志`);
+    });
+    return stream;
+  } catch (error) {
+    logger.warn(`touchstone: 后端日志不可用（${error && error.message}）, 输出只走 dsh 日志: ${logPath}`);
+    return null;
+  }
+}
+
+/**
+ * 行缓冲转发子进程输出。为什么不直接 `split('\n')`：data 事件按 chunk 到达，**行可能
+ * 被切开**——`TOUCHSTONE_LISTEN` 被切成两段就永远匹配不上，端口解析不到、面板固定 503
+ * （2026-10-08 缺陷定位时一并修）。每个流各持一段 carry，拼齐整行才交给 onLine。
+ */
+function pumpLines(stream, onLine) {
+  let carry = '';
+  stream.setEncoding('utf8');        // 内部 StringDecoder：多字节字符跨 chunk 不截断乱码
+  stream.on('data', (chunk) => {
+    carry += chunk;
+    const lines = carry.split('\n');
+    carry = lines.pop();             // 末段不完整，留到下一 chunk
+    for (const line of lines) onLine(line);
+  });
+  stream.on('end', () => { if (carry) onLine(carry); });
+}
+
+/**
  * 反代 /touchstone/* 到本机 server.py 子进程: 剥掉 /touchstone 前缀后原样转发
  * （路径/查询串原样; Node http 管道流式转发不缓冲, SSE 事件实时透传）。
  */
@@ -324,6 +386,14 @@ export async function apply(ctx, config = {}) {
     '--parent-watch',                             // 父死感知: dsh 退出/崩溃时后端自主退出
   ];
   const extraEnv = { ...(config.extraEnv || {}) };
+  // 插件形态默认「空口令 admin」（2026-10-08 用户口径）：面板本来就是免登 admin，
+  // 而随机一次性口令只印在启动横幅里、用户拿不到 —— 首装必被「强制改密门」锁死
+  // （横幅+门+薄壳丢 stdout 三者叠加，见 bug_report/20261008_1856）。这里下发开关：
+  // db.seed_admin 种子时存空口令、不置 must_change_pw；用户在设置页设了密码就按设置的来。
+  // 部署方显式配了 TS_ADMIN_PASSWORD 时无需让位（db 侧以该变量优先）。
+  if (!('TS_ADMIN_PASSWORDLESS' in extraEnv)) {
+    extraEnv.TS_ADMIN_PASSWORDLESS = '1';
+  }
   if (driverUrl) {
     // 驱动契约经环境变量下发（不写配置文件）: 重启 server.py 即重新握手, 无陈旧状态
     extraEnv.TS_AGENT_DRIVER_URL = driverUrl;
@@ -336,6 +406,8 @@ export async function apply(ctx, config = {}) {
   const pythonPath = config.pythonPath || 'python3';
   const deps = await preflightDeps(pythonPath, repoDir, logger);
   let myChild = null;
+  /** 本次壳的开的后端日志流（teardown 关闭；null = 不可用/未启动） */
+  let myLog = null;
   if (deps.fatal.length) {
     backendHint = renderDepHint(pythonPath, repoDir, deps.fatal);
     logger.warn(`touchstone: 后端未启动 —— Python 运行依赖缺失: ${deps.fatal.join(', ')}`);
@@ -356,18 +428,34 @@ export async function apply(ctx, config = {}) {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child = myChild;
-    myChild.stdout.on('data', (buf) => {
-      for (const line of String(buf).split('\n')) {
-        const m = line.match(/^TOUCHSTONE_LISTEN (\d+)/);
-        if (m) {
-          backendPort = Number(m[1]);
-          logger.info(`touchstone: 后端就绪 127.0.0.1:${backendPort}`);
-        }
+    // 子进程输出落盘（2026-10-08）：stdout 此前只用来解析 marker，**其余行全部丢弃**——
+    // 首启一次性口令横幅（设计上唯一出口，见 server._seed_hint）与 [board]/[waitq]/[runner]
+    // 运行诊断都在这些行里。现在 stdout/stderr 都逐行追加到 <库目录>/plugin-backend.log。
+    myLog = openBackendLog(backendLogPath(extraEnv), logger);
+    const writeLog = (line) => {
+      if (!myLog) return;
+      try { myLog.write(line + '\n'); } catch { /* 流已坏：忽略，绝不打断读取 */ }
+    };
+    pumpLines(myChild.stdout, (line) => {
+      writeLog(line);
+      const m = line.match(/^TOUCHSTONE_LISTEN (\d+)/);
+      if (m) {
+        backendPort = Number(m[1]);
+        logger.info(`touchstone: 后端就绪 127.0.0.1:${backendPort}`);
       }
     });
-    myChild.stderr.on('data', (buf) => logger.warn(`touchstone[py]: ${String(buf).trim()}`));
-    myChild.on('exit', (code, sig) => logger.warn(`touchstone: 后端退出 code=${code} sig=${sig}`));
-    myChild.on('error', (err) => logger.warn(`touchstone: 后端拉起失败: ${err.message}`));
+    pumpLines(myChild.stderr, (line) => {
+      writeLog(line);
+      if (line.trim()) logger.warn(`touchstone[py]: ${line.trim()}`);
+    });
+    myChild.on('exit', (code, sig) => {
+      writeLog(`[touchstone] 后端退出 code=${code} sig=${sig}`);
+      logger.warn(`touchstone: 后端退出 code=${code} sig=${sig}`);
+    });
+    myChild.on('error', (err) => {
+      writeLog(`[touchstone] 后端拉起失败: ${err.message}`);
+      logger.warn(`touchstone: 后端拉起失败: ${err.message}`);
+    });
   }
 
   let disposeRoute = null;
@@ -399,6 +487,10 @@ export async function apply(ctx, config = {}) {
       logger.warn(`touchstone: 驱动释放失败（忽略）: ${error && error.message}`);
     }
     await stopChild(myChild, logger, why);
+    if (myLog) {                    // 子进程停稳后再收日志流：最后几行不丢
+      try { myLog.end(); } catch { /* 已关闭：忽略 */ }
+      myLog = null;
+    }
     logger.info(`touchstone: 壳已停（${why}）`);
   };
 

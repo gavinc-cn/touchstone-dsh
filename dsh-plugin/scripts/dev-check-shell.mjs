@@ -108,7 +108,11 @@ async function main() {
   console.log('== 薄壳生命周期自检（apply / 启用即回收 / 掉线自检 / dispose）==');
   const repoDir = makeFakeRepo();
   const pidFile = path.join(repoDir, 'pids.txt');
-  const config = { repoDir, pythonPath: process.execPath, extraEnv: { FAKE_PID_FILE: pidFile } };
+  // TOUCHSTONE_DB 指到临时目录：2026-10-08 起薄壳把子进程 stdout/stderr 写
+  // <库目录>/plugin-backend.log，不隔离就会落到真实的 ~/.touchstone 数据目录。
+  const config = { repoDir, pythonPath: process.execPath,
+                   extraEnv: { FAKE_PID_FILE: pidFile,
+                               TOUCHSTONE_DB: path.join(repoDir, 'touchstone.db') } };
   const spawned = [];
 
   try {
