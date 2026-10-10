@@ -109,6 +109,11 @@ class FakeDriver:
         # 归档硬失败开关（测试用）：置字符串后 /archive 一律 409（非「会话不存在」，
         # 平台按硬失败回滚移列并 400 报错）
         self.archive_fail = None
+        # `/live` 的**完整声明**（A 批 2026-10-08 真插件契约）：真插件在枚举完宿主已有
+        # 会话后回 `complete: true`，Python 侧只有见到它才敢把空快照当成「宿主里确实
+        # 没有会话」（见 dshevents._align）。替身自己就是唯一会话源 ⇒ 默认 True；
+        # 置 **None** 即省略该字段，模拟**旧插件**（平台按「未对齐」处理：空表不写列）。
+        self.live_complete = True
         self.httpd = None
         self.port = 0
         self._mark_lock = threading.Lock()
@@ -444,7 +449,12 @@ class _Handler(BaseHTTPRequestHandler):
                                     "sessions": len(drv.sessions)})
         if path == "/live":
             rows = [drv.status(s) for s in list(drv.sessions.values())]
-            return self._json(200, {"sessions": rows})
+            body = {"sessions": rows}
+            # 完整声明（A 批）：真插件在 apply 时枚举完宿主已有会话才回 true；
+            # None = 模拟旧插件（字段缺省 ⇒ 平台把空表按未知处理）。
+            if drv.live_complete is not None:
+                body["complete"] = bool(drv.live_complete)
+            return self._json(200, body)
         if path == "/status":
             sid = (q.get("session_id") or [""])[0]
             sess = drv.sessions.get(sid)

@@ -14,6 +14,7 @@
  * 对外契约（全部挂在 webServer 的 `${DRIVER_PREFIX}` 前缀下，仅回环可达 + 令牌校验）：
  *   GET  /touchstone-agent/health              就绪探测（agents 服务是否可用）
  *   GET  /touchstone-agent/live                当前可见会话表（含外部直跑会话，零 REST 探测）
+ *                                              + `complete`：宿主已有会话是否已枚举（A 批）
  *   GET  /touchstone-agent/status?session_id=  单会话状态 + last_seq（SSE 续传基准）
  *   GET  /touchstone-agent/events?session_id=&since=  SSE 事件流（首发 ring 内 seq>since 的帧）
  *   POST /touchstone-agent/session             建会话或恢复会话 {cwd, task, session_id?, model?, provider?}
@@ -56,6 +57,16 @@ const QUESTION_CALL_MAX = 64;
 
 /** SSE keepalive 注释帧间隔（毫秒）：防中间层按空闲超时切断长连 */
 const KEEPALIVE_MS = 15000;
+
+/**
+ * 宿主已有会话枚举的**兜底重试**间隔（毫秒；A 批 2026-10-08）。
+ *
+ * apply 瞬间宿主可能仍在恢复工作区（`sessions` 服务尚未挂上），首轮枚举会失败；
+ * 1s 后再枚举一次即可补上（枚举幂等，重复调用只做覆盖写）。真机实测：热重载后
+ * 驱动实例重建 ⇒ `observed` 全空而 `/live` 恒空，平台可见性整体丢失（见
+ * bug_report/20261008_1935），本兜底是「首轮没赶上」的第二道网。
+ */
+const ENUMERATE_RETRY_MS = 1000;
 
 /**
  * 归档集兜底扫描间隔（毫秒；纯内存读，不产生任何 HTTP/磁盘 IO）。
@@ -242,6 +253,15 @@ export class AgentDriver {
      * 的最近一次已发布值（换行拼接的 key，便于整表比对）。null=尚未取到。
      */
     this._archivedKey = null;
+    /**
+     * 「宿主已有会话已枚举」标志（A 批 2026-10-08）：只有在成功读完宿主 `sessions`
+     * 服务的 store 之后才为 true，`/live` 据此声明 `complete`——Python 侧只有见到
+     * `complete:true` 才敢把**空快照**当成「宿主里确实没有会话」（否则一律按未知
+     * 处理：不写列、不推断，见 dshevents._align）。枚举失败时保持 false。
+     */
+    this._enumerated = false;
+    /** 枚举兜底重试定时器（见 ENUMERATE_RETRY_MS） */
+    this._enumerateTimer = null;
   }
 
   /**
@@ -287,6 +307,12 @@ export class AgentDriver {
       agentCtx.on('agent/inbox/claimed', (payload) => this._onInbox('claimed', payload));
       agentCtx.on('agent/inbox/discarded', (payload) => this._onInbox('discarded', payload));
       this.ready = true;
+      // 已有会话枚举（A 批 2026-10-08）：`session/created` 对**已有**会话不会再发，
+      // 插件重新 apply（热重载）后必须主动补齐，否则 `/live` 恒空、平台可见性丢失。
+      this._enumerateHostSessions();
+      this._enumerateTimer = setTimeout(() => this._enumerateHostSessions(),
+                                        ENUMERATE_RETRY_MS);
+      if (this._enumerateTimer.unref) this._enumerateTimer.unref();
       this.logger.info(`touchstone: agent 驱动就绪（会话池 + SSE 事件流，前缀 ${DRIVER_PREFIX}）`);
     });
     // 业务服务延迟注入（2026-10-03 P3）：缺失不阻塞插件加载，调用时按需 get；
@@ -328,6 +354,9 @@ export class AgentDriver {
     this._timer = null;
     if (this._sweepTimer) clearInterval(this._sweepTimer);
     this._sweepTimer = null;
+    // 枚举兜底定时器：停用后不能再写 `observed`（否则清表之后又被补回，成了幽灵会话）
+    if (this._enumerateTimer) clearTimeout(this._enumerateTimer);
+    this._enumerateTimer = null;
     for (const disposeRoute of this._routes) {
       try {
         disposeRoute();
@@ -364,6 +393,7 @@ export class AgentDriver {
     }
     this.questionCalls.clear();
     this.observed.clear();
+    this._enumerated = false;          // 观察表已清空：快照不再完整，重启后须重新枚举
     this.ready = false;
   }
 
@@ -538,6 +568,54 @@ export class AgentDriver {
     });
     this._publishState('session/created', {
       sid, data: { cwd, owned: this.sessions.has(sid), origin: this._sessionOrigin(session) } });
+  }
+
+  /**
+   * 枚举**宿主已有会话**，补进观察表（A 批 2026-10-08）。
+   *
+   * 为什么必须有它：`observed` 的写入路径只有 `session/created` 事件（L257 订阅）、
+   * 平台自建会话（`_session`）、fork 接管（`_fork`），而宿主对**已有**会话不会再发
+   * `session/created`——插件重新 apply（`dispose()` + 新实例，热重载/面板行开关往返）
+   * 后两表全空，`/live` 于是恒空（真机实测 23 条 → 0 条，3 分钟不自愈），Python 侧
+   * `dshevents` 对齐拿到空表 ⇒ 对所有外部会话失去可见性（运行中的看板卡被搬去
+   * 待审核，见 bug_report/20261008_1935）。
+   *
+   * 做法：读宿主 `sessions` 服务（`SessionStore.store`，`Map(sid → entry)`，
+   * `entry.session` = 活会话）逐个走既有的 `_observe()`，**已在观察表里的 sid 跳过**
+   * ——枚举只负责「发现没见过的」，不会把事件学到的 turn 结果/挂起问答覆盖掉，故本方法
+   * 可安全重复调用（apply 时一次 + 1s 兜底一次）。`store` 是宿主内部字段、非正式契约：
+   * 形状不符或抛错时只 warn，`_enumerated` 保持 false ⇒ `/live` 报 `complete:false`，
+   * 平台按「未对齐」处理（宁可多等不可误放行），插件其余功能不受影响。
+   *
+   * @returns {boolean} 是否成功枚举（true = `/live` 可声明快照完整）
+   */
+  _enumerateHostSessions() {
+    try {
+      const service = this.ctx.get('sessions');
+      const table = service && service.store;
+      if (!(table instanceof Map)) {
+        this.logger.warn('touchstone: 宿主 sessions.store 不可读，'
+                         + '/live 声明 complete=false（平台按未对齐处理）');
+        return false;
+      }
+      let n = 0;
+      for (const entry of table.values()) {
+        const session = entry && entry.session;
+        if (!session || !session.id) continue;      // 脏 entry（无活会话）：跳过
+        // 已在观察表里的（事件先到 / 平台自建已登记）不再覆盖：`_observe` 是整条覆盖写，
+        // 会把事件学到的 turn 结果、挂起问答清成 null——枚举只负责「发现没见过的」。
+        if (this.observed.has(String(session.id))) continue;
+        this._observe(session);
+        n += 1;
+      }
+      this._enumerated = true;
+      this.logger.info(`touchstone: 枚举宿主已有会话 ${n} 条（/live complete=true）`);
+      return true;
+    } catch (err) {
+      this.logger.warn(`touchstone: 枚举宿主会话失败（/live 声明 complete=false）: ${
+        (err && err.message) || err}`);
+      return false;
+    }
   }
 
   /**
@@ -1000,7 +1078,12 @@ export class AgentDriver {
     const path = url.pathname.slice(DRIVER_PREFIX.length) || '/';
     try {
       if (path === '/health' && req.method === 'GET') return this._json(res, 200, this._health());
-      if (path === '/live' && req.method === 'GET') return this._json(res, 200, { sessions: this.live() });
+      if (path === '/live' && req.method === 'GET') {
+        // `complete` = 宿主已有会话是否已枚举（A 批）：只有它为 true，Python 侧才敢把
+        // 「空表」当成「宿主里确实没有会话」；否则空表一律按未知处理（不写列、不推断）。
+        return this._json(res, 200, { sessions: this.live(),
+                                      complete: this._enumerated === true });
+      }
       if (path === '/status' && req.method === 'GET') return this._status(res, url);
       // `?scope=state` = 全局状态流（P4，Python EventHub 唯一连接）；缺省 = 单会话事件流
       if (path === '/events' && req.method === 'GET') {
@@ -1042,6 +1125,8 @@ export class AgentDriver {
       prefix: DRIVER_PREFIX,
       live: this.sessions.size,
       observed: this.observed.size,
+      // 宿主已有会话是否枚举成功（A 批）：热重载后可见性恢复与否，看这一位
+      enumerated: this._enumerated === true,
     };
   }
 

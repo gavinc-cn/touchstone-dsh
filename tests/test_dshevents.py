@@ -9,10 +9,15 @@ import dshdriver
 
 
 def _hub(monkeypatch, frames=None, live_rows=None):
-    """造一个已连接、喂了给定帧的 hub（不起线程），返回 (hub, feed)。"""
+    """造一个已连接、喂了给定帧的 hub（不起线程），返回 (hub, feed)。
+
+    `/live` 打桩打的是**原始响应读口** `dshdriver.live_snapshot()`（`{sessions, complete?}`）
+    ——`_align` 只消费它；`live()` 是它的行表包装（2026-10-08 修正，见
+    tests/test_session_visibility.py「B 修正」一节）。
+    """
     hub = dshevents.EventHub()
     if live_rows is not None:
-        monkeypatch.setattr(dshdriver, "live", lambda: {"sessions": live_rows})
+        monkeypatch.setattr(dshdriver, "live_snapshot", lambda: {"sessions": live_rows})
         hub._align()
     hub._set_connected(True)
     for frame in frames or []:
@@ -55,7 +60,7 @@ def test_fold_usage_and_model(monkeypatch):
     assert item["model"] == {"provider": "q", "model": "w"}      # 后到者覆盖
     assert item["usage"]["total"] == 10 and item["usage"]["output"] == 3
     # 对齐（/live 无这两个字段）不清掉已学到的值
-    monkeypatch.setattr(dshdriver, "live", lambda: {"sessions": [
+    monkeypatch.setattr(dshdriver, "live_snapshot", lambda: {"sessions": [
         {"session_id": "s1", "status": "idle", "owned": True}]})
     hub._align()
     assert hub.get("s1")["usage"]["total"] == 10
@@ -75,12 +80,12 @@ def test_fold_permission_frame(monkeypatch):
     ])
     assert hub.get("s1")["permission"] == {"mode": "manual", "preset": "workspace-write"}
     # /live 不带 permission：保留已学到的值（与 usage/model 同口径）
-    monkeypatch.setattr(dshdriver, "live", lambda: {"sessions": [
+    monkeypatch.setattr(dshdriver, "live_snapshot", lambda: {"sessions": [
         {"session_id": "s1", "status": "idle", "owned": True}]})
     hub._align()
     assert hub.get("s1")["permission"]["mode"] == "manual"
     # /live 带 permission（驱动新版本）：preset 以快照为准，mode 沿用平台记下的
-    monkeypatch.setattr(dshdriver, "live", lambda: {"sessions": [
+    monkeypatch.setattr(dshdriver, "live_snapshot", lambda: {"sessions": [
         {"session_id": "s1", "status": "idle", "owned": True,
          "permission": {"mode": "", "preset": "danger-full-access"}}]})
     hub._align()
@@ -100,7 +105,7 @@ def test_fold_inbox_queue_rows(monkeypatch):
     hub._on_frame({"seq": 2, "type": "driver/inbox", "session_id": "s1",
                    "data": {"items": [{"id": "b", "text": "二"}]}})
     assert [m["id"] for m in hub.get("s1")["inbox"]] == ["b"]      # 整表覆盖
-    monkeypatch.setattr(dshdriver, "live", lambda: {"sessions": [
+    monkeypatch.setattr(dshdriver, "live_snapshot", lambda: {"sessions": [
         {"session_id": "s1", "status": "idle", "owned": True}]})
     hub._align()
     assert [m["id"] for m in hub.get("s1")["inbox"]] == ["b"]      # 对齐不清值
@@ -155,7 +160,7 @@ def test_align_carries_origin(monkeypatch):
     assert hub.get("sub1")["origin"] == "subagent"
     assert hub.get("main1")["origin"] == ""
     # 再对齐一次：快照不带 origin ⇒ 保留旧值（origin 是会话固有的，不会变化）
-    monkeypatch.setattr(dshdriver, "live", lambda: {"sessions": [
+    monkeypatch.setattr(dshdriver, "live_snapshot", lambda: {"sessions": [
         {"session_id": "sub1", "status": "running", "owned": False, "cwd": "/a"}]})
     hub._align()
     assert hub.get("sub1")["origin"] == "subagent"
@@ -219,7 +224,7 @@ def test_align_replaces_registry(monkeypatch):
     assert hub.get("s1")["last_seq"] == 5
     assert hub.get("s2")["owned"] is False
     # 会话结束后再对齐：已消失的会话从注册表移除
-    monkeypatch.setattr(dshdriver, "live", lambda: {"sessions": [
+    monkeypatch.setattr(dshdriver, "live_snapshot", lambda: {"sessions": [
         {"session_id": "s2", "status": "idle", "owned": False}]})
     hub._align()
     assert set(hub.snapshot()) == {"s2"}
@@ -231,7 +236,7 @@ def test_align_failure_keeps_registry(monkeypatch):
 
     def boom():
         raise dshdriver.DshDriverError(-2, "不可达")
-    monkeypatch.setattr(dshdriver, "live", boom)
+    monkeypatch.setattr(dshdriver, "live_snapshot", boom)
     hub._align()
     assert hub.get("s1")["status"] == "running"
 
@@ -267,7 +272,7 @@ def test_run_reconnects_with_since_and_backoff(monkeypatch):
     hub = dshevents.EventHub()
     since_seen = []
     monkeypatch.setattr(dshdriver, "configured", lambda: True)
-    monkeypatch.setattr(dshdriver, "live", lambda: {"sessions": []})
+    monkeypatch.setattr(dshdriver, "live_snapshot", lambda: {"sessions": []})
     monkeypatch.setattr(dshevents, "RECONNECT_MIN", 0.01)
     monkeypatch.setattr(dshevents, "RECONNECT_MAX", 0.02)
 

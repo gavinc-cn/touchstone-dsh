@@ -136,6 +136,11 @@ function makeCtx() {
       return ws;
     },
   };
+  // 宿主会话表桩（A 批 2026-10-08 会话枚举）：形状对齐 @deepseek-ai/dsh-session 的
+  // `SessionStore`——`store` 是 `Map(sid → entry)`，`entry.session` = 活会话对象
+  // （另有 cwd/carrier/announced 等本用例不关心的字段）。`sockets.sessions = undefined`
+  // 模拟服务缺席（如 dev-check.mjs 的极简桩），枚举必须降级为 complete:false。
+  sockets.sessions = { store: new Map() };
   const agentCtx = {
     on(name, fn, options) {
       (handlers[name] ||= []).push(fn);
@@ -156,6 +161,8 @@ function makeCtx() {
         } };
       }
       if (name === 'sessionPersistence') return {};
+      // 宿主会话表（A 批枚举源）：`/live` 的 complete 声明由它是否可读决定
+      if (name === 'sessions') return sockets.sessions;
       // 工作区注册表（侧栏归组用；2026-10-04）：缺席时驱动须降级为「只告警不抛」
       if (name === 'workspaceRegistry') return sockets.workspaceRegistry;
       // P3 对齐端点用到的业务服务（形状对齐 .d.ts：SessionController / CommandsService）
@@ -292,6 +299,34 @@ function call(base, token, method, path, body) {
     headers: { 'content-type': 'application/json', 'x-ts-driver-token': token },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+}
+
+/** 造一条宿主会话（`SessionStore.store` 的 entry.session 形状：只用到 id + header）。 */
+function hostSession(id, cwd, origin) {
+  return { id, header: origin ? { cwd, origin } : { cwd } };
+}
+
+/**
+ * 起一个**独立**驱动实例（自带桩 ctx + 临时 HTTP 服务），回调跑完自动收尾。
+ *
+ * 为什么需要独立实例：A 批枚举用例要控制「apply 那一刻宿主会话表里有什么」，
+ * 而主实例的 store 必须保持为空（否则会污染前面 `/live 列出两个自持会话` 的断言）。
+ *
+ * @param {Function|null} setup - 可选的桩面预设（拿 sockets 摆布局）
+ * @param {Function} fn - 用例体，收 {driver, base, token, sockets, handlers}
+ */
+async function withDriver(setup, fn) {
+  const made = makeCtx();
+  if (setup) setup(made.sockets, made);
+  const driver = new AgentDriver(made.ctx, made.ctx.logger('t'));
+  driver.start();
+  const { server, base } = await serve(made.getHandler);
+  try {
+    return await fn({ ...made, driver, base, token: driver.token });
+  } finally {
+    await driver.dispose();
+    server.close();
+  }
 }
 
 /** 读 SSE 直到收到 n 帧或超时。 */
@@ -1070,6 +1105,88 @@ async function main() {
                                  archived: true });
   check('未知会话归档 → 410（平台跳过该 sid 放行卡片）', unknownAr.status === 410,
     String(unknownAr.status));
+
+  // --- 宿主已有会话枚举（A 批 2026-10-08）---
+  // 实障（bug_report/20261008_1935）：插件重新 apply（热重载 / 面板行开关往返）会重建
+  // 驱动实例，而 `observed` 的唯一写入路径是 `session/created`——**已有会话不会再发该
+  // 事件** ⇒ `/live` 恒空（真机实测 23 条 → 0 条且 3 分钟不恢复），平台侧 dshevents
+  // 对齐拿到空表、对所有外部会话失去可见性（运行中的卡被判待审核）。
+  // 修法：apply 时枚举宿主 `sessions` 服务的 store，把已有会话补进观察表，并在 `/live`
+  // 里声明 `complete:true`（Python 侧 B 批已按 `resp["complete"] is True` 消费）。
+  await withDriver((s) => {
+    // apply 前宿主里就有的两条：一条子代理会话、一条主会话
+    s.sessions.store.set('session-host-aaa',
+                         { session: hostSession('session-host-aaa', '/tmp/host-a', 'subagent') });
+    s.sessions.store.set('session-host-bbb',
+                         { session: hostSession('session-host-bbb', '/tmp/host-b', '') });
+  }, async ({ driver, base, token, sockets, handlers }) => {
+    const lv = await (await call(base, token, 'GET', '/live')).json();
+    check('A 批：apply 时枚举宿主已有会话（/live 不再恒空）',
+      lv.complete === true && lv.sessions.length === 2
+      && lv.sessions.every((x) => x.owned === false),
+      JSON.stringify(lv));
+    check('A 批：枚举行带 origin（子代理判定不依赖磁盘兜底）',
+      (lv.sessions.find((x) => x.session_id === 'session-host-aaa') || {}).origin === 'subagent'
+      && (lv.sessions.find((x) => x.session_id === 'session-host-bbb') || {}).origin === '',
+      JSON.stringify(lv.sessions.map((x) => [x.session_id, x.origin])));
+    const hl = await (await call(base, token, 'GET', '/health')).json();
+    check('A 批：/health 暴露 enumerated 与 observed（重启后可见性诊断口）',
+      hl.ok === true && hl.enumerated === true && hl.observed === 2,
+      JSON.stringify(hl));
+    // 与 `session/created` 合流：新会话入表、同 sid 覆盖不产生重复行
+    for (const fn of handlers['session/created'] || []) {
+      fn(hostSession('session-host-ccc', '/tmp/host-c', ''));
+      fn(hostSession('session-host-aaa', '/tmp/host-a2', 'subagent'));
+    }
+    const merged = await (await call(base, token, 'GET', '/live')).json();
+    check('A 批：枚举结果与 session/created 合流（同 sid 覆盖、无重复）',
+      merged.sessions.length === 3
+      && merged.sessions.filter((x) => x.session_id === 'session-host-aaa').length === 1
+      && (merged.sessions.find((x) => x.session_id === 'session-host-aaa') || {}).cwd === '/tmp/host-a2',
+      JSON.stringify(merged.sessions.map((x) => [x.session_id, x.cwd])));
+    // 幂等 + 与自持池去重：平台自建会话同时也在宿主表里（真机常态），只能出一行
+    const mine = await (await call(base, token, 'POST', '/session',
+                                   { cwd: '/tmp/x', task: 'enum' })).json();
+    sockets.sessions.store.set(mine.session_id, { session: hostSession(mine.session_id, '/tmp/x', '') });
+    driver._enumerateHostSessions();               // 再枚举一次（幂等）
+    const again = await (await call(base, token, 'GET', '/live')).json();
+    check('A 批：重复枚举幂等，且与自持池去重（同一 sid 只一行、owned=true）',
+      again.sessions.length === 4
+      && again.sessions.filter((x) => x.session_id === mine.session_id).length === 1
+      && (again.sessions.find((x) => x.session_id === mine.session_id) || {}).owned === true,
+      JSON.stringify(again.sessions.map((x) => [x.session_id, x.owned])));
+  });
+
+  // 降级：宿主表读不到（服务缺席 / 形状不符）⇒ complete=false，行为退回现状
+  // （平台按「未对齐」处理：不写列、不推断），且绝不影响插件其余端点。
+  for (const [label, setup] of [
+    ['sessions 服务缺席', (s) => { s.sessions = undefined; }],
+    ['store 形状不符', (s) => { s.sessions = { store: {} }; }],
+  ]) {
+    await withDriver(setup, async ({ base, token }) => {
+      const lv = await (await call(base, token, 'GET', '/live')).json();
+      const hl = await (await call(base, token, 'GET', '/health')).json();
+      const made = await (await call(base, token, 'POST', '/session', { cwd: '/tmp/x' })).json();
+      check(`A 批：${label} ⇒ complete=false 降级（不抛、其余端点照常）`,
+        lv.complete === false && Array.isArray(lv.sessions) && lv.sessions.length === 0
+        && hl.ok === true && hl.enumerated === false
+        && /^session-/.test(String(made.session_id || '')),
+        JSON.stringify({ lv, hl, made }));
+    });
+  }
+
+  // 延时兜底：apply 那一刻宿主可能仍在恢复工作区（服务还没挂上）⇒ 1s 后再枚举一次
+  await withDriver((s) => { s.sessions = undefined; }, async ({ base, token, sockets }) => {
+    sockets.sessions = { store: new Map([['session-host-late',
+      { session: hostSession('session-host-late', '/tmp/late', '') }]]) };
+    const before = await (await call(base, token, 'GET', '/live')).json();
+    await new Promise((r) => setTimeout(r, 1300));
+    const after = await (await call(base, token, 'GET', '/live')).json();
+    check('A 批：apply 时宿主表不可见 → 1s 兜底补枚举（complete 转 true）',
+      before.complete === false && after.complete === true
+      && after.sessions.some((x) => x.session_id === 'session-host-late'),
+      JSON.stringify({ before: before.complete, after }));
+  });
 
   // --- 释放 ---
   await call(base, token, 'POST', '/dispose', { session_id: sid });

@@ -2763,9 +2763,20 @@ def _recover_web_card(proj, card):
     `_recover_ext_rows` 按项目活跃会话集合重新对账（实况在→ext 行保持 running
     入前缀、占位不丢），空闲时由调和器列映射回 review（≤5s，与收养路径同归）。
     收养行为（建 _RUNS 条目）会把不可控会话伪装成平台
-    在管单元——ext 行被 `_platform_holds` 抑制。"""
+    在管单元——ext 行被 `_platform_holds` 抑制。
+
+    就绪闸（2026-10-08 批次 C，bug_report/20261008_1935）：本函数在启动序里必然
+    早于 `dshevents.start()`（server.py 里 board.recover 先于 dshevents.start），
+    此刻读任何会话都是「未知」；插件热重载后还会叠加「驱动实例重建、/live 空」
+    ——旧口径把「未知」当「空闲」，于是**正在运行的卡**被搬去待审核，且此后
+    调和器读不到该会话、自愈无门（实测卡 915）。现在：有 sid 而中枢不可信
+    （`dshevents.aligned()` 为 False）⇒ **不搬列**（也不建 _RUNS），保留原列等
+    中枢对齐后由调和器按实况归位（`_iw_once`：在场按忙/闲、缺席按「已结束」，
+    列写的时机从「未知时」挪到「已知时」）。"""
     family = _web_family(proj)
     sid = (card["session_id"] or "").strip()
+    if sid and not dshevents.aligned():
+        return                       # 未知 ≠ 空闲：不搬列，交调和器在可信后收口
     busy = False
     if sid:
         try:
@@ -3914,6 +3925,15 @@ def _iw_once():
                     if not dshevents.connected() and not _platform_holds(card["id"]) \
                             and not _subagent_session(sid):
                         ext_hold.add(card["id"])   # 占用未知：保留既有行（old 探针口径）
+                    elif dshevents.aligned() and not _platform_holds(card["id"]):
+                        # ③ 中枢可信（在线 ∧ 已对齐）却查不到该 sid ＝ 会话确已结束：
+                        #    补上卡列这一格（2026-10-08 批次 D，bug_report/20261008_1935）
+                        #    ——旧口径只收 ext 行、列不动，会话静默消失的 doing 卡永滞
+                        #    开发列（卡 908/909/912/913 的原症状）；对齐前一律不动，
+                        #    杜绝「热重载后注册表为空 ⇒ 把运行中的卡批量搬走」的误判。
+                        #    写前复核全在 `_iw_apply`：queue 占位 / 起跑窗口 / 平台持有 /
+                        #    已答待送达 / 归档（to_done）自动跳出（状态机重评）。
+                        _iw_apply(fam, card, "to_review", None)
                     continue               # 实况读不到：该卡本轮跳过，不搬列
                 # —— 外部条目占用候选（v2d T4）：busy 且非挂起、且平台不持有 ——
                 # 挂起（pending）不算占用（豁免面②：挂起即出队，不建行）；平台

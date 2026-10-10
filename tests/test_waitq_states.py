@@ -273,6 +273,9 @@ def test_recover_matrix_new_states(monkeypatch):
     # web 族实况探测打桩：仅 s-busy 在跑（驱动侧无本地子进程，无需 ensure 桩）
     monkeypatch.setattr(board, "_web_busy",
                         lambda family, pdir, sid: sid == "s-busy")
+    # 就绪闸（2026-10-08 批次 C）：本用例模拟「中枢在线且快照可信」的恢复场景，
+    # 故一并声明 aligned——不可信时 _recover_web_card 一律不搬列（未知 ≠ 空闲）。
+    monkeypatch.setattr(board.dshevents, "aligned", lambda: True)
     mark_calls = []
     real_mark_running = waitq.mark_running
     monkeypatch.setattr(waitq, "mark_running",

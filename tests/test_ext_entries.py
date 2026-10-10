@@ -413,6 +413,9 @@ def test_recover_sync_card_not_adopted_as_unit(monkeypatch):
     monkeypatch.setattr(board.dshevents, "get",
                         lambda sid: {"status": "running"})
     monkeypatch.setattr(board.dshevents, "connected", lambda: True)
+    # 就绪闸（2026-10-08 批次 C）：本用例模拟「中枢在线且快照可信」的恢复场景，
+    # 故一并声明 aligned——不可信时 _recover_web_card 一律不搬列（未知 ≠ 空闲）。
+    monkeypatch.setattr(board.dshevents, "aligned", lambda: True)
     monkeypatch.setattr(board.dshevents, "snapshot", lambda: {
         "s-ext-1": {"session_id": "s-ext-1", "status": "running",
                     "cwd": proj["project_dir"]}})

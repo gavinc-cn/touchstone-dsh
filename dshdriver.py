@@ -143,9 +143,30 @@ def available(timeout=HEALTH_TIMEOUT):
         return False
 
 
+def live_snapshot(timeout=10):
+    """`/live` 的**原始响应**：`{sessions: [...], complete?: bool}`。
+
+    `complete`（A 批 2026-10-08 起真插件会上报）＝插件是否已枚举宿主已有会话：
+    只有它为 true，**空表**才具备「宿主里确实没有会话」的语义（见 dshevents._align）。
+    旧装机副本没有该字段 ⇒ `complete` 缺省按未声明处理（空表＝未知）。
+
+    为什么单列一个读口（2026-10-08 修正）：`live()` 返回的是**行表**（历史调用点
+    server.py 直接迭代），而中枢对齐需要「行表 + 完整性声明」两件东西。旧写法拿
+    `live()` 的返回值当 dict 取 `.get("sessions")` ⇒ `/live` 非空时必抛
+    AttributeError，被 `except` 吞掉后中枢**永久「未对齐」**（`aligned()` 恒 False ⇒
+    看板 recover 不搬列、调和器缺席归位不触发）。契约由
+    `tests/test_session_visibility.py::test_live_readers_contract` 钉死。
+    """
+    return _request("GET", "/live", timeout=timeout) or {}
+
+
 def live():
-    """当前可见会话表（含外部直跑会话）：替代逐会话 REST 探测的实时态来源。"""
-    return _request("GET", "/live", timeout=10).get("sessions", [])
+    """当前可见会话表（含外部直跑会话）：替代逐会话 REST 探测的实时态来源。
+
+    返回**行表 list**（历史契约：server.py 的外部会话汇总直接迭代）；需要「完整性
+    声明」的调用方（dshevents._align）用 `live_snapshot()`。
+    """
+    return list((live_snapshot() or {}).get("sessions") or [])
 
 
 def status(session_id):

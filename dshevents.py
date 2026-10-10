@@ -61,6 +61,11 @@ class EventHub:
         # 与 `_sessions` 同样遵守「断连=未知」不变量——None 时调用方一律不动作。
         self._archived = None
         self._connected = False
+        # 快照对齐是否**可信**（2026-10-08 批次，B）：只有「(重)连时拿到过权威快照」
+        # 才置 True——空快照且插件未声明完整时保留旧表但置 False（见 `_align`）。
+        # 读口 `aligned()` = connected ∧ _aligned：调用方据此决定「能否按缺席推断
+        # 会话已结束」（`board._iw_once`）与「能否按实况搬列」（`board.recover`）。
+        self._aligned = False
         self._last_seq = 0
         self._frames = 0
         self._reconnects = 0
@@ -100,6 +105,22 @@ class EventHub:
         """链路是否在线（False ⇒ 所有状态读口返回 None＝未知）。"""
         with self._cond:
             return self._connected
+
+    def aligned(self):
+        """注册表是否**可信**（= 链路在线 ∧ 曾用插件权威快照对齐过）。
+
+        为什么需要它（2026-10-08 批次 B，bug_report/20261008_1935）：
+        插件重新 apply（热重载）时驱动实例重建、`/live` 会短暂返回空表——旧实现
+        `self._sessions = fresh` 直接清空注册表，调用方随即把「未知」当成
+        「会话已结束/空闲」：`board.recover()` 把**正在运行的卡**搬去待审核，
+        且调和器此后再也读不到该会话 ⇒ 不自愈。现在空快照保留旧表并置
+        `_aligned=False`，本读口给出「是否可信」的单点判据：
+          - False ⇒ 一律不据实况写列（未知 ≠ 空闲，同「断连=未知」不变量）；
+          - True ⇒ 会话不在注册表即可判「已结束」（`board._iw_once` 的补口）。
+        插件半（A 批次）在 `/live` 里声明 `complete` 后，真·零会话的宿主也能可信。
+        """
+        with self._cond:
+            return bool(self._connected and self._aligned)
 
     def get(self, sid):
         """单会话实时态；未连接或未知会话返回 None（＝未知，不是空闲）。
@@ -146,6 +167,7 @@ class EventHub:
         """诊断信息（/api 健康与测试断言用）。"""
         with self._cond:
             return {"connected": self._connected, "sessions": len(self._sessions),
+                    "aligned": bool(self._connected and self._aligned),
                     "last_seq": self._last_seq, "frames": self._frames,
                     "reconnects": self._reconnects, "changed": self._changed,
                     "archived": None if self._archived is None else len(self._archived),
@@ -226,8 +248,20 @@ class EventHub:
         新的状态轮询」。归档集取不到时保持「未知」（None），调用方一律不动作。
         """
         try:
-            rows = (dshdriver.live() or {}).get("sessions") or []
-        except Exception:                          # noqa: BLE001 — 对齐失败不阻断重连
+            # 用 live_snapshot()（原始 dict）而不是 live()（行表 list）——2026-10-08 修正：
+            # 旧写法 `dshdriver.live() or {}` 把行表当 dict 取 `.get("sessions")`，
+            # `/live` 非空时必抛 AttributeError 被下面 except 吞掉 ⇒ 中枢**永久未对齐**
+            # （aligned() 恒 False，C/D 两处补口在真机等于失效）。契约见
+            # tests/test_session_visibility.py::test_live_readers_contract。
+            resp = dshdriver.live_snapshot() or {}
+            rows = resp.get("sessions") or []
+            # 插件完整声明（A 批次后新增，旧插件缺省 None＝未声明）：只有它才让
+            # 「空表」具备「宿主里确实没有会话」的语义，否则空表一律按未知处理。
+            complete = resp.get("complete") is True
+        except Exception as exc:                   # noqa: BLE001 — 对齐失败不阻断重连
+            self._set_aligned(False)               # 取不到快照＝不能确认任何事
+            print(f"[dshevents] /live 对齐失败（{exc}）：保留 {len(self._sessions)} 条"
+                  f"既有会话、标记未对齐", flush=True)
             return
         try:
             archived = {str(s) for s in (dshdriver.archived() or []) if s}
@@ -265,11 +299,34 @@ class EventHub:
                     "inbox": old.get("inbox") or [],
                     "updated_at": now,
                 }
-            self._sessions = fresh
+            # —— 快照可信判定（2026-10-08 批次 B）——
+            # 非空快照 = 权威整表；空快照只有插件声明完整（complete）才算权威空。
+            # 其余情况（热重载后驱动实例重建、不重枚举已有会话 ⇒ 空表）＝**未知**：
+            # 旧表原样保留（宁可多等不可误放行），只把可信标志置 False——
+            # 调用方一律不据此推断忙/闲，也绝不据「缺席」判会话已结束。
+            trusted = bool(fresh) or complete
+            if trusted:
+                self._sessions = fresh
+            kept = len(self._sessions)
+            self._aligned = trusted
             if archived is not None:
                 self._archived = archived
             self._changed += 1
             self._cond.notify_all()
+        if not trusted and kept:
+            # 留痕（插件形态落 <库目录>/plugin-backend.log）：这是可诊断的降级态，
+            # 不是静默——旧表保留期间看板列不做忙/闲写入，直到下一次权威快照。
+            print(f"[dshevents] /live 空快照且插件未声明完整：保留 {kept} 条既有会话、"
+                  f"标记未对齐（热重载后驱动实例重建的已知形态，见 "
+                  f"bug_report/20261008_1935）", flush=True)
+
+    def _set_aligned(self, value):
+        """置「快照可信」标志（变更才唤醒订阅者；调用方持锁外语义同 `_set_connected`）。"""
+        with self._cond:
+            if self._aligned != bool(value):
+                self._aligned = bool(value)
+                self._changed += 1
+                self._cond.notify_all()
 
     def _set_connected(self, value):
         with self._cond:
@@ -399,6 +456,11 @@ def stop(timeout=2.0):
 
 def connected():
     return HUB.connected()
+
+
+def aligned():
+    """注册表可信读口（在线 ∧ 曾用权威快照对齐）；未对齐 ⇒ 调用方不写列、不推断。"""
+    return HUB.aligned()
 
 
 def get(sid):
