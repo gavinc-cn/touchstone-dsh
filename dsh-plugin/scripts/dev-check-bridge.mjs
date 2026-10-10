@@ -64,6 +64,28 @@ function makeTarget(name) {
   };
 }
 
+/** 给事件目标补上「document」面（2026-10-09）：侧栏入口的交互态样式表经
+ *  `createElement('style')` + `head.appendChild` + `querySelector` 幂等注入 —— 桩里也得真跑
+ *  这条路径（否则插件只能静默降级，注入逻辑等于没被测到）。只实现这三处用到的面。 */
+function asDocument(target) {
+  const styles = [];
+  target.styles = styles;
+  target.querySelector = (sel) => {
+    const m = /^style\[data-plugin-css="(.*)"\]$/.exec(String(sel));
+    return m ? (styles.find((s) => s.dataset.pluginCss === m[1]) || null) : null;
+  };
+  target.createElement = () => {
+    const node = { tagName: 'STYLE', dataset: {}, textContent: '' };
+    node.remove = () => {
+      const i = styles.indexOf(node);
+      if (i >= 0) styles.splice(i, 1);
+    };
+    return node;
+  };
+  target.head = { appendChild: (node) => { styles.push(node); return node; } };
+  return target;
+}
+
 /** 造假 localStorage（只存字符串；面板开合状态写在 'ts.plugin.open'）。 */
 function makeStorage(initial = {}) {
   const map = new Map(Object.entries(initial));
@@ -161,7 +183,7 @@ function setup({ uiWorkspace, openSessionError = null, open: openInitial = true,
   const initial = openInitial ? { 'ts.plugin.open': '1' } : {};
   if (lastRoute !== undefined) initial['ts.last_route'] = lastRoute;
   const storage = makeStorage(initial);
-  const hostDoc = makeTarget('host-document');
+  const hostDoc = asDocument(makeTarget('host-document'));
   hostDoc.activeElement = null;
   hostDoc.body = makeTarget('body');
   hostDoc.body.focused = false;

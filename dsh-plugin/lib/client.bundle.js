@@ -112,20 +112,103 @@ function toggleByKey(e) {
 /** 宿主页 keydown 监听体(capture 阶段; 函数引用稳定, 便于 dispose 时精确解绑)。 */
 function onHostKey(e) { toggleByKey(e); }
 
+// ── 侧栏入口按钮的配色与几何(2026-10-09 修) ──────────────────────────────────
+// 血案: 原先写 color:'var(--dsw-alias-text-l1, #e8e8e8)' —— dsh **没有** text-l1 这族
+// token(真实族是 --dsw-alias-label-primary/secondary/tertiary/caption/dimmed), var() 取不到
+// 就一直吃 fallback: 浅色档在 #f9fafb 的侧栏底上画 #e8e8e8 的字(实测对比度 1.17, 同排的
+// 「插件」「设置」是 18.08), 只有深色档碰巧能看。教训: 引用宿主 token 一律先核实名字。
+// 现行口径(明暗两档都跟宿主走):
+//   · 颜色**只取 dsh 语义 token 且不写死 fallback** —— token 缺席时该声明失效并回落到继承
+//     (侧栏根 .hHd-Xa_root 已设 label-primary), 而不是钉死一个只对某一档成立的灰;
+//   · 尺寸/圆角/gap/行高逐条对齐 dsh 自己的 .SidebarRoot_panelRow(min-height 36 / 内边距
+//     7px 8px / margin 0 2px / gap 8 / line-height 22 / --dsw-radius-md), 收起态对齐
+//     .hHd-Xa_collapsed .panelRow(36x36 居中);
+//   · 图标盒 16x16 —— 与 dsh 侧栏 SVG 图标同尺寸; 文字继承侧栏根的 14px。
+const ENTRY_TITLE = 'Touchstone 测试平台（Alt+T 开关）';
+const ENTRY_GLYPH_STYLE = {
+  flex: '0 0 16px', width: 16, height: 16, display: 'inline-flex',
+  alignItems: 'center', justifyContent: 'center', fontSize: 16, lineHeight: '16px',
+};
+const ENTRY_LABEL_STYLE = {
+  minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+};
+
+// 交互态样式(悬停/开合/键盘聚焦环): 伪类没法写在 inline style 里, 落一张最小样式表。
+// 取值逐条对齐 dsh 侧栏行(.hHd-Xa_panelRow:hover 与 :focus-visible)。
+const ENTRY_CSS = [
+  '.ts-sb-entry{background:transparent}',
+  '.ts-sb-entry:hover,.ts-sb-entry.ts-sb-on{background:'
+    + 'var(--dsw-alias-interactive-bg-hover,color-mix(in srgb,currentColor 8%,transparent))}',
+  '.ts-sb-entry:focus-visible{outline-width:var(--dsw-focus-ring-width,2px);outline-style:solid;'
+    + 'outline-color:var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));'
+    + 'outline-offset:-2px}',
+].join('');
+const ENTRY_CSS_ID = 'touchstone/sidebar-entry.css';
+
+/** 幂等挂上入口行交互态样式表(形态与 dsh 插件自身的注入方式一致)。
+ *  **失败一律吞掉**: 挂不上只是少了悬停/聚焦环的观感, 绝不能让侧栏入口或面板受影响
+ *  (桩 DOM 自检环境里 document 面本就不全, 真机异常同理)。
+ * @returns 摘除函数(插件卸载时调用; 已存在/挂不上时返回空操作)。 */
+function mountEntryStyle() {
+  try {
+    if (typeof document === 'undefined' || !document.head
+        || typeof document.createElement !== 'function'
+        || typeof document.querySelector !== 'function') {
+      return () => {};
+    }
+    if (document.querySelector('style[data-plugin-css=' + JSON.stringify(ENTRY_CSS_ID) + ']')) {
+      return () => {};
+    }
+    const tag = document.createElement('style');
+    tag.dataset.plugin = 'touchstone';
+    tag.dataset.pluginCss = ENTRY_CSS_ID;
+    tag.textContent = ENTRY_CSS;
+    document.head.appendChild(tag);
+    return () => tag.remove();
+  } catch (error) {
+    console.warn('[touchstone] 侧栏入口样式注入失败（只影响悬停/聚焦观感）:', error);
+    return () => {};
+  }
+}
+
 // 侧栏入口按钮(footer.action 槽; wide=侧栏展开态显示文字)
 function Toggle(props) {
-  const wide = props && props.wide;
+  const wide = !!(props && props.wide);
   const isOpen = useOpen();
+  const style = {
+    boxSizing: 'border-box', display: 'flex', alignItems: 'center',
+    border: 'none', cursor: 'pointer', textAlign: 'left',
+    color: 'var(--dsw-alias-label-primary)', // 无 fallback: 取不到即回落继承(见上注)
+    borderRadius: 'var(--dsw-radius-md, 8px)',
+    fontSize: 'inherit', // 侧栏根是 14px, 不再自带 13px
+  };
+  if (wide) {
+    style.gap = 8;
+    style.margin = '0 2px';
+    style.padding = '7px 8px';
+    style.minHeight = 36;
+    style.lineHeight = '22px';
+    style.flex = '1 1 auto';
+    style.minWidth = 0;
+  } else {
+    style.width = 36;
+    style.height = 36;
+    style.margin = 0;
+    style.padding = 0;
+    style.flex = 'none';
+    style.justifyContent = 'center';
+  }
   return h('button', {
-    style: {
-      display: 'flex', alignItems: 'center', gap: 6, width: '100%', boxSizing: 'border-box',
-      padding: '6px 12px', margin: '2px 0', borderRadius: 8, cursor: 'pointer', border: 'none',
-      color: 'var(--dsw-alias-text-l1, #e8e8e8)', fontSize: 13, textAlign: 'left',
-      background: 'transparent',
-    },
-    title: 'Touchstone 测试平台（Alt+T 开关）',
+    type: 'button',
+    className: 'ts-sb-entry' + (isOpen ? ' ts-sb-on' : ''),
+    style,
+    title: ENTRY_TITLE,
+    'aria-label': ENTRY_TITLE,
+    'aria-expanded': isOpen,
     onClick: () => setOpen(!isOpen),
-  }, wide ? (isOpen ? '🧪 关闭 Touchstone' : '🧪 Touchstone') : '🧪');
+  },
+  h('span', { style: ENTRY_GLYPH_STYLE, 'aria-hidden': 'true' }, '🧪'),
+  wide ? h('span', { style: ENTRY_LABEL_STYLE }, isOpen ? '关闭 Touchstone' : 'Touchstone') : null);
 }
 
 // 关闭按钮自动隐藏(2026-10-03): 常显会盖住被嵌 SPA 侧栏底部的用户名, 所以平时完全隐藏,
@@ -337,6 +420,8 @@ function Panel() {
 
 // cordis 客户端插件入口: 等 slots 服务就位后注册两个 UI 槽, 再挂快捷键
 function apply(ctx) {
+  // 侧栏入口的交互态样式表(悬停/开合/聚焦环), 与本插件同生命周期
+  ctx.effect(() => mountEntryStyle(), 'touchstone: 侧栏入口样式');
   const slots = ctx.get('slots');
   if (!slots) return;
   slots.inject('sidebar.footer.action', () => slots.register(

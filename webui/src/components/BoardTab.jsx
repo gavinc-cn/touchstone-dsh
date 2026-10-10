@@ -460,7 +460,8 @@ export default function BoardTab({ project }) {
       width: rect.width + 'px', margin: '0', zIndex: 999,
       pointerEvents: 'none', opacity: '0.95',
       transform: 'scale(1.04) rotate(1.5deg)',
-      boxShadow: '0 16px 32px rgba(0,0,0,.28)',
+      // 拖拽 ghost 投影走皮肤变量（浅色主题需要另一档阴影，原先是写死的暗色投影）
+      boxShadow: 'var(--shadow-ghost)',
       transition: 'none',
     })
     document.body.appendChild(ghost)

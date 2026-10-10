@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ArrowLeft, Boxes, Brain, Check, KeyRound, Link2, LogOut, Palette } from 'lucide-react'
-import { SKINS, applySkin, getSkin } from '../utils/skin'
+import { AUTO, AUTO_PREVIEW, SKINS, applySkin, getSkin, resolveSkin, skinLabel } from '../utils/skin'
 import { FONT_SCALES, applyFontScale, getFontScale } from '../utils/fontScale'
 import RagPanel from '../components/settings/RagPanel.jsx'
 import FeishuPanel from '../components/settings/FeishuPanel.jsx'
@@ -95,9 +95,19 @@ export default function Settings() {
 }
 
 // 外观：皮肤选择 + 字体大小（点选即生效并持久化到本浏览器，与后端无关）
+// 「跟随 DSH」是一个**选择**（值 'auto'），不是皮肤：打开后按 dsh 宿主的明暗自动切到
+// DSH 深色/浅色（独立打开时按系统偏好）；点任一具体皮肤即关闭跟随（手动优先）。
 function AppearanceSection() {
   const [skin, setSkin] = useState(getSkin())
   const [fs, setFs] = useState(getFontScale())
+  // 当前实际生效的皮肤：'auto' 需现场解析（宿主明暗 / 系统偏好）
+  const effective = resolveSkin(skin)
+
+  /** 点选即生效：落库的是「选择」本身。 */
+  function pick(id) {
+    applySkin(id)
+    setSkin(id)
+  }
 
   return (
     <Card className="max-w-xl gap-4 py-4">
@@ -109,12 +119,30 @@ function AppearanceSection() {
       <CardContent className="space-y-4 px-5">
         <div className="text-xs leading-relaxed text-muted-foreground">
           选择界面配色与字体大小，点选即生效，记录在本浏览器（localStorage），不影响其他用户。
+          「DSH 深色 / DSH 浅色」对齐 dsh 自身外观；「跟随 DSH」按 dsh 宿主的明暗自动切换。
         </div>
+        {/* 跟随 DSH：整行一张卡（它不是皮肤，故与下面四张具体皮肤卡分行） */}
+        <button type="button"
+          className={'skin-pick skin-pick-wide' + (skin === AUTO ? ' active' : '')}
+          onClick={() => pick(AUTO)}>
+          <span className="sw">
+            {AUTO_PREVIEW.map((c) => <i key={c} style={{ background: c }} />)}
+          </span>
+          <span className="skin-pick-txt">
+            <span>跟随 DSH</span>
+            <span className="sub">
+              {skin === AUTO
+                ? `当前生效：${skinLabel(effective)}`
+                : '按 dsh 宿主的明暗外观自动切换'}
+            </span>
+          </span>
+          {skin === AUTO && <Check className="ml-auto size-3.5 text-[var(--star)]" />}
+        </button>
         <div className="grid grid-cols-2 gap-3">
           {SKINS.map((s) => (
             <button key={s.id} type="button"
               className={'skin-pick' + (skin === s.id ? ' active' : '')}
-              onClick={() => { applySkin(s.id); setSkin(s.id) }}>
+              onClick={() => pick(s.id)}>
               <span className="sw">
                 {s.preview.map((c) => <i key={c} style={{ background: c }} />)}
               </span>

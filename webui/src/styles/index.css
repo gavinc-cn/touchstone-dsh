@@ -107,3 +107,67 @@
   --ff-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
+/* ================= DSH 皮肤: 与 dsh 自身外观对齐(2026-10-09) =================
+   取值来源与取数法见 doc_ai/spec/ui/DSH明暗主题.md; 与 theme.css 的同名皮肤块成对维护
+   (这里放 shadcn/Tailwind token, 那边放旧定制样式的语义变量)。
+   要点: 品牌位 --primary 是 dsh 的单色墨(深色近白/浅色近黑) —— 主按钮填充近黑/近白、
+   前景取反, 这是 dsh 最直观的身份特征; --ring 用 dsh 的焦点环色(state-business-primary)。
+   字体与圆角也照 dsh: 无衬线栈 + 无 serif 展示体 + 代码栈, --radius 取 dsh 的 radius-md(12px)。 */
+[data-skin='dsh-dark'] {
+  --radius: 12px;
+  --background: #151517;              /* dsh 深色画布 neutral-bluish-950 */
+  --foreground: #f9fafb;
+  --card: #232324;                    /* bg-layer-1 */
+  --card-foreground: #f9fafb;
+  --popover: #2c2c2e;                 /* bg-layer-2 */
+  --popover-foreground: #f9fafb;
+  --primary: #f9fafb;                 /* brand-primary: 单色墨 */
+  --primary-foreground: #0f1115;
+  --secondary: #2c2c2e;
+  --secondary-foreground: #f9fafb;
+  --muted: #232324;
+  --muted-foreground: #adb2b8;        /* label-secondary */
+  --accent: #ffffff14;                /* interactive-bg-hover */
+  --accent-foreground: #f9fafb;
+  --destructive: #f25a5a;             /* state-error-primary */
+  --destructive-foreground: #0f1115;
+  --border: #ffffff1f;                /* border-l2 */
+  --input: #ffffff1f;
+  --ring: #7aaaff;                    /* state-business-primary(焦点环) */
+
+  --ff-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --ff-serif: var(--ff-sans); /* dsh 无 serif 展示体 */
+  --ff-mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo,
+    Courier, "PingFang SC", "Microsoft YaHei";
+}
+
+[data-skin='dsh-light'] {
+  --radius: 12px;
+  --background: #ffffff;              /* dsh 浅色画布 */
+  --foreground: #0f1115;
+  --card: #ffffff;
+  --card-foreground: #0f1115;
+  --popover: #ffffff;
+  --popover-foreground: #0f1115;
+  --primary: #0f1115;                 /* brand-primary: 单色墨 */
+  --primary-foreground: #ffffff;
+  --secondary: #f5f6f7;
+  --secondary-foreground: #0f1115;
+  --muted: #f5f6f7;
+  --muted-foreground: #61666b;        /* label-secondary */
+  --accent: #2631480f;                /* interactive-bg-hover */
+  --accent-foreground: #0f1115;
+  --destructive: #ec1313;             /* state-error-primary */
+  --destructive-foreground: #ffffff;
+  --border: #0000001a;                /* border-l2 */
+  --input: #0000001a;
+  --ring: #4176e6;                    /* state-business-primary(焦点环) */
+
+  --ff-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --ff-serif: var(--ff-sans);
+  --ff-mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo,
+    Courier, "PingFang SC", "Microsoft YaHei";
+}
+

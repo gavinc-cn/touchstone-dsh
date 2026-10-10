@@ -9,8 +9,9 @@ import {
 } from '../../utils/loadMetrics'
 
 // 序列配色：平台语义色优先，超出部分用一组补充色循环
+// 全走 CSS 变量（--seq-4/5/6 原先写死为浅色系，白底上会糊；见 styles/theme.css 皮肤块）
 const COLORS = ['var(--run)', 'var(--retest)', 'var(--fail)', 'var(--pass)',
-  'var(--fix)', '#8ab4f8', '#c58af9', '#f6bf72']
+  'var(--fix)', 'var(--seq-4)', 'var(--seq-5)', 'var(--seq-6)']
 
 const W = 640
 const H = 150

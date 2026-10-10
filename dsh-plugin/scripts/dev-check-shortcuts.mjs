@@ -64,6 +64,28 @@ function makeIframe() {
   return el;
 }
 
+/** 给事件目标补上「document」面（2026-10-09）：侧栏入口的交互态样式表经
+ *  `createElement('style')` + `head.appendChild` + `querySelector` 幂等注入 —— 桩里也得真跑
+ *  这条路径（否则插件只能静默降级，注入逻辑等于没被测到）。只实现这三处用到的面。 */
+function asDocument(target) {
+  const styles = [];
+  target.styles = styles;
+  target.querySelector = (sel) => {
+    const m = /^style\[data-plugin-css="(.*)"\]$/.exec(String(sel));
+    return m ? (styles.find((s) => s.dataset.pluginCss === m[1]) || null) : null;
+  };
+  target.createElement = () => {
+    const node = { tagName: 'STYLE', dataset: {}, textContent: '' };
+    node.remove = () => {
+      const i = styles.indexOf(node);
+      if (i >= 0) styles.splice(i, 1);
+    };
+    return node;
+  };
+  target.head = { appendChild: (node) => { styles.push(node); return node; } };
+  return target;
+}
+
 /** 造假 localStorage（只存字符串；setOpen 会写 'ts.plugin.open'）。 */
 function makeStorage() {
   const map = new Map();
@@ -171,12 +193,14 @@ function makeCtx({ shortcuts = null, injectShortcuts = true } = {}) {
 /**
  * 搭一套完整环境：载入真实产物 + 桩 DOM/React/ctx，并把 apply 跑起来。
  * @param applyIt - false 时只搭环境不 apply（供「apply 抛错」用例自行调用）。
+ * @param openAtBoot - true 时预置 `ts.plugin.open=1`（产物载入即读到「面板开着」，用于入口开合态）。
  * @returns 该环境下所有可观测面（storage / hostDoc / slots / mini React / shortcuts）。
  */
-function setup({ shortcuts = null, registerError = null, runtime = 'web', platform = 'windows', catalogRow = null, applyIt = true } = {}) {
+function setup({ shortcuts = null, registerError = null, runtime = 'web', platform = 'windows', catalogRow = null, applyIt = true, openAtBoot = false } = {}) {
   const src = fs.readFileSync(bundlePath, 'utf8');
   const storage = makeStorage();
-  const hostDoc = makeTarget('host-document');
+  if (openAtBoot) storage.setItem('ts.plugin.open', '1'); // 必须在产物求值前落库（模块级读取）
+  const hostDoc = asDocument(makeTarget('host-document'));
   let factory = null;
   // 宿主页 window 桩：除 __ModuleLoader__ 外要有真 window 的事件面（面板打开时消息桥会挂
   // message 监听，见 dev-check-bridge.mjs）与 location/parent（探针只认同源 origin）
@@ -389,12 +413,82 @@ function caseDesktopRuntime() {
   check('desktop 档自管键不吞事件（交给宿主/原生处理）', !t.defaultPrevented && openState(storage) === '1');
 }
 
+/** 取侧栏入口元素：slot 注册的是包装组件 `(props) => h(Toggle, {wide})`，要再经 mini React
+ *  渲染一层才拿到真实按钮元素（与 openPanel 同一套路）。 */
+function entryElement(env, wide) {
+  const slot = env.rec.slots.find((s) => s.meta.id === 'touchstone-toggle');
+  if (!slot) return null;
+  const wrapped = slot.comp({ wide });
+  return env.mini.render(wrapped.type, wrapped.props);
+}
+
+function caseEntryLook() {
+  console.log('== ⑥ 侧栏入口配色/几何与交互态样式表（2026-10-09 修）==');
+  const env = setup();
+  const wide = entryElement(env, true);
+  const st = (wide && wide.props.style) || {};
+  check('入口类名 ts-sb-entry（交互态样式的挂点）',
+    !!wide && wide.props.className === 'ts-sb-entry', wide && wide.props.className);
+  // 血案回归：曾写 var(--dsw-alias-text-l1, #e8e8e8) —— dsh 无此 token，浅色档白底白字
+  // （真机实测对比度 1.172，同排 18.082）。颜色只取 dsh 语义 token 且不写 fallback。
+  check('文字色取 dsh 语义 token 且不写 fallback',
+    st.color === 'var(--dsw-alias-label-primary)', String(st.color));
+  check('不设 inline background（留给 :hover/开合态样式表，inline 会盖掉伪类）',
+    !('background' in st) && !('backgroundColor' in st));
+  check('几何对齐 dsh 侧栏行（36 高 / 7px 8px / gap 8 / margin 0 2px / 行高 22 / 半径 token）',
+    st.minHeight === 36 && st.padding === '7px 8px' && st.gap === 8 && st.margin === '0 2px'
+    && st.lineHeight === '22px' && st.borderRadius === 'var(--dsw-radius-md, 8px)',
+    JSON.stringify(st));
+  check('字号继承侧栏根（不再自带 13px）', st.fontSize === 'inherit', String(st.fontSize));
+  // 注意 mini React 的 children 挂在 el.children 上（真 React 是 props.children），
+  // 且 `wide ? label : null` 会留一个 null 占位 —— 计数一律先滤掉空位。
+  const kids = (el) => (el && Array.isArray(el.children) ? el.children.filter(Boolean) : []);
+  check('结构与按钮语义：glyph+title 两 span / type=button / aria-label / aria-expanded=false',
+    !!wide && kids(wide).length === 2
+    && kids(wide)[0].children[0] === '🧪' && kids(wide)[1].children[0] === 'Touchstone'
+    && wide.props.type === 'button' && !!wide.props['aria-label']
+    && wide.props['aria-expanded'] === false);
+
+  const rail = entryElement(env, false);
+  const rs = (rail && rail.props.style) || {};
+  check('收起态 36x36 居中、零内外边距、只剩图标',
+    !!rail && rs.width === 36 && rs.height === 36 && rs.justifyContent === 'center'
+    && rs.padding === 0 && rs.margin === 0 && kids(rail).length === 1,
+    JSON.stringify(rs));
+
+  const tags = env.hostDoc.styles;
+  const tag = tags[0];
+  check('apply 时注入且只注入一张样式表（带插件标记）',
+    tags.length === 1 && !!tag && tag.dataset.plugin === 'touchstone'
+    && tag.dataset.pluginCss === 'touchstone/sidebar-entry.css',
+    JSON.stringify(tags.map((s) => s.dataset)));
+  const css = (tag && tag.textContent) || '';
+  check('样式表覆盖 悬停/开合/聚焦环，色值也走 dsh token',
+    css.includes('.ts-sb-entry:hover') && css.includes('.ts-sb-entry.ts-sb-on')
+    && css.includes('var(--dsw-alias-interactive-bg-hover')
+    && css.includes('--dsw-focus-ring-width'), css);
+
+  // dispose：样式表随插件摘除（ctx.effect 的 disposer）
+  for (const cleanup of env.rec.effects) if (typeof cleanup === 'function') cleanup();
+  check('插件 dispose 后样式表被摘除', env.hostDoc.styles.length === 0,
+    String(env.hostDoc.styles.length));
+
+  // 面板开着（产物载入时即读到 ts.plugin.open=1）→ 带开合类且文案变化
+  const opened = setup({ openAtBoot: true });
+  const on = entryElement(opened, true);
+  check('面板开着时带 ts-sb-on、文案为「关闭 Touchstone」',
+    !!on && on.props.className === 'ts-sb-entry ts-sb-on'
+    && kids(on)[1].children[0] === '关闭 Touchstone',
+    (on && on.props.className) + ' / ' + (kids(on)[1] && kids(on)[1].children[0]));
+}
+
 console.log(`== 客户端快捷键自检（产物: ${path.relative(root, bundlePath)}）==`);
 caseOfficialRegistration();
 caseLocalAltT();
 caseIframeFollowsOfficialBinding();
 caseRegisterFailure();
 caseDesktopRuntime();
+caseEntryLook();
 
 console.log(failures === 0 ? '\nOVERALL: PASS' : `\nOVERALL: FAIL (${failures})`);
 process.exit(failures === 0 ? 0 : 1);

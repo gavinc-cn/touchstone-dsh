@@ -1,5 +1,7 @@
-/* Touchstone 暗色主题 —— 双皮肤变量体系
-   默认 starlight(星夜金, bikeops 运营后台设计语言); classic(经典蓝) 为原 GitHub 暗色板
+/* Touchstone 皮肤变量体系(2026-10-09 起四套)
+   默认 dsh-dark(DSH 深色) / dsh-light(DSH 浅色) —— 对齐 dsh 自身外观, 见 doc_ai/spec/ui/DSH明暗主题.md
+   starlight(星夜金, bikeops 运营后台设计语言) / classic(经典蓝, 原 GitHub 暗色板) 为存量两套
+   选择与解析(含「跟随 DSH」)在 utils/skin.js; <html data-skin="..."> 上恒为具体皮肤 id
    整体包进 @layer legacy: 让位于 shadcn/Tailwind 的 utilities,
    避免全局 button/input 等裸元素规则污染 shadcn 组件 */
 @layer legacy {
@@ -38,6 +40,28 @@
   --bubble-user-text: var(--text);
   --composer-focus: rgba(232, 184, 109, .5);
   --agent-on-text: var(--star);
+
+  /* ---- 2026-10-09 浅色化批次新增的语义变量 ----
+     下面每个默认值都**等于**原先写死在 components.css / BoardTab.jsx / LoadPanels.jsx
+     里的字面量 ⇒ 这些替换对 starlight/classic 的观感是零变化; DSH 两套皮肤各自覆盖。 */
+  --scrollbar-w: 8px;
+  --card-shadow: none;
+  --shadow-menu: 0 8px 28px rgba(0, 0, 0, .45);
+  --shadow-pop: 0 10px 32px rgba(0, 0, 0, .55);
+  --shadow-toast: 0 12px 32px rgba(0, 0, 0, .45);
+  --shadow-ghost: 0 16px 32px rgba(0, 0, 0, .28);
+  /* 会话输入框「/」命令菜单(原整块写死暗紫, 与皮肤变量无关, 浅色下完全不可用 ⇒ 抽 token) */
+  --menu-bg: #1e1c26; --menu-bd: #35313f;
+  --menu-fg: #e6e3ef; --menu-key: #a5a0b8; --menu-mut: #8b86a0;
+  --menu-on-bg: rgba(255, 255, 255, .09); --menu-on-fg: #fff;
+  /* 「需用户作答/审批」提示色(原写死 amber #f59e0b; 白底上作为文字对比度仅约 2:1 ⇒ 抽 token) */
+  --ask: #f59e0b;
+  /* 压测图表补充序列色(前三个序列复用 --run/--retest/--fail, 第 4~6 个原先写死在 LoadPanels) */
+  --seq-4: #8ab4f8; --seq-5: #c58af9; --seq-6: #f6bf72;
+  /* 日志行的次级色(原写死在 .log-line.lp-cmd/.lp-dim) */
+  --lp-cmd: #8a94a6; --lp-dim: #5a6478;
+  /* 监控趋势图的坐标轴/网格(原写死 rgba(139,148,158,.35/.12); 浅色下需另一档灰度) */
+  --chart-axis: rgba(139, 148, 158, .35); --chart-grid: rgba(139, 148, 158, .12);
   color-scheme: dark;
 }
 
@@ -74,6 +98,100 @@
   --agent-on-text: #dbe7ff;
 }
 
+/* ================= DSH 皮肤: 与 dsh 自身外观对齐(2026-10-09) =================
+   取值全部来自 dsh 的设计平台 token(--dsw-static-* 原色 / --dsw-alias-* 语义), 来源与
+   取数法见 doc_ai/spec/ui/DSH明暗主题.md。两套皮肤的身份特征是「品牌位单色墨」:
+   强调色 --star 取 dsh 的 brand-primary(深色近白 #f9fafb / 浅色近黑 #0f1115),
+   蓝色(--aurora/--run)只留给链接与业务状态, 与 dsh 自己的用法一致。
+   另两处 dsh 签名单品在本文件末尾(scrollbar 5px 胶囊 / 超椭圆圆角)。 */
+:root[data-skin='dsh-dark'] {
+  --bg: #151517; --panel: #1b1b1c; --panel2: #2c2c2e; --border: #ffffff1f;
+  --text: #f9fafb; --dim: #81858c;
+  --star: #f9fafb; --aurora: #7aaaff;
+  --pass: #22c55e; --fail: #f25a5a; --retest: #f59e0b; --run: #7aaaff; --fix: #b197fc;
+
+  --scrollbar: #3c3c3d; --scrollbar-hover: #545557; --scrollbar-w: 5px;
+  --card-bg: #232324; --card-bd: #ffffff1f;
+  --card-blur: 0px; --card-radius: 16px;
+  --card-shadow: 0 0 0 .5px #fff3, 0 4px 16px 0 #00000008, 0 0 24px 0 #00000008;
+  --shadow-menu: 0 0 0 .5px #fff3, 0 3px 8px 0 #0000000a, 0 0 20px 0 #0000000d;
+  --shadow-pop: 0 0 0 .5px #fff3, 0 3px 8px 0 #0000000a, 0 0 20px 0 #0000000d;
+  --shadow-toast: 0 0 0 .5px #fff3, 0 3px 8px 0 #0000000a, 0 0 20px 0 #0000000d;
+  --shadow-ghost: 0 0 0 .5px #fff3, 0 6px 20px 0 #0000004d;
+  --logo-1: #f9fafb; --logo-2: #e9ecf2; --logo-fg: #0f1115;
+  --tab-active: var(--star);
+  --login-glow: #232324;
+  --admin-badge: var(--star); --ok-text: var(--pass);
+  --inset-bg: #1b1b1c; --inset-text: #cfd3d6;
+  --row-hover: #ffffff14; --row-open: #ffffff24; --rz-hover: #ffffff3d;
+  --step-active-bg: #7aaaff1a; --case-running-bg: #7aaaff24;
+  --donut-shadow: #22c55e1f;
+  --seg-pass-1: #22c55e; --seg-pass-2: #4ed17e;
+  --seg-fail-1: #c93b3b; --seg-fail-2: #f25a5a;
+  --seg-retest-1: #c47a2a; --seg-retest-2: #f59e0b;
+  --grad-pass-1: #4ed17e; --grad-pass-2: #1b7a42;
+  --grad-fail-1: #f25a5a; --grad-fail-2: #a32b2b;
+  --lp-prompt: #7aaaff; --lp-compact: #ffa94d; --lp-round: #f9fafb;
+  --lp-done: #22c55e; --lp-err: #f25a5a; --lp-json: #4dabf7;
+  --err-bg: #f25a5a14; --err-bd: #f25a5a4d; --err-bd-strong: #f25a5a66;
+  --bubble-user-bg: #2c2c2e; --bubble-user-bd: #ffffff1f; --bubble-user-text: #f9fafb;
+  --composer-focus: #7aaaff;
+  --agent-on-text: #0f1115;
+  --ask: #f59e0b;
+  --menu-bg: #2c2c2e; --menu-bd: #ffffff1f;
+  --menu-fg: #f9fafb; --menu-key: #adb2b8; --menu-mut: #81858c;
+  --menu-on-bg: #ffffff24; --menu-on-fg: #f9fafb;
+  --seq-4: #faa2c1; --seq-5: #6dccff; --seq-6: #adb5bd;
+  --lp-cmd: #adb5bd; --lp-dim: #81858c;
+  --chart-axis: #ffffff3d; --chart-grid: #ffffff14;
+  color-scheme: dark;
+}
+
+:root[data-skin='dsh-light'] {
+  --bg: #ffffff; --panel: #f9fafb; --panel2: #f5f6f7; --border: #0000001a;
+  --text: #0f1115; --dim: #979da6;
+  --star: #0f1115; --aurora: #4176e6;
+  /* 状态色取 dsh 浅色侧的对应成员: 成功用 file-diff-added-marker(#01a241, 白底可读),
+     失败用 state-error-primary, 警告用 state-warn-label(amber-600), 修复用浅色语法紫 */
+  --pass: #01a241; --fail: #ec1313; --retest: #dd8629; --run: #4176e6; --fix: #6741d9;
+
+  --scrollbar: #e5e5e5; --scrollbar-hover: #d4d4d4; --scrollbar-w: 5px;
+  --card-bg: #ffffff; --card-bd: #0000001a;
+  --card-blur: 0px; --card-radius: 16px;
+  --card-shadow: 0 0 0 .5px #00000029, 0 4px 16px 0 #00000008, 0 0 24px 0 #00000008;
+  --shadow-menu: 0 0 0 .5px #00000029, 0 3px 8px 0 #0000000a, 0 0 20px 0 #0000000d;
+  --shadow-pop: 0 0 0 .5px #00000029, 0 3px 8px 0 #0000000a, 0 0 20px 0 #0000000d;
+  --shadow-toast: 0 0 0 .5px #00000029, 0 3px 8px 0 #0000000a, 0 0 20px 0 #0000000d;
+  --shadow-ghost: 0 0 0 .5px #00000029, 0 6px 20px 0 #00000029;
+  --logo-1: #0f1115; --logo-2: #3c3c3d; --logo-fg: #ffffff;
+  --tab-active: var(--star);
+  --login-glow: #ebeef2;
+  --admin-badge: var(--star); --ok-text: var(--pass);
+  --inset-bg: #f9fafb; --inset-text: #353638;
+  --row-hover: #2631480f; --row-open: #2631481a; --rz-hover: #26314824;
+  --step-active-bg: #4176e61a; --case-running-bg: #4176e624;
+  --donut-shadow: #01a2411f;
+  --seg-pass-1: #01a241; --seg-pass-2: #22c55e;
+  --seg-fail-1: #ec1313; --seg-fail-2: #f25a5a;
+  --seg-retest-1: #dd8629; --seg-retest-2: #f59e0b;
+  --grad-pass-1: #4ed17e; --grad-pass-2: #01a241;
+  --grad-fail-1: #f25a5a; --grad-fail-2: #ec1313;
+  --lp-prompt: #1971c2; --lp-compact: #e8590c; --lp-round: #0f1115;
+  --lp-done: #2f9e44; --lp-err: #ec1313; --lp-json: #1c7ed6;
+  --err-bg: #ec131314; --err-bd: #ec13134d; --err-bd-strong: #ec131366;
+  --bubble-user-bg: #edf3fe; --bubble-user-bd: #d3e2ff; --bubble-user-text: #0f1115;
+  --composer-focus: #4176e6;
+  --agent-on-text: #ffffff;
+  --ask: #dd8629;
+  --menu-bg: #ffffff; --menu-bd: #0000001a;
+  --menu-fg: #0f1115; --menu-key: #61666b; --menu-mut: #979da6;
+  --menu-on-bg: #2631481a; --menu-on-fg: #0f1115;
+  --seq-4: #d6336c; --seq-5: #0293b4; --seq-6: #495057;
+  --lp-cmd: #868e96; --lp-dim: #adb2b8;
+  --chart-axis: #00000029; --chart-grid: #00000014;
+  color-scheme: light;
+}
+
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; }
 body {
@@ -81,7 +199,8 @@ body {
   font: calc(13px * var(--fs))/1.5 var(--ff-sans);
   overflow: hidden;
 }
-::-webkit-scrollbar { width: 8px; height: 8px; }
+/* 滚动条宽度随皮肤: dsh 皮肤用 5px 细滚动条(--scrollbar-w), 存量两套仍是 8px */
+::-webkit-scrollbar { width: var(--scrollbar-w); height: var(--scrollbar-w); }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 
@@ -92,9 +211,11 @@ a { color: var(--run); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 /* 卡片: starlight 为玻璃卡(半透明底 + 星光描边 + 背景模糊), classic 为实心面板 */
+/* 卡片: dsh 两套为「实心面 + 发丝边 + 轻柔投影」(--card-shadow), 存量两套投影为 none */
 .card {
   background: var(--card-bg); border: 1px solid var(--card-bd); border-radius: var(--card-radius);
   padding: 14px 16px; margin-bottom: 14px;
+  box-shadow: var(--card-shadow);
   backdrop-filter: blur(var(--card-blur)); -webkit-backdrop-filter: blur(var(--card-blur));
 }
 .card h3 {
@@ -117,12 +238,13 @@ a:hover { text-decoration: underline; }
   color: var(--logo-fg); font-family: var(--mono); font-weight: 700; line-height: 1;
 }
 
-/* 流光分割线: starlight 签名单元(aurora → star 渐变), classic 下隐藏 */
+/* 流光分割线: starlight 的签名单元(aurora → star 渐变); 其余三套皮肤都没有这个语汇 ⇒ 隐藏
+   (用 :not 而非逐个列举: 未来新增皮肤默认不继承 starlight 的装饰) */
 .aurora-line {
   height: 1px; border: none; margin: 0;
   background: linear-gradient(90deg, transparent, var(--aurora), var(--star), transparent);
 }
-:root[data-skin='classic'] .aurora-line { display: none; }
+:root:not([data-skin='starlight']) .aurora-line { display: none; }
 
 .badge {
   display: inline-flex; align-items: center; gap: 5px; padding: 1px 9px;
@@ -182,6 +304,19 @@ pre.log {
   background: var(--inset-bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
   overflow: auto; white-space: pre-wrap; word-break: break-all;
   font-family: var(--mono); font-size: calc(12px * var(--fs)); color: var(--inset-text); margin: 0;
+}
+
+/* ---------- dsh 签名单品: 超椭圆圆角(corner-shape) ----------
+   dsh 的设计平台在全局挂 `corner-shape: superellipse(1.5)`(见其 base/corner-shape.css),
+   这是它最不易被误认的一处细节。@supports 守卫: 不支持的浏览器整块 no-op,
+   所以这里只对 dsh 两套皮肤生效、且不会因浏览器差异产生视觉回归。 */
+@supports (corner-shape: superellipse(1.5)) {
+  :root[data-skin='dsh-dark'] *,
+  :root[data-skin='dsh-dark'] *::before,
+  :root[data-skin='dsh-dark'] *::after,
+  :root[data-skin='dsh-light'] *,
+  :root[data-skin='dsh-light'] *::before,
+  :root[data-skin='dsh-light'] *::after { corner-shape: superellipse(1.5); }
 }
 } /* end @layer legacy */
 
