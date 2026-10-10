@@ -1216,6 +1216,26 @@ def msg_get(msg_id):
                             (str(msg_id),)).fetchone()
 
 
+def msg_meta(msg_id):
+    """消息等待项 meta（取该 target 的**最后一行**，含终态行）：飞书回流钩子在
+    终态收口之后读「提交时定格」的载荷（feishu 命名空间）。无行返回 {}，坏 JSON 亦 {}。
+
+    只读口：与 msg_get 相邻；口径上不看 state（收口已把行落终态，活跃口径读不到），
+    也不去 join chat_msgs——载荷只在等待项行上（chat_msgs 无 meta 列）。
+    """
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT meta FROM wait_items WHERE kind=? AND target_id=?"
+            " ORDER BY id DESC LIMIT 1", (KIND_MSG, str(msg_id))).fetchone()
+    if row is None:
+        return {}
+    try:
+        meta = json.loads(row["meta"] or "{}")
+    except ValueError:
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
 def msg_rows(sid=None, card_id=None, states=None):
     """消息行查询（chat 读侧专用）：sid/card_id/states 可选过滤，created_at 升序
     （idx_chat_msgs_sid 覆盖 sid 过滤）；states 传元组。"""

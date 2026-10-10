@@ -206,11 +206,18 @@ CREATE TABLE IF NOT EXISTS feishu_user_cfgs (
     user_id INTEGER PRIMARY KEY,
     json    TEXT NOT NULL DEFAULT '{}'
 );
+-- 飞书号绑定（一行 = 一个飞书号 ↔ 一个 Touchstone 用户）；后四列是「当前会话」
+-- 绑定态（2026-10-08 飞书通用对话）：私聊普通文本按它路由到 agent 会话，
+-- 换绑/解绑一律归零（见 set_feishu_binding 的「换绑归零」语义）
 CREATE TABLE IF NOT EXISTS feishu_bindings (
     open_id            TEXT PRIMARY KEY,
     user_id            INTEGER NOT NULL UNIQUE,
     default_project_id INTEGER NOT NULL DEFAULT 0,
-    bound_at           TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    bound_at           TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    cur_sid        TEXT    NOT NULL DEFAULT '',   -- 当前会话 id（空=未绑定会话）
+    cur_project_id INTEGER NOT NULL DEFAULT 0,    -- 当前会话所属项目（投递队列归属）
+    cur_title      TEXT    NOT NULL DEFAULT '',   -- 绑定时标题快照
+    cur_bound_at   TEXT    NOT NULL DEFAULT ''    -- 绑定时刻（localtime）
 );
 CREATE INDEX IF NOT EXISTS idx_board_cards_project ON board_cards(project_id);
 CREATE INDEX IF NOT EXISTS idx_board_comments_card ON board_comments(card_id);
@@ -491,6 +498,17 @@ CREATE UNIQUE INDEX idx_projects_user_name ON projects(user_id, name);
         if "user_id" not in cols:
             conn.execute("ALTER TABLE feishu_outbox"
                          " ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
+    # feishu_bindings 补「当前会话」四列（2026-10-08 飞书通用对话：绑定到某个会话）。
+    # 旧库的 feishu_bindings 由 CREATE TABLE IF NOT EXISTS 原样保留（不含这四列），
+    # 只能在此 ALTER 补齐；幂等：列已存在则跳过，存量行取空默认值（未绑定会话）。
+    with connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(feishu_bindings)")}
+        for name, ddl in (("cur_sid", "TEXT NOT NULL DEFAULT ''"),
+                          ("cur_project_id", "INTEGER NOT NULL DEFAULT 0"),
+                          ("cur_title", "TEXT NOT NULL DEFAULT ''"),
+                          ("cur_bound_at", "TEXT NOT NULL DEFAULT ''")):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE feishu_bindings ADD COLUMN {name} {ddl}")
     # 旧全局飞书配置迁移（2026-09-09 起飞书设置用户级）：旧的 app_settings['feishu']
     # 由 admin 在后台管理页配置，迁移给 admin 自己的用户配置（已有私户配置则不覆盖）
     with connect() as conn:
@@ -1383,13 +1401,18 @@ def get_feishu_binding_by_user(user_id):
 
 def set_feishu_binding(open_id, user_id, default_project_id=0):
     """绑定飞书号 ↔ 用户（双向一对一）：user_id 已绑其他 open_id 时先清旧绑
-    （换号重绑语义）；open_id 重绑直接覆盖（UPDATE）。"""
+    （换号重绑语义）；open_id 重绑直接覆盖（UPDATE）。
+
+    2026-10-08 起「换绑归零」：写入与覆盖都把「当前会话」四列清空——绑定态不能
+    跨身份继承（同一用户换飞书号、同一飞书号换用户，都必须重新显式绑定会话）。"""
     with connect() as conn:
         conn.execute("DELETE FROM feishu_bindings WHERE user_id=?", (user_id,))
         conn.execute(
-            "INSERT INTO feishu_bindings(open_id, user_id, default_project_id)"
-            " VALUES(?,?,?) ON CONFLICT(open_id) DO UPDATE SET"
-            " user_id=excluded.user_id, default_project_id=excluded.default_project_id",
+            "INSERT INTO feishu_bindings(open_id, user_id, default_project_id,"
+            " cur_sid, cur_project_id, cur_title, cur_bound_at)"
+            " VALUES(?,?,?,'',0,'','') ON CONFLICT(open_id) DO UPDATE SET"
+            " user_id=excluded.user_id, default_project_id=excluded.default_project_id,"
+            " cur_sid='', cur_project_id=0, cur_title='', cur_bound_at=''",
             (open_id, user_id, default_project_id))
 
 
@@ -1411,3 +1434,25 @@ def set_feishu_default_project(open_id, project_id):
         conn.execute(
             "UPDATE feishu_bindings SET default_project_id=? WHERE open_id=?",
             (project_id, open_id))
+
+
+def set_feishu_cur_session(open_id, project_id, sid, title=""):
+    """写「当前会话」绑定（open_id 行必须已存在；时刻取本地时间字符串）。
+
+    当前会话 = 该飞书号私聊普通文本的投递目标：`cur_sid` 空表示未绑定（走默认
+    项目/引导指令），`cur_project_id` 是投递队列的归属项目。sid/title 传空即等价
+    于清空对应字段（None 也按空串落库，避免行上出现 NULL）。
+    """
+    with connect() as conn:
+        conn.execute(
+            "UPDATE feishu_bindings SET cur_sid=?, cur_project_id=?, cur_title=?,"
+            " cur_bound_at=? WHERE open_id=?",
+            (sid or "", int(project_id or 0), title or "", now_str(), open_id))
+
+
+def clear_feishu_cur_session(open_id):
+    """清「当前会话」绑定（保留默认项目；未绑定时为 no-op）。"""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE feishu_bindings SET cur_sid='', cur_project_id=0,"
+            " cur_title='', cur_bound_at='' WHERE open_id=?", (open_id,))

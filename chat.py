@@ -92,7 +92,7 @@ def _new_msg_id():
 
 
 def submit(project_id, sid, message, task_id=None, card_id=None, comment_id=None,
-           inject=False, family="", model=""):
+           inject=False, family="", model="", extra_meta=None):
     """登记一条会话消息并投入统一队列（项目忙则排队，空闲则立即执行）。
 
     P3 起权威在 chat_msgs 表 + msg 等待项（waitq.msg_enqueue 一个事务双写）。
@@ -101,6 +101,11 @@ def submit(project_id, sid, message, task_id=None, card_id=None, comment_id=None
     dsh_plugin 的消息可「立即注入」（_rebuild_inject）。
     comment_id：卡片评论投递路径的评论行 id（终态写回 db.update_board_comment 用），
     随 meta 持久化（chat_msgs 无此列，P3 计划裁决 R1）。
+    extra_meta：调用方附加载荷（如飞书回流的 {"feishu": {...}}），键与
+    family/model/comment_id **平铺**进同一个 meta；键名由调用方自带命名空间
+    （飞书侧统一 `{"feishu": {...}}`），避免与既有键相撞。
+    task_id 与 card_id 同时为空＝纯会话消息（飞书通用对话等）：无任务轮次、无
+    卡片评论写回，按行重建时走纯会话投递分支（见 _rebuild_run/_rebuild_inject）。
     runner 单例不可用（单测/独立脚本）时同步执行并原样抛出异常（保持既有行为，
     行照常落表、不写等待项——P5 R13 收口：无拾取方，等待项只会成为孤儿行）。
     返回消息记录 dict（含 id/state/queued，供端点响应）。
@@ -109,7 +114,8 @@ def submit(project_id, sid, message, task_id=None, card_id=None, comment_id=None
     waitq.msg_prune(MSG_KEEP_SEC, MSG_MAX)          # 终态回收（msg_prune 表版，R8）
     inst = runner.INSTANCE
     payload_meta = {"family": family, "model": model,
-                    **({"comment_id": comment_id} if comment_id else {})}
+                    **({"comment_id": comment_id} if comment_id else {}),
+                    **(extra_meta or {})}
     waitq.msg_enqueue(msg_id, project_id, sid, message, task_id=task_id,
                       card_id=card_id, inject=bool(inject),
                       meta=payload_meta, queue=inst is not None)
@@ -159,8 +165,10 @@ def _msg_payload(msg_id):
 def _rebuild_run(msg_id, meta=None):
     """按行重建消息执行体（P3：闭包改按 kind 分派——设计 §5.3/§6.2）。
 
-    任务侧消息（task_id 非空）→ _send_now（合成 task dict 只为沿用既有调用形状：
-    单族世界里 _send_now 只做族校验与 dsh 分派，不再消费其中的 id/model）；
+    纯会话消息（task_id 与 card_id 皆空，如飞书通用对话）→ _send_now（合成
+    task dict 只为沿用既有调用形状：单族世界里 _send_now 只做族校验与 dsh 分派，
+    不再消费其中的 id/model）；
+    任务侧消息（task_id 非空）→ _send_now（合成 task dict 同上）；
     卡片评论（card_id 非空）→ board._deliver_unit（合成 card/comment dict，
     执行体只消费 id/session_id/model 与 comment id）；
     函数内 import 防循环（同 runner._worker 对 board 的先例）。
@@ -169,6 +177,11 @@ def _rebuild_run(msg_id, meta=None):
     row, _meta, project = _msg_payload(msg_id)
     if meta is None:
         meta = _meta
+    if row["task_id"] is None and row["card_id"] is None:
+        # 纯会话消息（飞书通用对话等）：无任务无卡片，直接投递会话
+        return lambda: _send_now({"id": None, "model": meta.get("model", "")},
+                                 project, meta.get("family", ""),
+                                 row["sid"], row["message"], bool(row["inject"]))
     if row["task_id"] is not None:
         task = {"id": row["task_id"], "model": meta.get("model", "")}
         return lambda: _send_now(task, project, meta.get("family", ""),
@@ -183,9 +196,13 @@ def _rebuild_run(msg_id, meta=None):
 
 def _rebuild_inject(msg_id):
     """「立即注入」投递体重建（与 _rebuild_run 同载荷源）：
-    任务侧 → _inject_send（steer 注入当前 turn，投递后即返回）；卡片评论 →
-    board._deliver_now(inject=True)。族不支持由 inject_now 前置拦截。"""
+    纯会话消息（task_id 与 card_id 皆空）→ _inject_send（steer 注入当前 turn，
+    投递后即返回，不落卡片）；任务侧 → _inject_send（同上，带任务 id）；
+    卡片评论 → board._deliver_now(inject=True)。族不支持由 inject_now 前置拦截。"""
     row, meta, project = _msg_payload(msg_id)
+    if row["task_id"] is None and row["card_id"] is None:
+        return lambda: _inject_send(project, row["sid"], None,
+                                    row["message"], meta.get("model", ""))
     if row["task_id"] is not None:
         return lambda: _inject_send(project, row["sid"], row["task_id"],
                                     row["message"], meta.get("model", ""))
@@ -197,6 +214,34 @@ def _rebuild_inject(msg_id):
                                       row["message"], inject=True)
 
 
+_MSG_DONE_HOOK = None      # 消息单元终态钩子 fn(msg_id, state)（飞书回流用，单一注册位）
+
+
+def set_msg_done_hook(fn):
+    """注册/注销（fn=None）消息单元终态钩子；回调异常由 _fire_msg_done 吞掉。
+
+    单一注册位（后注册覆盖先注册）：注册方是 feishu_conv.start（server.main 经
+    feishu.start_notifier 调用一次）。未注册时 run_unit 行为与加钩子前逐字等价。
+    """
+    global _MSG_DONE_HOOK
+    _MSG_DONE_HOOK = fn
+
+
+def _fire_msg_done(msg_id, state):
+    """触发消息单元终态钩子（done/yielded/error 各一次）；异常绝不影响队列收口。
+
+    钩子是旁路（飞书回流的答复推送）：它跑在**终态记录已落库之后**，自身抛错
+    （推送失败、会话读失败等）只留痕——队列收口与钩子成败解耦。
+    """
+    fn = _MSG_DONE_HOOK
+    if fn is None:
+        return
+    try:
+        fn(msg_id, state)
+    except Exception as e:
+        print(f"[chat] 终态钩子异常: {msg_id}: {e}", flush=True)
+
+
 def run_unit(msg_id):
     """统一队列执行体（runner worker 调用）：执行一条待跑消息；异常落记录不抛出。
 
@@ -204,7 +249,9 @@ def run_unit(msg_id):
     waitq.claim 互斥互补：等待项被取消/被注入抢先时此处让行）；执行体按行＋
     快照重建；终态 done/yielded/error 落表，等待项行终态在同函数闭环（裁决 R6——
     终态归执行体，runner 影子终态段不再管 m:）。yielded=挂起让位（2026-09-27）：
-    turn 等用户作答，运行位即行——行终态即释放，队首单元照常起跑。"""
+    turn 等用户作答，运行位即行——行终态即释放，队首单元照常起跑。
+    三条终态路各触发一次 `_fire_msg_done`（Task 6 飞书回流钩子：done=推答复、
+    yielded=不推（交既有作答链路）、error=推失败回执）。"""
     try:
         row = waitq.msg_get(msg_id)
         if row is None or row["state"] != STATE_QUEUED:
@@ -218,6 +265,7 @@ def run_unit(msg_id):
         except Exception as e:
             waitq.msg_finish(msg_id, STATE_ERROR, str(e))
             waitq.finish_by_target(waitq.KIND_MSG, msg_id, waitq.STATE_FAILED, str(e))
+            _fire_msg_done(msg_id, STATE_ERROR)
             return
         if res == STATE_YIELDED:
             print(f"[chat] 消息单元挂起让位：m:{msg_id}（turn 等待作答）", flush=True)
@@ -226,9 +274,11 @@ def run_unit(msg_id):
                                  "reason": "turn 等待作答"})
             waitq.msg_finish(msg_id, STATE_YIELDED)
             waitq.finish_by_target(waitq.KIND_MSG, msg_id, waitq.STATE_DONE)
+            _fire_msg_done(msg_id, STATE_YIELDED)
             return
         waitq.msg_finish(msg_id, STATE_DONE)
         waitq.finish_by_target(waitq.KIND_MSG, msg_id, waitq.STATE_DONE)
+        _fire_msg_done(msg_id, STATE_DONE)
     except Exception as e:      # 防线程拖死（DB 故障等）；行滞留由 selfcheck 兜底
         print(f"[chat] 消息单元异常: {msg_id}: {e}", flush=True)
         try:    # 尽力把等待项落 failed（chat_msgs 已不可写时由 selfcheck 兜底）
@@ -236,6 +286,7 @@ def run_unit(msg_id):
                                    waitq.STATE_FAILED, str(e)[:300])
         except Exception:
             pass
+        _fire_msg_done(msg_id, STATE_ERROR)     # 最外层异常同样只触发一次
 
 
 def _reap_orphan_claim(msg_id):

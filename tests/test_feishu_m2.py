@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import db
 import board
 import feishu
+import feishu_conv
 
 db.init_db()  # 测试库建表（幂等；conftest 已把 TOUCHSTONE_DB 指到临时库）
 
@@ -159,16 +160,22 @@ def test_group_no_mention_silent(monkeypatch):
     assert replies and "绑定" in replies[0]               # @ 到但未绑定 → 引导
 
 
-def test_bound_flow_and_help(monkeypatch):
+def test_bound_flow_unknown_text_routes(monkeypatch):
     replies = []
     monkeypatch.setattr(feishu, "rest_reply", lambda mid, t, cfg=None: replies.append(t))
     monkeypatch.setattr(db, "get_feishu_binding_by_open",
                         lambda oid: {"open_id": oid, "user_id": 1,
                                      "default_project_id": 0})
+    routed = []
+    # 2026-10-08 通用对话（Task 3）：单聊未识别文本改走 feishu_conv.route_text
+    # （投递给当前会话 / 无会话自动新建），不再直接回帮助；帮助只留给群聊与
+    # TS_FEISHU_CONV=0（见 tests/test_feishu_conv.py 的群聊与开关用例）。
+    monkeypatch.setattr(feishu_conv, "route_text",
+                        lambda binding, text, cfg=None: routed.append(text) or "已投递到「会话」")
     feishu._MSG_SEEN.clear()
     feishu._MSG_SEEN_SET.clear()
     feishu.handle_message_event(_evt(mid="m3", text="不认识的指令xyz"))
-    assert replies and "帮助" in replies[0]               # 未识别 → 帮助文案
+    assert routed == ["不认识的指令xyz"] and replies == ["已投递到「会话」"]
     feishu.handle_message_event(_evt(mid="m4", message_type="image", text=""))
     assert len(replies) == 2 and "暂不支持" in replies[1]  # 非文本：暂不支持
 

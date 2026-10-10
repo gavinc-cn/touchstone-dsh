@@ -160,6 +160,32 @@ class _GetFailApi(_FakeSlashApi):
         raise self.err
 
 
+# ---------- 图标键：只许用官方「Slash Command Icon Key 说明」表内的值 ----------
+
+def test_slash_icons_are_official_keys():
+    """2026-10-09 真机取证：`add_outlined` / `link_outlined` 不在官方 icon_key 全表内
+    ⇒ 创建报业务码 40000031（设置页红字「指令图标 icon_key 不合法」），同步只成功
+    15 / 17 条、`new` 与 `use` 两条指令在飞书侧根本不存在。此断言把「键必须落在官方
+    全表内」钉死在测试里——表中没有的键一律非法，不许凭语义自造（见 feishu.SLASH_ICON_KEYS）。"""
+    bad = [(c, i) for c, _, i in feishu.SLASH_COMMANDS if i not in feishu.SLASH_ICON_KEYS]
+    assert bad == [], f"icon_key 不在官方表内: {bad}"
+    assert "skill_outlined" in feishu.SLASH_ICON_KEYS      # 官方文档明示的缺省图标
+    assert len(feishu.SLASH_ICON_KEYS) >= 70               # 官方全表（2026-10-09 抄录 72 个）
+
+
+def test_sync_rejects_unknown_icon_before_request(monkeypatch):
+    """本地预检：图标不在官方表内 ⇒ **不发请求**、直接进 failed——比让飞书回 40000031
+    更快也更清楚（同步是逐条进行的，远端会停在「半同步」状态）。"""
+    monkeypatch.setattr(feishu, "SLASH_COMMANDS",
+                        (("help", "查看可用指令", "skill_outlined"),
+                         ("bogus", "假指令", "add_outlined")))
+    api = _use(monkeypatch, _FakeSlashApi())
+    out = feishu.sync_slash_commands(1)
+    assert out["ok"] is False and out["created"] == ["help"]
+    assert out["failed"] == [f"bogus: {feishu._SLASH_ICON_HINT}"]
+    assert all(c[2]["command"] != "bogus" for c in api.calls if c[0] == "POST")
+
+
 # ---------- 清除：只删 TS 自己的 ----------
 
 def test_clear_only_removes_ts_commands(monkeypatch):
@@ -284,8 +310,9 @@ def test_perm_card_button_retries_sync(monkeypatch):
     ret = feishu._on_card_action(_card_action("ou_me", {"t": "sc", "a": "retry", "u": 1}),
                                  dict(_CFG))
     assert ret["toast"]["type"] == "success"
-    assert len(api.items) == len(feishu.SLASH_COMMANDS)            # 11 条全建
-    assert dms and "注册完成" in dms[0] and "新增 11" in dms[0]
+    assert len(api.items) == len(feishu.SLASH_COMMANDS)            # 全量指令一次建齐
+    assert dms and "注册完成" in dms[0] and \
+        f"新增 {len(feishu.SLASH_COMMANDS)}" in dms[0]
 
 
 def test_perm_card_button_rejects_other_user(monkeypatch):

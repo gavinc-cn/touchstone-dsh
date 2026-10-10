@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 
 import db
+import feishu_conv
 import requests
 
 FEISHU_EVENTS = ("blocked_interaction", "task_failed", "card_review")
@@ -769,12 +770,19 @@ def bot_open_id(cfg):
 
 SLASH_API = "/open-apis/application/v7/app_slash_commands"
 # (指令名, 中文说明, icon_key)：指令名与 _INTENT_RULES 的 /别名 一一对应（顺序即面板顺序）；
-# icon_key 取值见官方「Slash Command Icon Key 说明」，传错报 40000031
+# icon_key **必须**取 SLASH_ICON_KEYS（官方「Slash Command Icon Key 说明」全表）内的值，
+# 表外的键（含按语义自造的）创建即报 40000031
 SLASH_COMMANDS = (
     ("help",    "查看可用指令", "skill_outlined"),
     ("bind",    "绑定站点账号：/bind 绑定码", "member_outlined"),
     ("unbind",  "解除站点账号绑定", "clear_outlined"),
     ("project", "设置默认项目：/project 项目名", "home_outlined"),
+    ("current",  "查看默认项目与当前会话", "home_outlined"),
+    ("projects", "项目总览卡：点选设为默认项目", "database_outlined"),
+    ("sessions", "默认项目最近会话：点选绑定", "chat_outlined"),
+    ("new",      "在默认项目下新建会话并绑定：/new [标题]", "add-chat-ai_outlined"),
+    ("use",      "绑定已有会话：/use 序号|关键字|会话id前缀", "global-link_outlined"),
+    ("leave",    "解绑当前会话（保留默认项目）", "clear_outlined"),
     ("status",  "查看任务与看板摘要：/status [项目名]", "database_outlined"),
     ("cards",   "查找卡片：/cards 关键字（id 前缀 / 标题包含）", "codeblock_outlined"),
     ("approve", "通过待审核卡片：/approve 卡片", "flag_outlined"),
@@ -788,6 +796,39 @@ _SLASH_NAMES = tuple(c for c, _, _ in SLASH_COMMANDS)
 _SLASH_PERM_CODES = (99991640, 99991672, 99991679)
 _SLASH_PERM_HINT = ("应用缺少「应用指令」权限：飞书开发者后台 → 权限管理，添加 "
                     "application:app_slash_command:read 与 write，创建并发布新版本后重试")
+_SLASH_ICON_HINT = "指令图标 icon_key 不合法（取值见官方 Slash Command Icon Key 说明）"
+# 官方「Slash Command Icon Key 说明」全量可选值（2026-10-09 抄自开放平台文档
+# https://open.feishu.cn/document/mcp_open_tools/agent-best-practices/agent-supports-slash-commands
+# 的同名章节，共 72 个；缺省 skill_outlined）。**表外的键一律非法**，创建/更新报业务码
+# 40000031——2026-10-09 真机取证：凭语义自造的 add_outlined / link_outlined 正是这样让
+# 同步停在 15/17 条（设置页红字即 _SLASH_ICON_HINT）。改图标前先在本表内选，
+# `tests/test_feishu_slash.py::test_slash_icons_are_official_keys` 会拦住表外的值。
+SLASH_ICON_KEYS = frozenset((
+    # AI 系（官方表前 31 项）
+    "skill_outlined", "light-ai_outlined", "chat-ai_outlined",
+    "ai-edit-continue_outlined", "education-ai_outlined", "ai-trans-switch_outlined",
+    "language-ai_outlined", "toolbar-more-ai_outlined", "image-ai_outlined",
+    "ai-agent_outlined", "ai-deepthink_outlined", "ai-style_outlined",
+    "ai-reminder_outlined", "ai-block_outlined", "ai-simplify-expression_outlined",
+    "promptword_outlined", "meeting-ai_outlined", "ai-improvewriting_outlined",
+    "slash-ai_outlined", "pa-cost-ai_outlined", "update-ai_outlined",
+    "diagnosis-ai_outlined", "ai-functions_outlined", "mic-ai_outlined",
+    "search-ai_outlined", "explanation-ai_outlined", "add-ai_outlined",
+    "add-chat-ai_outlined", "ai-notification_outlined", "dynamic-layout_outlined",
+    "ai-doc_outlined",
+    # 通用（官方表其余 41 项）
+    "home_outlined", "mail_outlined", "browser-mac_outlined", "flag_outlined",
+    "calendar-line_outlined", "sent_outlined", "gift_outlined", "tag_outlined",
+    "cloud_outlined", "bonus-payroll_outlined", "vote_outlined", "chat_outlined",
+    "emoji_outlined", "member_outlined", "robot_outlined", "mic_outlined",
+    "raisehand_outlined", "officephone_outlined", "effects_outlined", "labs_outlined",
+    "computer_outlined", "clear_outlined", "mouse_outlined", "cellphone_outlined",
+    "cursor_outlined", "plugin_outlined", "edit_outlined", "style-fillcolor_outlined",
+    "codeblock_outlined", "code_outlined", "folder_outlined", "file-link-word_outlined",
+    "file-link-sheet_outlined", "file-link-image_outlined", "global-link_outlined",
+    "champion_outlined", "local_outlined", "day_outlined", "waiting_outlined",
+    "database_outlined", "marketplace_outlined",
+))
 
 
 def _slash_description(desc):
@@ -828,7 +869,7 @@ def slash_error_hint(err):
     if code in _SLASH_PERM_CODES:
         return _SLASH_PERM_HINT
     if code == 40000031:
-        return "指令图标 icon_key 不合法（取值见官方 Slash Command Icon Key 说明）"
+        return _SLASH_ICON_HINT
     if code == 99992402:
         return "指令参数校验失败：指令名需为不含「/」的标识符，说明不可为空"
     return str(err)
@@ -938,6 +979,11 @@ def sync_slash_commands(user_id):
     failed = []
     need_scope = False
     for name, desc, icon in SLASH_COMMANDS:
+        if icon not in SLASH_ICON_KEYS:
+            # 本地预检：表外的键飞书必回 40000031，先在此拦下——省一次请求，
+            # 且不让远端停在「同步到一半」的状态（同步是逐条进行的）
+            failed.append(f"{name}: {_SLASH_ICON_HINT}")
+            continue
         try:
             buckets[_slash_upsert(cfg, name, desc, icon, by_name)].append(name)
         except FeishuRestError as e:
@@ -1064,9 +1110,16 @@ def _on_slash_perm_action(sender, value, cfg):
 
 HELP_TEXT = (
     "Touchstone 指令（单聊可用）：\n"
+    "直接发普通文字 = 与当前会话对话（未绑定会在默认项目自动新建）。\n"
     "· 帮助 — 本说明\n"
     "· 绑定 <码> — 绑定站点账号（绑定码在站点侧栏「设置」→ 飞书设置 生成）\n"
     "· 解绑 — 解除绑定\n"
+    "· 当前 — 查看默认项目与当前会话\n"
+    "· 项目 — 项目总览卡（点选即设为默认项目）\n"
+    "· 会话 — 默认项目最近活跃的 10 个会话（点选即绑定）\n"
+    "· 新建会话 [标题] — 在默认项目下新建并绑定\n"
+    "· 绑定会话 <序号|标题关键字|会话id前缀> — 绑定已有会话\n"
+    "· 解绑会话 — 只解绑会话，保留默认项目\n"
     "· 默认项目 <项目名> — 设置默认项目\n"
     "· 状态 [项目名] — 任务与看板摘要\n"
     "· 卡片 <关键字> — 找卡片（id 前缀/标题包含）\n"
@@ -1273,7 +1326,9 @@ def _seen_message(mid):
 def handle_message_event(evt, cfg=None):
     """入站消息主流程（M2 规则指令全为快路径，内联同步执行；M3 agent 解析需挪线程）：
     去重 → 群聊 @ 判定（未 @ 静默）→ 文本抽取（剥 @占位符）→ 绑定校验（未绑引导）
-    → 意图解析（未识别回帮助）→ 执行 → reply。任何异常吞掉。
+    → 意图解析 → 执行 → reply。**未识别文本**不是一律回帮助：单聊且通用对话开启
+    （`feishu_conv.enabled()`）时走 `feishu_conv.route_text` 投递给绑定的会话；群聊
+    与 `TS_FEISHU_CONV=0` 才回 `HELP_TEXT`（feishu.py:1337-1343）。任何异常吞掉。
     cfg = 连接所有者（收到消息的应用）的凭据，供回复/群聊判定使用。"""
     try:
         mid = evt.get("message_id")
@@ -1321,9 +1376,14 @@ def handle_message_event(evt, cfg=None):
                             "生成绑定码后在这里回复「绑定 <码>」完成绑定", cfg)
             return
         if intent is None:
-            rest_reply(mid, HELP_TEXT, cfg)
+            if evt.get("chat_type") != "group" and feishu_conv.enabled():
+                # 单聊未识别文本 → 通用对话路由（投递给当前会话；无会话按默认项目自动新建）
+                reply = feishu_conv.route_text(binding, text, cfg)
+            else:
+                reply = HELP_TEXT      # 群聊保持原行为：不落会话
+            rest_reply(mid, reply, cfg)
             return
-        reply = execute_intent(binding, intent, sender)
+        reply = execute_intent(binding, intent, sender, cfg)
         if reply:
             rest_reply(mid, reply, cfg)
     except Exception as e:
@@ -1355,7 +1415,8 @@ def _on_card_action(data, cfg):
     """卡片点击回调主流程：event_id 去重 → open_id 绑定校验（未绑 DM 引导）→
     动作分发（t=a 单题选项作答 / mq 多选类点选（多子题逐题点选、单题多选
     mini 表单）/ p 批准 / s 会话内批准 /
-    d 拒绝 / sc 快捷指令权限卡片「我已开通，重试注册」）→ 与文本指令共用的
+    d 拒绝 / sc 快捷指令权限卡片「我已开通，重试注册」/
+    dp 项目总览卡点选设默认项目 / ss 会话列表卡点选绑定会话）→ 与文本指令共用的
     _answer_by_token / _answer_multi_click / _decide_approval → DM 文本完整回执 + 返回 toast。
     value 精简键：t 动作（a 单题作答 / mq 多选类点选 / p 批准 / s 会话内批准 /
     d 拒绝）、c 卡号、n 题号（多题点选用）、i 选项序号（序号在执行器里重读服务端
@@ -1377,6 +1438,15 @@ def _on_card_action(data, cfg):
         # M4 权限引导卡片（t=sc）独立于卡片交互流：不带卡号，回调里重跑斜杠指令同步
         if t == "sc":
             return _on_slash_perm_action(sender, value, cfg)
+        # 通用对话卡片（t=dp 项目总览 / t=ss 会话列表）同样不带卡号：在既有看板
+        # 卡片白名单**之前**分流，看板回调（a/mq/p/s/d）路径一个字节都不动
+        if t in ("dp", "ss"):
+            binding = db.get_feishu_binding_by_open(sender)
+            if binding is None:
+                _dm_text(sender, "尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ "
+                                 "飞书设置，生成绑定码后在单聊回复「绑定 <码>」完成绑定", cfg)
+                return {"toast": {"type": "error", "content": "尚未绑定站点账号"}}
+            return feishu_conv.on_card_action(sender, binding, value, action, cfg)
         if t not in ("a", "mq", "p", "s", "d") or not key:
             return None
         binding = db.get_feishu_binding_by_open(sender)
@@ -1447,6 +1517,12 @@ _INTENT_RULES = (
     ("bind",            r"^(?:绑定|/bind)\s*([A-Za-z0-9]{4,8})$"),
     ("unbind",          r"^(?:解绑|/unbind)$"),
     ("default_project", r"^(?:默认项目|/project)\s+(\S+)$"),
+    ("current",         r"^(?:当前|/current)$"),
+    ("projects",        r"^(?:项目|/projects)$"),
+    ("sessions",        r"^(?:会话|/sessions)$"),
+    ("new",             r"^(?:新建会话|/new)(?:\s+(.+))?$"),
+    ("use",             r"^(?:绑定会话|/use)\s+(.+)$"),
+    ("leave",           r"^(?:解绑会话|/leave)$"),
     ("status",          r"^(?:状态|/status)(?:\s+(.+))?$"),
     ("card",            r"^(?:卡片|/cards?)\s+(.+)$"),
     ("approve",         r"^(?:通过|/approve)\s+(\S+)$"),
@@ -1489,9 +1565,10 @@ def bind_user(code, open_id):
     return None
 
 
-def execute_intent(binding, intent, sender_open_id):
+def execute_intent(binding, intent, sender_open_id, cfg=None):
     """绑定用户身份执行意图；返回回复文案（空串=不回复）。项目/卡片访问一律先过
-    归属（list_projects(user_id) 限用户项目），异常统一转友好文案。"""
+    归属（list_projects(user_id) 限用户项目），异常统一转友好文案。
+    cfg = 本次消息所属应用的凭据（转交通用对话层做卡片/回执）。"""
     action, g = intent["action"], intent["groups"]
     try:
         if action == "help":
@@ -1503,6 +1580,8 @@ def execute_intent(binding, intent, sender_open_id):
             return "已解绑。重新绑定请到站点生成新的绑定码"
         if action == "default_project":
             return _set_default_project(binding, g[0] or "")
+        if action in ("current", "projects", "sessions", "new", "use", "leave"):
+            return feishu_conv.conv_intent(binding, action, g, sender_open_id, cfg)
         return _execute_board_action(binding, intent, sender_open_id)
     except FeishuRestError:
         return "飞书接口调用失败，请稍后重试"
@@ -1510,18 +1589,23 @@ def execute_intent(binding, intent, sender_open_id):
         return "指令执行失败，请稍后重试"
 
 
-def _set_default_project(binding, name):
-    """设置单聊默认项目：精确名 → 唯一包含匹配；否则报项目不在列表。"""
+def _set_default_project(binding, name, project_id=0):
+    """设置单聊默认项目：`project_id` 非 0 时**按 id** 设（卡片点选 `t=dp` 路径），
+    否则按名匹配（精确名 → 唯一包含匹配）。两条路径共用
+    `feishu_conv.set_default_project`，换项目时自动清当前会话（设计 §3.2）。"""
+    if project_id:
+        project = feishu_conv._project_by_id(binding, project_id)
+        if project is None:
+            return "项目不在你的项目列表"
+        return feishu_conv.set_default_project(binding, project)
     user_id = binding["user_id"]
     projects = db.list_projects(user_id)
     for p in projects:
         if p["name"] == name:
-            db.set_feishu_default_project(binding["open_id"], p["id"])
-            return f"默认项目已设为「{name}」"
+            return feishu_conv.set_default_project(binding, p)
     hits = [p for p in projects if name in p["name"]]
     if len(hits) == 1:
-        db.set_feishu_default_project(binding["open_id"], hits[0]["id"])
-        return f"默认项目已设为「{hits[0]['name']}」"
+        return feishu_conv.set_default_project(binding, hits[0])
     return f"项目「{name}」不在你的项目列表"
 
 
@@ -2109,11 +2193,17 @@ def _send_loop():
 
 
 def start_notifier():
-    """幂等启动投递线程（server main 启动时调用一次；未配置时空转无害）。"""
+    """幂等启动投递线程（server main 启动时调用一次；未配置时空转无害）。
+
+    同时注册通用对话的消息终态钩子（feishu_conv.start，幂等）：答复回流靠它把
+    「跑完的会话消息」推回飞书 DM——这是本模块唯一的接线点（server.main 已调用
+    本函数），漏掉则回流全哑且无任何报错。
+    """
     global _SENDER_STARTED
     if _SENDER_STARTED:
         return
     _SENDER_STARTED = True
+    feishu_conv.start()                     # 幂等：注册 chat 的消息终态钩子
     threading.Thread(target=_send_loop, daemon=True,
                      name="feishu-notifier").start()
 
