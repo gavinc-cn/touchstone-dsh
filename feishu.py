@@ -486,6 +486,19 @@ def _build_interaction_card(ctx, project_name):
     kind = ctx.get("kind")
     cid = ctx.get("card_id")
     elements = []
+    # M6（2026-10-10）：方案先上——用户报障"仅凭选项无法决策"，故题面之前先给
+    # 折叠面板（Card 2.0 `collapsible_panel`；内部只放 markdown，飞书规定不能放
+    # form）+ 完整方案文档链接。两个字段都由 `_attach_plan` 挂在 ctx 上，
+    # 取不到方案（无会话/读不到转录）时整块不出现，卡片形状与旧版一致。
+    if ctx.get("plan_inline") and kind != "approval":
+        elements.append({
+            "tag": "collapsible_panel", "expanded": True,
+            "header": {"title": {"tag": "plain_text",
+                                 "content": "📄 agent 的方案 / 回答（点标题可折叠）"}},
+            "elements": [{"tag": "markdown", "content": ctx["plan_inline"]}]})
+    if ctx.get("plan_doc_url") and kind != "approval":
+        elements.append({"tag": "markdown",
+                         "content": f"📄 [查看完整方案（飞书文档）]({ctx['plan_doc_url']})"})
     if kind == "approval":
         lines = [f"**审批请求**：{ctx.get('action') or ctx.get('tool') or '工具调用'}"]
         if ctx.get("tool"):
@@ -561,6 +574,357 @@ def _build_interaction_card(ctx, project_name):
             "body": {"elements": elements}}
 
 
+# ---------- M6 作答方案：卡内摘要 + 完整方案飞书云文档（2026-10-10） ----------
+#
+# 用户报障（2026-10-10）：飞书作答卡片上只有题面（question 被 `_Q_TEXT_MAX=500`
+# 截断）与选项，agent 的方案/回答（末条 assistant 文本，实测 0–3217 字）与思考
+# （think，实测 122–18965 字）**一个字都不发** ⇒ 用户"仅凭选项无法决策"。
+# 本批把方案送进飞书，两条腿：
+#   ① 卡内折叠面板（`collapsible_panel`，Card 2.0）给摘要——不用跳转就能决策；
+#   ② 完整方案建飞书云文档（提问**全文** + 全部子题/选项/描述 + 回答 (+思考摘录)），
+#      链接放卡上——卡片放不下的部分在这里补全。
+#
+# 为什么不在文档里直接放选项让人点（2026-10-10 取证结论）：docx 块类型清单里没有
+# 投票/单选交互块（`lark-oapi` 生成的 `Block` 模型 63 个块字段无 poll/vote）；
+# 「文件编辑」事件 `P2DriveFileEditV1` 只带 file_token/操作者、**不含改了哪一块**；
+# 唯一"文档内点选"路线是内嵌多维表格 + `drive.file.bitable_record_changed_v1`
+# 事件（或文档评论事件），都要建表/授权/事件订阅 + 轮询，不适合"挂起等作答"的
+# 实时链路。故选项留在卡片上，文档承载方案与选项说明（文档内给文本补答语法）。
+
+PLAN_ENV = "TS_FEISHU_PLAN"        # =0 关闭本批全部新行为（回滚阀，回到只有题面+选项）
+_PLAN_INLINE_MAX = 1500            # 卡内折叠摘要上限（字符）
+_PLAN_DOC_MAX = 20000              # 文档正文上限（字符）
+_PLAN_THINK_MIN = 200              # assistant 回答短于该值 ⇒ 补 think 摘录
+_PLAN_THINK_MAX = 8000             # think 摘录上限（字符）
+_PLAN_DOC_TTL = 1800               # 建文档去重记录存活（秒）
+_PLAN_DOCS = {}                    # (card_id, qid) -> {"url": str, "at": float}
+_MD_BLOCK_MAX = 1800               # 文档单块文本上限（字符，超长块会被接口拒收）
+_ASK_TOOL = "ask_user_question"    # dsh 提问工具名（"提问前上下文"的切点）
+_DOC_TIMEOUT = 8                   # 文档类调用逐次超时（秒）
+
+
+def plan_enabled():
+    """作答方案增强总闸：`TS_FEISHU_PLAN=0` 关闭（一行回到"只有题面+选项"的现状）。"""
+    return (os.environ.get(PLAN_ENV) or "1") != "0"
+
+
+def _beijing_now():
+    """北京时间字符串：容器本地时区=UTC、用户/浏览器=Asia/Shanghai，给人看的文档
+    一律按 UTC+8 落（否则 22:00 的提问会写成 14:00，读者会误判成"8 小时前"）。"""
+    return time.strftime("%Y-%m-%d %H:%M", time.gmtime(time.time() + 8 * 3600))
+
+
+def _plan_session_texts(sid):
+    """会话转录 → 提问前的「方案/回答」文本 `{"assistant", "think"}`。
+
+    取「最后一次 `ask_user_question` **之前**」的末条 assistant 与末条 think——
+    多轮提问时只取当前这次提问的上下文（更早的回答不是本次的方案）。转录里还没有
+    该 tool_call（落盘滞后 / 旧会话）时回落整段末尾，语义相同（末尾即提问前内容）。
+
+    无 sid / 会话读不到 / 解析异常 ⇒ 两项皆空串：方案取数失败绝不影响卡片发送。
+    """
+    empty = {"assistant": "", "think": ""}
+    sid = str(sid or "").strip()
+    if not sid:
+        return empty
+    try:
+        import sessparse                     # 函数内懒 import：避免模块级循环依赖
+        res = sessparse.load("dsh", sid, "main") or {}
+        entries = res.get("entries") or []
+        if not res.get("found") or not entries:
+            return empty
+        cut = len(entries)
+        for i in range(len(entries) - 1, -1, -1):
+            e = entries[i] or {}
+            if e.get("kind") == "tool_call" and e.get("name") == _ASK_TOOL:
+                cut = i
+                break
+        assistant = think = ""
+        for e in reversed(entries[:cut]):
+            e = e or {}
+            if e.get("kind") == "assistant" and not assistant:
+                assistant = str(e.get("text") or "").strip()
+            elif e.get("kind") == "think" and not think:
+                think = str(e.get("text") or "").strip()
+            if assistant and think:
+                break
+        return {"assistant": assistant, "think": think}
+    except Exception:
+        return empty
+
+
+def _plan_inline_markdown(ctx, texts):
+    """卡内折叠摘要（上限 `_PLAN_INLINE_MAX`）：以末条 assistant 回答为主。
+
+    assistant 过短（< `_PLAN_THINK_MIN`）时补 think 摘录——实测这是常见形态：
+    回答只有一句"我给一份方案，你确认后再动手"、方案本体在 think 里（卡 949：
+    assistant 100 字 vs think 3513 字），不补的话卡上仍等于没有方案。
+    """
+    a = str((texts or {}).get("assistant") or "").strip()
+    t = str((texts or {}).get("think") or "").strip()
+    parts = []
+    if a:
+        parts.append(a)
+    if len(a) < _PLAN_THINK_MIN and t:
+        parts.append("**（思考摘录）**\n" + t)
+    if not parts:
+        return ""
+    md = "\n\n".join(parts)
+    if len(md) > _PLAN_INLINE_MAX:
+        md = md[:_PLAN_INLINE_MAX].rstrip() + "\n\n…（摘要已截断，完整内容见下方飞书文档）"
+    return md
+
+
+def _plan_question_md(ctx):
+    """提问**全文**（不截断）→ markdown：逐题题头/题面/补充说明/选项与描述/能力标注。
+
+    与卡片渲染（`_question_views` 按 `_Q_TEXT_MAX`/`_Q_OPT_MAX`/`_Q_DESC_MAX` 截断）
+    刻意分开：文档承载的正是卡片放不下的完整信息。旧调用面/测试替身只给平面字段
+    （question + 字符串选项）时按平面字段兜底。
+    """
+    qs = [q for q in (ctx.get("questions") or []) if q]
+    lines = []
+    if not qs:
+        q = str(ctx.get("question") or "").strip()
+        if q:
+            lines.append(q)
+        for i, o in enumerate(ctx.get("options") or [], 1):
+            lines.append(f"{i}) {_option_view(o)['label']}")
+        return "\n".join(lines)
+    n = len(qs)
+    for i, q in enumerate(qs, 1):
+        title = str(q.get("header") or q.get("question") or f"第 {i} 题")
+        lines.append(f"### {i}/{n} {title}")
+        if q.get("header") and q.get("question"):
+            lines.append(str(q["question"]))
+        body = str(q.get("body") or "").strip()
+        if body:
+            lines.append(body)
+        for j, o in enumerate(q.get("options") or [], 1):
+            ov = _option_view(o)
+            lines.append(f"{j}) {ov['label']}")
+            if ov["description"]:
+                lines.append(f"　　{ov['description']}")     # 全角缩进：描述次行
+        caps = []
+        if q.get("multi_select"):
+            caps.append("多选")
+        if q.get("allow_other"):
+            caps.append(f"可自定义：{q.get('other_label') or '其他'}")
+        if caps:
+            lines.append("（" + "；".join(caps) + "）")
+    return "\n".join(lines)
+
+
+def _plan_doc_title(ctx):
+    """文档标题：卡号 + 题头（云空间列表里能一眼认出是哪张卡哪次提问）。"""
+    head = str(ctx.get("header") or ctx.get("question") or "提问").strip()
+    head = (head.splitlines() or [""])[0]
+    return _clip_text(f"卡 {ctx.get('card_id')} · {head}", 80)
+
+
+def _plan_doc_markdown(ctx, texts, project_name=""):
+    """完整方案文档正文（markdown，经 `_md_blocks` 转飞书块）。
+
+    含：提问**全文**（卡片截断的部分在此补全）+ 末条 assistant 回答 + 作答指引
+    （文档内也能凭"回复序号"作答）+ 必要时的 think 摘录；整体按 `_PLAN_DOC_MAX` 截断。
+    """
+    cid = ctx.get("card_id")
+    a = str((texts or {}).get("assistant") or "").strip()
+    t = str((texts or {}).get("think") or "").strip()
+    lines = [f"# 卡 {cid} · agent 的方案与提问", "",
+             f"- 项目：{project_name or '—'}",
+             f"- 卡片：{str(ctx.get('title') or '')[:60]}",
+             f"- 时间：{_beijing_now()}（北京时间）"]
+    sid = str(ctx.get("session_id") or "").strip()
+    if sid:
+        lines.append(f"- 会话：{sid}")
+    if a:
+        lines += ["", "## agent 的方案 / 回答", "", a]
+    lines += ["", "## 提问（全文）", "", _plan_question_md(ctx)]
+    lines += ["", "## 如何作答", "",
+              "- 在飞书聊天里点卡片上的选项按钮 / 下拉即完成作答（多选题勾选后点「提交」）；",
+              f"- 也可以直接回复：「作答 {cid} <序号>」（多选逗号分隔，如 `作答 {cid} 1,3`），"
+              f"或「作答 {cid} <自定义文字>」写自由文本；",
+              "- 点选与文本作答可混用，已点选的题不必重复给。"]
+    if len(a) < _PLAN_THINK_MIN and t:
+        lines += ["", "## agent 的思考摘录", "", t[:_PLAN_THINK_MAX]]
+    md = "\n".join(lines)
+    if len(md) > _PLAN_DOC_MAX:
+        md = md[:_PLAN_DOC_MAX] + "\n\n…（正文已截断）"
+    return md
+
+
+def _md_plain(s):
+    """清掉 docx 文本块**不渲染**的行内 markdown 记号（`**粗**`/`*斜*`/反引号/`~~删~~`）：
+    留着只会以字面量出现在文档里（文档接口不做 markdown 渲染）。"""
+    s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
+    s = re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"\1", s)
+    s = re.sub(r"~~(.+?)~~", r"\1", s)
+    return s.replace("`", "")
+
+
+def _md_blocks(text):
+    """极简 markdown → 飞书文档块（标题/项目符号/有序/引用/代码/分隔线/正文）。
+
+    - 强调符清掉（`_md_plain`）；表格分隔行（`| --- | --- |`）丢弃——飞书块不支持
+      表格，留着只有噪声；数据行按普通文本保留。
+    - 超长段落按 `_MD_BLOCK_MAX` 切块（单块过长会被文档接口拒收）。
+    - 产出恒为合法块形状，绝不抛（方案文档失败不该拖垮发卡链路）。
+    """
+    blocks, in_code, buf = [], False, []
+
+    def mk(bt, key, content):
+        return {"block_type": bt,
+                key: {"elements": [{"text_run": {
+                    "content": content,
+                    "text_element_style": {"bold": bt in (3, 4, 5)}}}],
+                    "style": {}}}
+
+    def add_text(bt, key, s):
+        if not s:
+            return
+        for i in range(0, len(s), _MD_BLOCK_MAX):
+            blocks.append(mk(bt, key, s[i:i + _MD_BLOCK_MAX]))
+
+    def flush_code():
+        if buf:
+            add_text(14, "code", "\n".join(buf))
+            buf.clear()
+
+    for raw in str(text or "").split("\n"):
+        line = raw.rstrip()
+        if line.strip().startswith("```"):
+            if in_code:
+                flush_code()
+                in_code = False
+            else:
+                in_code = True
+            continue
+        if in_code:
+            buf.append(line)
+            continue
+        s = _md_plain(line)
+        if not s.strip():
+            continue
+        if re.match(r"^\|[\s\-:|]+\|$", s.strip()):          # 表格分隔行：丢
+            continue
+        if s.startswith("### "):
+            add_text(5, "heading3", s[4:])
+        elif s.startswith("## "):
+            add_text(4, "heading2", s[3:])
+        elif s.startswith("# "):
+            add_text(3, "heading1", s[2:])
+        elif s.strip() == "---":
+            blocks.append({"block_type": 22, "divider": {}})
+        elif s.lstrip().startswith("> "):
+            add_text(15, "quote", s.lstrip()[2:])
+        elif re.match(r"^\s*[-*] ", s):
+            add_text(12, "bullet", re.sub(r"^\s*[-*] ", "", s))
+        elif re.match(r"^\s*\d+[.)] ", s):
+            add_text(13, "ordered", re.sub(r"^\s*\d+[.)] ", "", s))
+        else:
+            add_text(2, "text", s)
+    flush_code()
+    return blocks
+
+
+def _docx_create(title, md_text, cfg, open_id, timeout=_DOC_TIMEOUT):
+    """建飞书云文档并授权给用户 → 返回规范链接（任一步失败抛 FeishuRestError）。
+
+    配方（2026-10-10 真机实测通过）：
+    ① 建文档 `POST /docx/v1/documents`（需 `docx:document` 权限）；
+    ② 写正文 `POST /docx/v1/documents/{doc}/blocks/{doc}/children`（**单次 ≤50 块**）；
+    ③ `PATCH /drive/v1/permissions/{doc}/public?type=docx` 设「组织内可阅读」
+       ——**必做**：文档默认归应用所有，不做这步用户打不开；
+    ④ `POST /drive/v1/permissions/{doc}/members` 把用户加成协作者（**best-effort**：
+       失败只留痕，第③步已保证链接可读）；
+    ⑤ `POST /drive/v1/metas/batch_query`（body 带 `with_url=true`）取规范链接
+       ——漏 `with_url` 会 `code=0` 静默回空串，此时按租户域名兜底拼链接。
+    """
+    body = _rest("POST", "/open-apis/docx/v1/documents", json_body={"title": title},
+                 cfg=cfg, timeout=timeout) or {}
+    doc = (((body.get("data") or {}).get("document") or {}).get("document_id") or "")
+    if not doc:
+        raise FeishuRestError("建文档成功但没拿到 document_id")
+    blocks = _md_blocks(md_text)
+    for i in range(0, len(blocks), 50):
+        _rest("POST", f"/open-apis/docx/v1/documents/{doc}/blocks/{doc}/children",
+              json_body={"children": blocks[i:i + 50], "index": i},
+              cfg=cfg, timeout=timeout)
+    _rest("PATCH", f"/open-apis/drive/v1/permissions/{doc}/public",
+          params={"type": "docx"},
+          json_body={"link_share_entity": "tenant_readable",
+                     "external_access_entity": "open"}, cfg=cfg, timeout=timeout)
+    if open_id:
+        try:
+            # need_notification=false：文档链接已在卡上，再加一条"分享给你"的飞书
+            # 通知就是重复打扰（提问多时尤甚）；membership 只是链接分享被组织策略
+            # 限制时的兜底通道。
+            _rest("POST", f"/open-apis/drive/v1/permissions/{doc}/members",
+                  params={"type": "docx", "need_notification": "false"},
+                  json_body={"member_type": "openid", "member_id": open_id,
+                             "perm": "full_access"}, cfg=cfg, timeout=timeout)
+        except FeishuRestError as e:
+            print(f"feishu docx: 加协作者失败（第③步链接分享已可读，继续）: {e!r}",
+                  file=sys.stderr, flush=True)
+    meta = _rest("POST", "/open-apis/drive/v1/metas/batch_query",
+                 params={"user_id_type": "open_id"},
+                 json_body={"request_docs": [{"doc_token": doc, "doc_type": "docx"}],
+                            "with_url": True}, cfg=cfg, timeout=timeout) or {}
+    metas = (meta.get("data") or {}).get("metas") or []
+    url = (metas[0].get("url") if metas else "") or ""
+    return url or f"https://feishu.cn/docx/{doc}"     # 兜底：域名由飞书 301/302 重定向
+
+
+def _plan_doc_get(key):
+    """取该 (卡, 提问) 已建文档链接（顺带清过期记录，防无界增长）。"""
+    now = time.time()
+    for k in [k for k, v in _PLAN_DOCS.items() if now - v.get("at", 0) > _PLAN_DOC_TTL]:
+        _PLAN_DOCS.pop(k, None)
+    v = _PLAN_DOCS.get(key)
+    return v.get("url", "") if v else ""
+
+
+def _plan_doc_put(key, url):
+    """记账（同一提问只建一次文档；上限截断防无界增长）。"""
+    _PLAN_DOCS[key] = {"url": url, "at": time.time()}
+    while len(_PLAN_DOCS) > 128:
+        _PLAN_DOCS.pop(min(_PLAN_DOCS, key=lambda k: _PLAN_DOCS[k]["at"]), None)
+
+
+def _attach_plan(ctx, project_name, cfg, open_id=""):
+    """把「方案」挂到卡片上下文：`plan_inline`（卡内折叠摘要）+ `plan_doc_url`（文档链接）。
+
+    best-effort：**绝不外抛**——方案是锦上添花，卡本身必须发出去（历史上 form 元素
+    超限曾整卡静默丢失）。无会话（取不到方案）直接返回，不发无意义文档。
+    同一 (卡, 提问) 只建一次文档：调和器理论上一提问只调一次 `card_blocked`，此处是
+    重放/重试保险，且让重放复用同一链接。
+    """
+    try:
+        sid = str(ctx.get("session_id") or "").strip()
+        if not sid:
+            return
+        texts = _plan_session_texts(sid)
+        inline = _plan_inline_markdown(ctx, texts)
+        if inline:
+            ctx["plan_inline"] = inline
+        key = (int(ctx.get("card_id") or 0), str(ctx.get("qid") or ""))
+        cached = _plan_doc_get(key)
+        if cached:
+            ctx["plan_doc_url"] = cached
+            return
+        md = _plan_doc_markdown(ctx, texts, project_name)
+        if not md.strip():
+            return
+        url = _docx_create(_plan_doc_title(ctx), md, cfg, open_id)
+        if url:
+            _plan_doc_put(key, url)
+            ctx["plan_doc_url"] = url
+    except Exception as e:
+        print(f"feishu docx: 建方案文档失败（卡照发，仅卡内摘要）: {e!r}",
+              file=sys.stderr, flush=True)
+
+
 def _dm_interaction_card(project_id, ctx):
     """旁路：向项目所有者的飞书单聊发交互卡片（**受 `notify_events` 闸门约束**，
     再要求账号绑定 + 应用凭据齐全才发）。
@@ -580,6 +944,10 @@ def _dm_interaction_card(project_id, ctx):
         if not binding or not cfg:
             return
         name = proj["name"] if proj else f"#{project_id}"
+        # M6：把 agent 的方案/回答挂到卡上（卡内折叠摘要 + 完整方案飞书文档链接）。
+        # 审批卡不做（它的"背景"由审批请求本身给出，建文档没意义）；开关可回滚。
+        if plan_enabled() and str(ctx.get("kind") or "") != "approval":
+            _attach_plan(ctx, name, cfg, binding["open_id"] or "")
         rest_send_card(binding["open_id"],
                        _build_interaction_card(ctx, name), cfg)
     except Exception as e:
@@ -602,6 +970,10 @@ def card_blocked(project_id, card, interaction):
     ctx = {
         "card_id": card["id"], "title": card.get("title") or "",
         "kind": kind,
+        # M6：方案取数（`_attach_plan` 读会话转录）与建文档去重都要这两个键；
+        # 缺了它们 M6 整块自动跳过（旧调用面/测试替身不受影响）。
+        "session_id": str(card.get("session_id") or ""),
+        "qid": str(interaction.get("qid") or ""),
         "question": interaction.get("question") or "",
         # 选项展示名取 label（交互归一后的字段，见 board._iw_interaction 的
         # dsh 分支；旧代码取不存在的 text 字段，推送里选项序号后恒空白）
@@ -709,8 +1081,9 @@ def _tenant_token(cfg):
     return out["tenant_access_token"]
 
 
-def _rest(method, path, *, params=None, json_body=None, cfg=None):
+def _rest(method, path, *, params=None, json_body=None, cfg=None, timeout=10):
     """飞书 REST 统一调用（按用户应用 cfg 鉴权）：非 0 业务码抛 FeishuRestError。
+    timeout 可按调用收敛（M6 建方案文档跑在 board 调和线程里，逐调用上限 8s）。
     路径规范化：调用方带/不带 /open-apis 前缀均恰好拼出一层（曾因调用方自带前缀
     + 此处再拼一层，请求打到 /open-apis/open-apis/... 恒 404 纯文本，且异常被吞
     表现为「机器人毫无反应」）。
@@ -727,7 +1100,7 @@ def _rest(method, path, *, params=None, json_body=None, cfg=None):
         try:
             r = requests.request(
                 method, url, params=params,
-                json=json_body, timeout=10,
+                json=json_body, timeout=timeout,
                 headers={"Authorization": f"Bearer {_tenant_token(cfg)}",
                          "Content-Type": "application/json"})
         except (OSError, ValueError) as e:
