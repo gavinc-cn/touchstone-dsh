@@ -59,6 +59,11 @@ function makeCtx() {
   const handlers = {};        // 事件名 -> [fn]
   const opts = {};            // 事件名 -> [ctx.on 第三参（注册选项）]
   const sockets = { agents: new Map(), disposed: [] };
+  // 「已由原生通道（dsh GUI）兑现过的提问」显式记账（T3 修复轮扩桩）：真宿主里 GUI 作答后
+  // 该提问即从待答表移除，`userQuestions.answer` 对同一 callId 必回 false（平台迟到作答
+  // 据此收口）。桩**不改**既有默认返回语义（`callId !== 'gone'`），只对显式记账的 callId
+  // 回 false；默认空集 ⇒ 既有 6 个 `/answer` 调用点逐字不受影响。
+  sockets.nativeFulfilled = new Set();
   // 工作区注册表桩（形状对齐 dsh-workspace 的 WorkspaceRegistry）：resolveByPath 命中
   // 已有工作区 / create 新建，实体 attachSession 只记录调用。`workspaceFail` 模拟注册表
   // 故障，`workspaceRegistry = undefined` 模拟服务缺席——两种情况驱动都必须降级不抛。
@@ -157,6 +162,8 @@ function makeCtx() {
       if (name === 'userQuestions') {
         return { answer: (_agent, callId, answer) => {
           sockets.answered = { callId, answer };
+          // 已由原生通道兑现过的提问：真宿主回 false（见 sockets.nativeFulfilled 注释）。
+          if (sockets.nativeFulfilled.has(callId)) return false;
           return callId !== 'gone';
         } };
       }
@@ -1187,6 +1194,496 @@ async function main() {
       && after.sessions.some((x) => x.session_id === 'session-host-late'),
       JSON.stringify({ before: before.complete, after }));
   });
+
+  // --- 看管声明（C 批）：非池内会话的注入开关 ---
+  // 为什么必须由平台**显式声明**、而不是「非池内即纳管」：宿主进程里存在大量与
+  // Touchstone 无关的会话（用户自己开的、子代理派生的），按推断纳管等于给平台开了
+  // 「向任意会话注入消息/作答」的口子。T2 投递回落 / T3 提问认领 / T4 审批双通道
+  // 都以 `_isWatched` 为唯一判据，故这里把端点与读口形状一并钉死。
+  const w1 = await (await call(base, token, 'POST', '/watch', { session_id: 'session-ext-w1' })).json();
+  check('POST /watch 声明看管 → watched=true', w1.ok === true && w1.watched === true, JSON.stringify(w1));
+  // 形状守卫：下游三批直接调 `_isWatched`，缺席即整批失效（故先判类型再判语义）
+  check('_isWatched 只认声明过的 sid（未声明一律 false）',
+    typeof driver._isWatched === 'function' && driver._isWatched('session-ext-w1') === true
+    && driver._isWatched('session-ext-other') === false,
+    JSON.stringify([typeof driver._isWatched, driver._isWatched && driver._isWatched('session-ext-other')]));
+  const w2 = await (await call(base, token, 'POST', '/watch', { session_id: 'session-ext-w1' })).json();
+  check('watch 幂等', w2.watched === true, JSON.stringify(w2));
+  const wh = await (await call(base, token, 'GET', '/health')).json();
+  check('/health 暴露 watched 计数', wh.watched === 1, String(wh.watched));
+  const w3 = await (await call(base, token, 'POST', '/watch', { session_id: 'session-ext-w1', on: false })).json();
+  check('on:false 撤销看管', w3.watched === false, JSON.stringify(w3));
+  const w4 = await call(base, token, 'POST', '/watch', { session_id: '' });
+  check('缺 session_id → 400', w4.status === 400, String(w4.status));
+  // 会话销毁即收口：否则看管表只涨不消，平台会对已不存在的 sid 继续纳管
+  await (await call(base, token, 'POST', '/watch', { session_id: 'session-ext-w2' })).json();
+  for (const fn of handlers['session/disposed'] || []) fn({ id: 'session-ext-w2' });
+  const wh2 = await (await call(base, token, 'GET', '/health')).json();
+  check('会话销毁 → 看管声明自动清除', wh2.watched === 0, String(wh2.watched));
+
+  // --- T2 投递回落（C 批）：池外 + 平台看管 + 宿主有活 agent ⇒ 直投，不接管 ---
+  // 桩造外部会话：宿主 `sessions.store` 登记（与 /live 同源，形状见 hostSession）+
+  // `agents` 表里有活 agent（该表就是驱动的宿主读口 `this.agentCtx.agents`）。
+  // 场景对应卡 #919：用户在 dsh GUI 直跑的会话不在平台池里，平台只「声明看管」。
+  sockets.sessions.store.set('session-ext-w1',
+    { id: 'session-ext-w1', session: hostSession('session-ext-w1', '/tmp/ext') });
+  sockets.agents.set('session-ext-w1', makeAgent('session-ext-w1', '/tmp/ext'));
+  const watchAgent = sockets.agents.get('session-ext-w1');
+  await call(base, token, 'POST', '/watch', { session_id: 'session-ext-w1' });
+  const p1 = await (await call(base, token, 'POST', '/prompt',
+    { session_id: 'session-ext-w1', prompt: '外部投递' })).json();
+  check('watched + 活 agent：/prompt 回落直投（external=true）',
+    p1.ok === true && p1.external === true, JSON.stringify(p1));
+  check('回落走的是宿主活 agent 的 followup',
+    watchAgent.calls.some((c) => c[0] === 'followup'
+      && c[1].content[0].text === '外部投递'), JSON.stringify(watchAgent.calls));
+  const s1 = await (await call(base, token, 'POST', '/steer',
+    { session_id: 'session-ext-w1', prompt: '插话' })).json();
+  check('watched：/steer 回落（external=true）',
+    s1.ok === true && s1.external === true
+    && watchAgent.calls.some((c) => c[0] === 'steer'), JSON.stringify(s1));
+  // /status 回落（brief Step 3 第三段）：形状 = 最小实时态 + external + 旁听 interaction，
+  // **不含 last_seq**（外部会话的会话事件 seq 不进本池，平台基线口径由 T6 统一走 dshevents）。
+  for (const fn of handlers['session/created'] || []) {
+    fn({ id: 'session-ext-w1', header: { cwd: '/tmp/ext' } });
+  }
+  for (const fn of handlers['session/event'] || []) {
+    fn({ id: 'session-ext-w1' },
+       { type: 'approval/asked', seq: 1, time: Date.now(),
+         data: { id: 'ap-ext-1', toolName: 'bash', reason: '外部会话等审批' } });
+  }
+  const stW = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  check('watched + 活 agent：/status 回落（external + 旁听 interaction，不含 last_seq）',
+    stW.session_id === 'session-ext-w1' && stW.external === true
+    && stW.status === watchAgent.status
+    && Boolean(stW.interaction) && stW.interaction.id === 'ap-ext-1'
+    && !('last_seq' in stW), JSON.stringify(stW));
+  sockets.agents.delete('session-ext-w1');
+  // 「闸门唯一实现」取证（评审 Important 1 的修复证据）：先接管驱动的 `_externalTarget` 计数，
+  // 再让三个端点各打一次——重构若把判定内联回某个端点，该端点不会命中这里（计数 <3）。
+  // 桩在旧代码上 `rawTarget` 为 undefined，故干跑返回 undefined（让断言失败而非抛异常）。
+  const rawTarget = driver._externalTarget;
+  let targetCalls = 0;
+  driver._externalTarget = function spyExternalTarget(res2, sid2) {
+    targetCalls += 1;
+    return typeof rawTarget === 'function' ? rawTarget.call(this, res2, sid2) : undefined;
+  };
+  const r2 = await call(base, token, 'POST', '/prompt',
+    { session_id: 'session-ext-w1', prompt: 'x' });
+  const p2 = await r2.json();
+  check('watched 但无活 agent：404「会话已结束（宿主无活动 agent）」',
+    r2.status === 404 && String(p2.error || '').includes('会话已结束'), JSON.stringify(p2));
+  // 逐字核全串（同场景三端点一次打完）：/prompt·/steer 是闸门自写的分档文案；
+  // /status 按控制者裁定保留既有文案（进度记录「T2 顾虑不修」），故与未看管同串。
+  const r2b = await call(base, token, 'POST', '/steer',
+    { session_id: 'session-ext-w1', prompt: 'x' });
+  const p2b = await r2b.json();
+  const r2c = await call(base, token, 'GET', '/status?session_id=session-ext-w1');
+  const p2c = await r2c.json();
+  delete driver._externalTarget;
+  check('watched + 无活 agent：三端点 404 逐字核全串（闸门文案分档）',
+    r2.status === 404 && p2.error === '会话已结束（宿主无活动 agent）: session-ext-w1'
+    && r2b.status === 404 && p2b.error === '会话已结束（宿主无活动 agent）: session-ext-w1'
+    && r2c.status === 404 && p2c.error === '会话不在驱动池中: session-ext-w1',
+    JSON.stringify({ prompt: { status: r2.status, error: p2.error },
+                     steer: { status: r2b.status, error: p2b.error },
+                     status: { status: r2c.status, error: p2c.error } }));
+  check('三端点共用唯一闸门 _externalTarget（各命中一次）',
+    typeof rawTarget === 'function' && targetCalls === 3,
+    JSON.stringify({ type: typeof rawTarget, calls: targetCalls }));
+  const r3 = await call(base, token, 'POST', '/prompt',
+    { session_id: 'session-never-watched', prompt: 'x' });
+  const p3 = await r3.json();
+  check('未看管会话：404 原文案不变（回归）',
+    r3.status === 404 && p3.error === '会话不在驱动池中: session-never-watched', JSON.stringify(p3));
+  // 未看管回归（更狠的一条）：宿主**有**活 agent 也不得直投——看管声明是唯一闸门，
+  // 否则宿主里任何用户自己的会话都能被平台注入消息（设计 §3.1 的开口理由）。
+  sockets.agents.set('session-ext-w3', makeAgent('session-ext-w3', '/tmp/ext'));
+  const r4 = await call(base, token, 'POST', '/prompt',
+    { session_id: 'session-ext-w3', prompt: 'x' });
+  const p4 = await r4.json();
+  const r5 = await call(base, token, 'POST', '/steer',
+    { session_id: 'session-ext-w3', prompt: 'x' });
+  const r6 = await call(base, token, 'GET', '/status?session_id=session-ext-w3');
+  check('未看管但宿主有活 agent：/prompt·/steer·/status 一律 404 原文案（看管是唯一闸门）',
+    r4.status === 404 && p4.error === '会话不在驱动池中: session-ext-w3'
+    && r5.status === 404 && r6.status === 404
+    && sockets.agents.get('session-ext-w3').calls.length === 0,
+    JSON.stringify({ prompt: p4, steer: r5.status, status: r6.status,
+                     calls: sockets.agents.get('session-ext-w3').calls }));
+  sockets.agents.delete('session-ext-w3');
+  // 池内路径一字不动的两个空 prompt 边角：T2 只把 `text` 求值提前（回落分支要用），
+  // 判定顺序未动——池内空 prompt 仍 400，未看管空 prompt 仍先撞 404 原文案（不被 400 截胡）。
+  const r7 = await call(base, token, 'POST', '/prompt', { session_id: sid, prompt: '' });
+  const p7 = await r7.json();
+  const r8 = await call(base, token, 'POST', '/prompt', { session_id: 'session-never-watched' });
+  const p8 = await r8.json();
+  const r9 = await call(base, token, 'POST', '/steer', { session_id: sid, prompt: '' });
+  check('池内空 prompt 仍 400（/prompt·/steer）；未看管空 prompt 仍先撞 404 原文案',
+    r7.status === 400 && p7.error === 'prompt 不能为空' && r9.status === 400
+    && r8.status === 404 && p8.error === '会话不在驱动池中: session-never-watched',
+    JSON.stringify({ prompt: r7.status, steer: r9.status, unwatched: p8 }));
+
+  // --- T3 提问认领第三分支（C 批）：池外 + 平台看管 ⇒ 双通道（认领 + 原生照旧）---
+  // 看管的外部会话（用户在 dsh GUI 直跑的）改前只「旁听」：挂起标记的 call_id 走旁听口径，
+  // legacy 提问恒为空 ⇒ 平台侧 answerable=false、会话窗不给作答框，只能回 dsh GUI 里答。
+  // T3 起与池内会话同款**双通道**：平台认领（`/answer` 兑现 waterfall）**同时**原生链路
+  // 照旧打开（dsh GUI 照旧弹框），两侧先答者胜、另一侧按 40405 收口。
+  // 桩必须自己重建（T2 段删过 w1 的 agent；旁听表 `observed` 由 `session/created` 写入）。
+  sockets.sessions.store.set('session-ext-w1',
+    { id: 'session-ext-w1', session: hostSession('session-ext-w1', '/tmp/ext') });
+  sockets.agents.set('session-ext-w1', makeAgent('session-ext-w1', '/tmp/ext'));
+  for (const fn of handlers['session/created'] || []) {
+    fn({ id: 'session-ext-w1', header: { cwd: '/tmp/ext' } });
+  }
+  await call(base, token, 'POST', '/watch', { session_id: 'session-ext-w1' });
+  // watched 外部会话的提问：双通道 + call_id 非空
+  let extNative = 0;
+  const extLane = makeNativeLane();
+  const extHost = new AbortController();
+  const extReq = { agent: sockets.agents.get('session-ext-w1'), signal: extHost.signal,
+                   wait: { callId: 'call-ext-9' },
+                   questions: [{ id: 'q1', question: '外部会话提问？',
+                                 options: [{ label: 'A', description: '说明 A' }] }] };
+  let extClaim = null;
+  const extP = qHooks[0](extReq, () => { extNative += 1; return extLane.promise; });
+  extP.then((v) => { extClaim = v; }, () => {});
+  const stExt = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  check('watched 外部会话：挂起标记带 call_id（平台 answerable=true）',
+    stExt.interaction && stExt.interaction.call_id === 'call-ext-9', JSON.stringify(stExt.interaction));
+  check('watched 外部会话：原生通道仍打开（dsh GUI 照旧弹框）', extNative === 1, String(extNative));
+  const ansExt = await (await call(base, token, 'POST', '/answer',
+    { session_id: 'session-ext-w1', call_id: 'call-ext-9',
+      answers: [{ id: 'q1', selected: ['A'] }] })).json();
+  await new Promise((r) => setTimeout(r, 10));
+  check('外部会话平台作答兑现认领（accepted=true，waterfall 返回值=平台作答）',
+    ansExt.accepted === true && extClaim && extClaim.answers[0].selected[0] === 'A',
+    JSON.stringify({ ansExt, extClaim }));
+  // legacy 提问（无 `wait.callId`，阻塞式 `ask_user_question` 的默认形态）：认领标识必须与
+  // 池内同口径回落到 `tool/call` 的真实 callId——只核 `wait.callId` 的那条在改前也恒真，
+  // 这一条才是「平台 answerable=true」真正的回归面。
+  for (const fn of handlers['session/event'] || []) {
+    fn({ id: 'session-ext-w1' },
+       { type: 'tool/call', seq: 95, time: Date.now(),
+         data: { turn: 1, step: 1, callId: 'tc-ext-w1', name: 'ask_user_question', arguments: '{}' } });
+  }
+  let extLegacyNative = 0;
+  qHooks[0]({ agent: sockets.agents.get('session-ext-w1'), signal: new AbortController().signal,
+              questions: [{ id: 'q2', question: '外部 legacy 提问？' }] },
+            () => { extLegacyNative += 1; return makeNativeLane().promise; })
+    .then(() => {}, () => {});
+  const stLegacy = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  check('watched 外部会话 legacy 提问：无 wait.callId 也认领出真实 call_id（平台 answerable=true）',
+    Boolean(stLegacy.interaction && stLegacy.interaction.call_id === 'tc-ext-w1'),
+    JSON.stringify(stLegacy.interaction));
+  const ansLegacy = await (await call(base, token, 'POST', '/answer',
+    { session_id: 'session-ext-w1', call_id: 'tc-ext-w1',
+      answers: [{ id: 'q2', selected: ['A'] }] })).json();
+  await new Promise((r) => setTimeout(r, 10));
+  check('watched 外部会话 legacy 提问：平台作答同样兑现认领（原生通道也已打开）',
+    ansLegacy.accepted === true && extLegacyNative === 1, JSON.stringify(ansLegacy));
+  // 未 watch 的外部会话：行为不变（call_id 空、仍让位）
+  sockets.sessions.store.set('session-ext-w2', { id: 'session-ext-w2',
+    session: { id: 'session-ext-w2', header: { cwd: '/tmp/ext2' } } });
+  sockets.agents.set('session-ext-w2', makeAgent('session-ext-w2', '/tmp/ext2'));
+  for (const fn of handlers['session/created'] || []) {      // 旁听表入口（/live 的数据源）
+    fn({ id: 'session-ext-w2', header: { cwd: '/tmp/ext2' } });
+  }
+  let rawNative = 0;
+  qHooks[0]({ agent: sockets.agents.get('session-ext-w2'),
+              signal: new AbortController().signal,
+              questions: [{ id: 'q1', question: '未看管？' }] },
+            () => { rawNative += 1; return makeNativeLane().promise; }).then(() => {}, () => {});
+  const liveRaw = await (await call(base, token, 'GET', '/live')).json();
+  const rawRow = (liveRaw.sessions || []).find((s) => s.session_id === 'session-ext-w2');
+  check('未 watch 外部会话：call_id 仍为空（旁听语义回归）',
+    Boolean(rawRow && rawRow.interaction && !rawRow.interaction.call_id),
+    JSON.stringify(rawRow && rawRow.interaction));
+  check('未 watch 外部会话：仍让位原生作答者', rawNative === 1, String(rawNative));
+  sockets.agents.delete('session-ext-w2');
+
+  // --- T3 竞速第三态（评审 Important 1 补测）：GUI 先答 ⇒ 平台迟到的 /answer 收口 ---
+  // 设计 §4.4 明文：watched 外部会话两侧同题、**先答者胜**；原生通道（dsh GUI）胜出后平台
+  // 若迟到，宿主 `userQuestions.answer` 对同一 callId 回 false ⇒ 驱动必须回 200 +
+  // `accepted:false`（不是 404、不是 500），平台据此按 40405 放弃重试、不空转。
+  // 改前 watched 外部会话一律走 `_lookup` 直接 404（本条迟到作答断言真红）；改后落在
+  // `_answer` 的 `_liveAgent` 回落支——该支此前**零覆盖**。
+  let extGuiNative = 0;
+  let extGuiValue = null;
+  const guiLane = makeNativeLane();
+  qHooks[0]({ agent: sockets.agents.get('session-ext-w1'), signal: new AbortController().signal,
+              wait: { callId: 'call-ext-gui' },
+              questions: [{ id: 'q3', question: 'GUI 先答？', options: [{ label: 'G' }] }] },
+            () => { extGuiNative += 1; return guiLane.promise; })
+    .then((v) => { extGuiValue = v; }, () => {});
+  const stGuiExt = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  check('watched 外部会话：GUI 未答时平台侧同样挂起（双通道同显 + 认领标识）',
+    Boolean(stGuiExt.interaction) && stGuiExt.interaction.call_id === 'call-ext-gui'
+    && extGuiNative === 1,
+    JSON.stringify({ interaction: stGuiExt.interaction, native: extGuiNative }));
+  guiLane.resolve({ answers: [{ id: 'q3', selected: ['G'] }] });
+  await new Promise((r) => setTimeout(r, 10));
+  // 真宿主语义：GUI 作答后该提问从待答表移除 ⇒ 同 callId 再答必被拒。这里**显式记账**
+  // （不调整桩默认返回），既有 6 个 /answer 调用点语义零漂移。
+  sockets.nativeFulfilled.add('call-ext-gui');
+  const stGuiMark = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  check('watched 外部会话：GUI 先答 → waterfall 返回值=GUI 作答且平台挂起标记清除',
+    Boolean(extGuiValue && extGuiValue.answers[0].selected[0] === 'G')
+    && stGuiMark.interaction === null,
+    JSON.stringify({ value: extGuiValue, interaction: stGuiMark.interaction }));
+  const lateRes = await call(base, token, 'POST', '/answer',
+    { session_id: 'session-ext-w1', call_id: 'call-ext-gui',
+      answers: [{ id: 'q3', selected: ['A'] }] });
+  const lateBody = await lateRes.json();
+  check('watched 外部会话：GUI 先答后平台迟到 /answer → 200 + accepted=false（平台按 40405 收口）',
+    lateRes.status === 200 && lateBody.accepted === false && lateBody.ok === true
+    && lateBody.session_id === 'session-ext-w1',
+    JSON.stringify({ status: lateRes.status, body: lateBody }));
+
+  // --- 看管但宿主已无活 agent：/answer 走 404 原文案（同一回落支的另一半，此前零覆盖）---
+  // brief Step 3「认领表未命中且无活 agent ⇒ 404 原文案」；文案与 /prompt·/steer 的分档
+  // 文案**有意不统一**（控制者裁定留到 T8 一次性决定），故此处钉全串、不改写成「会话已结束」。
+  sockets.agents.delete('session-ext-w1');
+  const rAbsent = await call(base, token, 'POST', '/answer',
+    { session_id: 'session-ext-w1', call_id: 'call-ext-unknown',
+      answers: [{ id: 'q3', selected: ['A'] }] });
+  const pAbsent = await rAbsent.json();
+  check('watched 但宿主无活 agent：/answer 404 原文案（认领表未命中 ⇒ 不假受理）',
+    rAbsent.status === 404 && pAbsent.error === '会话不在驱动池中: session-ext-w1',
+    JSON.stringify({ status: rAbsent.status, body: pAbsent }));
+  // 未看管但宿主有活 agent：/answer 同样不得直投（看管是唯一闸门）——补上评审点名的
+  // `_answer` 守卫出口（`:1545-1547`，与上一条的认领未命中出口是两处不同的 `_lookup`），
+  // 与 T2 段 `/prompt`·`/steer`·`/status` 三条「未看管一律 404」的第四条同款红线。
+  sockets.agents.set('session-ext-w4', makeAgent('session-ext-w4', '/tmp/ext'));
+  const answeredBefore = sockets.answered;
+  const rLeak = await call(base, token, 'POST', '/answer',
+    { session_id: 'session-ext-w4', call_id: 'call-ext-leak',
+      answers: [{ id: 'q1', selected: ['X'] }] });
+  const pLeak = await rLeak.json();
+  check('未看管但宿主有活 agent：/answer 404 原文案且不递宿主（看管是唯一闸门）',
+    rLeak.status === 404 && pLeak.error === '会话不在驱动池中: session-ext-w4'
+    && sockets.answered === answeredBefore,
+    JSON.stringify({ status: rLeak.status, body: pLeak, answered: sockets.answered }));
+  sockets.agents.delete('session-ext-w4');
+
+  // --- T4 审批双通道（C 批）：池外 + 平台看管 ⇒ 平台可代答 + 原生框照旧弹 ---
+  // 审批链路与提问**同源**（`approval/request` 与 `user-questions/request` 走同一套
+  // waterfall 转发）：改前 watched 外部会话的审批只让位（平台看不见、代答不了）；
+  // T4 起与池内同款**双通道**——插件认领（平台 `/approval` 兑现 waterfall）**同时**
+  // 原生链路照旧打开（dsh GUI 的审批框照常弹、照常可答），两侧先答者胜、另一侧收口。
+  // 桩必须自己重建：T3 段删过 w1/w2 的宿主 agent；`/status` 的 interaction 读的是旁听表
+  // `observed`（由 `session/created` 真处理器喂入），不是 sockets.sessions.store。
+  const apHooks = handlers['approval/request'] || [];
+  check('审批 waterfall 以 {prepend:true} 注册',
+    apHooks.length >= 1 && (opts['approval/request'] || [])[0]
+    && opts['approval/request'][0].prepend === true,
+    JSON.stringify(opts['approval/request']));
+  sockets.sessions.store.set('session-ext-w1',
+    { id: 'session-ext-w1', session: hostSession('session-ext-w1', '/tmp/ext') });
+  sockets.agents.set('session-ext-w1', makeAgent('session-ext-w1', '/tmp/ext'));
+  for (const fn of handlers['session/created'] || []) {
+    fn({ id: 'session-ext-w1', header: { cwd: '/tmp/ext' } });
+  }
+  await call(base, token, 'POST', '/watch', { session_id: 'session-ext-w1' });
+  let apNative = 0;
+  const apLane = makeNativeLane();
+  const apHost = new AbortController();
+  const apReq = { agent: sockets.agents.get('session-ext-w1'), toolName: 'bash',
+                  callId: 'tc-ap-1', reason: 'rm -rf', signal: apHost.signal };
+  let apLaneResult = null;
+  const apP = apHooks[0](apReq, () => { apNative += 1; return apLane.promise; });
+  apP.then((v) => { apLaneResult = v; }, () => {});
+  await new Promise((r) => setTimeout(r, 10));
+  const stAp = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  check('watched 外部会话审批：认领（挂起标记 answerable=true）且原生通道仍开',
+    apNative === 1 && stAp.interaction && stAp.interaction.answerable === true
+    && stAp.interaction.id, JSON.stringify({ apNative, mark: stAp.interaction }));
+  check('watched 外部会话审批：挂起标记形状（kind/tool/call_id/reason 原样带出）',
+    Boolean(stAp.interaction) && stAp.interaction.kind === 'approval'
+    && stAp.interaction.tool === 'bash' && stAp.interaction.call_id === 'tc-ap-1'
+    && stAp.interaction.reason === 'rm -rf', JSON.stringify(stAp.interaction));
+  check('watched 外部会话审批：原生通道信号被替换（平台先答时 GUI 框才收得掉）',
+    apReq.signal !== apHost.signal,
+    JSON.stringify({ replaced: apReq.signal !== apHost.signal }));
+  const apId = stAp.interaction ? stAp.interaction.id : '';
+  const ap1 = await (await call(base, token, 'POST', '/approval',
+    { session_id: 'session-ext-w1', approval_id: apId, decision: 'allowed-once' })).json();
+  await new Promise((r) => setTimeout(r, 10));
+  check('平台代答审批兑现（accepted/allowed-once）并收起 GUI 框',
+    ap1.ok === true && ap1.accepted === true && ap1.outcome === 'allowed-once'
+    && apLaneResult === 'allowed-once' && apReq.signal.aborted === true,
+    JSON.stringify({ ap1, apLaneResult, aborted: apReq.signal.aborted }));
+  const stApAfter = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  check('平台代答审批后：挂起标记清除（/status interaction=null）',
+    stApAfter.interaction === null, JSON.stringify(stApAfter.interaction));
+  // GUI 先答（原生通道胜出）⇒ 平台侧挂起收口，迟到的 /approval 落 409（先答者胜）
+  const guiApLane = makeNativeLane();
+  let guiApValue = null;
+  apHooks[0]({ agent: sockets.agents.get('session-ext-w1'), toolName: 'bash',
+               callId: 'tc-ap-gui', signal: new AbortController().signal },
+             () => guiApLane.promise).then((v) => { guiApValue = v; }, () => {});
+  await new Promise((r) => setTimeout(r, 10));
+  const stGuiAp = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  const guiApId = stGuiAp.interaction ? stGuiAp.interaction.id : '';
+  guiApLane.resolve('rejected');
+  await new Promise((r) => setTimeout(r, 10));
+  const stGuiAp2 = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  check('watched 外部会话：GUI 先答 → waterfall 返回值=GUI outcome 且平台挂起标记清除',
+    guiApValue === 'rejected' && stGuiAp2.interaction === null,
+    JSON.stringify({ value: guiApValue, interaction: stGuiAp2.interaction }));
+  const lateApRes = await call(base, token, 'POST', '/approval',
+    { session_id: 'session-ext-w1', approval_id: guiApId, decision: 'allowed-once' });
+  const lateAp = await lateApRes.json();
+  check('watched 外部会话：GUI 先答后平台迟到 /approval → 409（认领已收口，不重复兑现）',
+    lateApRes.status === 409 && lateAp.error === '当前没有等待中的审批（或已由 GUI 作答）',
+    JSON.stringify({ status: lateApRes.status, body: lateAp }));
+  // 非法 decision：外部支同样「先校验、再兑现」——不得把非法 outcome 递给宿主
+  const apBadLane = makeNativeLane();
+  const apBadReq = { agent: sockets.agents.get('session-ext-w1'), toolName: 'bash',
+                     callId: 'tc-ap-bad', signal: new AbortController().signal };
+  apHooks[0](apBadReq, () => apBadLane.promise).then(() => {}, () => {});
+  await new Promise((r) => setTimeout(r, 10));
+  const stBad = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  const badRes = await call(base, token, 'POST', '/approval',
+    { session_id: 'session-ext-w1', approval_id: stBad.interaction && stBad.interaction.id,
+      decision: 'bogus' });
+  const badBody = await badRes.json();
+  const stBad2 = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  check('watched 外部会话：/approval 非法 decision → 400 且不兑现（认领仍在）',
+    badRes.status === 400 && Boolean(stBad2.interaction)
+    && stBad2.interaction.kind === 'approval',
+    JSON.stringify({ status: badRes.status, body: badBody, mark: stBad2.interaction }));
+  const cancelAp = await (await call(base, token, 'POST', '/approval',
+    { session_id: 'session-ext-w1', decision: 'cancelled' })).json();
+  check('watched 外部会话：不带 approval_id 的 /approval 兑现当前在途认领（cancelled + 收框）',
+    cancelAp.ok === true && cancelAp.accepted === true && cancelAp.outcome === 'cancelled'
+    && apBadReq.signal.aborted === true,
+    JSON.stringify({ body: cancelAp, aborted: apBadReq.signal.aborted }));
+  await new Promise((r) => setTimeout(r, 10));
+  // 审计帧**后到**的最坏顺序（真机主顺序是审计帧在前，见下）：认领期间宿主的
+  // `approval/asked` 审计帧不得盖掉平台认领标记——它的 mark 既没有 `ap-<n>` 也没有
+  // `answerable`，盖上去平台侧的作答按钮就消失了（读宿主 `dsh-user-approval/lib/index.js`
+  // `request()`：先 append `approval/asked`、再跑 `approval/request` waterfall；观察者是
+  // 提交后回调，顺序不保证 ⇒ 两条顺序都要成立）。
+  const apAuditLane = makeNativeLane();
+  const apAuditReq = { agent: sockets.agents.get('session-ext-w1'), toolName: 'bash',
+                       callId: 'tc-ap-audit', signal: new AbortController().signal };
+  apHooks[0](apAuditReq, () => apAuditLane.promise).then(() => {}, () => {});
+  await new Promise((r) => setTimeout(r, 10));
+  const stBeforeAudit = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  for (const fn of handlers['session/event'] || []) {
+    fn({ id: 'session-ext-w1' },
+       { type: 'approval/asked', seq: 201, time: Date.now(),
+         data: { id: 'ap-host-201', toolName: 'bash', reason: '宿主审计帧' } });
+  }
+  const stAfterAudit = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  check('认领期间宿主 approval/asked 审计帧不覆盖认领标记（id/answerable 保持平台口径）',
+    Boolean(stAfterAudit.interaction) && stAfterAudit.interaction.answerable === true
+    && stAfterAudit.interaction.id === (stBeforeAudit.interaction && stBeforeAudit.interaction.id)
+    && stAfterAudit.interaction.reason === ''
+    && stAfterAudit.interaction.call_id === 'tc-ap-audit',
+    JSON.stringify({ before: stBeforeAudit.interaction, after: stAfterAudit.interaction }));
+  const auditAp = await (await call(base, token, 'POST', '/approval',
+    { session_id: 'session-ext-w1', decision: 'rejected' })).json();
+  for (const fn of handlers['session/event'] || []) {
+    fn({ id: 'session-ext-w1' },
+       { type: 'approval/decided', seq: 202, time: Date.now(),
+         data: { id: 'ap-host-201', outcome: 'rejected' } });
+  }
+  const stAfterDecided = await (await call(base, token, 'GET', '/status?session_id=session-ext-w1')).json();
+  check('审批兑现后 decided 审计帧照旧收口（平台侧不残留 waiting）',
+    auditAp.ok === true && auditAp.outcome === 'rejected' && stAfterDecided.interaction === null,
+    JSON.stringify({ body: auditAp, interaction: stAfterDecided.interaction }));
+  // 未 watch 的外部会话：仍让位（回归）——宿主**有**活 agent 也不行（看管是唯一闸门），
+  // 且请求对象上的 signal 不得被替换（= `_openNativeLane` 没被调用，一个字节没动）。
+  sockets.agents.set('session-ext-w2', makeAgent('session-ext-w2', '/tmp/ext2'));
+  let apRawNative = 0;
+  const apRawLane = makeNativeLane();
+  const apRawHost = new AbortController();
+  const apRawReq = { agent: sockets.agents.get('session-ext-w2'), toolName: 'bash',
+                     callId: 'tc-ap-raw', signal: apRawHost.signal };
+  apHooks[0](apRawReq, () => { apRawNative += 1; return apRawLane.promise; })
+    .then(() => {}, () => {});
+  check('未 watch 外部会话审批：原样让位（回归）', apRawNative === 1, String(apRawNative));
+  check('未 watch 外部会话审批：看管为唯一闸门（不认领 + signal 未被替换）',
+    driver._isWatched('session-ext-w2') === false && apRawNative === 1
+    && apRawReq.signal === apRawHost.signal
+    && !(driver.approvals && driver.approvals.has('session-ext-w2')),
+    JSON.stringify({ watched: driver._isWatched('session-ext-w2'), native: apRawNative,
+                     replaced: apRawReq.signal !== apRawHost.signal }));
+  const rawApRes = await call(base, token, 'POST', '/approval',
+    { session_id: 'session-ext-w2', decision: 'allowed-once' });
+  const rawAp = await rawApRes.json();
+  check('未 watch 外部会话：/approval 404 原文案（看管是唯一闸门，不假受理）',
+    rawApRes.status === 404 && rawAp.error === '会话不在驱动池中: session-ext-w2',
+    JSON.stringify({ status: rawApRes.status, body: rawAp }));
+  sockets.agents.delete('session-ext-w2');
+
+  // --- T4 核心交付：`_dropClaims` 收口「看管中会话被 disposed」一态 ---
+  // 提问侧在途认领的 **abort** 一态 T3 已由通用 hostSignal 收口；**disposed** 一态此前
+  // 无人清理（T3 明文留给 T4 的 `_dropClaims`）：会话销毁后认领悬挂在表里 ⇒ 宿主 `ask()`
+  // 永远等不到结果、挂起标记残留。这里把提问与审批两条链的在途认领一并钉死。
+  const w5 = 'session-ext-w5';
+  sockets.sessions.store.set(w5, { id: w5, session: hostSession(w5, '/tmp/ext5') });
+  sockets.agents.set(w5, makeAgent(w5, '/tmp/ext5'));
+  for (const fn of handlers['session/created'] || []) {
+    fn({ id: w5, header: { cwd: '/tmp/ext5' } });
+  }
+  await call(base, token, 'POST', '/watch', { session_id: w5 });
+  let w5Q = null;
+  let w5QErr = null;
+  let w5Ap = null;
+  let w5ApErr = null;
+  let w5QNative = 0;
+  let w5ApNative = 0;
+  qHooks[0]({ agent: sockets.agents.get(w5), signal: new AbortController().signal,
+              wait: { callId: 'call-drop-1' },
+              questions: [{ id: 'q1', question: '会话被销毁前在途的提问？' }] },
+            () => { w5QNative += 1; return makeNativeLane().promise; })
+    .then((v) => { w5Q = v; }, (e) => { w5QErr = e; });
+  apHooks[0]({ agent: sockets.agents.get(w5), toolName: 'bash', callId: 'tc-drop-1',
+               signal: new AbortController().signal },
+             () => { w5ApNative += 1; return makeNativeLane().promise; })
+    .then((v) => { w5Ap = v; }, (e) => { w5ApErr = e; });
+  await new Promise((r) => setTimeout(r, 10));
+  for (const fn of handlers['session/disposed'] || []) fn({ id: w5 });
+  await new Promise((r) => setTimeout(r, 10));
+  check('disposed 收口：在途提问认领被 reject 且摘表（原生通道同样已打开）',
+    Boolean(w5QErr) && w5Q === null && w5QNative === 1
+    && !driver.questions.has('call-drop-1'),
+    JSON.stringify({ rejected: Boolean(w5QErr), value: w5Q, native: w5QNative,
+                     held: driver.questions.has('call-drop-1') }));
+  check('disposed 收口：在途审批认领被 reject 且摘表（原生通道同样已打开）',
+    Boolean(w5ApErr) && w5Ap === null && w5ApNative === 1 && driver.approvals
+    && !driver.approvals.has(w5),
+    JSON.stringify({ rejected: Boolean(w5ApErr), value: w5Ap, native: w5ApNative,
+                     held: Boolean(driver.approvals && driver.approvals.has(w5)) }));
+  const stDropped = await (await call(base, token, 'GET', `/status?session_id=${w5}`)).json();
+  check('disposed 收口：看管声明与挂起标记同步清除（/status 回 404 原文案）',
+    driver._isWatched(w5) === false && stDropped.error === `会话不在驱动池中: ${w5}`,
+    JSON.stringify({ watched: driver._isWatched(w5), status: stDropped }));
+  sockets.agents.delete(w5);
+
+  // --- T4：`dispose()` 一态同样收口在途认领（brief 写的 `stop()` 不存在，真实失活口=dispose）---
+  // 用独立实例（`withDriver` 自带桩 ctx + 临时服务，收尾时由它调 `driver.dispose()`）：
+  // 插件停用/热重载时在途审批认领必须 reject 收口，否则宿主审批 waterfall 永久悬挂。
+  let dispoErr = null;
+  let dispoDriver = null;
+  const dispoSid = 'session-ext-w6';
+  await withDriver(null, async ({ driver: d2, base: b2, token: t2, sockets: s2, handlers: h2 }) => {
+    dispoDriver = d2;
+    s2.agents.set(dispoSid, makeAgent(dispoSid, '/tmp/ext6'));
+    await call(b2, t2, 'POST', '/watch', { session_id: dispoSid });
+    h2['approval/request'][0]({ agent: s2.agents.get(dispoSid), toolName: 'bash',
+                                signal: new AbortController().signal },
+                              () => makeNativeLane().promise)
+      .then(() => {}, (e) => { dispoErr = e; });
+    await new Promise((r) => setTimeout(r, 10));
+  });
+  check('dispose() 收口：在途审批认领被 reject（插件停用不悬挂）',
+    Boolean(dispoErr) && dispoDriver.approvals && dispoDriver.approvals.size === 0,
+    JSON.stringify({ rejected: Boolean(dispoErr),
+                     held: dispoDriver.approvals ? dispoDriver.approvals.size : null }));
 
   // --- 释放 ---
   await call(base, token, 'POST', '/dispose', { session_id: sid });

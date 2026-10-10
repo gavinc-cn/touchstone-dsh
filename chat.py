@@ -22,14 +22,21 @@
 排队消息「立即注入」（2026-09-14）：平台排队中的消息可不等队列，用户点按钮即
 撤销排队并立即投递到目标会话（dsh：steer 注入当前 turn 的最近 step 边界，会话
 空闲则立即起轮）——见 inject_now。
+
+外部会话（C 批 T5，2026-10-10）：用户在 dsh GUI 里直跑/接管的会话（`owned:false`）
+也可投递，但要先在**入队前**过 `_external_preflight`（宿主有活 agent ∧ 平台已向
+驱动声明看管，`board._ensure_watch`）；前提不成立即抛 `DeliveryRefused`，消息
+**不落 chat_msgs/wait_items 行**（「必然失败的静默排队」变成「发送即明确文案」）。
 """
 
 import json
 import os
+import queue
 import threading
 import time
 
 import db
+import dshevents
 import dshdriver
 import lib
 import runner
@@ -75,6 +82,24 @@ class InjectRefused(RuntimeError):
     """
 
 
+class DeliveryRefused(RuntimeError):
+    """外部会话投递前置闸拒绝（C 批 T5，2026-10-10）：消息**未入队、未落行**。
+
+    与投递失败（`DshDriverError`，消息落 `chat_msgs.state=error`）的区分：本异常在
+    入队**之前**由 `_external_preflight` 抛出，chat_msgs/wait_items 都查不到这次
+    发送——把「必然失败的静默排队（用户等 16ms 才看到 404 + toast）」变成「点发送
+    即刻的明确文案」。触发面只有外部会话（`owned:false`）且前提不成立：
+    宿主无活 agent（会话已结束）/ 看管声明失败（未获投递许可）/ 回滚阀关闭。
+    池内会话与未对齐（未知）路径**不会**抛本异常（不变量：现状一个字节不变）。
+    """
+
+
+# 外部会话投递总开关（回滚阀，设计 §10）：`TS_EXTERNAL_DELIVER=0` ⇒ 外部会话一律
+# 拒投（前置闸退化为「外部会话一律拒绝」），池内会话完全不受影响。**每次调用现读**
+# （与 `_dsh_wait_turn_limit` 同口径）：值在进程内可热改，不必重启平台。
+EXTERNAL_DELIVER_ENV = "TS_EXTERNAL_DELIVER"
+
+
 # 可会话续聊的 agent 族（P7b 单族化：只剩 dsh 插件形态）。
 # dsh_plugin（路线 A）：会话在 dsh 宿主进程内常驻，投递 = followup/steer，
 # 且 sid 由插件在轮次开始即精确返回（不再靠 mtime 猜）。已退场族不在列——
@@ -89,6 +114,56 @@ def _new_msg_id():
     with _lock:                      # 与 _CHATS 共用模块锁（消息登记锁已随表退场）
         _MSG_SEQ[0] += 1
         return f"{int(time.time() * 1000)}-{_MSG_SEQ[0]}"
+
+
+def _external_deliver_enabled():
+    """外部会话投递是否开启（`TS_EXTERNAL_DELIVER=0` 关闭；缺省/非法值按开启）。"""
+    return (os.environ.get(EXTERNAL_DELIVER_ENV) or "").strip() != "0"
+
+
+def _external_preflight(sid):
+    """投递前置闸（C 批 T5）：外部会话前提不成立时 **raise DeliveryRefused**（不入队）。
+
+    判定阶梯（设计 §5.2；顺序即优先级）：
+      ① 空 sid ⇒ 放行（既有路径自己报「会话 id 为空」，不改语义）；
+      ② 注册表未知（`dshevents.get` 为 None：未连接 / 没见过该 sid）⇒ 放行；
+      ③ 注册表未对齐（`dshevents.aligned()` 为假：热重载后 /live 空表，快照不可信）
+         ⇒ 放行——**未知 ≠ 外部**，绝不据不可信快照拒投（与「断连=未知」同一不变量）；
+      ④ `owned` 为真（平台自持会话）⇒ 放行，走池内原路**一个字节不变**；
+      ⑤ 其余＝外部会话（用户在 dsh GUI 里直跑/接管）：要求「宿主有活 agent」
+         （`status != 'unknown'`，同插件 `live ? live.status : 'unknown'` 口径）
+         ∧「看管声明成功」（`board._ensure_watch`，幂等，失败不重试）——任一不满足
+         即拒投，并按分类文案抛错。
+    回滚阀 `TS_EXTERNAL_DELIVER=0`：第 ⑤ 步整段退化为「外部会话一律拒绝」（连看管
+    都不声明），池内/未知路径照旧放行。
+
+    为什么放在 `submit` 首行：投递的**唯一入口**是统一队列（chat_msgs 行 + m: 等待项
+    一个事务），一旦落行就必然要等 worker 拾取、失败也只能落 error 终态——闸必须在
+    落行之前。**循环导入红线**：`board` 顶层 `import chat`，故 `import board` 写在
+    函数体内（同文件 `_rebuild_run`/`_rebuild_inject` 既有先例）。
+    """
+    if not sid:
+        return
+    st = dshevents.get(sid)
+    if st is None:
+        return                      # 未知：保持现状（真失败仍由投递错误兜底）
+    if not dshevents.aligned():
+        return                      # 不可信快照：不据此拒投（未知 ≠ 外部）
+    if st.get("owned"):
+        return                      # 平台自持会话：池内原路
+    # —— 以下为外部会话（用户在 dsh GUI 直跑/接管）：需要显式许可 ——
+    if not _external_deliver_enabled():
+        raise DeliveryRefused(
+            "该会话是 dsh 直跑会话，平台已关闭外部会话投递"
+            f"（{EXTERNAL_DELIVER_ENV}=0），请到 dsh 会话窗口发送")
+    if str(st.get("status") or "") == "unknown":
+        # 宿主里没有活 agent（会话已结束/被销毁）：投递必然 404，别让用户白等
+        raise DeliveryRefused("会话已结束，无法投递（宿主无活动 agent）")
+    import board                    # 函数内 import：board 顶层 import chat，防循环导入
+    if not board._ensure_watch(sid):
+        raise DeliveryRefused(
+            "该会话是 dsh 直跑会话，平台未获投递许可（看管声明失败：插件过旧或不可达），"
+            "请到 dsh 会话窗口发送")
 
 
 def submit(project_id, sid, message, task_id=None, card_id=None, comment_id=None,
@@ -110,6 +185,7 @@ def submit(project_id, sid, message, task_id=None, card_id=None, comment_id=None
     行照常落表、不写等待项——P5 R13 收口：无拾取方，等待项只会成为孤儿行）。
     返回消息记录 dict（含 id/state/queued，供端点响应）。
     """
+    _external_preflight(sid)        # 首行前置闸（C 批 T5）：外部会话未获许可即拒投（不落行）
     msg_id = _new_msg_id()
     waitq.msg_prune(MSG_KEEP_SEC, MSG_MAX)          # 终态回收（msg_prune 表版，R8）
     inst = runner.INSTANCE
@@ -436,6 +512,14 @@ def _register(sid, task_id, message, log_path="", dsh_plugin=False, since=None):
 # 只在本进程、同一「投递→等待」序列内使用；wait 取走即弃（防陈旧基线误判）。
 _DSH_BASELINE = {}
 
+# sid -> 本次投递是否 steer（「立即注入」/inject=True）——与 `_DSH_BASELINE` 同款
+# 「投递时记、等待时取走即弃」的旁表（I1 终审修复，2026-10-10）。
+# 用途只有一个：`dsh_wait_turn_via_events` 判定「本轮 turn/start 帧早于订阅」时，
+# 仅当**本次投递是 steer 注入**才按「已在跑」播种 `started`（见该函数 docstring）；
+# 每次 `dsh_send` 都写（True/False 都写，旧值必须被覆盖——否则上一次 steer 的
+# 残留 True 会毒化下一次 followup 的等待）。池内等待器 `dsh_wait_turn` 不读它。
+_DSH_INJECT = {}
+
 
 def dsh_busy(sid):
     """dsh 插件会话是否正在跑 turn（驱动不可用按 False，交由发送路径报错）。
@@ -449,24 +533,50 @@ def dsh_busy(sid):
         return False
 
 
+def _dsh_baseline_since(sid):
+    """投递基线 seq（等 turn/end 的起点）：驱动 `/status` 拿不到就回落中枢注册表。
+
+    判据是「**拿不到** `last_seq`」而不是「`/status` 抛错」（2026-10-10 T6 修正）：
+    T2 落地后，watched + 活 agent 的外部会话 `/status` 由 `_externalTarget` 干跑后
+    按外部形状回 200，响应里**刻意没有** `last_seq`——只 catch 异常会让回落分支
+    永不触发、`since` 恒 0（等轮次会把基线之前的历史帧当成本轮）。
+    两个来源按「先权威后本地」取：
+      ① 驱动 `/status`（池内会话的权威口径，一次同步读，不是轮询）；
+      ② `dshevents.get(sid)["last_seq"]`（中枢已折好的**本地**值，零请求；
+         外部会话、驱动不可达时用它）。
+    两者都取不到返回 0（保持既有「无基线」语义）。
+    """
+    try:
+        seq = dshdriver.status(sid).get("last_seq")
+    except dshdriver.DshDriverError:
+        seq = None
+    if seq is None:
+        seq = (dshevents.get(sid) or {}).get("last_seq")
+    try:
+        return int(seq or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def dsh_send(sid, message, inject=False):
     """dsh 插件族投递（chat 与 board 共用）：记基线 → prompt / steer → 返回基线 seq。
 
     投递语义：dsh 的 `followup` 在会话忙时排进 agent inbox（服务端排队），`steer`
     则注入当前 turn 的最近 step 边界——平台的「发送 / 立即注入」两种语义因此
     一一对应，无需 spawn 子进程。异常抛 DshDriverError 由调用方处置。
+    基线来源见 `_dsh_baseline_since`（外部会话没有 `last_seq` ⇒ 回落中枢）。
+    投递的同时把「本次是否 steer」记进旁表 `_DSH_INJECT`（I1）：外部会话的等待器
+    据此决定要不要按「已在跑的 turn」播种 `started`。
     """
     if not sid:
         raise dshdriver.DshDriverError(-1, "会话 id 为空，无法投递")
-    try:
-        since = int(dshdriver.status(sid).get("last_seq") or 0)
-    except dshdriver.DshDriverError:
-        since = 0
+    since = _dsh_baseline_since(sid)
     if inject:
         dshdriver.steer(sid, message)
     else:
         dshdriver.prompt(sid, message)
     _DSH_BASELINE[sid] = since
+    _DSH_INJECT[sid] = bool(inject)      # I1：True/False 都写（覆盖上一次投递的旧值）
     return since
 
 
@@ -538,11 +648,156 @@ def dsh_wait_turn(sid, since=None, yield_on_interaction=True, log_path=""):
         stop.set()
 
 
+def _log_wait_timeout(log_path, detail):
+    """写「等待 turn 结束超时」留痕：会话日志 + 平台日志（插件形态落 plugin-backend.log）。
+
+    断连与总时限两条收口共用同一行文案（不变量：断连也必须按**超时口径**收口并留痕，
+    绝不判「正常结束」）；`detail` 只补原因，便于事后区分是哪条收口。
+    `runner.append_log` 对空/不可写路径静默跳过（既有语义），故再打一行平台日志
+    兜底——外部卡片投递可能没有 `_CHATS` 记录（`log_path` 为空），此时留痕不能丢。
+    """
+    line = f"### 会话等待 turn 结束超时（{detail}）"
+    runner.append_log(log_path, line + "\n")
+    print(f"[chat] {line}（日志: {log_path or '无'}）", flush=True)
+
+
+def dsh_wait_turn_via_events(sid, since=None, log_path="", yield_on_interaction=True):
+    """等 dsh 会话一次 turn 结束——**全局状态流版**（外部会话专用，C 批 T6）。
+
+    与 `dsh_wait_turn`（按会话 SSE）的分工：外部会话不在驱动池中，
+    `/events?session_id=` 与 `/status` 同属池内门禁（404）⇒ 按会话 SSE 一帧都收不到，
+    旧实现随即按「本轮结束」返回（把「读不到」误判成功）。这里改订阅插件的**全局
+    状态流**（`dshevents`：插件对每个会话都发 `turn/start`/`turn/end`/
+    `driver/interaction`，见 `dshevents._on_frame`），平台侧**零请求**——等待只是从
+    进程内队列取帧，加上每 `TICK` 一次的本地判定（不是远端状态轮询）。
+
+    返回 None（本轮结束/超时/断连收口）或 STATE_YIELDED（挂起等作答，让出运行位）。
+    `since`：本轮起点 seq（缺省先取本次投递基线 `_DSH_BASELINE`，再回落中枢
+    `last_seq`）——只用于过滤 `turn/start`（`event_seq > since` 才算「本轮起来了」），
+    避免上一轮遗留的 turn/start 被误当本轮。
+    判定阶梯（顺序即优先级）：
+      ⓪ **steer 注入「已在跑的 turn」按已在跑播种 `started`**（I1，两个条件缺一不可，
+         见下方 `started` 初始化处的长注释）；
+      ① 本 sid `turn/start` 且 `data.event_seq > since` ⇒ 记 started；
+      ② started 且本 sid `turn/end` ⇒ 返回 None（本轮结束）；
+      ③ 本 sid `driver/interaction{state:'asked'}` ⇒ STATE_YIELDED（让位）；
+      ④ 中枢断连（`dshevents.connected()` 为假）⇒ 超时行留痕 + 返回 None
+         （断连=未知：绝不判「正常结束」，也绝不把项目运行位钉死）；
+      ⑤ 到 `_dsh_wait_turn_limit()` 总时限 ⇒ 同款超时行 + 返回 None；
+      ⑥ started 为假且超 `TURN_START_GRACE` ⇒ 返回 None（turn 压根没起来，不占位）。
+    `log_path` 缺省取本会话对话日志（`_CHATS[sid]["log_path"]`，同 `dsh_wait_turn`）。
+    """
+    if not sid:
+        return None
+    if since is None:
+        since = _DSH_BASELINE.pop(sid, None)     # 本次投递记下的基线（取走即弃）
+    injected = bool(_DSH_INJECT.pop(sid, None))  # 本次投递是否 steer（同上取走即弃）
+    if since is None:
+        since = (dshevents.get(sid) or {}).get("last_seq")
+    try:
+        since = int(since or 0)
+    except (TypeError, ValueError):
+        since = 0
+    if not log_path:
+        with _lock:
+            rec = _CHATS.get(sid)
+        log_path = (rec or {}).get("log_path") or ""
+    limit = _dsh_wait_turn_limit()
+    t0 = time.time()
+    deadline = t0 + limit
+    # —— I1（终审，2026-10-10）：steer 注入「已在跑的 turn」按已在跑播种 started ——
+    # 两个条件**缺一不可**（下面两行即全部条件）：
+    #   ① `injected`：本次投递是 steer 注入（`dsh_send` 投递时记下的已知事实）；
+    #   ② 入口本地读一次中枢注册表，实况 `status == "running"`（零请求，不是轮询）。
+    # 为什么需要：steer 的目标是**已经在跑的** turn，它的 `turn/start` 帧早于本订阅
+    # （全局状态流对进程内订阅者无回放），而 `since`（外部会话取中枢 `last_seq`）恒
+    # ≥ 该 turn/start 的 `event_seq` ⇒ 过滤条件 `seq > since` 恒假 ⇒ `started` 恒假
+    # ⇒ 本轮 `turn/end` 被丢弃，只能等满 TURN_START_GRACE(60s)：`m:` 行落 done、项目
+    # 运行位提前释放，而外部 turn 仍在跑 ⇒ 下一个排队单元与它**并发写同一工作区**
+    # （违「任务按项目串行」红线）。播种后由真 `turn/end` 帧收口。
+    # 为什么不能无条件读 `status=='running'` 当初值：followup 排在正在跑的**旧** turn
+    # 之后时（消息已进 agent inbox、本轮尚未 turn/start），旧 turn 的 `turn/end` 会被
+    # 误判成本轮结束——正是 T6 修掉的那类误判；故条件①必须同时成立。
+    started = injected and (dshevents.get(sid) or {}).get("status") == "running"
+    inbox = queue.Queue()                # 消费线程 → 本函数：原始帧的线程安全交接
+
+    def _on_frame(frame):
+        """中枢订阅回调：只入队（契约要求短小——它跑在事件消费线程里）。"""
+        inbox.put(frame)
+
+    def _consume(frame):
+        """处理一帧：返回结论（None / 'turn_end' / 'interaction'），必要时推进 started。
+
+        只认本 sid 的帧（全局流上混着所有会话的帧）；跨会话帧直接忽略。
+        """
+        nonlocal started
+        if str(frame.get("session_id") or "") != sid:
+            return None
+        typ = str(frame.get("type") or "")
+        data = frame.get("data") or {}
+        if typ == "turn/start":
+            seq = data.get("event_seq")
+            if isinstance(seq, int) and seq > since:
+                started = True
+            return None
+        if typ == "turn/end":
+            # started 是「本轮起来了」的闩：started 之前到达的 turn/end 属于上一轮
+            # （投递排队/在途时的遗留帧），不能当成本轮结束。started 有两个来源：
+            # ① 本函数按 `turn/start`（seq > since）置真；② 入口按 I1 播种（steer
+            # 注入已在跑的 turn——其 turn/start 帧早于订阅，见 started 初始化处）。
+            return "turn_end" if started else None
+        if typ == "driver/interaction" and str(data.get("state") or "") == "asked":
+            if yield_on_interaction:
+                return "interaction"
+            # 不让位时继续等：提问意味着 turn 已在跑（同 TurnWaiter.feed 口径）
+            started = True
+        return None
+
+    dshevents.subscribe(_on_frame)
+    try:
+        while True:
+            try:
+                frame = inbox.get_nowait()
+            except queue.Empty:
+                # 队列已取空：做一轮本地判定（链路/时限/宽限），再按节拍阻塞等帧
+                now = time.time()
+                if not dshevents.connected():
+                    _log_wait_timeout(
+                        log_path, f"状态流断连：{now - t0:g}s 无 turn/end")
+                    return None
+                if now >= deadline:
+                    _log_wait_timeout(log_path, f"{limit:g}s 无 turn/end")
+                    return None
+                if not started and now - t0 > TURN_START_GRACE:
+                    return None          # turn 未启动：不占着项目位
+                # 阻塞等下一帧：窗口 = min(节拍, 距总时限余量, 未起轮时的启动宽限余量)
+                # ——让宽限/时限到点即判定，不被 TICK 推迟（TICK 可被环境放大）
+                window = min(TICK, deadline - now)
+                if not started:
+                    window = min(window, TURN_START_GRACE - (now - t0))
+                try:
+                    frame = inbox.get(timeout=max(0.05, window))
+                except queue.Empty:
+                    continue
+            verdict = _consume(frame)
+            if verdict == "turn_end":
+                return None
+            if verdict == "interaction":
+                return STATE_YIELDED     # 已送达；挂起让位（运行位即释放）
+    finally:
+        dshevents.unsubscribe(_on_frame)   # 订阅必须回收（回调常驻消费线程的列表里）
+
+
 def _dsh_send_now(project, sid, message, inject):
     """dsh 插件族消息投递体：写对话日志 → 投递 → 等 turn 结束。
 
     turn 结束由插件推来的 turn/end 帧判定（事件驱动，零轮询）；「挂起等作答」
-    由 driver/interaction 帧实时告知。"""
+    由 driver/interaction 帧实时告知。
+    等轮次走 `wait_turn` 分流口（T6 收口）：外部会话（无卡消息路径的飞书绑定会话、
+    平台重启后变 `owned:false` 的任务会话）订阅**全局状态流**——按会话 SSE 对
+    池外会话是 404（「读不到」会被误判成本轮结束）。本会话的基线 `since` 与
+    对话日志落点 `log_path` 逐字透传（缺陷 G 的总时限原因行必须落这条日志）。
+    """
     lib.ensure_runtime_dirs(project["work_dir"])
     log_dir = lib.runtime_dir(project["work_dir"], runner.LOG_DIR_NAME)
     log_path = os.path.join(log_dir, f"chat_dsh_{int(time.time())}.log")
@@ -552,8 +807,10 @@ def _dsh_send_now(project, sid, message, inject):
                     f"{'steer' if inject else 'followup'}\n").encode("utf-8", errors="replace"))
     since = dsh_send(sid, message, inject)
     _register(sid, None, message, dsh_plugin=True, since=since, log_path=log_path)
-    # 显式传入本会话日志：总时限超时（缺陷 G）的原因行要落到这条对话日志上
-    return dsh_wait_turn(sid, since, log_path=log_path)
+    # 分流口：池内/未知 ⇒ 既有按会话 SSE（显式传本会话日志 + 基线，语义同旧直调）；
+    # 外部 ⇒ 全局状态流（同参数透传，见 wait_turn）
+    return wait_turn(project["work_dir"], sid, "dsh_plugin",
+                     since=since, log_path=log_path)
 
 
 def wait_web_busy(project_dir, sid, family):
@@ -572,6 +829,46 @@ def wait_web_busy(project_dir, sid, family):
     if family != "dsh_plugin":
         return None
     return dsh_wait_turn(sid)
+
+
+def wait_turn(project_dir, sid, family, since=None, log_path=""):
+    """等一次会话 turn 结束的**分流口**（C 批 T6）：按会话归属选等待通道。
+
+    外部会话（用户在 dsh GUI 里直跑/接管，注册表 `owned:false`）不在驱动池中，
+    `/events?session_id=` 与 `/status` 同属池内门禁（404）⇒ 按会话 SSE 等不到任何
+    帧，「等不到」又被当成「本轮结束」（外部会话被误判成功的根因）。故外部会话改走
+    **全局状态流**（`dsh_wait_turn_via_events`：插件每会话都发 `turn/start`/
+    `turn/end`，平台侧零请求）。
+
+    其余情况一律走既有 `wait_web_busy`（按会话 SSE），**行为一个字节不变**：
+      - `owned:true` 平台自持会话：权威等待通道就是按会话 SSE（重连补发、基线
+        续传都在那边）；
+      - 注册表未知（`dshevents.get` 返回 None：链路断连 / 没见过该 sid）：
+        **未知 ≠ 外部**（与 `chat._external_preflight` 同一判定阶梯）——此时无法
+        判定它是外部会话，若改走事件流路，链路降级期会把池内会话立刻按超时收口
+        （运行位提前释放），是净回归。
+    未对齐（热重载后 /live 空快照、旧表保留）不单独判：链路仍在线、帧照旧折叠，
+    行里的 `owned` 仍是可用的判定依据（与前置闸同口径：只有「读不到行」才算未知）。
+
+    `since` / `log_path`（可选，C 批 T6 收口）：承载「本轮基线」与「缺陷 G 总时限
+    原因行的落点」（`_dsh_send_now` 消息路径显式传这两个；`board._deliver_unit`
+    不传）。语义分两种调用形状：
+      - **都不传**（既有形状）：池内/未知照旧原样调 `wait_web_busy(project_dir,
+        sid, family)` —— 含非 dsh 族的 None 守卫与 `_DSH_BASELINE` 兜底，逐字等价；
+      - **传了任一个**：池内/未知改走 `dsh_wait_turn(sid, since, log_path=log_path)`
+        —— 与旧 `_dsh_send_now` 直调同参数同返回值（绝不换成丢掉这两个参数的
+        `wait_web_busy(...)`，那会让基线丢回 0、缺陷 G 原因行落错日志）。
+    外部分支两种形状一致：`dsh_wait_turn_via_events(sid, since, log_path=log_path)`
+    （`since` 为 None 时该函数自带基线回落：先 `_DSH_BASELINE` 再中枢 `last_seq`）。
+    """
+    st = dshevents.get(sid) if sid else None
+    if st is None or st.get("owned"):
+        if since is None and not log_path:
+            return wait_web_busy(project_dir, sid, family)   # 既有形状：一字未动
+        if family != "dsh_plugin":
+            return None                     # 族守卫（与 wait_web_busy 同口径）
+        return dsh_wait_turn(sid, since, log_path=log_path)
+    return dsh_wait_turn_via_events(sid, since, log_path=log_path)
 
 
 def _send_now(task, project, family, sid, message, inject):

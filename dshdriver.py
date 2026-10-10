@@ -376,6 +376,46 @@ def unarchive(session_id, timeout=30):
     return archive(session_id, archived=False, timeout=timeout)
 
 
+# ---------- 看管声明（外部会话投递通道，C 批 T5 2026-10-10） ----------
+
+# 看管声明超时（秒）：`/watch` 是驱动侧**纯内存写**，正常毫秒级返回；而投递前置闸
+# （`chat._external_preflight`）是在 HTTP 请求线程上同步调用它的——不能沿用普通请求
+# 的 120s，否则驱动僵死会把用户的一次「发送」卡住两分钟。2s 与「声明不成功即拒投」
+# 的语义相称（设计 §5.1）。
+WATCH_TIMEOUT = 2
+
+# 旧插件没有 `/watch` 端点时的状态码（未知驱动端点，见插件 _serve 的兜底 404）。
+# 平台据此把「外部会话投递」降级为拒投并给「插件过旧」文案，池内一切功能不受影响。
+WATCH_UNSUPPORTED = 404
+
+
+def watch_session(session_id, on=True):
+    """声明 / 撤销「平台看管该会话」（驱动 `POST /watch`，幂等）。返回看管是否生效。
+
+    为什么需要（C 批设计 §3.1）：外部会话（用户在 dsh GUI 里直跑/接管、`/live` 里
+    `owned:false`）既不在驱动池、也没有平台持有者，驱动侧因此不可能靠「在不在池内」
+    推断平台是否有意投递——**范围必须由平台显式划定**（宿主里与 Touchstone 无关的
+    会话多得是，无差别放开等于允许平台向任意会话注入消息与答案）。平台只对**平台确实
+    要投递的**会话声明看管：有看板卡的会话由 `board._ensure_watch` 常态声明；任务侧
+    会话在宿主上报为外部态（`owned:false`）时，由消息前置闸 `chat._external_preflight`
+    与作答/审批送达前的 `board._watch_before_delivery` 补声明。驱动据此放行 `/prompt`·
+    `/steer`·`/answer`·`/approval` 的池外分支。
+
+    幂等：重复声明同一 sid 不报错，驱动回执给的是 `watched` 的**当前实际状态**
+    （而非「这次有没有改动」），故本函数返回 `bool(resp["watched"])`——调用方按
+    「True 才算声明成功」处置。`on=False` 撤销（卡删除/归档后的回收，见
+    `board._watch_prune`）。
+
+    失败语义：**异常照抛**（`DshDriverError`：旧插件 404 / 驱动不可达 / 令牌错），
+    「是否吞异常降级」由调用方决定——`board._ensure_watch` 选择留痕 + 返回 False
+    且不重试（看管失败 ⇒ 投递前置闸拒投，见 `chat._external_preflight`）。
+    """
+    resp = _request("POST", "/watch",
+                    {"session_id": session_id, "on": bool(on)},
+                    timeout=WATCH_TIMEOUT)
+    return bool((resp or {}).get("watched"))
+
+
 def apply_session_defaults(session_id, model="", provider="",
                            reasoning_effort="", permission_mode="", log=None):
     """把项目级默认（思考等级 / 权限档）应用到刚建或刚续的会话上（best-effort）。

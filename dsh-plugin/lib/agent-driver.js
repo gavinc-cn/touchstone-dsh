@@ -24,6 +24,7 @@
  *   POST /touchstone-agent/dispose             释放常驻会话（可选连会话存储一起删）
  *   GET  /touchstone-agent/archived            宿主归档集整表（看板「已完成」与 dsh 会话归档同步）
  *   POST /touchstone-agent/archive             {session_id, archived} 归档/取消归档（幂等）
+ *   POST /touchstone-agent/watch               {session_id, on?} 看管声明（外部会话注入开关，C 批）
  *
  * 状态帧（scope=state）新增 `driver/archived`：归档集**整表快照**（不是增量），
  * 变化时推一帧（`domain/changed` 事件为主 + keepalive 15s 兜底比对）；平台侧
@@ -208,6 +209,16 @@ export class AgentDriver {
     this.sessions = new Map();
     /** 全局可见会话（含用户自己直跑的）：外部会话发现通道，替代逐会话 REST 探测 */
     this.observed = new Map();
+    /**
+     * 平台**显式声明**看管的会话（C 批，2026-10-10）：`POST /watch` 写入，`/health.watched` 报数。
+     *
+     * 为什么必须由平台显式声明，而不是「宿主里凡非池内会话一律纳管」：宿主进程里
+     * 有大量与 Touchstone 无关的会话（用户自己开的、其它插件建的、子代理派生的），
+     * 按推断纳管等于给平台开一个「向任意会话注入消息与作答」的口子。只有声明过的
+     * sid 才是平台可回落投递（T2）、认领提问（T3）、接管审批（T4）的对象；平台撤销
+     * （`on:false`）或宿主会话销毁即收口，看管表不会只涨不消。
+     */
+    this.watched = new Set();
     /** agents 服务就绪标记（未就绪时路由返回 503，Python 侧据此降级为 CLI 形态） */
     this.ready = false;
     this.agentCtx = null;
@@ -227,6 +238,16 @@ export class AgentDriver {
      * 原生作答者，不入本表。
      */
     this.questions = new Map();
+    /**
+     * 插件**认领中**的审批（C 批 T4，2026-10-10）：sid → {id, mark, resolve, reject, finish, lane}
+     * ——与 `questions` 平行的一套，承载**看管的外部会话**的审批双通道（`_holdApproval`）。
+     *
+     * 为什么不并进 `entry.pendingApproval`：池内会话（平台自持）的审批认领走的是池条目上的
+     * 既有单槽 `pendingApproval`（`/status` 的 `pending_approval`、`_approval` 的池内分支都
+     * 读它），而看管的外部会话**没有池条目**（不接管），故另立一张按 sid 索引的表。
+     * 池内路径一字未动，两套并存、互不影响；兑现或收口即从表里摘除。
+     */
+    this.approvals = new Map();
     /**
      * `ask_user_question` 的 tool/call 登记：callId → {sid, at}（bounded）。
      * 两个用途：① legacy 模式提问不带 `wait.callId`，用真实 tool callId 作平台侧
@@ -277,7 +298,11 @@ export class AgentDriver {
       agentCtx.on('session/created', (session) => this._observe(session));
       agentCtx.on('session/disposed', (session) => {
         const sid = String(session.id);
+        // 在途认领（提问/审批）先收口：会话已销毁，waterfall 再也不可能被兑现，
+        // 留着就是「宿主 `ask()` 永远悬挂」+ 挂起标记残留（C 批 T4 的 `_dropClaims`）
+        this._dropClaims(sid);
         this.observed.delete(sid);
+        this.watched.delete(sid);          // 宿主会话已销毁：看管声明随之收口（C 批）
         this._publishState('session/disposed', { sid });
       });
       // agent 状态变更（P0 实测跨插件可见）：payload 形状是 **单个对象**
@@ -298,9 +323,13 @@ export class AgentDriver {
       agentCtx.on('user-questions/request',
                   (request, next) => this._onQuestionRequest(request, next),
                   { prepend: true });
-      // 审批同为 waterfall：默认 next() 让位（GUI 弹窗照常可答）；仅当平台通过
-      // `/permission` 接管过该会话（holdApprovals）时才认领，等 `/approval` 送达
-      agentCtx.on('approval/request', (request, next) => this._onApprovalRequest(request, next));
+      // 审批同为 waterfall，**同样必须 prepend**（与提问同源的理由见 `_onQuestionRequest`：
+      // dsh Web 客户端问答桥先注册且认领后不再 next()，append 注册的 listener 在真机上
+      // 永远收不到）。prepend 只抢「先看」位置，**是否让位由分支决定**——池内未接管、
+      // 看管外无活 agent、（未看管的）外部会话三类一律 `next()` 让位，dsh GUI 的审批弹窗
+      // 照常；只有「池内已接管」与「看管外 + 宿主有活 agent」才认领（双通道：原生框照旧弹）
+      agentCtx.on('approval/request', (request, next) => this._onApprovalRequest(request, next),
+                  { prepend: true });
       // 宿主 inbox（P6 #21）：排队消息的增/领/弃三个事件都可见 ⇒ 平台会话窗能
       // 展示「宿主排队行」（kimi 侧等价物是 /prompts 的 queued 段）。
       agentCtx.on('agent/inbox/inserted', (payload) => this._onInbox('inserted', payload));
@@ -392,7 +421,17 @@ export class AgentDriver {
       }
     }
     this.questionCalls.clear();
+    // 在途**审批**认领（C 批 T4）：同属「插件要走了、兑现不了」，按看管 sid 逐个走
+    // `_dropClaims` 统一收口（提问/审批 + 挂起标记一把清）；上面那个全量循环已兜住
+    // 提问，故这里实际补的是 `approvals` 与仍残留的挂起标记。`watched` 已并入 sid 集合，
+    // 是因为「撤销看管后仍有在途审批」的窗口里 approvals 有值而 watched 已空。
+    // 调用点落在 `dispose()`（本驱动**没有** `stop()`：真实失活口只有这里的 dispose，
+    // 与 T1 的 `watched.clear()` 同处，brief 里写的 `stop()` 系笔误）
+    for (const sid of new Set([...this.watched, ...this.approvals.keys()])) {
+      this._dropClaims(sid);
+    }
     this.observed.clear();
+    this.watched.clear();              // 看管声明同属易失的进程内状态，停用时一并收口
     this._enumerated = false;          // 观察表已清空：快照不再完整，重启后须重新枚举
     this.ready = false;
   }
@@ -430,6 +469,79 @@ export class AgentDriver {
       });
     }
     return [...owned, ...external];
+  }
+
+  /**
+   * 该会话是否被平台声明为「看管」（C 批，2026-10-10）。
+   *
+   * 外部会话（用户在 dsh GUI 直跑/接管的）的投递回落、提问认领、审批接管三条通道
+   * 全部以本判据为闸：**只有平台显式 `POST /watch` 过的 sid 才为 true**。绝不按
+   * 「不在池内」「能枚举到」之类推断——宿主里与 Touchstone 无关的会话多得是，
+   * 推断就等于允许平台向任意会话注入消息与答案（见 `this.watched` 的说明）。
+   *
+   * @param {string} sid - dsh 会话 id（`session-<uuid>`）
+   * @returns {boolean} 看管中即 true；空值/未声明/已撤销/已销毁一律 false
+   */
+  _isWatched(sid) {
+    return this.watched.has(String(sid || ''));
+  }
+
+  /**
+   * 宿主**活 agent**读口（C 批，2026-10-10）：`agents.get(sid)` 给出该会话在宿主进程内
+   * 的 agent 句柄；没有（会话已结束，或本进程从没起过它）返回 undefined。
+   *
+   * 与 `this.sessions` 的分界（T2 回落投递的依据）：`sessions` 是**平台持有**的池
+   * （handle 由本插件建/恢复并持有），本读口只问「宿主里它还活着吗」——句柄归谁与
+   * 所有权无关（用户直跑会话的 agent 归 GUI 作用域，见 C 方案 §二 T2）。于是
+   * 「`_isWatched` 且 `_liveAgent` 有值」即可直接 followup/steer 投递，无需接管会话。
+   * 守卫 `typeof … 'function'`：极简桩 ctx 可能没有 agents 服务（与 `_fork` 同款防御）。
+   *
+   * @param {string} sid - dsh 会话 id
+   * @returns {object|undefined} 宿主活 agent（带 followup/steer/status）；无则 undefined
+   */
+  _liveAgent(sid) {
+    const agents = this.agentCtx && this.agentCtx.agents;
+    if (!agents || typeof agents.get !== 'function') return undefined;
+    return agents.get(String(sid || ''));
+  }
+
+  /**
+   * 外部会话投递的**唯一闸门**（C 批 T2 重构，2026-10-10）：`/prompt`、`/steer`、`/status`
+   * 三个端点的「池外回落」判定全部收在这里；未看管一律回到池内/404 老路径（见设计 §3.1
+   * 与 §3.2）。三档语义如下，调用方按返回值分流：
+   *
+   *   ① 池内（`this.sessions.has(sid)`）**或**未看管：返回 `undefined` 且**不写任何响应**
+   *      —— 调用方交回既有路径：`/prompt`·`/steer` 继续走 `_lookup`（唯一 404 出口，文案
+   *      `会话不在驱动池中: <sid>` 一字不变），`/status` 走自己的池内 200 / 池外 404；
+   *   ② 已看管但 `_liveAgent(sid)` 不存在：**自己写 404** `会话已结束（宿主无活动 agent）: <sid>`
+   *      并返回 `null` —— 「声明过看管、会话却已结束」的独立分档，平台据此报因，不再误报
+   *      「不在驱动池中」；
+   *   ③ 已看管且宿主有活 agent：返回该 live agent（`/prompt` 用它 `followup`、`/steer` 用它
+   *      `steer`、`/status` 取它的 `status`），**不接管**会话。
+   *
+   * `res` 传 `null` = 干跑：只判定、不写响应（`/status` 用）。`/status` 对「watched 但无活
+   * agent」保留**既有** 404 原文案 `会话不在驱动池中: <sid>`（控制者裁定维持「三端点文案
+   * 不完全统一」，见进度记录「T2 顾虑不修」），故它把 ②③ 一并当「非外部」处理、合流到
+   * 自己那个 404 出口；判定逻辑仍只有这一份实现，不会再长出第三个副本。
+   *
+   * 为什么必须收敛成一份实现：T3（`/answer`）与 T4（`/approval`）还要在同一闸门上加分支，
+   * 四处副本改一漏一将是**静默**的（评审 Important 1）。
+   *
+   * @param {object|null} res - HTTP 响应对象；`null` = 干跑不写响应
+   * @param {string} sid - dsh 会话 id（调用方已 `String(...)` 归一）
+   * @returns {object|undefined|null} live agent；`undefined`=池内或未看管；`null`=已看管但无活 agent
+   */
+  _externalTarget(res, sid) {
+    // ① 池内/未看管：不自作主张，交回调用方的既有路径（看管声明是唯一闸门）
+    if (this.sessions.has(sid) || !this._isWatched(sid)) return undefined;
+    // ② 已看管但宿主已无活 agent：会话结束/被销毁，单独一档文案
+    const live = this._liveAgent(sid);
+    if (!live) {
+      if (res) this._json(res, 404, { error: `会话已结束（宿主无活动 agent）: ${sid}` });
+      return null;
+    }
+    // ③ 已看管且宿主有活 agent：直投目标
+    return live;
   }
 
   // ---------- 会话事件 ----------
@@ -489,22 +601,34 @@ export class AgentDriver {
       this._publishState('transcript', { sid, data: { event_seq: event.seq,
                                                      kind: event.type } });
     }
-    // 审批是会话事件（log-only audit），与提问共同构成「等人工输入」实况
+    // 审批是会话事件（log-only audit），与提问共同构成「等人工输入」实况。
+    // C 批 T4：看管外部会话的**认领中**审批以平台标记为准，审计帧不得覆盖/收口它——
+    // 审计 mark 既没有 `ap-<n>` 也没有 `answerable`（只是宿主自己落的审计记录），盖上
+    // 去平台侧的作答按钮就消失了。真机主顺序是审计帧在前（读宿主
+    // `dsh-user-approval/lib/index.js` 的 `request()`：先 append `approval/asked`、再跑
+    // `approval/request` waterfall），故这两个分支只在「观察者提交后回调、帧落到认领之后」
+    // 时才命中；池内/未看管会话的 `approvals` 恒空，行为一个字节不变。
     if (event.type === 'approval/asked') {
-      const mark = { kind: 'approval', id: event.data && event.data.id,
-                     tool: (event.data && event.data.toolName) || '',
-                     reason: (event.data && event.data.reason) || '' };
-      if (entry) entry.interaction = mark;
-      const seen = this.observed.get(sid);
-      if (seen) seen.interaction = mark;
-      this._publishState('driver/interaction', { sid, data: { state: 'asked', interaction: mark } });
+      // 认领中（`approvals` 命中）只跳过「写标记 + 发状态帧」这一段，函数尾部的
+      // `observed.updatedAt` 与会话流转发照旧执行（不能用 return 提前退出）
+      if (!this.approvals.has(sid)) {
+        const mark = { kind: 'approval', id: event.data && event.data.id,
+                       tool: (event.data && event.data.toolName) || '',
+                       reason: (event.data && event.data.reason) || '' };
+        if (entry) entry.interaction = mark;
+        const seen = this.observed.get(sid);
+        if (seen) seen.interaction = mark;
+        this._publishState('driver/interaction', { sid, data: { state: 'asked', interaction: mark } });
+      }
     }
     if (event.type === 'approval/decided') {
-      if (entry) entry.interaction = null;
-      const seen = this.observed.get(sid);
-      if (seen) seen.interaction = null;
-      this._publishState('driver/interaction', {
-        sid, data: { state: 'decided', outcome: (event.data && event.data.outcome) || '' } });
+      if (!this.approvals.has(sid)) {
+        if (entry) entry.interaction = null;
+        const seen = this.observed.get(sid);
+        if (seen) seen.interaction = null;
+        this._publishState('driver/interaction', {
+          sid, data: { state: 'decided', outcome: (event.data && event.data.outcome) || '' } });
+      }
     }
     // 提问的工具调用/结果（2026-10-04 修 #791）：
     //  · tool/call：`ask_user_question` 的真实 callId 只在这里出现——legacy 模式下
@@ -675,7 +799,7 @@ export class AgentDriver {
    * listener 均不触发，prepend 的才触发）。prepend 只抢「先看」的位置，是否让位
    * 由下面的分支决定，故 Web GUI 对**外部会话**的行为一个字节都没变。
    *
-   * 两条分支：
+   * 三条分支：
    *  1) 平台自持会话（`/session` 建的池内会话，看板卡与任务轮都走它）：**双通道**——
    *     插件认领（平台 `/answer` 兑现，Touchstone 会话窗渲染选择框可作答）**并且**
    *     把请求交回下游原生链路（dsh Web GUI 同样弹提问框、同样可作答），两侧先答者胜
@@ -687,23 +811,30 @@ export class AgentDriver {
    *        平台的 answerable/作答通道全程空转（#791：Touchstone 会话窗不出现选择框）。
    *      · 为什么要让位（2026-10-06 修 #837）：纯认领时该 waterfall 到插件为止，dsh Web
    *        GUI 收不到提问 —— 提问框只在 Touchstone 侧出现。预期是**两侧都显示**。
-   *  2) 其它会话（用户自己直跑/外部会话）：只旁听（发状态帧，平台据此把卡置阻塞、
-   *     把 ext 行按挂起处置），`next()` 让原生作答者（dsh Web GUI）照旧作答。
+   *  2) **池外但平台已看管**的外部会话（C 批 T3，2026-10-10；用户在 dsh GUI 直跑、平台
+   *     只 `POST /watch` 声明看管的）：与 ①**同一套双通道**——认领（挂起标记带 call_id
+   *     ⇒ 平台 answerable=true、`/answer` 兑现 waterfall）**并且**原生链路照旧打开
+   *     （dsh GUI 照旧弹框），两侧先答者胜；**不接管**该会话（不建池条目）。这正是 T2
+   *     投递回落（`/prompt`·`/steer`）在作答侧的对称面：看得见就要答得上。
+   *  3) 其它会话（用户自己直跑且平台**未**看管的）：只旁听（发状态帧，平台据此把卡置
+   *     阻塞、把 ext 行按挂起处置），`next()` 让原生作答者（dsh Web GUI）照旧作答；
+   *     `_isWatched` 是唯一闸门，未看管会话的行为与 C 批之前一个字节不差。
    */
   _onQuestionRequest(request, next) {
     const agent = request && request.agent;
     const sid = agent ? String(agent.id) : '';
     const waitCallId = String((request && request.wait && request.wait.callId) || '');
     const entry = sid ? this.sessions.get(sid) : undefined;
-    if (entry !== undefined) {
-      // 平台自持会话：双通道。标识优先取宿主给的 wait.callId（timed 模式），
+    // ① 池内 / ② 池外+看管：同一套认领（`_isWatched` 只在这里开口，未看管照旧走 ③）
+    if (entry !== undefined || (sid && this._isWatched(sid))) {
+      // 双通道。标识优先取宿主给的 wait.callId（timed 模式），
       // 否则取 `ask_user_question` 的真实 tool callId（legacy 模式），再否则自造
       const callId = waitCallId || this._takeQuestionCallId(sid) || this._nextQuestionId();
       // 先留原宿主取消信号（轮次中止/停卡）：打开原生通道会替换请求对象上的
       // `signal`（见 `_openNativeLane`），平台侧的收口仍要认**原信号**
       const hostSignal = request && request.signal;
       const lane = this._openNativeLane(request, next);
-      return this._holdQuestion(entry, callId, request, hostSignal, lane);
+      return this._holdQuestion(sid, callId, request, hostSignal, lane);
     }
     if (!sid) return next();
     this._publishQuestionMark(sid, waitCallId, request);
@@ -759,7 +890,8 @@ export class AgentDriver {
   }
 
   /**
-   * 认领一个平台自持会话的提问：登记进 `this.questions`、发挂起状态帧，返回的 Promise
+   * 认领一个会话的提问（池内自持会话、看管的外部会话共用，C 批 T3 起形参由池条目
+   * 改为 `sid`）：登记进 `this.questions`、发挂起状态帧，返回的 Promise
    * 由**两个作答通道先到者**兑现——① 平台 `/answer`；② 原生链路（dsh GUI 提问框，
    * `_openNativeLane`）。返回值直接交回宿主 `ask_user_question`。
    *
@@ -775,8 +907,7 @@ export class AgentDriver {
    * 中止（用户停卡/cancel）：宿主 abort 信号触发 → reject 普通 Error，宿主 `ask()`
    * 见「信号已中止」会归一为 ASK_ABORTED（tool result 记中断，与旧行为一致）。
    */
-  _holdQuestion(entry, callId, request, hostSignal, lane) {
-    const sid = entry.sessionId;
+  _holdQuestion(sid, callId, request, hostSignal, lane) {
     return new Promise((resolve, reject) => {
       const pending = { sid, callId, mark: null, done: false, finish: null, resolve, reject,
                         lane: lane || null,
@@ -913,7 +1044,11 @@ export class AgentDriver {
     return mark;
   }
 
-  /** 清「提问挂起」标记（作答送达/提问收口）：状态流发一帧非 asked 态即清。 */
+  /**
+   * 清挂起标记（作答送达/提问收口/审批收口）：状态流发一帧非 asked 态即清。
+   * 提问与审批**共用**同一个 interaction 槽（`entry.interaction` / `observed.interaction`），
+   * 故两者走同一个清口（审批的认领收口见 `_holdApproval` / `_dropClaims`）。
+   */
   _clearQuestionMark(sid) {
     if (!sid) return;
     const entry = this.sessions.get(sid);
@@ -1110,6 +1245,8 @@ export class AgentDriver {
       // 会话归档（看板「已完成」双向同步，2026-10-05）
       if (path === '/archived' && req.method === 'GET') return this._archived(res);
       if (path === '/archive' && req.method === 'POST') return await this._archive(res, req);
+      // 看管声明（C 批，2026-10-10）：外部会话注入开关——T2 投递回落/T3 提问认领/T4 审批的门
+      if (path === '/watch' && req.method === 'POST') return await this._watch(res, req);
       this._json(res, 404, { error: `未知驱动端点 ${path}` });
     } catch (err) {
       this.logger.warn(`touchstone: 驱动 ${path} 失败: ${err && err.message}`);
@@ -1125,16 +1262,63 @@ export class AgentDriver {
       prefix: DRIVER_PREFIX,
       live: this.sessions.size,
       observed: this.observed.size,
+      watched: this.watched.size,        // 平台声明的看管会话数（C 批；T2~T4 的作用域）
       // 宿主已有会话是否枚举成功（A 批）：热重载后可见性恢复与否，看这一位
       enumerated: this._enumerated === true,
     };
   }
 
-  /** 单会话状态：含 last_seq（Python 订阅 SSE 时的续传基准）。 */
+  /**
+   * `POST /watch` {session_id, on?}：声明/撤销「平台看管该会话」（C 批，2026-10-10）。
+   *
+   * 语义：`on !== false`（缺省 true）= 纳入看管，`on:false` = 撤销；两者都幂等
+   * （重复声明不报错，回执以 `watched` 给出**当前实际状态**，平台据此核对）。
+   * 只写内存表、不碰宿主会话，故对未知 sid 也返回 200——`/watch` 是「声明意图」，
+   * 不是「建立会话」；sid 是否真实存在由 T2 投递时的 404 兜底暴露。
+   * 状态码约定：200=已记录（含幂等重复、含未知 sid）；400=session_id 为空。
+   */
+  async _watch(res, req) {
+    const body = await this._body(req);
+    const sid = String(body.session_id || '');
+    if (!sid) {
+      this._json(res, 400, { error: 'session_id 不能为空' });
+      return;
+    }
+    const on = body.on !== false;
+    if (on) this.watched.add(sid); else this.watched.delete(sid);
+    this._json(res, 200, { ok: true, session_id: sid, watched: this.watched.has(sid) });
+  }
+
+  /**
+   * 单会话状态：含 last_seq（Python 订阅 SSE 时的续传基准）。
+   *
+   * C 批（T2，2026-10-10）加**并列**回落：池外但平台看管（`/watch`）且宿主仍有活 agent
+   * 的会话，回最小实时态 `{session_id, status, external, interaction}`。**不含 `last_seq`**：
+   * 外部会话的会话事件 seq 不进本池（`_onSessionEvent` 对非池内会话早退），平台侧基线
+   * 口径由 `dshevents` 统一处理（设计 §4.3）。看管过但宿主已无活 agent 的会话仍走原文案
+   * 404（控制者裁定：只规定「watched + 活 agent」这一档的回落形状，不动 /status 的既有
+   * 404 文案），未看管会话行为一字不变。
+   *
+   * 重构（评审 Important 1）：池外判定改调 `_externalTarget`（与 `/prompt`·`/steer` 共用
+   * 的**唯一**闸门）。此处传 `res=null` 干跑——闸门只判定不写响应，于是「watched 但无活
+   * agent」与本端点的既有 404 原文案自然合流到下面同一个出口，判定逻辑不再有第三份副本。
+   */
   _status(res, url) {
     const sid = url.searchParams.get('session_id') || '';
     const entry = this.sessions.get(sid);
     if (!entry) {
+      // 池外：共用闸门（干跑，不写响应）判定「已看管 + 宿主有活 agent」这一档
+      const live = this._externalTarget(null, sid);
+      if (live) {
+        this._json(res, 200, {
+          session_id: sid,
+          status: live.status,
+          external: true,
+          // 挂起实况取旁听表（`_observe` 写入）：未旁听到即 null（平台既有口径，不推断）
+          interaction: (this.observed.get(sid) || {}).interaction || null,
+        });
+        return;
+      }
       this._json(res, 404, { error: `会话不在驱动池中: ${sid}` });
       return;
     }
@@ -1339,12 +1523,35 @@ export class AgentDriver {
     }
   }
 
-  /** 投递一轮提示词：平台的「一轮」= 一次 followup + 等 turn/end（Python 侧等 SSE 帧）。 */
+  /**
+   * 投递一轮提示词：平台的「一轮」= 一次 followup + 等 turn/end（Python 侧等 SSE 帧）。
+   *
+   * C 批（T2，2026-10-10）加**并列**回落分支：池外但平台看管（`/watch`）且宿主仍有活
+   * agent 的会话（用户在 dsh GUI 直跑的），直接对宿主 agent `followup` 投递、**不接管**，
+   * 回执带 `external:true`。判定顺序（设计 §3.2）：池内原路 → watched + 活 agent 回落
+   * → 404 分档（已看管无活 agent / 未看管）。未看管会话的 404 文案与行为一字不变——
+   * 仍走 `_lookup` 这个既有唯一出口。
+   *
+   * 重构（评审 Important 1）：池外三档判定收敛到 `_externalTarget`（唯一闸门），本端点只留
+   * 自己独有的三行——空 prompt→400、`live.followup` 投递、200 `external:true` 回执。
+   */
   async _prompt(res, req) {
     const body = await this._body(req);
-    const entry = this._lookup(res, body);
-    if (!entry) return;
+    const sid = String(body.session_id || '');
     const text = String(body.prompt == null ? '' : body.prompt);
+    const live = this._externalTarget(res, sid);
+    if (live === null) return;                 // ② 已看管但宿主无活 agent：闸门已回 404 分档文案
+    if (live !== undefined) {                  // ③ 已看管且宿主有活 agent：直投，不接管
+      if (!text) {
+        this._json(res, 400, { error: 'prompt 不能为空' });
+        return;
+      }
+      live.followup(this._userMessage(text));
+      this._json(res, 200, { ok: true, session_id: sid, external: true });
+      return;
+    }
+    const entry = this._lookup(res, body);     // ① 池内/未看管：既有路径
+    if (!entry) return;
     if (!text) {
       this._json(res, 400, { error: 'prompt 不能为空' });
       return;
@@ -1356,19 +1563,31 @@ export class AgentDriver {
   /**
    * 回答挂起的提问（2026-10-04 修 #791 起分两路；2026-10-06 修 #837 起 dsh GUI 也可答）：
    *
-   *  ① 插件**认领中**的提问（平台自持会话的在途提问，`this.questions` 命中）：
-   *     兑现认领 Promise——返回值由 waterfall 直接交回宿主 `ask_user_question`。
-   *     这是平台答**在途**提问的通道（见 `_onQuestionRequest` 注释）。
+   *  ① 插件**认领中**的提问（平台自持会话、以及 C 批 T3 起**看管的外部会话**的在途提问，
+   *     `this.questions` 命中）：兑现认领 Promise——返回值由 waterfall 直接交回宿主
+   *     `ask_user_question`。这是平台答**在途**提问的通道（见 `_onQuestionRequest` 注释）。
    *  ② 认领表未命中：退回宿主 `ctx.userQuestions.answer(agent, callId, …)`——
    *     只对「continued」（前台等待超时后）的提问有效，覆盖 timed 模式超时后
    *     平台迟到作答的场景；accepted=false 表示问题已不存在/已应答（含**用户在
    *     dsh GUI 先答**的情形：#837 起两侧同题，先答者胜），平台侧按
    *     40405「问题已不存在」放弃重试，不空转。
+   *
+   * 池外分支（C 批 T3）：池内/未看管仍走 `_lookup` 这个既有唯一出口（404 文案一字不变）；
+   * **看管的外部会话**放行——认领表命中即兑现，否则对宿主活 agent（`_liveAgent`）走 ②；
+   * 「看管但宿主已无活 agent」与未看管同走 404 原文案。这里**不套用** `_externalTarget`：
+   * 该闸门对「看管但无活 agent」自写的是 `/prompt`·`/steer` 的分档文案，而本端点要维持
+   * 既有单串；且认领表命中时与「宿主是否还有活 agent」无关（在途提问必须能兑现）。
+   * 判定必须发生在写响应**之前**，不能先 `_lookup` 写了 404 再补第二个响应。
    */
   async _answer(res, req) {
     const body = await this._body(req);
-    const entry = this._lookup(res, body);
-    if (!entry) return;
+    const sid = String(body.session_id || '');
+    // 池内 / 未看管的池外：既有路径一字不动（`_lookup` 是唯一 404 出口）
+    const entry = this.sessions.get(sid);
+    if (entry === undefined && !(sid && this._isWatched(sid))) {
+      this._lookup(res, body);
+      return;
+    }
     const callId = String(body.call_id || '');
     if (!callId) {
       this._json(res, 400, { error: 'call_id 不能为空' });
@@ -1377,13 +1596,25 @@ export class AgentDriver {
     const answers = Array.isArray(body.answers) ? body.answers : [];
     const held = this.questions.get(callId);
     if (held !== undefined) {
-      if (held.sid !== entry.sessionId) {
+      if (held.sid !== sid) {
         this._json(res, 409, { error: '提问不属于该会话' });
         return;
       }
       this._settleQuestion(callId, { answers });
-      this._json(res, 200, { ok: true, accepted: true, session_id: entry.sessionId });
+      this._json(res, 200, { ok: true, accepted: true, session_id: sid });
       return;
+    }
+    // 认领表未命中：池内用池条目上的 agent（含接管条目的 agent=null，原样交给宿主）；
+    // 看管的外部会话用宿主活 agent，无活 agent 即与未看管同走 404 原文案。
+    let agent;
+    if (entry !== undefined) {
+      agent = entry.agent;
+    } else {
+      agent = this._liveAgent(sid);
+      if (!agent) {
+        this._lookup(res, body);
+        return;
+      }
     }
     const svc = this.agentCtx ? this.agentCtx.get('userQuestions') : null;
     if (!svc || typeof svc.answer !== 'function') {
@@ -1392,20 +1623,41 @@ export class AgentDriver {
     }
     let accepted = false;
     try {
-      accepted = svc.answer(entry.agent, callId, { answers });
+      accepted = svc.answer(agent, callId, { answers });
     } catch (err) {
       this._json(res, 409, { error: `作答被拒: ${(err && err.message) || err}` });
       return;
     }
-    if (accepted) this._clearQuestionMark(entry.sessionId);   // 受理即清挂起标记
-    this._json(res, 200, { ok: true, accepted, session_id: entry.sessionId });
+    if (accepted) this._clearQuestionMark(sid);               // 受理即清挂起标记
+    this._json(res, 200, { ok: true, accepted, session_id: sid });
   }
 
-  /** 插话：运行中 steer 到最近 step 边界（空闲则直接起一个 turn）。 */
-  async _steer(res, req) {    const body = await this._body(req);
-    const entry = this._lookup(res, body);
-    if (!entry) return;
+  /**
+   * 插话：运行中 steer 到最近 step 边界（空闲则直接起一个 turn）。
+   *
+   * C 批（T2）回落与 `/prompt` 同款（设计 §3.2）：池外 + 看管 + 宿主有活 agent ⇒ 对宿主
+   * agent `steer` 直投并回 `external:true`；未看管会话行为一字不变。
+   *
+   * 重构（评审 Important 1）：池外三档判定收敛到 `_externalTarget`（唯一闸门），本端点只留
+   * 自己独有的三行——空 prompt→400、`live.steer` 插话、200 `external:true` 回执。
+   */
+  async _steer(res, req) {
+    const body = await this._body(req);
+    const sid = String(body.session_id || '');
     const text = String(body.prompt == null ? '' : body.prompt);
+    const live = this._externalTarget(res, sid);
+    if (live === null) return;                 // ② 已看管但宿主无活 agent：闸门已回 404 分档文案
+    if (live !== undefined) {                  // ③ 已看管且宿主有活 agent：直投，不接管
+      if (!text) {
+        this._json(res, 400, { error: 'prompt 不能为空' });
+        return;
+      }
+      live.steer(this._userMessage(text));
+      this._json(res, 200, { ok: true, session_id: sid, external: true });
+      return;
+    }
+    const entry = this._lookup(res, body);     // ① 池内/未看管：既有路径
+    if (!entry) return;
     if (!text) {
       this._json(res, 400, { error: 'prompt 不能为空' });
       return;
@@ -1454,11 +1706,21 @@ export class AgentDriver {
   /**
    * `approval/request` waterfall：返回 outcome 即「认领」，调用 next() 则让位。
    *
-   * - **默认让位**（`holdApprovals=false`）：GUI 的审批弹窗照常作答，平台只旁听
-   *   （`approval/asked` 会话事件已经让平台能展示）；
-   * - **认领**（平台经 `/permission` 接管过该会话）：把请求挂起，等 `/approval`
-   *   送达 `allowed-once|rejected|cancelled`；请求 signal abort（撤回/取消）时
-   *   落 `'cancelled'` 收口，不悬挂。
+   * 注册选项是 `{prepend: true}`（C 批 T4）：与提问同源，dsh Web 客户端问答桥先注册且
+   * 认领后不再 next()，append 注册的 listener 在真机上永远收不到。prepend **只抢「先看」
+   * 位置**，是否让位由下面的分支决定——池内未接管 / 看管外无活 agent / 未看管三类一律
+   * `next()`，故 C 批之前的外部会话与未看管会话行为一个字节都没变。三条分支：
+   *
+   *  1) 池内（平台自持会话）且平台经 `/permission` 接管过（`holdApprovals`）：**认领**，
+   *     把请求挂起等 `/approval` 送达 `allowed-once|rejected|cancelled`；请求 signal abort
+   *     （撤回/取消）时落 `'cancelled'` 收口，不悬挂。**纯让位**（未接管/已有在途认领）
+   *     时走 `next()`，GUI 的审批弹窗照常作答。
+   *  2) **池外但平台已看管**（C 批 T4：用户 dsh GUI 直跑、平台只 `POST /watch` 声明看管的）
+   *     且宿主仍有活 agent：与提问侧同款**双通道**——认领（挂起标记 `answerable:true` 带
+   *     `ap-<n>` id，平台 `/approval` 兑现 waterfall）**并且**原生链路照旧打开（dsh GUI 的
+   *     审批框照常弹、照常可答），两侧先答者胜、另一侧收口（竞速口径见 `_holdApproval`）。
+   *     **不接管**该会话（不建池条目）。「看管但宿主已无活 agent」落回 `next()` 让位。
+   *  3) 其它（用户直跑且**未**看管）：原样 `next()` 让位，与 C 批之前逐字一致。
    *
    * 注意 `ApprovalRequestEvent` **没有 id**（id 由服务内部生成、只出现在
    * `approval/asked|decided` 审计事件里），故这里自生成 `ap-<n>` 作为平台侧
@@ -1469,43 +1731,251 @@ export class AgentDriver {
       const agent = request && request.agent;
       const sid = String((agent && agent.session && agent.session.id) || '');
       const entry = this.sessions.get(sid);
-      if (!entry || !entry.holdApprovals || entry.pendingApproval) return next();
-      const id = `ap-${++this._approvalSeq}`;
-      const mark = { kind: 'approval', id,
-                     tool: (request && request.toolName) || '',
-                     call_id: String((request && request.callId) || ''),
-                     reason: (request && request.reason) || '',
-                     answerable: true };
-      entry.interaction = mark;
-      entry.publish({ sid, seq: null, time: Date.now(), type: 'driver/interaction',
-                      data: { state: 'asked', interaction: mark } });
-      this._publishState('driver/interaction', { sid, data: { state: 'asked', interaction: mark } });
-      return new Promise((resolve) => {
-        const settle = (outcome) => {
-          if (!entry.pendingApproval || entry.pendingApproval.id !== id) return;
-          entry.pendingApproval = null;
-          entry.interaction = null;
-          resolve(outcome);
-        };
-        entry.pendingApproval = { id, settle };
-        const signal = request && request.signal;
-        if (signal) {
-          if (signal.aborted) return settle('cancelled');
-          try {
-            signal.addEventListener('abort', () => settle('cancelled'), { once: true });
-          } catch { /* 无 addEventListener 的实现：忽略，靠 /approval 收口 */ }
-        }
-        return undefined;
-      });
+      // ① 池内：既有认领逻辑逐字不动（未接管 / 已有在途认领 ⇒ 让位）
+      if (entry !== undefined) {
+        if (!entry.holdApprovals || entry.pendingApproval) return next();
+        const id = `ap-${++this._approvalSeq}`;
+        const mark = { kind: 'approval', id,
+                       tool: (request && request.toolName) || '',
+                       call_id: String((request && request.callId) || ''),
+                       reason: (request && request.reason) || '',
+                       answerable: true };
+        entry.interaction = mark;
+        entry.publish({ sid, seq: null, time: Date.now(), type: 'driver/interaction',
+                        data: { state: 'asked', interaction: mark } });
+        this._publishState('driver/interaction', { sid, data: { state: 'asked', interaction: mark } });
+        return new Promise((resolve) => {
+          const settle = (outcome) => {
+            if (!entry.pendingApproval || entry.pendingApproval.id !== id) return;
+            entry.pendingApproval = null;
+            entry.interaction = null;
+            resolve(outcome);
+          };
+          entry.pendingApproval = { id, settle };
+          const signal = request && request.signal;
+          if (signal) {
+            if (signal.aborted) return settle('cancelled');
+            try {
+              signal.addEventListener('abort', () => settle('cancelled'), { once: true });
+            } catch { /* 无 addEventListener 的实现：忽略，靠 /approval 收口 */ }
+          }
+          return undefined;
+        });
+      }
+      // ② 池外 + 看管 + 宿主有活 agent：双通道（认领 + 原生框照旧弹），不接管会话
+      if (sid && this._isWatched(sid) && this._liveAgent(sid)) {
+        // 同会话已有在途认领：让位（与池内 `entry.pendingApproval` 同款）。若在这里覆盖
+        // `approvals` 槽，前一条认领的 Promise 就再无兑现可能（正是 `_dropClaims` 要消灭的
+        // 悬挂态）；让位后它仍可经 dsh GUI 作答，不丢审批。
+        if (this.approvals.has(sid)) return next();
+        // 先留原宿主取消信号（轮次中止/会话销毁）：打开原生通道会替换请求对象上的
+        // `signal`（见 `_openNativeLane`），平台侧的收口仍要认**原信号**
+        const hostSignal = request && request.signal;
+        const lane = this._openNativeLane(request, next);
+        return this._holdApproval(sid, request, hostSignal, lane);
+      }
+      // ③ 未看管 / 看管但宿主无活 agent：原样让位（GUI 照常可答）
+      return next();
     } catch (err) {
       this.logger.warn(`touchstone: approval/request 处理异常: ${(err && err.message) || err}`);
       return next();
     }
   }
 
-  /** `POST /approval`：{session_id, approval_id?, decision} → 兑现挂起的审批。 */
+  /**
+   * 认领一个**看管外部会话**的审批（C 批 T4；池内会话仍走 `entry.pendingApproval` 既有
+   * 单槽，本方法只管池外）：登记进 `this.approvals`、发挂起标记，返回的 Promise 由
+   * **两个作答通道先到者**兑现——① 平台 `/approval`（`_settleApproval`）；
+   * ② 原生链路（dsh GUI 审批框，`_openNativeLane`）。返回值直接交回宿主 `approval/request`
+   * waterfall（outcome 字符串）。
+   *
+   * 与 `_holdQuestion` 同构（两侧都显示、都可答，先答者胜）：
+   *  · 原生链路**成功**即胜出：清平台挂起标记（Touchstone 侧的审批框随之收起），平台侧
+   *    迟到的 `/approval` 落到「认领表已空」⇒ 409 收口，不重复兑现。
+   *  · 原生链路**失败**不算数（GUI 关掉框、客户端异常、无客户端的 profile…）：平台通道
+   *    继续等 `/approval`。真正的失败只由宿主取消信号（轮次 abort / 会话销毁）给出。
+   *  · 平台先答：`_settleApproval` 主动 abort 原生通道的取消信号 → dsh GUI 的审批框自行
+   *    收起（见 `_openNativeLane`），不留「答了也没人收」的死框。
+   *
+   * 中止（停卡/cancel，宿主 signal abort）：清标记 + 收起 GUI 框 + reject，宿主按
+   * 「审批请求已中止」归一，不悬挂（与 `_holdQuestion` 的中止口径一致）。
+   *
+   * 单槽约束：`approvals` 按 sid 索引（与池内 `entry.pendingApproval` 同款），同一会话
+   * 同时只有一条在途认领；若宿主并发抛来第二条，`_onApprovalRequest` 让位给它走原生通道，
+   * 不覆盖本槽（否则前一条的 Promise 永远兑现不了）。
+   *
+   * @param {string} sid - 看管中的外部会话 id（**没有**池条目，故标记只能走 observed）
+   * @param {object} request - 宿主 `approval/request` 请求对象（toolName/callId/reason）
+   * @param {AbortSignal|undefined} hostSignal - 原宿主取消信号（替换前的）
+   * @param {{promise: Promise<any>, cancel: Function}} lane - 原生作答通道
+   * @returns {Promise<string>} 平台的 outcome（`allowed-once|rejected|cancelled`）
+   */
+  _holdApproval(sid, request, hostSignal, lane) {
+    return new Promise((resolve, reject) => {
+      const id = `ap-${++this._approvalSeq}`;
+      const pending = { sid, id, mark: null, done: false, finish: null, resolve, reject,
+                        lane: lane || null,
+                        cancelLane: () => { if (lane) lane.cancel(new Error('the platform answered the approval first')); } };
+      this.approvals.set(sid, pending);
+      /** 收口（幂等）：摘表 + 解绑中止监听 + 清挂起标记 */
+      pending.finish = () => {
+        if (pending.done) return;
+        pending.done = true;
+        if (this.approvals.get(sid) === pending) this.approvals.delete(sid);
+        if (pending.onAbort && hostSignal
+            && typeof hostSignal.removeEventListener === 'function') {
+          hostSignal.removeEventListener('abort', pending.onAbort);
+        }
+        // 挂起标记与提问共用同一个 interaction 槽（`_clearQuestionMark` 即该槽的收口口）
+        this._clearQuestionMark(sid);
+      };
+      // 原生通道（dsh GUI）：成功即胜出并清平台挂起标记；失败一律忽略（平台通道仍在）
+      if (lane) {
+        lane.promise.then((value) => {
+          if (pending.done) return;
+          pending.finish();
+          resolve(value);
+        }, () => { /* 见 docstring：旁路故障不判死审批 */ });
+      }
+      if (hostSignal) {
+        if (hostSignal.aborted) {
+          pending.finish();
+          pending.cancelLane();
+          reject(new Error('approval request aborted before the platform answered'));
+          return;
+        }
+        pending.onAbort = () => {
+          pending.finish();
+          pending.cancelLane();
+          reject(new Error('approval request aborted before the platform answered'));
+        };
+        hostSignal.addEventListener('abort', pending.onAbort);
+      }
+      pending.mark = this._publishApprovalMark(sid, id, request);
+    });
+  }
+
+  /**
+   * 兑现认领中的**外部会话**审批（平台 `/approval` 送达）：true=命中并已交付宿主。
+   * 平台先答时顺带 abort 原生通道的取消信号——dsh GUI 的审批框随之收起。
+   *
+   * `approval_id` 空串按池内分支同款语义处理（不指定 = 兑现当前在途那条）；
+   * 显式给了 id 但不符 ⇒ false（不误兑现别的审批）。
+   *
+   * @param {string} sid - 看管中的外部会话 id
+   * @param {string} approvalId - 平台回传的 `ap-<n>`（可空）
+   * @param {string} outcome - `allowed-once|rejected|cancelled`（调用方已校验）
+   * @returns {boolean} 命中并兑现即 true；无在途认领或 id 不符即 false
+   */
+  _settleApproval(sid, approvalId, outcome) {
+    const pending = this.approvals.get(sid);
+    if (pending === undefined) return false;
+    const wanted = String(approvalId == null ? '' : approvalId);
+    if (wanted && wanted !== pending.id) return false;
+    pending.finish();
+    pending.cancelLane();
+    pending.resolve(outcome);
+    return true;
+  }
+
+  /**
+   * 发布「审批挂起」标记（与 `_publishQuestionMark` 同款，仅用于**池外**认领）：
+   * 外部会话没有池条目，故写 `observed`（平台 `/status`、`/live` 的挂起实况来源）
+   * 并推全局状态流；池内分支保持既有的 inline 写法（`entry.publish` + 状态流）逐字不动。
+   *
+   * @returns {object} 标记本身（形状：`{kind:'approval', id, tool, call_id, reason, answerable}`）
+   */
+  _publishApprovalMark(sid, id, request) {
+    const mark = { kind: 'approval', id,
+                   tool: (request && request.toolName) || '',
+                   call_id: String((request && request.callId) || ''),
+                   reason: (request && request.reason) || '',
+                   answerable: true };
+    if (!sid) return mark;
+    const entry = this.sessions.get(sid);
+    const seen = this.observed.get(sid);
+    if (entry) {
+      entry.interaction = mark;
+      entry.publish({ sid, seq: null, time: Date.now(), type: 'driver/interaction',
+                      data: { state: 'asked', interaction: mark } });
+    }
+    if (seen) seen.interaction = mark;
+    this._publishState('driver/interaction', { sid, data: { state: 'asked', interaction: mark } });
+    return mark;
+  }
+
+  /**
+   * 收口某会话的**全部在途认领**（C 批 T4）：提问认领 reject、审批认领 reject、挂起标记
+   * 一并清掉。调用点两处——`session/disposed`（宿主会话被销毁）与 `dispose()`（插件停用）。
+   *
+   * 为什么必须有：认领的 Promise 是宿主 `ask()`/审批 waterfall 的返回值，会话没了就**再无
+   * 兑现可能**；只把它留在表里 = 宿主侧永久悬挂 + 平台侧挂起标记残留（卡永远显示「等作答」）。
+   * T3 有意不写 disposed 清理，明文把这一态留给本批（计划分工）。
+   *
+   * 收口口径：一律 **reject**（与 `dispose()` 里提问的全量收口同一口径），宿主见异常/信号
+   * 中止自会归一为中断；`finish()` 幂等，重复调用/已兑现的条目是纯 no-op。
+   *
+   * @param {string} sid - 会话 id（池内/池外皆可；按 `pending.sid` 匹配）
+   */
+  _dropClaims(sid) {
+    const key = String(sid || '');
+    if (!key) return;
+    // 只在**确实摘掉了认领**时才补发挂起标记收口帧：会话被销毁时本方法对每个 sid 都会跑，
+    // 无认领的会话（尤其**未看管**会话）不能因此多出一帧状态变更——那是可观测的行为漂移。
+    let dropped = false;
+    for (const [callId, pending] of [...this.questions]) {
+      if (pending.sid !== key) continue;
+      try {
+        pending.finish();
+        pending.cancelLane();
+        pending.reject(new Error('host session disposed before the question settled'));
+        dropped = true;
+      } catch {
+        /* 已收口/已兑现：忽略 */
+      }
+    }
+    const approval = this.approvals.get(key);
+    if (approval !== undefined) {
+      try {
+        approval.finish();
+        approval.cancelLane();
+        approval.reject(new Error('host session disposed before the approval settled'));
+        dropped = true;
+      } catch {
+        /* 已收口/已兑现：忽略 */
+      }
+    }
+    // 两条链都没命中就不发帧（`finish()` 本身已清标记，这里只兜「认领在别处摘了表、
+    // 标记却还在」的残留态）
+    if (dropped) this._clearQuestionMark(key);
+  }
+
+  /**
+   * `POST /approval`：{session_id, approval_id?, decision} → 兑现挂起的审批。
+   *
+   * 池外分支（C 批 T4）：**看管中**的外部会话放行——认领表（`approvals`）命中即兑现
+   * （宿主 waterfall 收到 outcome），否则回 409「当前没有等待中的审批（或已由 GUI 作答）」
+   * （GUI 先答/已收口时的迟到作答就落这里，与池内分支同串）。decision 先在外部支校验，
+   * 非法一律 400、**绝不**把非法 outcome 递宿主。池内与未看管仍走 `_lookup` 这个既有唯一
+   * 404 出口（文案一字不变）：判定必须发生在写响应**之前**，不能先 `_lookup` 写了 404
+   * 再补第二个响应（与 `_answer` 同款理由）。
+   */
   async _approval(res, req) {
     const body = await this._body(req);
+    const sid = String(body.session_id || '');
+    if (this.sessions.get(sid) === undefined && sid && this._isWatched(sid)) {
+      const decision = String(body.decision == null ? '' : body.decision);
+      if (!['allowed-once', 'rejected', 'cancelled'].includes(decision)) {
+        this._json(res, 400, { error: 'decision 非法（allowed-once/rejected/cancelled）' });
+        return;
+      }
+      if (this._settleApproval(sid, body.approval_id, decision)) {
+        this._json(res, 200, { ok: true, accepted: true, session_id: sid, outcome: decision });
+        return;
+      }
+      this._json(res, 409, { error: '当前没有等待中的审批（或已由 GUI 作答）' });
+      return;
+    }
     const entry = this._lookup(res, body);
     if (!entry) return;
     const pending = entry.pendingApproval;

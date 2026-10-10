@@ -2051,16 +2051,16 @@ def deliver_comment(project, card, comment_row, inject=False, raw=False):
 def _deliver_unit(project, card, comment_row, wrapped, inject):
     """统一队列消息单元执行体：投递评论并等该会话结束（执行期间持有项目占用）。
 
-    返回即释放占用：dsh 等 busy 出现再回落（与任务 turn 同款判定，见
-    chat.wait_web_busy）；返回 chat.STATE_YIELDED = turn 挂起等作答、已让位
-    （chat.run_unit 据此落终态）。尾部 proc 分支为 CLI 时代的防御残留
-    （单族化后 _RUNS 条目恒为 dsh，proc=None）。
+    返回即释放占用：dsh 会话的等轮次走 `chat.wait_turn` 分流口（外部会话订阅全局
+    状态流、平台自持会话走既有按会话 SSE，规则见该函数）；返回
+    chat.STATE_YIELDED = turn 挂起等作答、已让位（chat.run_unit 据此落终态）。
+    尾部 proc 分支为 CLI 时代的防御残留（单族化后 _RUNS 条目恒为 dsh，proc=None）。
     """
     _deliver_now(project, card, comment_row, wrapped, inject)
     family = _web_family(project)
     if family is not None:
-        return chat.wait_web_busy(project["project_dir"], card["session_id"],
-                                  family)
+        return chat.wait_turn(project["project_dir"], card["session_id"],
+                              family)
     with _runs_lock:
         rec = _RUNS.get(card["id"])
     proc = rec.get("proc") if rec is not None else None
@@ -2074,11 +2074,21 @@ def _deliver_now(project, card, comment_row, wrapped, inject=False):
     单族化后只有 dsh_plugin：followup 忙时排进 agent inbox（等同服务端排队
     语义，不拒绝）；inject=True 走 steer，注入当前 turn 的最近 step 边界
     （steer 失败不致命，评论仍在 inbox/队列）。退场族无投递通道，直接报错。
+    送达前重声明看管（C 批终审 I2，2026-10-10）：本函数是评论**推送腿**的唯一出口，
+    `_watch_prune` 的撤销判据只看活跃 `m:` 行（不看推送腿本身）。真实入口＝平台重启后
+    `_rebuild_run → _deliver_unit → _deliver_now` 直投：`_WATCHED` 随进程清空、驱动侧
+    `watched` 也可能随插件重载清空 ⇒ 不补声明就撞驱动「未看管」404、`m:` 行落 error。
+    与 `_answer_deliver` 同源同判据（`_watch_before_delivery` 内部只对 `owned:false`
+    的池外会话声明，命中缓存零请求；池内/未知路径一个字节不变）。
     """
     family = _web_family(project)
     sid = card["session_id"]
     if family is not None:
         try:
+            # 送达前重声明看管（C 批终审 I2）：外部会话的看管可能已被 `_watch_prune`
+            # 撤掉（平台重启后记账为空、驱动侧重载后 watched 为空），漏声明则下面
+            # 这条驱动调用撞「未看管」404（见上）
+            _watch_before_delivery(sid)
             # dsh 的「立即注入」= steer（注入当前 turn 的最近 step 边界）；
             # 普通投递 = followup（忙时排进 inbox，等同服务端排队）；
             # 统一走 _web_send（单族投递唯一出口，测试打桩面也在此）
@@ -3687,6 +3697,12 @@ def _iw_interaction(family, proj, sid, busy_hint=None):
             return None
         busy = st.get("status") == "running"
         mark = st.get("interaction") or {}
+        # T9 真机取证待办（2026-10-10）：外部会话（owned:false）挂起等作答期间，宿主
+        # `status` 是否为 `running` **尚未取证**——本批先按既有口径交付，判据保持不动。
+        # 若实测为 `idle`，mark 非空的挂起会被本行判成 pending=False（answerable 随之
+        # 丢失、站点上不可答），届时由控制者另派小修复把判据拆开：`mark` 为空 ⇒
+        # pending False；`mark` 非空且 `call_id` 非空 ⇒ pending True（`busy` 照实回传，
+        # 防陈旧 mark 复活卡片），并补一条对应的反例用例。
         if not busy or not mark:
             return {"pending": False, "busy": busy, "qid": None,
                     "question": None, "options": None,
@@ -3736,6 +3752,237 @@ def _iw_interaction(family, proj, sid, busy_hint=None):
                 "text": question[:80]}
     except Exception:
         return None          # 读注册表异常：本轮跳过
+
+
+# ---------- 外部会话看管声明（C 批 T5，2026-10-10） ----------
+#
+# 背景：用户在 dsh GUI 里直跑/接管的会话（`/live` 里 `owned:false`）不在驱动池，
+# 投递必然 404。驱动侧因此加了 `POST /watch` 显式看管闸（见 dshdriver.watch_session）；
+# 平台侧把「声明范围」限定为**平台确实要投递的会话**：有卡的会话（宿主里与 Touchstone
+# 无关的会话一律不碰）**加上**宿主上报为外部态（owned:false）的任务侧会话——后者由
+# 消息前置闸与作答送达前的 `_watch_before_delivery` 按需补声明（T7 评审 2026-10-10）。
+#
+# 声明点三处，互为兜底：
+#   ① `_iw_once` 逐卡循环内（调和器扫描，覆盖常态）；
+#   ② `chat._external_preflight` 投递前置闸内（覆盖「卡刚建、扫描节拍还没跑到」的窗口）；
+#   ③ `_watch_before_delivery` 作答/审批送达前（覆盖无卡的**任务侧**外部会话）。
+# 撤销：`_watch_prune`（卡删除/换绑会话后回收，防集合无界增长）。
+# 失效：`_watch_generation_sync`（中枢重连边沿清空记账后重放，设计 §5.1）。
+# 语义：`_WATCHED` 是**进程内缓存**（「已声明过」的记账，避免每轮重复 POST）；
+# 驱动侧 `watched` 才是权威。故集合清了只会多打一次幂等的 `/watch`，不会漏声明。
+_WATCHED: set[str] = set()
+_watch_lock = threading.Lock()
+# 看管代次：上次见到的中枢连接代次（`dshevents.stats()["reconnects"]`）。
+# None = 本进程尚未对过账（首次读只记基准，不清空——启动时集合本就为空）。
+_WATCH_GEN = None
+# 扫卡节流窗口（秒，C 批终审 I3，2026-10-10）：`_iw_once` 由**每个状态帧**唤醒
+# （仅 IW_MIN_INTERVAL 限速），节拍尾部每轮都调 `_watch_prune()`；而扫卡 =
+# `list_projects_all()` 一次连接 + **每项目一次** `list_board_cards()`，只要有任何
+# 一个外部会话被看管，全量扫卡就跟着状态帧跑。节流到与调和器兜底拍
+# （`IW_SAFETY_SECONDS`=60s，见文件尾）同量级：被节流的只是「扫卡 + 撤销」，
+# **只影响回收的及时性**（多留一会儿看管是安全方向）；代次检查是正确性路径，
+# 照旧每次进入都做（见 `_watch_prune`）。
+WATCH_PRUNE_INTERVAL = 60.0
+# 上次真正扫卡的时刻（`time.monotonic()`；0.0 = 本拍该扫）。就地读写都在 `_watch_lock` 内。
+_WATCH_PRUNE_AT = 0.0
+
+
+def _watch_generation_sync():
+    """中枢重连边沿 ⇒ 清空 `_WATCHED`；返回是否发生了清空（设计 §5.1 的失效通道）。
+
+    依据：`dshevents.stats()["reconnects"]`——中枢（`dshevents.EventHub`）每次
+    「未连接 → 已连接」边沿加一，读口是**纯本地** `with self._cond`（零 HTTP 请求），
+    故每次声明前读一次也不打驱动。为什么必须清：驱动侧 `watched` 是插件进程内的
+    易失状态（`dispose()` / 插件重新 apply、宿主重载即清空），而平台记账仍写着
+    「已声明过」——不清就会一直命中陈旧缓存、不再 POST `/watch`，投递撞驱动 404 落
+    error，且卡还在时 `_watch_prune` 不撤 ⇒ 不自愈（bug_report/20261008_1935 记录的
+    宿主侧重载场景）。清空只让下一次 `_ensure_watch` 重新声明一次（幂等 POST），
+    不会漏声明。
+    """
+    global _WATCH_GEN
+    try:
+        gen = dshevents.stats().get("reconnects")
+    except Exception:                      # noqa: BLE001 — 读口异常不阻断，下轮再来
+        return False
+    if gen is None:
+        return False
+    with _watch_lock:
+        prev, _WATCH_GEN = _WATCH_GEN, gen
+        if prev is None or prev == gen:
+            return False
+        _WATCHED.clear()
+    return True
+
+
+def _ensure_watch(sid):
+    """声明「平台看管该会话」（幂等，成功才入缓存）；失败留痕返回 False，不重试。
+
+    先过**代次对账**（中枢重连 ⇒ 陈旧记账作废，见 `_watch_generation_sync`），
+    再查缓存：已在 `_WATCHED` 内直接 True（零请求）；否则
+    `dshdriver.watch_session(sid)`，驱动确认 `watched=true` 才记进缓存。任何失败
+    （旧插件无 `/watch` ⇒ 404、驱动不可达、令牌错）都只打印一行诊断并返回 False
+    ——**不重试**：调用方（`chat._external_preflight`）据此拒投并给明确文案，比反复
+    打驱动更有用；下一轮调和器扫描会自然重试一次（缓存里没有它）。
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    _watch_generation_sync()
+    with _watch_lock:
+        if sid in _WATCHED:
+            return True
+    try:
+        ok = bool(dshdriver.watch_session(sid))
+    except Exception as exc:                       # noqa: BLE001 — 失败降级为拒投
+        hint = "（插件过旧：无 /watch 端点，请重装插件并重启 dsh web）" \
+            if getattr(exc, "code", None) == dshdriver.WATCH_UNSUPPORTED else ""
+        print(f"[board] 看管声明失败 sid={sid}: {exc}{hint}", flush=True)
+        return False
+    if not ok:
+        print(f"[board] 看管声明失败 sid={sid}: 驱动未确认看管（watched=false）",
+              flush=True)
+        return False
+    with _watch_lock:
+        _WATCHED.add(sid)
+    return True
+
+
+def _watch_card_refs():
+    """看管引用集：全部卡片的 `session_id ∪ sessions`。
+
+    含归档项目（归档 ≠ 删卡，归档项目的在跑会话照旧需要投递通道）。坏 JSON 按
+    「无附加会话」防御（与卡片读侧同口径）。
+    """
+    refs = set()
+    for proj in db.list_projects_all():
+        for card in db.list_board_cards(proj["id"]):
+            sid = str(card["session_id"] or "")
+            if sid:
+                refs.add(sid)
+            try:
+                refs.update(str(s) for s in json.loads(card["sessions"] or "[]") if s)
+            except ValueError:
+                pass                               # 坏 JSON 按无附加会话（防御）
+    return refs
+
+
+def _watch_msg_inflight(sid):
+    """该 sid 是否仍有在途消息（活跃 `m:` 行）——看管撤销判据的第二条。
+
+    读口用 `chat.live_of_sid`（内部即既有 waitq 读口
+    `waitq.msg_rows(sid=…, states=("queued", "running"))`，不另写 SQL）。
+    读不到按「有在途」保守处理：宁可少撤（下轮再试），不可误撤（在途消息送达
+    撞驱动 404，正是本任务要消灭的「放行后静默失败」）。
+    """
+    try:
+        return bool(chat.live_of_sid(sid))
+    except Exception:                          # noqa: BLE001 — 读不到按「有在途」保守
+        return True
+
+
+def _watch_prune():
+    """撤掉**确无需要**的看管声明（`POST /watch {on:false}`），返回撤销条数。
+
+    判据（两条都成立才撤）：
+      ① 无卡引用——引用集 = 全部卡片的 `session_id ∪ sessions`，见 `_watch_card_refs`；
+      ② 无在途消息——该 sid 已无活跃 `m:` 行，见 `_watch_msg_inflight`。前置闸会为
+         **无卡**外部会话放行（飞书绑定会话、任务会话重载后变外部态等 `card_id/
+         task_id` 皆空的 submit 路径），此时「无卡引用」≠「无人需要看管」：还在
+         `m:` 行里排队的消息一旦被撤看管，送达时 `/prompt` 就撞驱动 404。
+
+    竞态（与前置闸的 TOCTOU）：撤销判据在**同一临界区**内复核，不信任扫描快照
+    ——① `_WATCHED` 成员资格在锁内重查（快照之后并发的前置闸可能刚重新声明入集合）；
+    ② 在途消息在锁内重查（快照之后可能刚落 `m:` 行）。撤销成功后**再复核一次**：
+    窗口内若又冒出新声明/新在途消息（`on:false` 可能压掉了并发的 `on:true`），立即
+    补偿重声明——宁可多打一次幂等 `/watch`，不可留「缓存无、驱动无」而在途消息撞
+    404。驱动 I/O 全程在锁外（锁纪律：`_watch_lock` 只保护记账集合，绝不跨网络调用）。
+    撤销失败的 sid 放回集合等下一轮重试。
+
+    节流（C 批终审 I3，2026-10-10）：本函数由 `_iw_once` **每个状态帧**调用一次，
+    而「扫卡」是 O(项目数 × 每项目卡数) 的 DB 读、`_watch_msg_inflight` 还在
+    `_watch_lock` 内做 SQLite 查询。故「扫卡 + 撤销」节流到
+    `WATCH_PRUNE_INTERVAL`(60s，与调和器兜底拍同量级)：窗口内只剩两件零成本的事
+    —— `_watch_generation_sync()`（本地代次读口）与「集合空则返回」。
+    **代次检查不参与节流**（它是正确性路径：中枢重连边沿必须立刻作废旧记账，否则
+    陈旧缓存永不自愈）；被节流影响的**只有回收的及时性**（最多晚一拍撤销看管——
+    多留一会儿看管是安全方向，且在途消息送达不受影响）。
+    开销：`_WATCHED` 为空（常态）时零 DB 访问（早于节流判定，也不会消耗窗口——
+    新声明入集合后本拍即扫）。
+    """
+    global _WATCH_PRUNE_AT
+    _watch_generation_sync()                   # 中枢重连过：陈旧记账先作废（撤销无意义）
+    with _watch_lock:
+        if not _WATCHED:
+            return 0                           # 常态：零 DB 访问（不消耗节流窗口）
+        now = time.monotonic()
+        if now - _WATCH_PRUNE_AT < WATCH_PRUNE_INTERVAL:
+            return 0                           # 本窗口已扫过：只推迟回收，不影响正确性
+        _WATCH_PRUNE_AT = now                  # 开窗（含扫描异常：下一拍再试）
+    refs = _watch_card_refs()
+    with _watch_lock:
+        candidates = sorted(_WATCHED - refs)   # 粗筛快照；最终判据见下面的锁内复核
+    n = 0
+    for sid in candidates:
+        with _watch_lock:
+            # —— 撤销前锁内复核（唯一信任点）——
+            if sid not in _WATCHED or sid in refs or _watch_msg_inflight(sid):
+                continue
+            _WATCHED.discard(sid)              # 先出缓存：并发 _ensure_watch 转为重新声明
+        try:
+            dshdriver.watch_session(sid, on=False)
+        except Exception as exc:               # noqa: BLE001 — 留痕，下轮重试
+            with _watch_lock:
+                _WATCHED.add(sid)              # 撤销失败：放回，下轮再试
+            print(f"[board] 看管撤销失败 sid={sid}: {exc}", flush=True)
+            continue
+        # —— 撤销后复核：窗口内并发落下的新声明 / 新在途消息 ⇒ 补偿重声明 ——
+        with _watch_lock:
+            redeclared = sid in _WATCHED
+            if redeclared:
+                _WATCHED.discard(sid)          # 清掉再声明：强制真发一次 POST
+        if redeclared or _watch_msg_inflight(sid):
+            _ensure_watch(sid)
+            continue
+        n += 1
+    return n
+
+
+def _watch_before_delivery(sid):
+    """送达前对**非池内**（外部）会话重新声明一次看管（C 批 T7 控制器裁定，2026-10-10）。
+
+    为什么必须补（T5 与 T4 两处评审叠加出的真实洞）：`_watch_prune` 的撤销判据是
+    「无卡引用 ∧ 无在途 `m:` 行」——**不含活跃 `a:`（作答）行**；驱动的
+    `/watch {on:false}` 也不会主动收口在途认领（要等 abort/disposed/dispose）。
+    两者叠加：答案已入队未送达、或会话正挂起等作答（用户刚点作答）时点，prune 可能
+    已把该 sid 的看管撤掉 ⇒ 送达 `/answer`·`/approval` 撞驱动「未看管」404 ⇒
+    `a:` 行落 error，正是本批要消灭的失败类。故作答/审批的**唯一送达出口**
+    （`_answer_deliver`，worker 补位与「立即送达」共用）在真正调驱动前补一次声明。
+
+    幂等且廉价：`_ensure_watch` 命中 `_WATCHED` 缓存时是**纯本地判断、零请求**，
+    只有缓存/驱动侧确已被撤（prune 撤销、中枢重连失效）才真发一次 `POST /watch`。
+
+    判据用既有读口 `dshevents.get(sid)` 的 `owned`（不新增全局状态、不猜）：
+    `owned is False` ⇒ 外部会话（需要显式看管）；`owned is True`（平台自持）与
+    `None`（注册表未知/断连——未知 ≠ 外部）一律不声明，与 `chat._external_preflight`
+    及 `_iw_once` 逐卡挂钩同一判定阶梯：池内与未知路径行为一个字节不变。
+    本函数**不改** `_watch_prune` 判据（「未看管不认领」是驱动侧红线，驱动行为正确），
+    只把「撤销窗口里到达的送达」自愈回来。
+
+    失败不阻断（`_ensure_watch` 自带留痕、不重试）：声明失败时驱动同样回 404，由
+    调用方既有的重试/放弃语义处置，错误口径与此前一致。
+
+    边界：本钩子**缩小但不关闭** `_watch_prune` 与「在途送达」之间的交错窗口——钩子
+    返回后到驱动真正收到 `/answer`·`/approval` 之间仍可能被一次并发 prune 撤掉看管；
+    该残留窗口的兜底在**送达重试**（`a:` 行的 3 次退避重试；每次重试都再走一遍本钩子
+    重新声明），不为此引入锁或全局状态。
+    """
+    sid = str(sid or "")
+    if not sid:
+        return
+    st = dshevents.get(sid)
+    if st is None or st.get("owned"):
+        return                          # 未知（断连/没见过）与平台自持：不碰
+    _ensure_watch(sid)
 
 
 _RECONCILE_FIELDS = {
@@ -4000,6 +4247,8 @@ def _iw_once():
     异常语义：读不到实况（中枢未连接/未知）该卡本轮跳过（不搬列，防把运行中卡
     误判完成搬去待审核；取代 sync_sessions 旧「异常视为空闲」；ext 行侧保留既有
     行=保留上一轮占用，宁可多等不可误放行——逐卡 `r is None` 走 `ext_hold`）。
+    看管声明（C 批 T5）：逐卡对 `owned:false`（用户直跑的）会话调 `_ensure_watch`
+    ——声明范围=有卡会话；卡删除后的回收在节拍尾部 `_watch_prune`。
     单卡异常不外抛（不影响其他卡/项目）。节拍尾部另跑 starting 超时对账
     （_reconcile_starting_rows，v2d T3，裁决 R6）。"""
     now = int(time.time() * 1000)
@@ -4046,6 +4295,15 @@ def _iw_once():
                 if not sid:
                     continue               # 无会话（从未起跑的真排队卡等）无可探测
                 r = _iw_interaction(fam, proj, sid)
+                # —— 看管声明（C 批 T5）：外部会话（用户直跑/接管，`owned:false`）
+                # 的投递/作答通道以平台显式 `POST /watch` 为闸，声明范围=有卡会话
+                # （本循环即「有卡」的天然边界；撤销见 `_watch_prune`）。幂等：
+                # 只有新 sid 首见（或中枢重连后记账刚被清空，见
+                # `_watch_generation_sync`）才真发请求，失败留痕不重试。
+                # 读注册表判 owned（而非另发请求）；未知（get 为 None）不声明。
+                _st = dshevents.get(sid)
+                if _st is not None and not _st.get("owned"):
+                    _ensure_watch(sid)
                 if r is None:
                     # 实况读不到：两种语义必须分开（2026-10-07 实障修复，卡 870）——
                     # ① 中枢**断连**＝真未知：保行（宁多等不可误放行，原口径）；
@@ -4122,6 +4380,12 @@ def _iw_once():
         _reconcile_starting_rows()
     except Exception:
         pass                                     # 守护线程不 crash（同 _iw_once 口径）
+    # 看管回收（C 批 T5）：卡删除/换绑会话后撤掉驱动的看管声明（`_WATCHED` 为空时
+    # 零 DB 访问；异常不影响本轮回调和的其余部分）。
+    try:
+        _watch_prune()
+    except Exception:
+        pass                                     # 同上：回收失败下轮再来
 
 
 def interaction_of_sid(sid):
@@ -4297,10 +4561,17 @@ def _answer_deliver(proj, meta):
     插件在 waterfall 里挂起），meta 带 `outcome`（`allowed-once`/`rejected`）走
     插件 `/approval`；未认领（GUI 作答）时插件返回 409 → 这里转 40005 让上层按
     「再无待决」收口。
+
+    外部（池外）会话（C 批 T7，2026-10-10）：真正调驱动前经 `_watch_before_delivery`
+    幂等补声明看管——看管可能已被 `_watch_prune` 撤掉（其撤销判据不含活跃 `a:` 行），
+    漏声明会让 `/answer`·`/approval` 撞「未看管」404、答案落 error。
     """
     if _web_family(proj) != "dsh_plugin":
         # 退场族无作答送达通道（单族化）：明确报错，不落已删除的 kimi 配送段
         raise RuntimeError(agents.RETIRED_MSG)
+    # 送达前重声明看管（C 批 T7）：外部会话的看管可能已被 `_watch_prune` 撤掉
+    # （其判据不含活跃 `a:` 行），漏声明则下面两条驱动调用撞「未看管」404（见上）
+    _watch_before_delivery(meta.get("sid"))
     if meta.get("approval_id"):
         outcome = str(meta.get("outcome") or "")
         if not outcome:
@@ -4512,7 +4783,9 @@ def answer_interaction(proj, card, qid, answers):
     看板卡路径（v2b T1，裁决 R8）**一律入队**（_queue_answer_unit：插前缀后/
     等待区最前 + doing/queue 占位，补位启动时 worker 才调驱动 `/answer` 一次
     提交送达——dsh 侧按 callId + 逐题 selected/custom 一次给全，缺项即未答）；
-    任务侧伪卡（无 id）保持直送。成功后清理 watcher 缓存（下轮调和重新检测刷新）。
+    任务侧伪卡（无 id）保持直送，但直送前经 `_watch_before_delivery` 补声明看管
+    （任务会话被宿主上报为外部态后撞「未看管」404 的修复，T7 评审 2026-10-10）。
+    成功后清理 watcher 缓存（下轮调和重新检测刷新）。
 
     answers = [{"wire": "q_0", "kind": "single|multi|other|multi_with_other",
                 "option_id"/"option_ids"/"text": ...}, ...]（前端逐题收集；
@@ -4591,7 +4864,7 @@ def answer_interaction(proj, card, qid, answers):
     # ._answer_exempt_keys_locked，R5⑥），一律插「运行中最后一个条目后面」
     # （前缀后/等待区最前），卡落 doing/queue 排队占位，补位启动时才送达。
     # 仅看板卡（有卡 id）参与；任务侧会话没有卡片列语义，保持直送
-    # （specQ §5 边界不变）。
+    # （specQ §5 边界不变；直送前经 `_watch_before_delivery` 补声明看管，见下）。
     try:
         card_id = card["id"]
     except (KeyError, IndexError, TypeError):
@@ -4600,6 +4873,11 @@ def answer_interaction(proj, card, qid, answers):
         if _web_family(proj) != "dsh_plugin":
             # 退场族无作答通道（单族化）：不落已删除的 kimi 配送段
             return f"回答失败：{agents.RETIRED_MSG}"
+        # 送达前重声明看管（T7 评审 Important，控制器裁定 2026-10-10）：任务会话
+        # 宿主重载后会被驱动以 owned:false 上报（= 池外），而本直送分支不经
+        # `_answer_deliver`；不补声明就撞「未看管」404，用户看到「回答失败：…」。
+        # 判据同 `_answer_deliver`：owned:false 才声明，池内/未知零请求。
+        _watch_before_delivery(sid)
         try:
             # 路线 A：任务侧会话直送（卡片侧走作答排队，见 _answer_deliver）；
             # 驱动调用失败（网络/序列化/提问已失效等）均须落到前端
@@ -4620,7 +4898,8 @@ def answer_approval(proj, card, approval_id, decision, scope=""):
     与 answer_interaction 同款白名单校验：approval_id 必须是缓存里的实况值
     （防伪造/旧 id 重放）；decision ∈ approved/rejected（平台两态），
     scope="session" 为「本会话内批准」——dsh 无该语义，显式拒绝（见下）。
-    看板卡路径（v2b T1）一律入队、补位启动时才送达；任务侧保持直送。
+    看板卡路径（v2b T1）一律入队、补位启动时才送达；任务侧保持直送，直送前同样经
+    `_watch_before_delivery` 补声明看管（与提问腿同源，T7 评审 2026-10-10）。
     成功后清 watcher 缓存（下轮调和重新检测刷新）。
     返回 None=成功，str=错误信息（server 转 400 JSON {error}）。"""
     sid = card["session_id"] or ""
@@ -4648,12 +4927,15 @@ def answer_approval(proj, card, approval_id, decision, scope=""):
     dsh_outcome = {"approved": "allowed-once", "rejected": "rejected"}[decision]
     # 审批作答同路入队（v2b T1，删恒直送）：与提问作答同一插入规则——补位
     # 启动时由执行体按 meta 分发 answer_approval 送达。仅看板卡（有卡 id）
-    # 参与；任务侧会话保持直送（specQ §5 边界不变）。
+    # 参与；任务侧会话保持直送（specQ §5 边界不变；直送前同样补声明看管，见下）。
     try:
         card_id = card["id"]
     except (KeyError, IndexError, TypeError):
         card_id = None
     if card_id is None:
+        # 送达前重声明看管（T7 评审 Important，控制器裁定 2026-10-10）：同上
+        # （提问腿）——任务会话池外化后，本直送分支同样需要先补声明再调 `/approval`。
+        _watch_before_delivery(sid)
         try:
             dshdriver.answer_approval(sid, approval_id, dsh_outcome)
         except Exception as e:                      # noqa: BLE001

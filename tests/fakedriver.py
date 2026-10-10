@@ -22,12 +22,22 @@ chat/dshevents）走**原路径**跑起来。
 
 状态流帧（`?scope=state`）与真插件同形：`{seq, time, type, session_id, data}`，
 `dshevents.EventHub` 直接折叠（字段口径见该模块 `_on_frame`）。
+
+**外部会话与看管（C 批 T5，2026-10-10）**：替身另持一张 `external` 表，模拟
+「用户在 dsh GUI 里直跑/接管」的会话——它们**不在** `sessions`（驱动池）里，
+只在 `/live` 里以 `owned:false` 行出现（真插件 `observed` 表同形）；平台要投递/
+作答必须先 `POST /watch` 声明看管（`watched` 集合），否则 `/prompt`·`/steer` 404。
+三个控制面端点供测试造场景：`/_ctl/external`（建外部会话）、`/_ctl/external_state`
+（改实况：`status='unknown'` 即「宿主无活 agent」）、`/_ctl/external` + `watch_fail`
+（模拟旧插件没有 `/watch` 端点）。`FakeDriver.ctl()` 是这些控制面的客户端便捷口。
 """
 
 import json
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -98,6 +108,18 @@ class FakeDriver:
         self.on_prompt = on_prompt
         self.lock = threading.RLock()
         self.sessions = {}
+        # 外部会话表（C 批 T5）：{sid: {sid, cwd, status, interaction}}。模拟
+        # 「用户在 dsh GUI 里直跑/接管」的会话——它们不在 `sessions`（驱动池）里，
+        # 只经 `/live` 以 `owned:false` 行露出（真插件 `observed` 表同形）。
+        # `status='unknown'` = 宿主里没有活 agent（会话已结束），与真插件
+        # `live ? live.status : 'unknown'` 同口径。
+        self.external = {}
+        # 平台已声明的看管集（真插件 `this.watched` 同形）：外部会话能被
+        # `/prompt`·`/steer`·`/answer`·`/approval` 触达的**唯一**闸（设计 §3.1）。
+        self.watched = set()
+        # 看管端点硬失败开关（测试用，同 `archive_fail` 口径）：置字符串后
+        # `/watch` 一律 404——模拟**旧插件**没有该端点，平台据此降级为拒投。
+        self.watch_fail = None
         self.state_seq = 0
         self.state_ring = []
         self.subs = []                  # 状态流订阅者队列（queue.Queue）
@@ -147,6 +169,29 @@ class FakeDriver:
     @property
     def url(self):
         return f"http://127.0.0.1:{self.port}"
+
+    # ---------- 控制面客户端（测试便捷口） ----------
+
+    def ctl(self, path, body=None):
+        """走控制面发一条请求（`/_ctl/*`），返回解析后的响应 dict。
+
+        测试脚本用它制造场景（建外部会话 / 改实况 / 造提问），真插件没有控制面。
+        `body=None` 走 GET，给了 body 走 POST（JSON）。HTTP 非 2xx 也把响应体
+        返回给调用方自行断言（与 `serverfixture.Api` 同口径）。
+        """
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            self.url + path, data=data, method="GET" if data is None else "POST",
+            headers={"content-type": "application/json; charset=utf-8"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:      # 非 2xx：正文照常返回（调用方断言）
+            raw = e.read().decode("utf-8", errors="replace")
+        try:
+            return json.loads(raw or "{}")
+        except ValueError:
+            return {"raw": raw}
 
     # ---------- 记号与统计（测试断言面） ----------
 
@@ -430,6 +475,76 @@ class _Handler(BaseHTTPRequestHandler):
         sid = str(body.get("session_id") or "")
         return self.driver.sessions.get(sid)
 
+    # ---------- 外部会话回落（C 批 T5；与真驱动阶梯同序，设计 §3.2/§4.2） ----------
+
+    def _external_fallback(self, sid):
+        """池外会话的准入判定：返回 `(row, None)` 可触达；`(None, (code, error))` 拒绝。
+
+        阶梯（与真驱动一致）：① 未声明看管 ⇒ 404「未声明看管」；② 已看管但宿主
+        没有活 agent（`status='unknown'`）⇒ 404「会话已结束」；③ 已看管 + 有活
+        agent ⇒ 放行（返回外部会话行）。**未看管的会话一律不可触达**——这是平台
+        「不打扰宿主里与 TS 无关的会话」的硬闸。
+        """
+        drv = self.driver
+        if sid not in drv.watched:
+            return None, (404, f"会话不在驱动池中且未声明看管: {sid}")
+        row = drv.external.get(sid)
+        if row is None or str(row.get("status") or "") == "unknown":
+            return None, (404, f"会话已结束（宿主无活动 agent）: {sid}")
+        return row, None
+
+    def _external_prompt(self, body, steer=False):
+        """池外会话的投递回落（`/prompt`·`/steer`）。
+
+        替身不做 LLM，故只记一笔 `external:True` 的调用记号并回
+        `{ok:true, external:true}`（平台半的断言面就是「驱动确实收到这次投递、
+        且知道它是外部会话」）；真插件在此让宿主 `agent.followup()/steer()` 真跑一轮。
+        """
+        sid = str(body.get("session_id") or "")
+        text = str(body.get("prompt") or "")
+        row, err = self._external_fallback(sid)
+        if err is not None:
+            return self._json(err[0], {"error": err[1]})
+        self.driver.note({"call": "/steer" if steer else "/prompt", "sid": sid,
+                          "prompt": text, "external": True})
+        return self._json(200, {"ok": True, "session_id": sid, "external": True})
+
+    def _external_answer(self, body):
+        """池外会话作答（提问）：按替身内部 `interaction` 兑现（call_id 匹配才接受）。"""
+        sid = str(body.get("session_id") or "")
+        row, err = self._external_fallback(sid)
+        if err is not None:
+            return self._json(err[0], {"error": err[1]})
+        drv = self.driver
+        with drv.lock:
+            cur = dict(row.get("interaction") or {})
+        if not cur or str(cur.get("call_id")) != str(body.get("call_id")):
+            # 与池内同口径：认领表里没有该 callId ⇒ 未接受（平台按 40405 放弃）
+            return self._json(200, {"accepted": False})
+        with drv.lock:
+            row["interaction"] = None
+        drv.note({"call": "/answer", "sid": sid, "call_id": body.get("call_id"),
+                  "answers": body.get("answers"), "external": True})
+        return self._json(200, {"accepted": True, "external": True})
+
+    def _external_approval(self, body):
+        """池外会话审批：按替身内部 `interaction`（kind=approval）兑现 `outcome`。"""
+        sid = str(body.get("session_id") or "")
+        row, err = self._external_fallback(sid)
+        if err is not None:
+            return self._json(err[0], {"error": err[1]})
+        drv = self.driver
+        with drv.lock:
+            cur = dict(row.get("interaction") or {})
+        if str(cur.get("kind") or "") != "approval":
+            return self._json(409, {"error": "无待决审批"})
+        with drv.lock:
+            row["interaction"] = None
+        drv.note({"call": "/approval", "sid": sid,
+                  "approval_id": body.get("approval_id"),
+                  "decision": body.get("decision"), "external": True})
+        return self._json(200, {"outcome": body.get("decision"), "external": True})
+
     # ---------- 路由 ----------
 
     def do_GET(self):
@@ -449,6 +564,19 @@ class _Handler(BaseHTTPRequestHandler):
                                     "sessions": len(drv.sessions)})
         if path == "/live":
             rows = [drv.status(s) for s in list(drv.sessions.values())]
+            # 外部会话并进同一张表、**owned:false**（与真插件 `live()` 同形）：
+            # 真插件外部行只有 session_id/task/cwd/status/owned/origin/interaction/
+            # last_turn_reason，**不带** last_seq/permission/started_at 等池内字段
+            # ——平台读侧必须容忍这些字段缺失（`dshevents._align` 用 row.get 兜底）。
+            with drv.lock:
+                ext = [dict(r) for r in drv.external.values()]
+            for r in ext:
+                rows.append({"session_id": r["sid"], "task": "",
+                             "cwd": r.get("cwd") or "",
+                             "status": r.get("status") or "unknown",
+                             "owned": False, "origin": "",
+                             "interaction": r.get("interaction"),
+                             "last_turn_reason": None})
             body = {"sessions": rows}
             # 完整声明（A 批）：真插件在 apply 时枚举完宿主已有会话才回 true；
             # None = 模拟旧插件（字段缺省 ⇒ 平台把空表按未知处理）。
@@ -459,6 +587,11 @@ class _Handler(BaseHTTPRequestHandler):
             sid = (q.get("session_id") or [""])[0]
             sess = drv.sessions.get(sid)
             if sess is None:
+                # 外部会话仍**不在驱动池**：与真插件同文案（`/status` 的池外回落
+                # 由 T2 提供，本替身按 T5 口径只回 404）——平台据此把投递基线
+                # 回落走 `dshevents`（T6）。
+                if sid in drv.external:
+                    return self._json(404, {"error": f"会话不在驱动池中: {sid}"})
                 return self._json(404, {"error": "session not found"})
             return self._json(200, drv.status(sess))
         if path == "/models":
@@ -529,7 +662,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/prompt":
             sess = self._session_of(body)
             if sess is None:
-                return self._json(404, {"error": "session not found"})
+                return self._external_prompt(body, steer=False)
             text = str(body.get("prompt") or "")
             drv.note({"call": "/prompt", "sid": sess.sid, "prompt": text})
             drv.fire_prompt_hook(sess, text)
@@ -538,12 +671,32 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/steer":
             sess = self._session_of(body)
             if sess is None:
-                return self._json(404, {"error": "session not found"})
+                return self._external_prompt(body, steer=True)
             text = str(body.get("prompt") or "")
             drv.note({"call": "/steer", "sid": sess.sid, "prompt": text})
             drv.fire_prompt_hook(sess, text)
             drv.start_turn(sess, text, steered=True)
             return self._json(200, {"ok": True})
+        if path == "/watch":
+            # 看管声明（C 批 T5；真插件 `_watch` 同形）：幂等 add/delete，
+            # 回执 `watched` 给**当前实际状态**（平台据此核对，而不是假设）。
+            # 只写内存表、不碰会话，故未知 sid 也 200（「声明意图」不是「建会话」）。
+            if drv.watch_fail:
+                return self._json(404, {"error": drv.watch_fail})
+            sid = str(body.get("session_id") or "")
+            if not sid:
+                return self._json(400, {"error": "session_id 不能为空"})
+            on = body.get("on") is not False
+            with drv.lock:
+                if on:
+                    drv.watched.add(sid)
+                else:
+                    drv.watched.discard(sid)
+                watched = sid in drv.watched
+            drv.note({"call": "/watch", "sid": sid, "on": bool(on),
+                      "watched": watched})
+            return self._json(200, {"ok": True, "session_id": sid,
+                                    "watched": watched})
         if path == "/cancel":
             sess = self._session_of(body)
             if sess is None:
@@ -651,7 +804,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/approval":
             sess = self._session_of(body)
             if sess is None:
-                return self._json(404, {"error": "session not found"})
+                return self._external_approval(body)
             if not sess.held_approvals:
                 return self._json(409, {"error": "approval not held by platform"})
             with sess.lock:
@@ -665,7 +818,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/answer":
             sess = self._session_of(body)
             if sess is None:
-                return self._json(404, {"error": "session not found"})
+                return self._external_answer(body)
             with sess.lock:
                 cur = sess.interaction or {}
             if not cur or str(cur.get("call_id")) != str(body.get("call_id")):
@@ -693,6 +846,40 @@ class _Handler(BaseHTTPRequestHandler):
     def _ctl_post(self, path):
         drv = self.driver
         body = self._read_body()
+        if path == "/_ctl/external":
+            # 登记一个**外部会话**（用户在 dsh GUI 里直跑/接管的会话）：只进
+            # `drv.external`，不进驱动池——故 `/live` 里 `owned:false`、
+            # `/status` 404、投递必须先在 `/watch` 声明看管。
+            # body: {sid, cwd?, status?}（status 缺省 'idle' = 宿主有活 agent）。
+            sid = str(body.get("sid") or body.get("session_id") or "")
+            if not sid:
+                return self._json(400, {"error": "sid required"})
+            with drv.lock:
+                row = drv.external.get(sid)
+                if row is None:
+                    row = {"sid": sid, "cwd": "", "status": "idle",
+                           "interaction": None}
+                    drv.external[sid] = row
+                if body.get("cwd"):
+                    row["cwd"] = str(body.get("cwd"))
+                if body.get("status"):
+                    row["status"] = str(body.get("status"))
+                snap = dict(row)
+            return self._json(200, {"ok": True, "external": snap})
+        if path == "/_ctl/external_state":
+            # 改外部会话实况：body {sid, status?, interaction?}。键**在不在** body
+            # 里决定改不改（`interaction: null` 即清空挂起），与「缺省不改」区分。
+            sid = str(body.get("sid") or body.get("session_id") or "")
+            with drv.lock:
+                row = drv.external.get(sid)
+                if row is None:
+                    return self._json(404, {"error": "external session not found"})
+                if "status" in body:
+                    row["status"] = str(body.get("status") or "")
+                if "interaction" in body:
+                    row["interaction"] = body.get("interaction")
+                snap = dict(row)
+            return self._json(200, {"ok": True, "external": snap})
         if path == "/_ctl/ask":
             sess = self._session_of(body)
             if sess is None:

@@ -7,6 +7,8 @@
 // props: value/onChange(textarea 受控), atts/onRemoveAtt(附件 chips),
 //        uploading/inputLocked/caps/meta(门控与 placeholder; meta 含 family/ctx/sessionModel/permission),
 //        chatRunning/taskRunning/queuedN/board/sending(发送-停止按钮分态; 忙/运行中=「排队」),
+//        stopDisabled(外部会话「停止」置灰, C 批 T8: 轮次归 dsh GUI, 平台停不了;
+//         仅置灰不隐藏——用户看得见按钮在、但停不了),
 //        permMode/modelSel/modelOpts/onSetModel/onSetPermission/effortSel/effortOpts/onSetEffort
 //        (会话级配置四控件, Task 4 + 2026-10-04 思考等级;
 //        权限三档 manual/yolo/auto；档位文案出处 kimi code，语义走服务端 DSH_PERMISSION_PRESETS 近似映射;
@@ -41,7 +43,7 @@ function fmtTok(n) {
 }
 
 export default function ComposerBar({ value, onChange, atts, onRemoveAtt, uploading, inputLocked,
-    caps, meta, onSend, onStop, chatRunning, taskRunning,
+    caps, meta, onSend, onStop, stopDisabled, chatRunning, taskRunning,
     queuedN, board, sending,
     permMode, modelSel, modelOpts, onSetModel, onSetPermission,
     effortSel, effortOpts, onSetEffort,
@@ -100,6 +102,12 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
   // 停止按钮：有排队消息=取消排队；会话运行中=停止当前对话（board 恒显示；
   // 有 queue 能力的族在任务运行中不显示——那是任务级停止，走任务列表的停止按钮）
   const canStop = (queuedN || 0) > 0 || (chatRunning && (board || !(caps.queue && taskRunning)))
+  // 按钮文案（两种语义共用一个按钮）：有排队消息且当前无运行 turn ⇒「取消排队」
+  const stopLabel = (queuedN || 0) > 0 && !chatRunning ? '取消排队' : '停止'
+  // 外部会话置灰（C 批 T8）：轮次归 dsh GUI 持有，平台的停止/中断对它无效——文案为
+  // 「停止」时置灰（仅置灰不隐藏，用户看得见按钮在、但停不了）；「取消排队」是平台侧
+  // 动作（撤销 m: 行，不碰 dsh 侧轮次），对外部会话照常有效，不连坐
+  const stopGreyed = !!stopDisabled && stopLabel === '停止'
   return (
     <div className="sess-composer">
       {/* 已作答·待送达行（2026-09-14，board 卡片会话）：答案已被平台收下、等项目
@@ -295,10 +303,11 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
           <text x="9" y="9" dominantBaseline="central" textAnchor="middle">{ctxPct}</text>
         </svg>
         <span style={{ flex: 1 }}></span>
-        {/* 停止/取消排队（有排队消息或会话运行中；两者可并存——停止不影响继续排队发送） */}
+        {/* 停止/取消排队（有排队消息或会话运行中；两者可并存——停止不影响继续排队发送）；
+            外部会话（stopGreyed）仍显示按钮但置灰：那是 dsh GUI 持有的轮次，平台停不了 */}
         {canStop && (
-          <Button variant="outline" size="sm" onClick={onStop}>
-            <Square /> {(queuedN || 0) > 0 && !chatRunning ? '取消排队' : '停止'}
+          <Button variant="outline" size="sm" onClick={onStop} disabled={stopGreyed}>
+            <Square /> {stopLabel}
           </Button>
         )}
         <Button size="sm" onClick={onSend}

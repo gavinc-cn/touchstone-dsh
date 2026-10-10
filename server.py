@@ -382,6 +382,29 @@ def _board_session_running(owner_cid, proj, sid):
     return board.web_session_busy(proj, sid)
 
 
+def _session_owned(sid):
+    """会话归属（会话端点 meta.owned；C 批 T8，2026-10-10）：**三态**返回。
+
+    - `True`  = 平台自持（驱动池内会话）：平台的停止/中断本来就有效，前端照现状渲染；
+    - `False` = 外部会话（用户在 dsh GUI 里直跑/接管）：轮次由 dsh GUI 持有，平台停不了，
+                前端据此出「外部会话」提示条并把「停止」置灰；
+    - `None`  = 注册表未知（未连接 / 热重载后 /live 未对齐 / 没见过该 sid）：前端
+                **按「池内」渲染**，与现状一致——「未知 ≠ 外部」是本批统一判定阶梯，
+                绝不据不可信快照反向推断成外部会话。
+
+    判定阶梯与投递前置闸 `chat._external_preflight` 的第 ②③④ 步逐条对齐（未知放行、
+    不可信快照放行、owned 为真放行，其余才是外部）。
+
+    为什么不是 `bool(...)`：外部会话上报的也是 `owned:false`，与「注册表未知」的兜底
+    值撞车——布尔下发会让断连/未对齐窗口里的池内会话被误判成外部（误出提示条，还误
+    停用「停止」/「取消排队」）。故未知一律下发 `None`，把「未知 ≠ 外部」落进线上格式。
+    """
+    st = dshevents.get(sid)
+    if st is None or not dshevents.aligned():
+        return None
+    return bool(st.get("owned"))
+
+
 def _session_permission_mode(state):
     """会话级权限档（会话窗「权限」控件的数据源，2026-10-04 修恒置灰）。
 
@@ -3348,6 +3371,9 @@ class Handler(BaseHTTPRequestHandler):
             # 与「立即送达」按钮（POST .../cards/<cid>/answer/deliver，不等项目空闲）
             data["answer_pending"] = board.is_answer_pending(owner_cid)
             data["interaction"] = board.interaction_of_sid(sid)
+            # 会话归属三态（C 批 T8）：前端按 `owned === false` 出「外部会话」提示条并把
+            # 「停止」置灰；`None`=注册表未知按「池内」渲染（判定口径见 _session_owned）
+            data["owned"] = _session_owned(sid)
             data["family"] = family
             if family == "dsh_plugin":
                 # P6：ctx 圈数据源＝EventHub 的 usage（事件推来，零请求）。
@@ -4822,6 +4848,14 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as e:
             self._respond(500, json.dumps({"error": f"agent 调用失败: {e}"},
                                           ensure_ascii=False).encode("utf-8"),
+                          "application/json; charset=utf-8")
+            return
+        except RuntimeError as e:
+            # 投递前置闸拒投（chat.DeliveryRefused：外部会话前提不成立，C 批 T5/T8）——
+            # 消息未入队、未落行，回 400 + 闸的中文文案（口径同 _api_board_session_comment）。
+            # 必须排在 dshdriver.DshDriverError 之后：它也是 RuntimeError 子类，先命中 409/500；
+            # 裸 RuntimeError 若逃逸，do_POST 无兜底 ⇒ 用户拿到连接重置而不是要求的明确文案。
+            self._respond(400, json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8"),
                           "application/json; charset=utf-8")
             return
         self._respond(200, json.dumps(

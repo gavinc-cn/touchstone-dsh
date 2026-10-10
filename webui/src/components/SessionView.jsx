@@ -19,6 +19,8 @@ import FilePreview from './FilePreview'
 import MergeHandoffDialog from './MergeHandoffDialog'
 import { Button } from '@/components/ui/button'
 import { findSlashToken } from '../utils/slashToken'
+// 会话归属（C 批 T8）：外部会话提示条文案与「停止」可用性判定（纯函数层，有单测）
+import { canStop, ownedHint } from '../utils/sessionOwned'
 // 提问索引侧栏的纯派生（用户提问 + agent 问答混排 / 回答文本解析 / 占位与悬浮文案）
 import { buildQuestionIndex, questionLabel, questionTitle } from '../utils/sessionQa'
 import { useDshHostCaps } from '../hooks/useDshHost'
@@ -778,6 +780,11 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   // 可打开的会话 id：board 模式取卡片当前会话 sid（弹窗内切会话/fork 后即跟随新值），
   // 任务模式取 meta 推送的 session_id（会话尚未生成时为空 → 按钮置灰）
   const dshSid = boardSid || meta?.session_id || ''
+  // 会话归属（C 批 T8）：外部会话（用户在 dsh GUI 里直跑/接管）出顶部提示条 + 把
+  // 「停止」置灰——轮次由 dsh GUI 持有，平台的停止/中断对它无效；注册表未知
+  // （meta.owned 未下发/为 null）按池内渲染（未知 ≠ 外部，判定见 utils/sessionOwned）
+  const ownedTip = ownedHint(meta?.owned)
+  const stopDisabled = !canStop(meta?.owned)
   // 2026-09-10：会话消息统一进平台队列——项目忙/任务运行中不再锁输入（发出即排队，
   // 项目空闲后按入队顺序执行），只有会话不可用(meta.found=false)才锁输入；
   // dsh 会话自身在跑时消息入宿主 inbox 排队（caps.queue；平台队列行可「立即注入」）
@@ -1005,11 +1012,15 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
         // 保持上次列表——读不到 ≠ 没有排队，避免排队行闪烁);
         // unit_state=该卡片单元在统一队列中的态(位次 pos/total 数据源);
         // queue_state=服务端展示派生七枚举(弹窗标题「队列」徽标, 见 SessionModal);
-        // card_column=卡片当前所在列(弹窗标题「卡片队列」徽标, 通过/移列后跟随变化)
+        // card_column=卡片当前所在列(弹窗标题「卡片队列」徽标, 通过/移列后跟随变化);
+        // owned=会话归属三态(外部会话提示条+「停止」置灰的数据源, 见 utils/sessionOwned,
+        // 白名单漏键即恒 undefined ⇒ 两处消费全成死代码, 由 tests/test_session_owned.py
+        // 的静态守卫钉住)
         setMeta((prev) => ({ found: d.found, reason: d.reason, agents: d.agents,
                   agent: d.agent, total: d.total, totals: d.totals, session_id: boardSid,
                   capabilities: d.capabilities, running: d.running,
                   interaction: d.interaction,
+                  owned: d.owned,
                   family: d.family, ctx: d.ctx, permission: d.permission,
                   sessionModel: d.sessionModel, sessionEffort: d.sessionEffort,
                   unit_state: d.unit_state,
@@ -1579,6 +1590,17 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
         {totalsText && <span className="sess-totals" title="输入 / 输出 / 缓存读取 / 总耗时">{totalsText}</span>}
       </div>
 
+      {/* 外部会话提示条（C 批 T8）：本会话由用户在 dsh GUI 里直跑/接管（非平台启动），
+          轮次归 dsh GUI 所有——平台的「停止」/中断对它无效，故底部「停止」按钮同步
+          置灰（按钮在 ComposerBar 里渲染，disabled 经 stopDisabled 透传）。仅
+          meta.owned === false 时渲染；注册表未知按池内渲染，不出条也不置灰 */}
+      {ownedTip && (
+        <div className="mb-2 flex items-start gap-2 rounded-md border border-border bg-secondary/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+          <TriangleAlert className="mt-0.5 h-3.5 w-3.5 flex-none text-primary" />
+          <span>{ownedTip}</span>
+        </div>
+      )}
+
       {/* 消息流(窗口化虚拟滚动: 只渲染视口附近条目) */}
       <MessageList entries={entries} metaNull={!meta} found={!!meta?.found} reason={meta?.reason}
         taskId={taskId} agent={meta?.agent || agent} pid={board ? boardPid : pid}
@@ -1610,6 +1632,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
           meta={meta}
           onSend={send}
           onStop={stopChat}
+          stopDisabled={stopDisabled}
           chatRunning={chatRunning}
           taskRunning={taskRunning}
           queuedN={queuedN}
