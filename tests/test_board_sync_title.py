@@ -73,20 +73,90 @@ def test_new_card_takes_first_prompt_lines(monkeypatch):
     assert c["origin"] == "sync" and c["session_id"] == SID
 
 
-def test_new_card_without_prompt_falls_back_then_backfills(monkeypatch):
-    """建卡时首问还没落盘（会话目录先建、提问后到的真实竞态）：先落 sid 短码兜底，
-    首问到达后的下一拍补齐标题与描述。"""
+def test_empty_session_not_projected_until_first_prompt(monkeypatch):
+    """A 类闸（2026-10-09）：会话一个字都还没有（首问/标题皆空）⇒ **不建卡**。
+
+    取代旧口径「先落 sid 短码兜底、首问到了再补齐」——看板不再出现
+    `session-xxxx` 占位卡；首问落盘后的下一个节拍才建卡，标题口径直接正确。"""
     proj = _mk_project()
     _patch(monkeypatch, [{"sid": SID, "title": "", "mtime": 0, "first_prompt": ""}])
-    created = board.sync_sessions(proj)
-    assert len(created) == 1
-    cid = created[0]
-    assert db.get_board_card(cid)["title"] == SID[:12]        # 兜底，非会话号需求
+    assert board.sync_sessions(proj) == []                     # 空会话不投影
     _patch(monkeypatch, [{"sid": SID, "title": "", "mtime": 0,
                           "first_prompt": "真实首问\n其余内容"}])
-    assert board.sync_sessions(proj) == []                     # 不重复建卡
-    c = db.get_board_card(cid)
+    created = board.sync_sessions(proj)                        # 首问落盘 → 建卡
+    assert len(created) == 1
+    c = db.get_board_card(created[0])
     assert c["title"] == "真实首问" and c["description"] == "其余内容"
+    assert c["session_id"] == SID and c["origin"] == "sync"
+    assert board.sync_sessions(proj) == []                     # 不重复建卡
+
+
+def test_title_only_session_still_projected(monkeypatch):
+    """A 类闸的边界：只有会话标题事件、首问未落盘（dsh 自动标题已生成）时照建——
+    标题取会话标题、描述留空，回落链保留（首问后到仍由 `_sync_card_follow` 补齐）。"""
+    proj = _mk_project()
+    _patch(monkeypatch, [{"sid": SID, "title": "dsh 生成的标题", "mtime": 0,
+                          "first_prompt": ""}])
+    created = board.sync_sessions(proj)
+    assert len(created) == 1
+    c = db.get_board_card(created[0])
+    assert c["title"] == "dsh 生成的标题" and c["description"] == ""
+
+
+def test_platform_owned_task_session_not_projected(monkeypatch):
+    """B 类闸（2026-10-09）：平台自己的任务会话（`tasks.session_id`）不再被当成
+    「外部直跑会话」重复投影成卡——实测 gtrade 项目 7 张压测/任务会话卡即此，
+    任务侧本就有入口（任务详情/日志）。"""
+    proj = _mk_project()
+    tid = db.insert_task(proj["id"], "压测任务", 0, "不复测", "rounds", "1")
+    db.update_task(tid, session_id=SID)
+    _patch(monkeypatch, [{"sid": SID, "title": "", "mtime": 0,
+                          "first_prompt": "压测任务（第 1 步/共 2 步）：\n细节"}])
+    assert board.sync_sessions(proj) == []
+
+
+def test_feishu_bound_session_not_projected(monkeypatch):
+    """B 类闸的另一来源：飞书通用对话当前绑定的会话（`feishu_bindings.cur_sid`）
+    在飞书侧已有入口，同样不重复投影。"""
+    proj = _mk_project()
+    db.set_feishu_binding("ou_sync_test", 0, proj["id"])
+    db.set_feishu_cur_session("ou_sync_test", proj["id"], SID)
+    _patch(monkeypatch, [{"sid": SID, "title": "", "mtime": 0,
+                          "first_prompt": "飞书里说的话\n其余"}])
+    assert board.sync_sessions(proj) == []
+
+
+def test_misbuilt_cards_swept_once(monkeypatch):
+    """存量误建卡收口（2026-10-09）：平台自持会话卡与空会话占位卡按「每项目一轮 +
+    软删可还原」口径收进回收站（判据与新建闸同源）；用户在回收站**还原**后同一
+    进程内不再被反复软删（尊重显式操作，口径同子代理卡收口）。"""
+    proj = _mk_project()
+    pid = proj["id"]
+    tid = db.insert_task(pid, "压测任务", 0, "不复测", "rounds", "1")
+    db.update_task(tid, session_id=SID)                        # 平台自持会话
+    owned_card = _mk_card(pid, title="压测任务（第 1 步/共 2 步）：", sid=SID)
+    empty_card = _mk_card(pid, title=SID2[:12], sid=SID2)      # 空会话占位卡
+    _patch(monkeypatch, [
+        {"sid": SID, "title": "", "mtime": 0, "first_prompt": "任务首问\n其余"},
+        {"sid": SID2, "title": "", "mtime": 0, "first_prompt": ""},
+    ])
+    board.sync_sessions(proj)
+    assert db.get_board_card(owned_card)["trashed"] == 1
+    assert db.get_board_card(empty_card)["trashed"] == 1
+    db.restore_board_card(empty_card)                          # 用户显式还原
+    board.sync_sessions(proj)
+    assert db.get_board_card(empty_card)["trashed"] == 0
+
+
+def test_misbuilt_sweep_spares_cards_with_content(monkeypatch):
+    """收口不误伤：有内容的会话卡（首问非空）既不在 B 类判据里、也不满足 A 类
+    「绑的会话全空」，照旧留在板上（919 那种「建卡后被真实使用」的卡属正常演进）。"""
+    proj = _mk_project()
+    keep = _mk_card(proj["id"], title="任务卡片919是啥? 怎么没有标题?", sid=SID)
+    _patch(monkeypatch, [{"sid": SID, "title": "会话标题", "mtime": 0,
+                          "first_prompt": "任务卡片919是啥? 怎么没有标题?"}])
+    board.sync_sessions(proj)
+    assert db.get_board_card(keep)["trashed"] == 0
 
 
 # ------------------------------------------------------------ 存量卡回填

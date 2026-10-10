@@ -3272,6 +3272,13 @@ SYNC_DESC_MAX = 2000   # 描述上限（防一次长提问把看板负载撑大�
 # 不被反复软删（进程重启后重建空集，重跑一轮幂等）。
 _SYNC_SUBAGENT_SWEPT = set()
 
+# 已跑过「存量误建卡软删收口」的项目 id（`sync_sessions` 尾巴，2026-10-09）：
+# 历史版本建出的两类卡——**平台自己持有会话的卡**（B 类：任务 / 飞书会话被当成
+# 外部会话重复投影）与**空会话占位卡**（A 类：会话一个字都还没有就投影出
+# `session-xxxx`）——新版一律不再产生，存量按同款「每项目一轮 + 软删可还原」
+# 口径收口（理由与边界见 `sync_sessions` 尾巴注释）。
+_SYNC_MISBUILT_SWEPT = set()
+
 
 def _split_first_prompt(text):
     """首问原文 → (标题, 描述)：首行=标题、其余行=描述。
@@ -3295,13 +3302,67 @@ def _split_first_prompt(text):
     return first, rest
 
 
+def _is_empty_session(item):
+    """空会话判定（A 类闸，2026-10-09）：会话已存在但**还没有任何内容**。
+
+    「有内容」= 有首问（`first_prompt`）或有会话标题事件（`title`）——两者都空
+    的会话就是用户刚在 dsh 侧建出来、一句话还没说的空壳。历史版本会给它建一张
+    `session-xxxx` 占位卡（等首问落盘再补齐标题），对用户表现为「看板上凭空
+    冒出一张没标题的卡」；新口径改为**不投影**，等首问/标题落盘后的下一个
+    30s 节拍再建卡（届时标题口径直接正确，不再需要兜底与补齐两步）。
+
+    item 缺失（会话已不在本次枚举里，如存储被删）返回 False——那种情况交既有
+    「存储被删→done」规则处理，本闸不表态。
+    """
+    if not item:
+        return False
+    return not str(item.get("first_prompt") or "").strip() \
+        and not str(item.get("title") or "").strip()
+
+
+def _platform_owned_sids(project_id):
+    """本项目「平台自己持有会话位」的 sid 集合（B 类闸，2026-10-09）。
+
+    sync 卡的定位是**外部直跑会话**（用户在 dsh GUI 里直接跑、平台只是把它
+    投影到看板）。平台自己建/持有的会话在平台侧已有入口，再投影一张卡就是
+    重复，故建卡前剔除。两个来源：
+
+      - `tasks.session_id`：任务主会话（任务详情 / 日志里已有入口）；
+      - `feishu_bindings.cur_sid`：飞书通用对话当前绑定的会话（飞书侧有入口）。
+
+    看板卡自己的会话不用列——`sync_sessions` 的 bound 映射（卡片 sessions 并集）
+    已经覆盖。站点会话窗发过消息的会话（`chat_msgs`）**不纳入**：那些会话常常
+    正是 dsh GUI 建出来的外部会话（用户从会话窗投一句话而已），纳入会让它们
+    永远建不出卡（含「建卡 30s 窗口内先投了消息」的竞态）。
+
+    一次查库、单轮复用；表缺失/结构演进按空集（归因失败绝不影响建卡）。
+    """
+    sids = set()
+    try:
+        with db.connect() as conn:
+            for sql, args in (
+                ("SELECT session_id AS sid FROM tasks"
+                 " WHERE project_id=? AND session_id<>''", (project_id,)),
+                ("SELECT cur_sid AS sid FROM feishu_bindings"
+                 " WHERE cur_project_id=? AND cur_sid<>''", (project_id,)),
+            ):
+                try:
+                    sids.update(str(r["sid"]) for r in conn.execute(sql, args))
+                except Exception:
+                    continue     # 单表不可用只丢该项，不影响另一项与建卡
+    except Exception:
+        return set()
+    return {s for s in sids if s}
+
+
 def _sync_card_fields(item, sid):
     """sync 卡**新建**时的 (标题, 描述)。
 
-    优先「主会话第一次用户提问」（首行→标题、其余→描述）；会话还没收到提问时
-    回落会话标题事件、再回落 sid 短码——建卡后首问一旦落盘，由
-    `_sync_card_follow` 在同步节拍里补齐（会话目录先建、提问后到的真实竞态，
-    见 board spec「sync 会话归类」）。
+    优先「主会话第一次用户提问」（首行→标题、其余→描述）；无首问时回落会话标题
+    事件、再回落 sid 短码兜底（`_sync_card_fields` 只被**已通过空会话闸**的调用方
+    调用——首问/标题两者皆空的会话根本不会建卡，见 `_is_empty_session`）。建卡后
+    首问一旦落盘，仍由 `_sync_card_follow` 在同步节拍里补齐（覆盖「只有标题、
+    首问后到」的窄窗口，见 board spec「sync 会话归类」）。
     """
     title, desc = _split_first_prompt(item.get("first_prompt") or "")
     if not title:
@@ -3338,12 +3399,20 @@ def _sync_card_follow(card, item, sid):
 def sync_sessions(project):
     """自动同步项目 agent 会话到看板。返回新建卡 id 列表。
 
+    **建卡闸（2026-10-09 两处收窄，用户诉求「看板别再莫名冒卡」）**：
+    - A 类 空会话不投影：会话已存在但一句话都还没有（首问/标题皆空）时不建卡，
+      等首问或标题落盘后的下一个节拍再建（见 `_is_empty_session`）；
+    - B 类 平台自持会话不重复投影：`tasks.session_id` / `feishu_bindings.cur_sid`
+      的会话平台侧已有入口，不再当成"外部直跑会话"投影成卡（见
+      `_platform_owned_sids`）。
+
     新建卡（origin='sync'）：标题/描述=主会话第一次用户提问（首行→标题、其余→
-    描述；首问未落盘时回落会话标题、再回落 sid 短码，落盘后由本函数补齐），绑定
+    描述；无首问时回落会话标题、再回落 sid 短码，落盘后由本函数补齐），绑定
     主会话，busy→doing / 空闲→review；存量 sync 卡：首问补齐标题/描述（用户改过
     名的不动）+ dsh 族列映射移交调和器（事件驱动），此处仅归档→done（人工拖到
     todo/blocked/done 后不再自动搬）；会话存储被删的 sync 卡自动进 done；绑子代理
-    会话的存量 sync 卡收口进回收站（每项目一轮，见函数尾注释）。
+    会话的存量 sync 卡收口进回收站（每项目一轮）；上述两类误建卡的存量也按同款
+    口径收口（每项目一轮，见函数尾注释）。
     sync 卡不占 runner 项目占用（外部会话平台控制不了，防堵死统一队列）。
     """
     if not settings_of(project["id"]).get("sync_sessions", True):
@@ -3363,6 +3432,8 @@ def sync_sessions(project):
             bound[s] = c
         if c["session_id"]:
             bound[c["session_id"]] = c
+    # B 类闸的 sid 集合（每轮一次查库，见 `_platform_owned_sids`）
+    owned = _platform_owned_sids(project["id"])
     created = []
     for it in items:
         sid = it["sid"]
@@ -3371,9 +3442,16 @@ def sync_sessions(project):
         # busy 按需判定（2026-09-27）：只有新卡分支消费 busy；存量 sync 卡只用
         # archived（列映射归调和器），不再为每个会话无条件探测。
         busy = False
-        if c is None:
+        if c is None and not _is_empty_session(it) and sid not in owned:
             busy = _sync_session_busy(project, raw_family, sid, it["mtime"])
         if c is None:
+            # A 类闸：空会话不投影（建卡竞态由"等首问"取代旧的"先落 sid 短码
+            # 兜底再补齐"——用户在板上看到的将只会有内容的会话）
+            if _is_empty_session(it):
+                continue
+            # B 类闸：平台自持会话（任务/飞书）已有入口，不重复投影成卡
+            if sid in owned:
+                continue
             title, desc = _sync_card_fields(it, sid)
             cid = db.insert_board_card(project["id"], title, desc)
             # 归档会话：不参与 busy 判定，直接落「已完成」
@@ -3416,6 +3494,34 @@ def sync_sessions(project):
         if dropped:
             print(f"[board-sync] 子代理会话卡收口: 软删 {dropped} 张"
                   f"（项目 {project['id']}，见 spec/queue/排队与占用.md）")
+    # —— 存量误建卡收口（2026-10-09，两类新闸对应的存量）——
+    # A/B 两闸只挡新建，历史版本已经建出的两类卡还留在板面上（实测：任务会话卡
+    # 12 张、空会话占位卡 10 张，跨 4 个项目）。这里**软删进回收站**（可还原；
+    # 不删会话文件、不动会话与依赖、不碰任务的任何记录）。判据与新建闸同源：
+    #   ① B 类：卡绑的 sid 是平台自持会话（tasks/飞书）——重复投影，收回；
+    #   ② A 类：卡绑的会话**全部**是空会话（首问/标题皆空）——没有任何内容可看；
+    #      任一 sid 不在本轮枚举里（存储被删等）即不判空，交「存储被删→done」规则。
+    # 三条边界与子代理卡收口一致：只认 origin='sync' 自动卡（用户自建卡一字节
+    # 不动）、平台在管的运行中卡跳过（`_has_active_run`）、每项目只跑一轮
+    # （用户从回收站还原后同一进程内不再被反复软删；重启后重跑一轮，幂等）。
+    if project["id"] not in _SYNC_MISBUILT_SWEPT:
+        by_sid = {it["sid"]: it for it in items}
+        dropped = 0
+        for c in cards:
+            if c["origin"] != "sync" or _has_active_run(c["id"]):
+                continue
+            sids = set(_card_sids(c))
+            if not sids:
+                continue
+            if any(s in owned for s in sids) or \
+                    all(_is_empty_session(by_sid.get(s)) for s in sids):
+                db.trash_board_card(c["id"])
+                dropped += 1
+        _SYNC_MISBUILT_SWEPT.add(project["id"])
+        if dropped:
+            print(f"[board-sync] 误建卡收口: 软删 {dropped} 张"
+                  f"（项目 {project['id']}：平台自持会话卡 / 空会话占位卡，"
+                  f"见 board spec §48）")
     # 存储被删 → done（list 只回 50 条，不能用「不在列表」判定删除，必须逐卡查存在性）
     for c in cards:
         if c["origin"] != "sync" or c["column_key"] == "done" or _has_active_run(c["id"]):
