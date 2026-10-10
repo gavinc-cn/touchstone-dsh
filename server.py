@@ -3493,11 +3493,14 @@ class Handler(BaseHTTPRequestHandler):
             data["owned"] = _session_owned(sid)
             data["family"] = family
             if family == "dsh_plugin":
-                # P6：ctx 圈数据源＝EventHub 的 usage（事件推来，零请求）。
-                # dsh 的 TokenUsage 没有窗口上限 ⇒ max 缺省 None（前端不画环）。
+                # 上下文圈（2026-10-10 修「恒为 0」）：分子/分母都随上面的
+                # `sessparse.load` 从会话存储的两个 last-wins 槽位带出来
+                # （used＝最新 usage 的 prompt 侧 token 数，max＝最新
+                # `request/context` 的 contextWindow，见 sessparse._dsh_prompt_tokens），
+                # 此处**不再**用 EventHub 的 usage 覆盖：那条只有 total 口径、且插件
+                # 后端一重启就清零；会话文件是持久的，本来就在本次请求里解析过
+                # （零额外解压，`data["ctx"]` 由 load 结果带出，窗口未知时不带该键）。
                 st = dshevents.get(sid)
-                if st and st.get("usage"):
-                    data["ctx"] = {"used": st["usage"].get("total") or 0, "max": None}
                 # 会话级模型（会话窗「模型」展示）：事件流里学到就用它，否则留空
                 # 由前端回落「项目默认模型」（既有兜底链）
                 sel = (st or {}).get("model") or {}

@@ -224,6 +224,93 @@ def test_dsh_load_cache_hit_and_stamp_invalidation(monkeypatch):
     assert len(calls) == 4
 
 
+# ------------------------------------------- 上下文占用（会话窗底栏 ctx 圈）
+
+def _ctx_frames(window=1000000, usage=None, window2=None, usage2=None):
+    """构造带 `request/context`（分母）与 `assistant/message` usage（分子）的事件帧。
+
+    window2/usage2 非 None 时再各落一条，用于验证两个槽位各自 last-wins。
+    """
+    recs = []
+    seq = 1
+    if window is not None:
+        data = {"provider": "deepseek-account", "model": "deepseek-flash"}
+        if window:
+            data["contextWindow"] = window
+        recs.append({"type": "request/context", "seq": seq, "time": seq, "data": data})
+        seq += 1
+    if window2 is not None:
+        d2 = {"provider": "p2", "model": "m2"}
+        if window2:
+            d2["contextWindow"] = window2
+        recs.append({"type": "request/context", "seq": seq, "time": seq, "data": d2})
+        seq += 1
+    for u in (usage, usage2):
+        if u is None:
+            continue
+        recs.append({"type": "assistant/message", "seq": seq, "time": seq,
+                     "data": {"message": {"content": [{"type": "text", "text": "好"}]},
+                              "usage": u}})
+        seq += 1
+    return [recs]
+
+
+# 真机样本口径（卡 952 会话 2026-10-10 实测）：input 372 + cacheRead 277632
+# + cacheWrite 0 = 278004；total 279174 - output 1170 = 278004（两式一致）
+_USAGE_REAL = {"inputTokens": 372, "outputTokens": 1170, "cacheReadTokens": 277632,
+               "cacheWriteTokens": 0, "totalTokens": 279174}
+
+
+def test_dsh_ctx_window_and_pressure_tokens():
+    """ctx 圈数据源（2026-10-10 修「恒为 0」）：分母 = 最新 `request/context` 的
+    contextWindow（适配器声明的路由窗口），分子 = 最新 usage 的 **prompt 侧** token 数
+    —— 口径与 dsh token-meter 的 pressureTokens 逐字一致（input + cacheRead +
+    cacheWrite），**不是 totalTokens**（total 含本次输出，会把占用随回复越画越大）。"""
+    _mk_dsh(frames=_ctx_frames(usage=_USAGE_REAL))
+    data = sessparse.load("dsh", DSH_SID, "main", 0)
+    assert data["ctx"] == {"used": 278004, "max": 1000000}
+
+
+def test_dsh_ctx_last_wins_and_missing_window():
+    """两个槽位各自 last-wins（中途 /model 换模型会再落一条 request/context、
+    每轮回复都落一条 usage）；适配器**未声明窗口**（request/context 无 contextWindow
+    或整条缺席）⇒ 不下发 ctx——前端据「无 ctx」渲染灰环 + tooltip「暂无上下文用量
+    数据」，而不是画一个恒 0 的进度弧（这正是本次要修的旧形态）。"""
+    _mk_dsh(frames=_ctx_frames(window=100000, window2=200000,
+                              usage={"inputTokens": 10, "outputTokens": 5,
+                                     "cacheReadTokens": 20},
+                              usage2={"inputTokens": 7, "outputTokens": 3}))
+    assert sessparse.load("dsh", DSH_SID, "main", 0)["ctx"] == {"used": 7, "max": 200000}
+
+    # 只有 request/context、够不着窗口字段 → 不下发 ctx
+    _mk_dsh(frames=_ctx_frames(window=None), sid=DSH_SID2)
+    assert "ctx" not in sessparse.load("dsh", DSH_SID2, "main", 0)
+
+
+def test_dsh_ctx_fallback_and_empty_usage():
+    """老格式 usage（缺 inputTokens，无 cache 字段）时分子退回 totalTokens - outputTokens；
+    窗口已知但一次模型调用都还没有（或 usage 完全不可用）⇒ used=0（空上下文），
+    环照常按 0% 画——有分母才算得出版本。"""
+    _mk_dsh(frames=_ctx_frames(usage={"outputTokens": 40, "totalTokens": 340}))
+    assert sessparse.load("dsh", DSH_SID, "main", 0)["ctx"] == {"used": 300, "max": 1000000}
+
+    _mk_dsh(frames=_ctx_frames(usage={"totalTokens": "bad"}), sid=DSH_SID2)
+    assert sessparse.load("dsh", DSH_SID2, "main", 0)["ctx"] == {"used": 0, "max": 1000000}
+
+
+def test_dsh_ctx_follows_appended_frames():
+    """ctx 随会话增量更新：追加一帧新 usage 后按 stamp 重解析，分子跟随（分母不变）。"""
+    path = _mk_dsh(frames=_ctx_frames(usage={"inputTokens": 100, "outputTokens": 10}))
+    assert sessparse.load("dsh", DSH_SID, "main", 0)["ctx"] == {"used": 100, "max": 1000000}
+    _append_dsh_frame(path, [{"type": "assistant/message", "seq": 9, "time": 900,
+                              "data": {"message": {"content": []},
+                                       "usage": {"inputTokens": 250,
+                                                 "cacheReadTokens": 750,
+                                                 "outputTokens": 12,
+                                                 "totalTokens": 1012}}}])
+    assert sessparse.load("dsh", DSH_SID, "main", 0)["ctx"] == {"used": 1000, "max": 1000000}
+
+
 def test_dsh_load_tolerates_bad_and_non_object_lines():
     """dsh load：坏 JSON 行与合法 JSON 非对象行（数组/数字/字符串/null）跳过不崩——
     旧实现对这类行直接 .get() 会抛 AttributeError 炸掉整次解析；同一容错覆盖标题

@@ -19,6 +19,11 @@
   tool_result {call_id, name, text, is_error, truncated}
 （dsh 事件流没有 usage 汇总事件与「本轮失败」独立通道，故不产出 usage / error 条目；
 响应里的 totals 字段保留为 0，维持 API 形状稳定。）
+
+上下文占用（会话窗底栏 ctx 圈，2026-10-10 修「恒为 0」）：dsh 会话日志里有两个
+可用槽位——`request/context` 事件带**上下文窗口**（适配器声明，见 _parse_dsh）、
+`assistant/message` 带本次调用的 **TokenUsage**；`load()` 在有窗口时附带
+`ctx={"used","max"}`（分子口径＝prompt 侧 token 数，见 _dsh_prompt_tokens）。
 """
 
 import base64
@@ -71,13 +76,50 @@ def _obj(raw):
     return d if isinstance(d, dict) else None
 
 
+def _nonneg_int(v):
+    """JSON 值 → 非负整数，其他（bool / 字符串 / 负数 / None）一律 None。
+
+    token 计数与窗口大小都必须是干净的整数：`True` 在 Python 里是 int 子类，
+    直接参与算术会算出垃圾值。
+    """
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+
+def _dsh_prompt_tokens(usage):
+    """dsh `TokenUsage` → 本次请求的 **prompt 侧 token 数**（上下文占用分子）。
+
+    口径照抄 dsh `dsh-token-meter` 的 `pressureFrom`：
+    `inputTokens + (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0)`＝「这一次请求
+    送进模型的上下文有多大」。**不能**用 totalTokens：它含本次回复的输出 token，
+    环会随回复长度越画越大（且与上下文窗口不成比例）。inputTokens 缺失（老格式）
+    退回 `totalTokens - outputTokens`；再取不到返回 None（调用方保留上一槽位值）。
+    """
+    if not isinstance(usage, dict):
+        return None
+    inp = _nonneg_int(usage.get("inputTokens"))
+    if inp is not None:
+        return inp + (_nonneg_int(usage.get("cacheReadTokens")) or 0) \
+                   + (_nonneg_int(usage.get("cacheWriteTokens")) or 0)
+    total = _nonneg_int(usage.get("totalTokens"))
+    out = _nonneg_int(usage.get("outputTokens"))
+    if total is not None and out is not None and total >= out:
+        return total - out
+    return None
+
+
 class _Entries:
     """entry 收集器：自动分配 seq 并累计 totals。"""
 
     def __init__(self):
         self.entries = []
-        # token/耗时汇总（API 契约字段）：dsh 事件流无 usage 事件，恒为 0
+        # token/耗时汇总（API 契约字段）：dsh 事件流无 usage 汇总事件，恒为 0
         self.totals = {"input": 0, "output": 0, "cache_read": 0, "duration_ms": 0}
+        # 上下文占用两槽位（会话窗底栏 ctx 圈，2026-10-10 修「恒为 0」）：两个**独立
+        # last-wins** 槽位，口径与 dsh token-meter 的 `contextPressure` 投影一致：
+        #   used = 最新一次 usage 的 prompt 侧 token 数（pressureTokens）
+        #   max  = 最新 `request/context` 事件的 contextWindow（适配器声明的路由窗口）
+        # None = 该槽位尚未出现过（老会话 / 适配器未声明窗口 / 还没有一次模型调用）。
+        self.ctx = {"used": None, "max": None}
         # dsh 回退锚点（仅 _parse_dsh 填充）：[(mid, ese)，...] —— 真实用户提问的
         # 合成 mid 与**会话事件 seq**；dsh 没有原地 undo，回退＝按该 seq fork 新会话
         self.dsh_anchors = []
@@ -472,6 +514,18 @@ def _parse_dsh(path):
                     col.add("think", tm, text=b.get("text", ""))
                 elif b.get("type") == "text":
                     col.add("assistant", tm, text=b.get("text", ""))
+            # 上下文占用分子（会话窗 ctx 圈）：每次模型调用结算的 prompt 侧 token 数，
+            # last-wins（无 usage 的中断消息不参与，槽位保留上一次可用的值）
+            used = _dsh_prompt_tokens(data.get("usage"))
+            if used is not None:
+                col.ctx["used"] = used
+        elif t == "request/context":
+            # 上下文占用分母（会话窗 ctx 圈）：宿主为该路由解析出的上下文窗口
+            # （适配器声明才有；中途 /model 换模型会再落一条，故 last-wins）。
+            # 0/缺失一律忽略——窗口必须为正才有意义（宿主 schema 也是 positive）。
+            win = _nonneg_int(data.get("contextWindow"))
+            if win:
+                col.ctx["max"] = win
         elif t == "tool/call":
             cid = data.get("callId", "")
             tool_names[cid] = data.get("name", "")
@@ -588,6 +642,8 @@ def load(family, sid, agent, after=0):
     或 {"found": False, "reason": "missing" | "unsupported"}。
     entries 为 seq >= after 的增量；total 为全量条数（变小时客户端应重置重拉）。
     dsh 为单线会话（固定 main，无子 agent）。
+    另在**分母（上下文窗口）已知**时附带 `ctx`（会话窗底栏占用圈的数据源，
+    见 _dsh_prompt_tokens / `request/context`）；窗口未知时**不带**该键。
     """
     if family not in FAMILIES:
         return {"found": False, "reason": "unsupported"}
@@ -604,14 +660,21 @@ def load(family, sid, agent, after=0):
         cache = _CACHE.get(key)
         if cache is None or cache["stamp"] != stamp:
             col = _parse_dsh(zpath)
-            cache = {"stamp": stamp, "entries": col.entries, "totals": col.totals}
+            cache = {"stamp": stamp, "entries": col.entries, "totals": col.totals,
+                     "ctx": col.ctx}
             _CACHE[key] = cache
     except (OSError, ValueError):
         return {"found": False, "reason": "missing"}
     entries = cache["entries"]
     after = max(0, int(after or 0))
-    return {"found": True, "agents": agents, "agent": agent,
-            "entries": entries[after:], "total": len(entries), "totals": cache["totals"]}
+    out = {"found": True, "agents": agents, "agent": agent,
+           "entries": entries[after:], "total": len(entries), "totals": cache["totals"]}
+    # 上下文占用（会话窗底栏 ctx 圈，2026-10-10）：只在**分母已知**时下发——前端按
+    # `+ctx.max > 0` 决定画不画进度弧，窗口未知时给了也只能画成 0%（本次修的旧形态）。
+    # 分子缺省 0：窗口已知但还没有一次模型调用＝空上下文，0% 是真实读数。
+    if cache["ctx"]["max"]:
+        out["ctx"] = {"used": cache["ctx"]["used"] or 0, "max": cache["ctx"]["max"]}
+    return out
 
 
 def resolve_media(family, sid, agent, media_id):
