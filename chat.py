@@ -520,6 +520,145 @@ _DSH_BASELINE = {}
 # 残留 True 会毒化下一次 followup 的等待）。池内等待器 `dsh_wait_turn` 不读它。
 _DSH_INJECT = {}
 
+# ---------- 投递前预订阅（缺陷 A 修复，2026-10-10 T9b 真机复跑发现） ----------
+#
+# 缺陷（真机 run1–run7，6/6 命中）：外部会话的普通 followup 投递里，`turn/start`
+# 帧到中枢在 +0.072~0.143s，而等待器的 `dshevents.subscribe` 在 +0.084~0.152s
+# ⇒ **帧早到 9~13ms**；全局状态流对进程内订阅者**无回放** ⇒ 该帧永远看不到
+# ⇒ `started` 恒假 ⇒ 本轮 `turn/end` 被丢弃 ⇒ 只能等满 `TURN_START_GRACE`(60s)
+# 收口（`m:` 行在 turn/end 帧后 56~57s 才落 done）。有卡路由 `ext:` 行兜住占用
+# （无实害，只是状态滞后 60s）；**无卡路（任务侧直送 / 飞书绑定会话）会真的提前
+# 释放项目运行位**，与仍在跑的外部 turn 并发改同一工作区 ⇒ 违「任务按项目串行」
+# 红线。
+#
+# 修法：把「订阅 + 帧队列」从等待器里抽成 `_TurnSubscription`，`dsh_send` 在
+# **投递之前**先建订阅并放进旁表 `_DSH_SUB`（与 `_DSH_BASELINE`/`_DSH_INJECT` 同款
+# 「投递时记、等待时取走即弃」）；`dsh_wait_turn_via_events` 优先取走预订阅，取不到
+# 再退回「现订阅」（老行为——覆盖「预订阅与等待之间才转外部」等窗口）。
+# 硬约束（逐条落在下面的实现里）：
+#   ① **只对会走事件流路的那一档建**（`dshevents.get(sid)["owned"] is False`，正是
+#      `chat.wait_turn` 分流到事件流的判据）：池内/未知的投递零改动、零多余订阅
+#      ——池内等待器 `dsh_wait_turn`（按会话 SSE）根本不读这张旁表；
+#   ② **不等待的投递不留悬挂订阅**（`chat._inject_send`、`board._deliver_now(
+#      inject=True)`、卡片首投等）：旁表有界（条数上限 `DSH_SUB_MAX` + TTL 惰性过期
+#      `DSH_SUB_TTL`），出表/取走/投递抛异常一律 `dshevents.unsubscribe`（订阅回调
+#      常驻中枢消费者列表，泄漏会让每次状态帧都白调一次）；
+#   ③ 帧队列**只收本 sid 的帧**（状态帧低频 ⇒ 无人取走的队列也有界），等待器
+#      `_consume` 里的 sid 过滤照旧（双保险）；
+#   ④ **不拿 `status == "running"` 无条件播种 `started`**（I1 安全阀不许写宽）：
+#      预订阅只解决「帧早到」，`started` 的判定阶梯一个字未改。
+DSH_SUB_MAX = 32        # `_DSH_SUB` 条数上限（超出按建订阅时刻从旧到新回收）
+DSH_SUB_TTL = 120.0     # 预订阅惰性过期（秒）：投递后无人取走即回收
+
+
+class _TurnSubscription:
+    """投递前建立的一次性全局状态流订阅：本 sid 的帧 → 线程安全队列。
+
+    一个实例＝一次投递的「帧口袋」：`dsh_send` 建它（`_dsh_sub_open`）→
+    `dsh_wait_turn_via_events` 取走并当帧队列用（`_dsh_sub_take`）→ 等待器 `finally`
+    或回收路径 `close()`（退订，幂等）。取不到预订阅时等待器自建同款实例（老行为）。
+    """
+
+    def __init__(self, sid):
+        self.sid = str(sid or "")
+        self.frames = queue.Queue()     # 回调（消费线程）→ 等待器（本线程）的交接口
+        self.created = time.time()
+        self._closed = False
+        # 回调存成**对象同一性稳定**的引用：订阅与退订必须传同一个对象（`dshevents`
+        # 的订阅者列表按 `==` 摘除本就够用，但既有用例按 `is` 钉「退订的就是订阅的
+        # 那一个回调」——回调常驻列表的泄漏判据；每次属性访问都会新建 bound method，
+        # 故存一次，两个方向都稳）。
+        self._cb = self._on_frame
+
+    def _on_frame(self, frame):
+        """中枢订阅回调：只收本 sid 的帧并入队。
+
+        契约要求短小（跑在事件消费线程里）：这里只做一次字符串比较 + `put`。
+        按 sid 过滤（等待器 `_consume` 里还有一层同样的过滤）让「无人取走的预订阅」
+        队列也保持有界——状态帧是低频事件，不会像按 token 的流那样爆量。
+        """
+        if self._closed:
+            return
+        if str(frame.get("session_id") or "") != self.sid:
+            return
+        self.frames.put(frame)
+
+    def close(self):
+        """退订（幂等）：回调必须从中枢订阅者列表里摘掉，否则常驻泄漏。"""
+        if self._closed:
+            return
+        self._closed = True
+        dshevents.unsubscribe(self._cb)
+
+
+_DSH_SUB = {}                       # sid -> _TurnSubscription（投递时建、等待时取走即弃）
+_DSH_SUB_LOCK = threading.Lock()
+
+
+def _dsh_sub_reap_locked():
+    """旁表惰性回收（**调用方须持 `_DSH_SUB_LOCK`**）：过 TTL 与超条数上限的条目出表。
+
+    返回**待退订**列表（出锁后再 `close()`）：`close()` 要拿中枢的订阅锁，不在本锁内
+    做，免得两把锁的获取顺序成为隐患（业务侧没有任何路径反向获取本锁）。
+    """
+    now = time.time()
+    stale = []
+    for sid, sub in list(_DSH_SUB.items()):
+        if now - sub.created > DSH_SUB_TTL:
+            stale.append(_DSH_SUB.pop(sid))
+    over = len(_DSH_SUB) - DSH_SUB_MAX
+    if over > 0:
+        # 超限：按建订阅时刻从旧到新回收（同一时刻大量投递时也收敛回上限之内）
+        oldest = sorted(_DSH_SUB.items(), key=lambda kv: kv[1].created)[:over]
+        for sid, _sub in oldest:
+            stale.append(_DSH_SUB.pop(sid))
+    return stale
+
+
+def _dsh_sub_open(sid):
+    """投递**之前**建预订阅并放进旁表；返回该订阅（同 sid 的旧订阅覆盖即退订）。
+
+    只应由 `dsh_send` 在「会话是外部（`owned is False`）」时调用——那是
+    `chat.wait_turn` 会分流到事件流路、等待器会取用它的唯一一档。
+    """
+    sub = _TurnSubscription(sid)
+    dshevents.subscribe(sub._cb)
+    with _DSH_SUB_LOCK:
+        old = _DSH_SUB.get(sub.sid)
+        _DSH_SUB[sub.sid] = sub
+        # 入表**之后**回收：条数上限对「当前表」恒成立（新订阅 created 最新，
+        # 不会被自己的这一次回收摘掉）
+        stale = _dsh_sub_reap_locked()
+    for item in stale:
+        item.close()                    # 过期/超限的旧订阅：真退订
+    if old is not None:
+        old.close()                     # 同 sid 上一次没被取走的预订阅：回收
+    return sub
+
+
+def _dsh_sub_take(sid):
+    """取走该 sid 的预订阅（无则 `None`）：取走即从旁表删除。
+
+    退订责任随之转移给调用方（等待器在 `finally` 里 `close()`）——旁表只负责
+    「投递到取走」这段短窗口内的保管，取走即弃与 `_DSH_BASELINE` 同款语义。
+    """
+    with _DSH_SUB_LOCK:
+        stale = _dsh_sub_reap_locked()
+        sub = _DSH_SUB.pop(str(sid or ""), None)
+    for item in stale:
+        item.close()
+    return sub
+
+
+def _dsh_sub_drop(sub):
+    """按对象回收一个预订阅（投递失败路径）：仅当旁表里仍是它才删，随后退订。"""
+    if sub is None:
+        return
+    with _DSH_SUB_LOCK:
+        if _DSH_SUB.get(sub.sid) is sub:
+            _DSH_SUB.pop(sub.sid, None)
+    sub.close()
+
 
 def dsh_busy(sid):
     """dsh 插件会话是否正在跑 turn（驱动不可用按 False，交由发送路径报错）。
@@ -567,14 +706,27 @@ def dsh_send(sid, message, inject=False):
     基线来源见 `_dsh_baseline_since`（外部会话没有 `last_seq` ⇒ 回落中枢）。
     投递的同时把「本次是否 steer」记进旁表 `_DSH_INJECT`（I1）：外部会话的等待器
     据此决定要不要按「已在跑的 turn」播种 `started`。
+    **投递前预订阅（缺陷 A 修复）**：外部会话先建 `_TurnSubscription` 放进 `_DSH_SUB`
+    ——`turn/start` 帧可能在 `POST` 返回前后几毫秒到达，等投递返回再订阅就永远看不到
+    （全局状态流对进程内订阅者无回放）；投递失败当场回收该预订阅。
     """
     if not sid:
         raise dshdriver.DshDriverError(-1, "会话 id 为空，无法投递")
-    since = _dsh_baseline_since(sid)
-    if inject:
-        dshdriver.steer(sid, message)
-    else:
-        dshdriver.prompt(sid, message)
+    # 外部会话（`owned is False`）＝ `chat.wait_turn` 会分流到事件流路的那一档：
+    # 投递前先订阅（见 `_TurnSubscription`）；池内/未知不建（池内等待器不读它）。
+    sub = None
+    if (dshevents.get(sid) or {}).get("owned") is False:
+        sub = _dsh_sub_open(sid)
+    try:
+        since = _dsh_baseline_since(sid)
+        if inject:
+            dshdriver.steer(sid, message)
+        else:
+            dshdriver.prompt(sid, message)
+    except Exception:
+        # 投递失败：预订阅无人会取走，当场回收（不留悬挂订阅）
+        _dsh_sub_drop(sub)
+        raise
     _DSH_BASELINE[sid] = since
     _DSH_INJECT[sid] = bool(inject)      # I1：True/False 都写（覆盖上一次投递的旧值）
     return since
@@ -675,6 +827,12 @@ def dsh_wait_turn_via_events(sid, since=None, log_path="", yield_on_interaction=
     `since`：本轮起点 seq（缺省先取本次投递基线 `_DSH_BASELINE`，再回落中枢
     `last_seq`）——只用于过滤 `turn/start`（`event_seq > since` 才算「本轮起来了」），
     避免上一轮遗留的 turn/start 被误当本轮。
+    **帧口袋优先用投递前的预订阅**（缺陷 A）：`dsh_send` 对**外部会话**在投递之前就
+    `dshevents.subscribe` 并把帧排进 `_TurnSubscription.frames`（旁表 `_DSH_SUB`），
+    这里 `_dsh_sub_take` 取走即用——`turn/start` 帧即便在投递返回后立刻到达也已在
+    口袋里；取不到（池内转外部、非 `dsh_send` 投递、旁表已回收）退回「现订阅」
+    （老行为：窗口只是收窄，不再是常态）。**举证责任在订阅**：`started` 的判定
+    阶梯一个字未改（不许无条件按 `status=='running'` 播种，见第 ⓪ 条）。
     判定阶梯（顺序即优先级）：
       ⓪ **steer 注入「已在跑的 turn」按已在跑播种 `started`**（I1，两个条件缺一不可，
          见下方 `started` 初始化处的长注释）；
@@ -719,11 +877,15 @@ def dsh_wait_turn_via_events(sid, since=None, log_path="", yield_on_interaction=
     # 之后时（消息已进 agent inbox、本轮尚未 turn/start），旧 turn 的 `turn/end` 会被
     # 误判成本轮结束——正是 T6 修掉的那类误判；故条件①必须同时成立。
     started = injected and (dshevents.get(sid) or {}).get("status") == "running"
-    inbox = queue.Queue()                # 消费线程 → 本函数：原始帧的线程安全交接
-
-    def _on_frame(frame):
-        """中枢订阅回调：只入队（契约要求短小——它跑在事件消费线程里）。"""
-        inbox.put(frame)
+    # —— 帧口袋（缺陷 A）：优先取投递前的预订阅，取不到再自建（老行为）——
+    # 预订阅在 `dsh_send` 里建于**投递之前** ⇒ `turn/start` 帧只要在本轮等待开始
+    # 之后到达就不会漏（真机实测帧早于「投递后订阅」9~13ms）。自建分支覆盖
+    # 「预订阅不存在」的形态：非 `dsh_send` 投递、池内转外部、旁表已回收/过期。
+    sub = _dsh_sub_take(sid)
+    if sub is None:
+        sub = _TurnSubscription(sid)
+        dshevents.subscribe(sub._cb)
+    inbox = sub.frames                # 消费线程 → 本函数：原始帧的线程安全交接
 
     def _consume(frame):
         """处理一帧：返回结论（None / 'turn_end' / 'interaction'），必要时推进 started。
@@ -753,7 +915,6 @@ def dsh_wait_turn_via_events(sid, since=None, log_path="", yield_on_interaction=
             started = True
         return None
 
-    dshevents.subscribe(_on_frame)
     try:
         while True:
             try:
@@ -785,7 +946,9 @@ def dsh_wait_turn_via_events(sid, since=None, log_path="", yield_on_interaction=
             if verdict == "interaction":
                 return STATE_YIELDED     # 已送达；挂起让位（运行位即释放）
     finally:
-        dshevents.unsubscribe(_on_frame)   # 订阅必须回收（回调常驻消费线程的列表里）
+        # 订阅必须回收（回调常驻中枢消费者列表里）；预订阅与自建订阅同款：
+        # 取走即弃（`_dsh_sub_take` 已出旁表）+ 这里 `close()` 幂等退订。
+        sub.close()
 
 
 def _dsh_send_now(project, sid, message, inject):

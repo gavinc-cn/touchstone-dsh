@@ -37,13 +37,14 @@ import chat
 import db
 import dshevents
 import dshdriver
+import runner
 import waitq
 from fakedriver import FakeDriver
 
 
 @pytest.fixture(autouse=True)
 def _clean_queue_and_watch():
-    """每例前后清等待项/消息表 + 看管集合 + 看管代次/扫卡节流（都是进程内/表级共享态，跨例会串味）。"""
+    """每例前后清等待项/消息表 + 看管集合 + 看管代次/扫卡节流 + 投递前预订阅（都是进程内/表级共享态，跨例会串味）。"""
     def _clean():
         with db.connect() as conn:
             for t in ("wait_items", "chat_msgs"):
@@ -51,6 +52,12 @@ def _clean_queue_and_watch():
         board._WATCHED.clear()
         board._WATCH_GEN = None      # 代次指针同样复位：否则用例结果依赖执行顺序
         board._WATCH_PRUNE_AT = 0.0  # 扫卡节流窗口（I3）同样复位：视作「本拍该扫」
+        # 投递前预订阅旁表（缺陷 A）：出表 + 真退订（订阅回调常驻中枢列表，泄漏会串味）
+        with chat._DSH_SUB_LOCK:
+            subs = list(chat._DSH_SUB.values())
+            chat._DSH_SUB.clear()
+        for sub in subs:
+            sub.close()
     _clean()
     yield
     _clean()
@@ -1224,4 +1231,253 @@ def test_watch_prune_generation_sync_not_throttled(monkeypatch):
         assert board._watch_prune() == 0                 # 仍在窗口内：不扫卡
         assert board._WATCHED == set()                   # 但代次失效照常清空（不被节流）
     finally:
+        drv.stop()
+
+
+# ---------- ⑫ 缺陷 A（T9b 真机复跑发现，2026-10-10）：投递前预订阅 ----------
+#
+# 真机现象（run1–run7，6/6 命中）：「投递返回 → 等待器订阅」的订阅竞态。外部会话的
+# 普通 followup 投递里，`turn/start` 帧到中枢在 +0.072~0.143s，而等待器的
+# `dshevents.subscribe` 在 +0.084~0.152s ⇒ **帧早到 9~13ms**；全局状态流对进程内
+# 订阅者**无回放** ⇒ `started` 恒假 ⇒ 本轮 `turn/end` 被丢弃 ⇒ 只能等满
+# `TURN_START_GRACE`(60s) 收口（`m:` 行在 turn/end 帧后 56~57s 才落 done）。
+# 有卡路由 `ext:` 行兜住占用（无实害，状态滞后 60s）；**无卡路（任务侧直送 / 飞书
+# 绑定会话）会真的提前释放项目运行位**，与仍在跑的外部 turn 并发改同一工作区 ⇒ 违
+# 「任务按项目串行」红线。
+#
+# 修法：把「订阅 + 帧队列」从等待器里抽成 `_TurnSubscription`，`chat.dsh_send` 在
+# **投递之前**先建订阅并放进模块级旁表 `chat._DSH_SUB`（与 `_DSH_BASELINE`/
+# `_DSH_INJECT` 同款「投递时记、等待时取走即弃」）；`dsh_wait_turn_via_events` 优先
+# 取走预订阅，取不到再退回「现订阅」（老行为，覆盖预订阅与等待之间的窗口）。
+# 本节守卫四件事：① 订阅确实早于投递（结构判据）；② 投递返回后**立刻**到的帧仍被
+# 真 `turn/end` 收口（行为判据，修复前必红）；③ 不等待的投递不留悬挂订阅（条数上限
+# + TTL 惰性过期，均真退订）；④ 池内/未知会话**不建**预订阅（池内路径零改动）。
+
+PRESUB_SID = "session-ext-presub"
+
+
+def test_dsh_send_subscribes_before_delivery(monkeypatch):
+    """预订阅早于投递：`/prompt` 之前回调已注册（缺陷 A 的结构判据）。"""
+    drv = _real_driver(monkeypatch)
+    try:
+        sid = PRESUB_SID
+        drv.ctl("/_ctl/external", {"sid": sid, "cwd": "/tmp/ext"})
+        _hub(monkeypatch, {sid: {"owned": False, "status": "idle", "last_seq": 3}})
+        board._WATCHED.clear()
+        assert board._ensure_watch(sid) is True          # 外部会话投递许可（T5 闸）
+        order = []
+        real_sub = dshevents.subscribe
+        real_prompt = dshdriver.prompt
+
+        def spy_sub(cb):
+            order.append("subscribe")
+            return real_sub(cb)
+
+        def spy_prompt(s, text):
+            order.append("prompt")
+            return real_prompt(s, text)
+
+        monkeypatch.setattr(chat.dshevents, "subscribe", spy_sub)
+        monkeypatch.setattr(chat.dshdriver, "prompt", spy_prompt)
+        try:
+            assert chat.dsh_send(sid, "hi") == 3
+        finally:
+            _drop_delivery(sid)
+        assert order[:2] == ["subscribe", "prompt"]      # 订阅先于投递（修复前恒 prompt 先）
+        assert chat._DSH_SUB.get(sid) is not None        # 预订阅留在旁表等等待器取走
+    finally:
+        drv.stop()
+
+
+def test_pre_subscription_catches_frame_before_waiter(monkeypatch):
+    """投递返回后立刻到的帧不再漏：等待器取走预订阅 ⇒ 由真 `turn/end` 收口。
+
+    确定性造法（不靠赛跑）：真投递（`dsh_send` 打替身 `/prompt`）⇒ 预订阅已建立；
+    投递返回后**同步**喂 `turn/start` + `turn/end`（等价于「帧在投递返回后、等待器
+    开工前到达」）⇒ 才调等待器。修复前等待器此刻才订阅，两帧都不在队列里 ⇒
+    `started` 恒假 ⇒ 只能走 `TURN_START_GRACE`；本用例把宽限放大到 3s 并断言返回
+    < 1s，宽限收口（≥3s）必被击落。
+    """
+    drv = _real_driver(monkeypatch)
+    sid = PRESUB_SID + "-frame"
+    frames = {}
+    unsub = _capture_subscribe(monkeypatch, frames)
+    try:
+        drv.ctl("/_ctl/external", {"sid": sid, "cwd": "/tmp/ext"})
+        _hub(monkeypatch, {sid: {"owned": False, "status": "idle", "last_seq": 5}})
+        board._WATCHED.clear()
+        assert board._ensure_watch(sid) is True      # 外部会话投递许可（T5 闸）
+        assert chat.dsh_send(sid, "hi") == 5         # 真投递 ⇒ 预订阅在旁表
+        cb = frames.get("cb")
+        assert cb is not None, "投递前没有建立订阅（缺陷 A 未修）"
+        cb({"type": "turn/start", "session_id": sid, "data": {"event_seq": 6}})
+        cb({"type": "turn/end", "session_id": sid,
+            "data": {"reason": {"kind": "completed"}, "event_seq": 9}})
+        monkeypatch.setattr(chat, "TURN_START_GRACE", 3.0)     # 宽限远大于观测
+        t0 = time.time()
+        assert chat.dsh_wait_turn_via_events(sid) is None
+        assert time.time() - t0 < 1.0                # 真 turn/end 收口（宽限 3s 没到）
+        assert sid not in chat._DSH_SUB              # 取走即弃
+        assert unsub and unsub[0] is cb              # finally 真退订（不泄漏回调）
+    finally:
+        _drop_delivery(sid)
+        with chat._DSH_SUB_LOCK:
+            stale = chat._DSH_SUB.pop(sid, None)
+        if stale is not None:
+            stale.close()
+        drv.stop()
+
+
+def test_pre_subscription_bounded_and_reclaimed(monkeypatch):
+    """不等待的投递不留悬挂订阅：超条数上限 / 超 TTL 的预订阅出表并真退订。
+
+    `chat._inject_send`、`board._deliver_now(inject=True)` 这类**不等待**的投递也会
+    先订阅（投递前建），若无人取走必须回收——订阅回调常驻中枢消费者列表，泄漏会污染
+    全局回调（每次状态帧都被调一次）。
+    """
+    _real_driver(monkeypatch)
+    _hub(monkeypatch, {})
+    unsub = []
+    monkeypatch.setattr(chat.dshevents, "subscribe", lambda cb: cb)
+    monkeypatch.setattr(chat.dshevents, "unsubscribe", lambda cb: unsub.append(cb))
+    monkeypatch.setattr(chat, "DSH_SUB_MAX", 2)
+    monkeypatch.setattr(chat, "DSH_SUB_TTL", 300.0)
+    subs = [chat._dsh_sub_open(f"session-ext-cap-{i}") for i in range(4)]
+    assert len(chat._DSH_SUB) <= 2                   # 旁表有界（条数上限）
+    assert subs[0]._closed and subs[1]._closed       # 最旧两条被回收…
+    assert len(unsub) == 2                           # …且真退订
+    # TTL 惰性过期：把在场的一条改成超龄，再开一条 ⇒ 它出表并退订
+    chat._DSH_SUB["session-ext-cap-2"].created -= 1000
+    chat._dsh_sub_open("session-ext-cap-ttl")
+    assert "session-ext-cap-2" not in chat._DSH_SUB
+    assert subs[2]._closed
+
+
+def test_dsh_send_skips_pre_subscription_for_pool_and_unknown(monkeypatch):
+    """池内（owned:true）/ 注册表未知的投递**不建**预订阅（池内等待器用不上它）。
+
+    硬约束「池内路径行为一个字节不变」：`dsh_wait_turn`（按会话 SSE）从不读旁表，
+    给它建订阅只是白搭一个中枢回调 ⇒ 只有会走事件流路的那一档（`owned is False`）
+    才建。
+    """
+    drv = _real_driver(monkeypatch)
+    try:
+        sid_pool = PRESUB_SID + "-pool"
+        drv.create(sid_pool, cwd="/tmp/ext")
+        _hub(monkeypatch, {sid_pool: {"owned": True, "status": "idle"}})
+        try:
+            chat.dsh_send(sid_pool, "hi")
+        finally:
+            _drop_delivery(sid_pool)
+        assert chat._DSH_SUB == {}                   # 池内：不建
+        sid_unk = PRESUB_SID + "-unknown"
+        _hub(monkeypatch, {})                        # 注册表未知（断连 / 没见过该 sid）
+        monkeypatch.setattr(chat.dshdriver, "prompt", lambda s, t: None)
+        try:
+            chat.dsh_send(sid_unk, "hi")
+        finally:
+            _drop_delivery(sid_unk)
+        assert chat._DSH_SUB == {}                   # 未知 ≠ 外部：同样不建
+    finally:
+        drv.stop()
+
+
+# ---------- ⑬ 缺陷 B（T9b 真机发现，2026-10-10）：作答送达的孤儿 c: 行 vs 本卡排队消息 ----------
+#
+# 真机现象（6 轮 5 轮命中，观测 ≥180s 不自愈）：外部会话卡作答 ⇒ 真送达成功
+# （`_deliver_answer_unit`）⇒ 卡回 doing + `card_started` 补回一条**没有 `_RUNS`
+# 背书**的「送达恢复」`c:` 行（外部会话不由平台拥有，`_RUNS` 里没有它）；紧接着该卡
+# 再入队一条消息（`m:` 行 queued）⇒ 调和器把 `live_msg`（本卡有排队/执行中的消息）
+# 算作「在跑」⇒ doing 分支恒 `None`（不收行）⇒ 而那条 `c:` 行就在运行前缀里，serial
+# 项目里把这条消息**永久挡在队外**（`_prefix_window_blocked`）⇒ 该卡与项目后续投递
+# 全被挡住，周期自检只打 `[waitq-selfcheck] 行状态不明（仅告警）: c:N`。
+#
+# 机制定位（是否外部卡特有）：**孤儿行**（活跃 `c:` 行 ∧ 无 `_RUNS` 背书）的生产
+# 产生面只有一处——作答/立即送达送达成功时的 `card_started`（`_deliver_answer_unit` /
+# `deliver_pending_answer_now`）。池内卡的同一形态带 `_RUNS` 条目（`has_run=True`）⇒
+# 调和器早退不碰、由巡视线程 `_finish_run` 在会话空闲时收口该行 ⇒ **生产上只有外部/
+# 接管卡（`owned:false`，has_run=False）能命中互等**；但互等规则本身是通用的（任何
+# 「孤儿行 + live_msg」都成立），只是池内卡走不到。
+#
+# 修法（控制者裁定方向）：这类孤儿运行行只认**实况 busy**——行若已空闲（中枢可信地
+# 报 idle），调和器必须收口它（`to_review`）让排队消息按队序起跑；`live_msg` 不能再
+# 把它按「在跑」保住（行恰恰是消息起不来的原因）。**不采用**「无条件按
+# `status == 'running'` 播种」那类放宽，也不动 `_prefix_window_blocked`（队列窗口闸
+# 三处同口径是硬约束）。
+
+DEADLOCK_SID = "session-ext-deadlock"
+
+
+def test_orphan_hold_only_applies_without_run_entry():
+    """纯函数判据：孤儿行（无 `_RUNS` 背书）只认实况 busy；其余形态照旧不动。
+
+    同一个「doing + 会话空闲 + 本卡有排队消息」形态，四种输入四种结论——后两条是
+    「既有语义一个字节不变」的守卫：
+      ① 池内（has_run=True）⇒ `None`（列流转归 `_finish_run`，调和器不碰）；
+      ② 普通卡（无活跃 `c:` 行，orphan_hold=False）⇒ `None`（**live_msg 照旧算
+         「在跑」**：消息即将驱动会话，阻塞列卡片回开发列靠的正是它）；
+      ③ 孤儿行（活跃 `c:` 行无 `_RUNS` 背书，生产上＝外部卡的送达恢复行）⇒
+         `to_review`（收行放行队列——消息被这条行挡着，live_msg 不能再当「在跑」）；
+      ④ 孤儿行但会话确实在跑（busy=True）⇒ `None`（行继续占位，等本轮结束）。
+    """
+    card = {"column_key": "doing", "block_kind": None}
+    r = {"pending": False, "busy": False}
+    assert board._reconcile_action_for("dsh_plugin", card, r, True, True) is None
+    assert board._reconcile_action_for("dsh_plugin", card, r, False, True) is None
+    assert board._reconcile_action_for("dsh_plugin", card, r, False, True,
+                                       orphan_hold=True) == "to_review"
+    assert board._reconcile_action_for("dsh_plugin", card,
+                                       {"pending": False, "busy": True},
+                                       False, True, orphan_hold=True) is None
+
+
+def test_answer_recovery_row_releases_queued_message(monkeypatch, tmp_path):
+    """真 waitq + 真调和 + 真补位器：孤儿 `c:` 行 + 本卡排队消息 ⇒ 调和器收行、消息可拾取。
+
+    现场全走真路径：真替身驱动 → `answer_interaction` 真入队 `a:` 行 →
+    `_deliver_answer_unit` 真送达（打替身 `/answer`）⇒ 卡回 doing + 孤儿行 running；
+    会话实况换成空闲（恢复的那一轮结束了）⇒ `chat.submit` 真入队一条消息。断言：
+    修复前 `_pick_locked()` 拾不到（行挡着）且调和器不收行；修复后调和器收口该行、
+    卡片归位待审核、消息仍在队且真补位器能拾起它。
+    """
+    drv = _real_driver(monkeypatch)
+    try:
+        sid = DEADLOCK_SID
+        drv.ctl("/_ctl/external", {"sid": sid, "cwd": "/tmp/ext"})
+        drv.ctl("/_ctl/external_state", {"sid": sid, "status": "running",
+                                         "interaction": EXT_ANS_MARK})
+        _hub(monkeypatch, {sid: {"owned": False, "status": "running",
+                                 "interaction": EXT_ANS_MARK}})
+        board._WATCHED.clear()
+        inst = runner.Runner(boot_gate=True)      # 真 runner：worker 停在启动闸，不抢行
+        runner.INSTANCE = inst
+        proj = _proj()
+        cid = _make_sync_card(proj, sid, column="doing")
+        card = db.get_board_card(cid)
+        board.interaction_probe("dsh_plugin", proj, sid)   # 会话端点/调和器同款读口
+        assert board.answer_interaction(proj, card, "c1", EXT_ANS_PICK) is None
+        board._deliver_answer_unit(cid)           # 真送达（替身 /answer）⇒ 补回孤儿行
+        row = waitq.get_active(waitq.KIND_CARD, cid)
+        assert row is not None and row["state"] == waitq.RUNNING
+        assert not board._has_active_run(cid)     # 孤儿：无 `_RUNS` 背书（外部会话）
+        # 恢复的那一轮结束（真机：作答后会话续跑完本轮）⇒ 会话实况空闲
+        _hub(monkeypatch, {sid: {"owned": False, "status": "idle"}})
+        # 该卡紧接着再入队一条消息（真机 ③ 组形态：作答送达后 ~1.4s 又发一条）
+        msg = chat.submit(proj["id"], sid, "后续排队消息", card_id=cid,
+                          family="dsh_plugin")
+        mid = msg["id"]
+        assert waitq.get_active(waitq.KIND_MSG, mid) is not None    # m: 行在场（排队）
+        assert chat.live_of_sid(sid) is True
+        # —— 互等现场自证：孤儿行占着运行前缀 ⇒ 真补位器拾不到这条消息 ——
+        with inst._cond:
+            assert inst._pick_locked() is None, "现场没复现互等（消息没被孤儿行挡住）"
+        # —— 调和器一轮：孤儿行（会话可信空闲）必须收口 ⇒ 消息重新可拾取 ——
+        board._iw_once()
+        assert waitq.get_active(waitq.KIND_CARD, cid) is None      # c: 行已收口
+        assert db.get_board_card(cid)["column_key"] == "review"    # 卡归位待审核
+        assert chat.live_of_sid(sid) is True                       # 消息没被丢
+        with inst._cond:
+            assert inst._pick_locked() == f"m:{mid}"               # 真补位器能拾起（不再被挡）
+    finally:
+        _drop_delivery(DEADLOCK_SID)
         drv.stop()

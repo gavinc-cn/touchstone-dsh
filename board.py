@@ -3712,6 +3712,27 @@ def run_pid(card_id):
     return None
 
 
+def _orphan_hold(card_id):
+    """本卡是否持有「无平台在管条目背书」的活跃 `c:` 行（**孤儿运行行**，缺陷 B 判据）。
+
+    生产上唯一的产生面＝作答/立即送达**送达成功**时 `runner.card_started` 补回的
+    「送达恢复」/「立即送达」行：那行由平台建，而目标会话是外部/接管会话（平台的
+    `_RUNS` 里没有它）⇒ 行没有「在管条目」背书，收口只能靠调和器按实况判定
+    （`_starting_window` 的 docstring 早已写明这类形态要能「落回待审核」）。
+
+    为什么必须与 `has_run` 分开判（缺陷 B，T9b 真机 6 轮 5 轮命中）：调和状态机把
+    `live_msg`（本卡有排队/执行中的 `m:` 行）算作「在跑」，而**孤儿行本身就在运行
+    前缀里**——serial 项目里它把本卡自己的排队消息永久挡在队外
+    （`runner._prefix_window_blocked`），状态机又因为那条消息「排队中」判本卡「在跑」
+    ⇒ 互等：行不收口、消息永远排不到、该卡与项目后续投递全被挡住（周期自检只打
+    `[waitq-selfcheck] 行状态不明（仅告警）`）。故孤儿行只认**实况 busy**。
+
+    池内卡走不到这个形态：同一「送达恢复」动作发生在池内卡上时 `_RUNS` 条目在场
+    （`has_run=True`），状态机在 `has_run` 分支早退、行由巡视线程 `_finish_run` 在
+    会话空闲时收口（见 `_reconcile_action_for` 的不干预规则）。"""
+    return _card_unit_active(card_id) and not _has_active_run(card_id)
+
+
 # ---------- 交互等待检测（InteractionWatcher，方案 A） ----------
 # 单族化后等待态只有 dsh 一个来源：`dshevents` 注册表的 interaction 字段——
 # 提问来自 `user-questions/request` waterfall、审批来自 `approval/asked`
@@ -4073,7 +4094,8 @@ _RECONCILE_FIELDS = {
 
 
 def _reconcile_action_for(family, card, r, has_run=False, live_msg=False,
-                          stop_recent=False, archived=None, starting=False):
+                          stop_recent=False, archived=None, starting=False,
+                          orphan_hold=False):
     """调和状态机（纯函数，单测覆盖）：按会话实况 r（pending/busy）、归档态
     archived 与当前卡状态得出动作，action ∈
     {'block'（进阻塞+interaction）,
@@ -4087,10 +4109,16 @@ def _reconcile_action_for(family, card, r, has_run=False, live_msg=False,
     （None，中枢断连）一律不动作（不变量「断连=未知」）。
     映射规则（无平台在管运行时，设计 §2.4）：提问→blocked(interaction)；
     运行中→doing；空闲→review；阻塞解除按运行态回 doing/review。
-    运行判定 running = busy or live_msg（2026-09-11）：live_msg=本卡会话有
-    排队/执行中的平台消息单元（chat.live_of_sid）——消息排队尚未执行时会话
-    并不 busy，仅凭 busy 会漏判；阻塞列卡片在消息投递后即应回开发列（用户
-    约定：所有正在运行的卡片都在「正在开发」列）。
+    运行判定 running = busy or (live_msg ∧ ¬orphan_hold)（2026-09-11 立，2026-10-10
+    加孤儿行例外）：live_msg=本卡会话有排队/执行中的平台消息单元（chat.live_of_sid）
+    ——消息排队尚未执行时会话并不 busy，仅凭 busy 会漏判；阻塞列卡片在消息投递后
+    即应回开发列（用户约定：所有正在运行的卡片都在「正在开发」列）。
+    `orphan_hold`（`_orphan_hold`：本卡有活跃 `c:` 行但无 `_RUNS` 背书，生产上＝
+    作答/立即送达补回的「送达恢复」行）**只认实况 busy**：那条行本身就在运行前缀里，
+    serial 项目里它把本卡自己的排队消息挡在队外，再把 live_msg 当「在跑」就是互等
+    （缺陷 B：行不收口 ⇒ 消息永远排不到 ⇒ 行永远收不了；真机 6 轮 5 轮命中，该卡与
+    项目后续投递被永久挡住）。会话可信空闲（busy=False）时这类行必须收口让队列继续
+    ——与「送达恢复行按实况落回待审核」的既有口径（`_starting_window`）同源。
     不干预规则：退场族不动（调用方已过滤，此处兜底保纯函数安全）；
     todo/done 终态不动；平台在管运行（has_run=True）的卡只做交互 block/recover、
     busy/空闲流转归 _finish_run 拥有（防与轮收尾抢写）——**唯一例外**是卡片在
@@ -4131,7 +4159,9 @@ def _reconcile_action_for(family, card, r, has_run=False, live_msg=False,
         return None
     pending = bool(r and r.get("pending"))
     busy = bool(r and r.get("busy"))
-    running = busy or bool(live_msg)
+    # 孤儿运行行只认实况 busy（缺陷 B，见 `_orphan_hold` 与 docstring）：
+    # live_msg 不能再把它按「在跑」保住——行恰恰是那条消息起不来的原因
+    running = busy or (bool(live_msg) and not orphan_hold)
     if card["block_kind"] == "manual":
         if pending:
             return None                      # 等待用户回答：维持阻塞态
@@ -4197,10 +4227,13 @@ def _iw_apply(family, card, action, r):
         return                    # 已答待送达：调和动作一律跳过（见 docstring）
     has_run = _has_active_run(card["id"])
     live_msg = chat.live_of_sid((cur["session_id"] or "").strip())
+    # 写前复核同样重取「孤儿运行行」（缺陷 B，短路口径同 `_iw_once`）
+    orphan = bool(live_msg) and _orphan_hold(cur["id"])
     if _reconcile_action_for(family, cur, r, has_run, live_msg,
                              _stop_recent(cur["id"]),
                              dshevents.archived(cur["session_id"] or ""),
-                             _starting_window(cur["id"])) != action:
+                             _starting_window(cur["id"]),
+                             orphan) != action:
         return                    # 状态已变：跳过，不写库
     if action == "to_done":
         # dsh 侧归档 → 卡片进「已完成」（2026-10-05 反向规则）：走容器迁移原语收口
@@ -4421,11 +4454,16 @@ def _iw_once():
                     c.update(r)            # pending/busy/qid/question/options/answerable/text
                     c["ts"] = now
                 live_msg = chat.live_of_sid(sid)   # 本卡消息在跑/排队（消息驱动的会话）
+                # 孤儿运行行（缺陷 B）只在「本卡确有排队/执行中的消息」时才影响判定
+                # （无消息时 running 只看 busy，见 `_reconcile_action_for`）⇒ 短路
+                # 掉那次行点查，平台在管卡的常规拍零额外 DB 访问。
+                orphan = bool(live_msg) and _orphan_hold(card["id"])
                 action = _reconcile_action_for(fam, card, r,
                                                _has_active_run(card["id"]), live_msg,
                                                _stop_recent(card["id"]), arch,
                                                _starting_window(card["id"],
-                                                                starting_ids))
+                                                                starting_ids),
+                                               orphan)
                 if action:
                     _iw_apply(fam, card, action, r)
             except Exception:
