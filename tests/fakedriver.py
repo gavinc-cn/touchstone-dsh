@@ -120,6 +120,10 @@ class FakeDriver:
         # 看管端点硬失败开关（测试用，同 `archive_fail` 口径）：置字符串后
         # `/watch` 一律 404——模拟**旧插件**没有该端点，平台据此降级为拒投。
         self.watch_fail = None
+        # 建/恢复会话硬失败开关（测试用，同 `watch_fail` 口径）：置字符串后
+        # `/session` 一律 500——模拟「会话已不存在 / 恢复失败」，供卡片会话投递
+        # 自愈（2026-10-10）用例断言「接不回时给明确文案、不再白投一次」。
+        self.session_fail = None
         self.state_seq = 0
         self.state_ring = []
         self.subs = []                  # 状态流订阅者队列（queue.Queue）
@@ -651,6 +655,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(401, {"error": "bad token"})
         body = self._read_body()
         if path == "/session":
+            if drv.session_fail:
+                return self._json(500, {"error": drv.session_fail})
             sid = str(body.get("session_id") or "")
             sess = drv.create(sid, cwd=str(body.get("cwd") or ""),
                               task=str(body.get("task") or ""),

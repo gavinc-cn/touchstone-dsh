@@ -2068,23 +2068,67 @@ def _deliver_unit(project, card, comment_row, wrapped, inject):
         proc.wait()
 
 
+# 卡片会话已不在宿主时的投递文案（用户可见）：不暴露「驱动池 / sid」这类内部
+# 链路词，只给「发生了什么 + 怎么办」。sync 卡与「接不回」两种情形共用一句
+# ——两者对用户的可执行动作相同（点「开始」重新拉起会话）。
+LOST_SESSION_MSG = ("会话已结束（宿主无活动 agent），消息未送达："
+                    "请点「开始」重新拉起会话后再发送")
+
+
+def _ensure_card_session(project, card, sid):
+    """投递前确保宿主仍持有该卡会话（宿主已失去 ⇒ 按 resume 接回）；返回可否投递。
+
+    报障现场（卡 934，2026-10-10）：插件热重载把宿主里所有会话 dispose 掉之后，
+    卡片 `session_id` 仍在库、卡照旧在列，用户发评论 / 点「立即注入」时驱动回
+    404「会话不在驱动池中」——前端只能把这条内部文案原样 toast 出来。
+
+    判定阶梯（与调和器「会话确已结束」同源，见 `chat.host_session_lost`）：
+      ① 宿主仍有该会话（注册表命中 / 中枢未对齐＝未知）⇒ 放行，**零请求**，
+         既有路径一个字节不变；
+      ② 确已失去 ∧ 平台自建卡（`origin` 非 `sync`）⇒ `chat.revive_host_session`
+         按 `_start_web` 的续接语义 resume 回池（同一张卡、同一个 sid、同一上下文）；
+      ③ 确已失去 ∧ sync 卡（`origin='sync'`＝用户在 dsh GUI 直跑的会话）⇒ **不接回**：
+         C 批设计「只投递不接管」，平台不擅自把用户的会话收养进自己的池，直接报
+         明确文案（用户点「开始」＝显式收养，那是既有路径）。
+    接不回（会话文件缺失 / 驱动不可达）同样返回 False，由调用方报同一句文案。
+    cwd 取 `card_workspace`（worktree 卡的会话必须接回它的工作树）。
+    """
+    if not chat.host_session_lost(sid):
+        return True                        # 会话在场/未知：不动作（零请求）
+    cid = _card_opt(card, "id")
+    row = db.get_board_card(cid) if cid else None
+    origin = str(_card_opt(row if row is not None else card, "origin") or "")
+    if origin == "sync":
+        return False                       # 外部会话卡：不接管（见上 ③）
+    return chat.revive_host_session(sid, cwd=card_workspace(project, row or card),
+                                    task=f"card-{cid}")
+
+
 def _deliver_now(project, card, comment_row, wrapped, inject=False):
     """评论真正送达（立即路径与统一队列消息单元执行体共用；wrapped 为最终文本）。
 
     单族化后只有 dsh_plugin：followup 忙时排进 agent inbox（等同服务端排队
     语义，不拒绝）；inject=True 走 steer，注入当前 turn 的最近 step 边界
     （steer 失败不致命，评论仍在 inbox/队列）。退场族无投递通道，直接报错。
-    送达前重声明看管（C 批终审 I2，2026-10-10）：本函数是评论**推送腿**的唯一出口，
-    `_watch_prune` 的撤销判据只看活跃 `m:` 行（不看推送腿本身）。真实入口＝平台重启后
-    `_rebuild_run → _deliver_unit → _deliver_now` 直投：`_WATCHED` 随进程清空、驱动侧
-    `watched` 也可能随插件重载清空 ⇒ 不补声明就撞驱动「未看管」404、`m:` 行落 error。
-    与 `_answer_deliver` 同源同判据（`_watch_before_delivery` 内部只对 `owned:false`
-    的池外会话声明，命中缓存零请求；池内/未知路径一个字节不变）。
+    送达前两道人造兜底（顺序固定，都在 `_web_send` 之前）：
+      ① **会话存活**（2026-10-10，修卡 934）：宿主被插件热重载/重启清过之后，
+         卡会话可能已不存在——`_ensure_card_session` 先接回再投递，接不回则报
+         `LOST_SESSION_MSG`（可执行指引），不再把驱动 404 原文案抛给用户；
+      ② 重声明看管（C 批终审 I2，2026-10-10）：本函数是评论**推送腿**的唯一出口，
+         `_watch_prune` 的撤销判据只看活跃 `m:` 行（不看推送腿本身）。真实入口＝平台
+         重启后 `_rebuild_run → _deliver_unit → _deliver_now` 直投：`_WATCHED` 随进程
+         清空、驱动侧 `watched` 也可能随插件重载清空 ⇒ 不补声明就撞驱动「未看管」404、
+         `m:` 行落 error。与 `_answer_deliver` 同源同判据（`_watch_before_delivery`
+         内部只对 `owned:false` 的池外会话声明，命中缓存零请求；池内/未知路径一个
+         字节不变）。
     """
     family = _web_family(project)
     sid = card["session_id"]
     if family is not None:
         try:
+            # 会话存活兜底（见上 ①）：卡会话已被宿主丢掉时先 resume 接回再投递
+            if not _ensure_card_session(project, card, sid):
+                raise RuntimeError(LOST_SESSION_MSG)
             # 送达前重声明看管（C 批终审 I2）：外部会话的看管可能已被 `_watch_prune`
             # 撤掉（平台重启后记账为空、驱动侧重载后 watched 为空），漏声明则下面
             # 这条驱动调用撞「未看管」404（见上）

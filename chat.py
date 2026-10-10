@@ -672,6 +672,68 @@ def dsh_busy(sid):
         return False
 
 
+# ---------- 宿主会话存活兜底（2026-10-10，修卡 934） ----------
+#
+# 现场：dsh 会话活在宿主进程内，插件**热重载 / 宿主重启**会把所有会话 dispose 掉
+# ——真机实证 2026-10-10 01:06:48 两张卡的会话同时落
+# `turn/end {kind:"aborted", reason:{kind:"disposed"}}`。平台侧卡片/任务的
+# `session_id` 仍在库、卡照旧在列，用户再发评论 / 点「立即注入」时驱动回 404
+# 「会话不在驱动池中」（卡 934 报障：前端 toast 只有这句内部链路文案，用户无从
+# 判断该怎么办）。
+#
+# 判据与调和器「会话确已结束」同源（`board._iw_once`）：`dshevents.aligned()`
+# （中枢可信）∧ 注册表里没有这个 sid ⇒ 宿主确实不再持有它。此时按平台既有
+# 「有 sid 就 resume」的语义（`board._start_web` 的续接腿、`runner` 的
+# `dshdriver.ensure_session` 同一出口）把会话接回池内，再走原投递。
+# 未知（未对齐 / 断连）一律不动：未知 ≠ 已失去，零请求、既有行为一个字节不变。
+
+HOST_REVIVE_ENV = "TS_HOST_SESSION_REVIVE"
+
+
+def _host_revive_enabled():
+    """接回总开关（回滚阀）：`TS_HOST_SESSION_REVIVE=0` ⇒ 不接回，退回修复前行为。"""
+    return (os.environ.get(HOST_REVIVE_ENV) or "").strip() != "0"
+
+
+def host_session_lost(sid):
+    """宿主是否**确已**不再持有该会话（可信快照 ∧ 注册表无此 sid）。
+
+    两个条件是「确已」的全部证据：`aligned()` 为假（中枢断连 / 热重载后快照未
+    对齐）时注册表本就不可信，读不到 sid 只代表**未知**——按全局不变量「未知 ≠
+    已结束」，一律返回 False（调用方不动）。读口异常同样按未知处理。
+    """
+    if not sid:
+        return False
+    try:
+        if not dshevents.aligned():
+            return False
+        return dshevents.get(sid) is None
+    except Exception:                      # noqa: BLE001 — 读口异常按未知，不阻断投递
+        return False
+
+
+def revive_host_session(sid, cwd="", task=""):
+    """把「宿主已失去」的会话按既有 resume 语义接回；返回是否**可以投递**。
+
+    True：会话本来就在宿主里（零请求），或刚被成功接回，或回滚阀关闭（退回旧行为，
+    失败仍由驱动 404 兜底）。
+    False：确已失去且接不回（会话文件不存在 / 驱动不可达 / 令牌错）——调用方据此
+    给用户明确文案，而不再发一次必然 404 的投递。
+    `cwd`/`task` 只在真接回时下传（前者对齐 `board.card_workspace`：worktree 卡；
+    后者是驱动侧的会话标签，与 `_start_web` 同形）。
+    """
+    if not _host_revive_enabled() or not host_session_lost(sid):
+        return True
+    try:
+        dshdriver.resume_session(sid, cwd=cwd, task=task)
+    except dshdriver.DshDriverError as e:
+        print(f"[chat] 会话接回失败 sid={sid}: {e}", flush=True)
+        return False
+    print(f"[chat] 宿主已失去会话，按 resume 接回：sid={sid}"
+          f"（cwd={cwd or '-'} task={task or '-'}）", flush=True)
+    return True
+
+
 def _dsh_baseline_since(sid):
     """投递基线 seq（等 turn/end 的起点）：驱动 `/status` 拿不到就回落中枢注册表。
 
