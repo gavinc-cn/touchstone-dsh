@@ -2701,10 +2701,86 @@ def _reconcile_starting_rows():
               f"（claimed_at={claimed}）", flush=True)
 
 
+def _heal_queue_placeholders():
+    """排队占位缺等待项行自愈（30s 全量对账节拍；2026-10-10 实障卡 936）。
+
+    背景：卡片停在「正在开发」+`block_kind='queue'`（前端「排队中」徽标的**唯一**
+    来源，见 `queue_state_of`），但 wait_items 里没有对应的活跃 c: 行。调度权威是
+    行——`runner._pick_locked` 只遍历等待项行，行不在场 ⇒ 补位器永远拾不到该卡，
+    卡片永久僵在排队态（除用户重按「开始」的幂等补建或服务重启 `board.recover`
+    尾段补建外**无任何自愈出口**），项目看着空闲而队列不动。本函数把 `recover`
+    尾段那条「占位卡缺等待项行就补建」的对账规则**周期化**：逐张排队占位卡核对，
+    行缺失即经 `runner.submit_card` 补建（幂等：行仍在则 `enqueue_card` 复用既有
+    行、位次不动；补建落等待区末尾，与 recover 同几何——原排队位次已不可考）。
+
+    跳过四类（都不是「行丢了」，补行反而有害）：
+    - 已答待送达（活跃 a: 行在场）：等待单元是 answer 行，本就不建 c: 行
+      （`_queue_answer_unit` 单写口径），补 c: 行会让未送达答案与新一轮起跑打架；
+    - 独立 worktree 卡：起跑不入队、不落行（spec §47），`block_kind='queue'`
+      对它是残留投影，补行等于把它塞回统一队列；
+    - 平台在管（`_has_active_run`）：会话在跑、运行行缺失归收尾/调和器兜底，
+      此处补行会与在跑会话并发起第二轮；
+    - **会话实况在跑**（卡有 sid 且 `dshevents` 注册表报 `running`）：占位卡也可能是
+      「会话被外部直跑/重启后行丢失」形态（恢复运行的行未重建），补行会让补位器起跑
+      同一会话再投一轮 prompt——行缺失交调和器/收尾路径处理，本函数只补「确实没人在
+      跑」的卡（单族化后状态读口零请求、本地注册表；断连/未知不在此列，照常补建）。
+
+    检测到的异常形态各落一行诊断（`[board] 排队占位缺等待项行（占位在、行不在）…`）；
+    异常逐卡吞（补建失败也只留一行诊断），不影响其他卡；返回本次补建条数。
+    `runner` 单例缺位（调试退化）时只报告不自愈——日志仍如实留痕。"""
+    inst = runner.INSTANCE
+    try:
+        queued = db.list_queued_board_cards()
+    except Exception as e:                                  # noqa: BLE001
+        print(f"[board] 排队占位自愈扫描失败: {e}", flush=True)
+        return 0
+    healed = 0
+    for card in queued:
+        try:
+            cid = int(card["id"])
+        except (TypeError, ValueError):
+            continue                                        # 脏 id：理论项，跳过
+        try:
+            if (_card_opt(card, "worktree") or "").strip():
+                continue                                    # worktree 卡不入队（§47）
+            if waitq.get_active(waitq.KIND_CARD, cid) is not None:
+                continue                                    # 行在场：正常排队，不动
+            if waitq.get_active(waitq.KIND_ANSWER, cid) is not None:
+                continue                                    # 已答待送达：单元是答案行
+            if _has_active_run(cid):
+                continue                                    # 会话在跑：行归收尾路径
+            sid = (card["session_id"] or "").strip()
+            if sid:
+                try:
+                    st = dshevents.get(sid) or {}
+                except Exception:                           # noqa: BLE001 — 读口异常按未知
+                    st = {}
+                if st.get("status") == "running":
+                    continue                                # 实况在跑：补行会重复投递
+            # 占位在、行不在：`enqueue_card` 单事务红线（行+占位原子）声称此形态
+            # 「从结构上消失」，出现即异常——先落一行异常报告，再补建
+            print(f"[board] 排队占位缺等待项行（占位在、行不在）：c:{cid}"
+                  f"（项目 {card['project_id']}）", flush=True)
+            if inst is None:
+                continue                                    # runner 缺位：只报告
+            inst.submit_card(cid)
+            healed += 1
+        except Exception as e:                              # noqa: BLE001
+            print(f"[board] 排队占位补建失败：c:{cid}: {e}", flush=True)
+    return healed
+
+
 def _watch_once():
     """一轮巡视：结束会话收尾（_watch_runs_once）+ 定时到点开工（被门禁拦则
-    清定时记错误；起会话失败则把卡置回 todo，避免僵在 doing 无进程）。"""
+    清定时记错误；起会话失败则把卡置回 todo，避免僵在 doing 无进程）+
+    排队占位缺行自愈（`_heal_queue_placeholders`，实障卡 936）。"""
     _watch_runs_once()
+    # 排队占位缺行自愈（30s 节拍）：占位在、行不在 ⇒ 补位器永远拾不到，卡片
+    # 僵在「排队中」而项目看着空闲。补建规则与 recover 尾段同源（幂等）。
+    try:
+        _heal_queue_placeholders()
+    except Exception:                                       # noqa: BLE001
+        pass                                    # 巡视不因自愈失败中断（下一拍再来）
     # 定时扫描：todo 列到点卡片经统一入口进 doing（整库扫描，量小；一律入队
     # （v2b T2 起 parallel 直起废除），门禁语义与手动开始一致）
     now_ms = int(time.time() * 1000)

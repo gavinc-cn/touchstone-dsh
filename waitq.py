@@ -727,6 +727,9 @@ def selfcheck(probe=None):
     的扫描集内**——③ 只取 `kind=KIND_CARD` 的活跃行，ext 行永不被 ③ 覆盖
     （v3 终审修复：原文「③ 只对『卡行已删』形态告警」不成立；③ 的实际报告面
     是两类 c: 行形态——卡不在 doing（列已非开发容器）+ 卡行已删（行无主））。
+    反向形态「占位在、行不在」（doing+queue 卡无活跃 c: 行）**不在本函数面**：
+    它要读 board_cards 的排队占位语义，归 `board._heal_queue_placeholders`
+    的 30s 节拍（报告 + 补建一体，2026-10-10 实障卡 936）。
     probe：行判活探针（web busy 三态；`selfcheck_units` 透传，直调缺省 None）。
     """
     problems = []

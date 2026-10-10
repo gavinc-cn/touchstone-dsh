@@ -23,9 +23,17 @@ def teardown_function(_fn):
 
 
 def _clean_waitq_tables():
+    """清等待项/消息表 + 复位遗留的排队占位投影。
+
+    占位（doing+queue）与等待项行是**同一事务**写下的（`enqueue_card` 单事务
+    红线）：只清 wait_items 而不复位占位，会让上一例的卡在本例里变成「占位在、
+    行不在」的孤儿态——本文件 2026-10-10 新增的占位缺行自愈用例（实障卡 936）
+    会把这些残留一起补建，计数断言随之失去确定性。故两表与占位一并复位。"""
     with db.connect() as conn:
         for t in ("wait_items", "chat_msgs"):
             conn.execute(f"DELETE FROM {t}")
+        conn.execute("UPDATE board_cards SET block_kind=NULL, block_text=''"
+                     " WHERE block_kind='queue'")
 
 
 def _card(**kw):
@@ -657,3 +665,124 @@ def test_pick_follows_queue_order_after_reorder():
     assert r._pick_locked() == f"c:{w1}"       # 初始按入队序拾卡1
     assert board.reorder_card(pid, w2, w1) is None   # 调序：卡2 排到卡1 前
     assert r._pick_locked() == f"c:{w2}"       # 拾取顺序=新队序（单轨）
+
+
+# ---------- 排队占位缺等待项行自愈（2026-10-10 实障卡 936） ----------
+# 实障：卡片停在「正在开发」+`block_kind='queue'`（前端「排队中」徽标的唯一来源，
+# queue_state_of 派生），但 wait_items 里没有对应的活跃 c: 行。调度权威是行——
+# `runner._pick_locked` 只遍历等待项行 ⇒ 补位器永远拾不到该卡，卡片永久僵在排队态
+# （此前唯一出口是用户重按「开始」的幂等补建或服务重启 recover 尾段补建）。
+# 修法：`board._heal_queue_placeholders` 把 recover 的那条对账规则周期化（30s）。
+
+def _queue_placeholder_card(pid, title="占位卡"):
+    """真库：建一张 doing+queue 排队占位卡（可选不落等待项行 = 实障形态）。"""
+    cid = db.insert_board_card(pid, title)
+    db.update_board_card(cid, column_key="doing", block_kind="queue",
+                         block_text="排队等待：统一队列")
+    return cid
+
+
+def test_heal_queue_placeholder_requeues_missing_row(monkeypatch):
+    """占位在、行不在 ⇒ 自愈补建 c: waiting 行（与 board.recover 尾段同规则）。
+
+    钉住实障卡 936 的可恢复性：补建后 `_pick_locked` 才有行可拾（行即队列），
+    且补建幂等（第二次调用不再插行、位次不动）。"""
+    pid = _t2_project()
+    cid = _queue_placeholder_card(pid, "占位无行卡")
+    try:
+        assert waitq.get_active(waitq.KIND_CARD, cid) is None    # 实障形态
+        monkeypatch.setattr(board.runner, "INSTANCE", _bare_instance())
+        assert board._heal_queue_placeholders() == 1
+        row = waitq.get_active(waitq.KIND_CARD, cid)
+        assert row is not None and row["state"] == "waiting"
+        assert row["project_id"] == pid
+        # 端到端：补建后补位器（行即队列）立刻拾得到该卡——修前此处恒 None
+        assert runner.Runner.__new__(runner.Runner)._pick_locked() == f"c:{cid}"
+        seq_before = row["seq"]
+        assert board._heal_queue_placeholders() == 0             # 幂等：行已在
+        assert waitq.get_active(waitq.KIND_CARD, cid)["seq"] == seq_before
+    finally:
+        db.purge_board_card(cid)
+
+
+def test_heal_queue_placeholder_skips_answer_pending(monkeypatch):
+    """已答待送达（活跃 a: 行在场）不补 c: 行：作答单元的等待表征是 answer 行，
+    `_queue_answer_unit` 单写口径本就不建 c: 行——补行会让未送达的答案与新一轮
+    起跑打架（送达执行体另行 card_started 补回运行行）。"""
+    pid = _t2_project()
+    cid = _queue_placeholder_card(pid, "等送达卡")
+    try:
+        waitq.insert_after_prefix(waitq.KIND_ANSWER, cid, pid, meta={"sid": "s-1"})
+        monkeypatch.setattr(board.runner, "INSTANCE", _bare_instance())
+        assert board._heal_queue_placeholders() == 0
+        assert waitq.get_active(waitq.KIND_CARD, cid) is None
+        assert waitq.get_active(waitq.KIND_ANSWER, cid) is not None   # 答案行原样
+    finally:
+        db.purge_board_card(cid)
+
+
+def test_heal_queue_placeholder_skips_worktree_run_and_live_session(monkeypatch):
+    """三类「不是行丢了」的形态都不补行：worktree 卡（起跑不入队、不落行，
+    spec §47；queue 占位对它是残留投影）、平台在管卡（会话在跑，运行行缺失归
+    收尾/调和器兜底）、**会话实况 running 卡**（`dshevents` 注册表确证在跑——
+    补行会让补位器给同一会话再投一轮 prompt；边界：实况非 running 照常补建，
+    guard 只挡确证在跑，断连/未知不在此列）。"""
+    pid = _t2_project()
+    wt = _queue_placeholder_card(pid, "worktree 占位卡")
+    run = _queue_placeholder_card(pid, "在管占位卡")
+    live = _queue_placeholder_card(pid, "实况在跑卡")
+    try:
+        db.update_board_card(wt, worktree="/tmp/wt-heal")
+        board._RUNS[run] = {"proc": None, "sid": "s-run", "family": "dsh_plugin",
+                            "project_dir": "/tmp", "started_at": 0,
+                            "seen_busy": True, "aborted": False,
+                            "turn_baseline": None, "log_path": ""}
+        db.update_board_card(live, session_id="s-live")
+        monkeypatch.setattr(board.dshevents, "get",
+                            lambda sid: {"status": "running"})
+        monkeypatch.setattr(board.runner, "INSTANCE", _bare_instance())
+        assert board._heal_queue_placeholders() == 0
+        assert waitq.get_active(waitq.KIND_CARD, wt) is None
+        assert waitq.get_active(waitq.KIND_CARD, run) is None
+        assert waitq.get_active(waitq.KIND_CARD, live) is None
+        # 边界：实况非 running（空闲）⇒ 照常补建（未确证在跑就不放弃自愈）
+        monkeypatch.setattr(board.dshevents, "get",
+                            lambda sid: {"status": "idle"})
+        assert board._heal_queue_placeholders() == 1
+        assert waitq.get_active(waitq.KIND_CARD, live) is not None
+    finally:
+        db.purge_board_card(wt)
+        db.purge_board_card(run)
+        db.purge_board_card(live)
+
+
+def test_heal_queue_placeholder_reports_only_when_runner_missing(monkeypatch, capsys):
+    """runner 单例缺位（调试退化）：只报告不自愈——异常形态仍留诊断日志，
+    供「占位在、行不在」复发时定位（实障卡 936 排查时全库无一行线索）。"""
+    pid = _t2_project()
+    cid = _queue_placeholder_card(pid, "缺单例卡")
+    try:
+        monkeypatch.setattr(board.runner, "INSTANCE", None)
+        assert board._heal_queue_placeholders() == 0
+        assert waitq.get_active(waitq.KIND_CARD, cid) is None
+        out = capsys.readouterr().out
+        assert f"排队占位缺等待项行（占位在、行不在）：c:{cid}" in out
+    finally:
+        db.purge_board_card(cid)
+
+
+def test_watch_once_runs_heal_and_survives_failure(monkeypatch):
+    """30s 全量对账节拍接线：`_watch_once` 跑自愈（修复的落地入口），且自愈
+    抛异常不打断巡视其余步骤（守护线程不 crash）。"""
+    calls = []
+    monkeypatch.setattr(board, "_watch_runs_once", lambda: calls.append("runs"))
+    monkeypatch.setattr(board, "_heal_queue_placeholders",
+                        lambda: calls.append("heal") or 0)
+    monkeypatch.setattr(board, "_enter_doing", lambda proj, r: (None, None))
+    monkeypatch.setattr(board, "sync_sessions", lambda proj: [])
+    board._watch_once()
+    assert calls == ["runs", "heal"]
+    monkeypatch.setattr(board, "_heal_queue_placeholders",
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    board._watch_once()                        # 不抛：异常被节拍吞掉
+    assert calls == ["runs", "heal", "runs"]
