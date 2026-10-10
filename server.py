@@ -1068,6 +1068,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/me/feishu/doctor":
             self._api_me_feishu_doctor(body)
             return
+        if path == "/api/me/feishu-hook/apply":
+            # 项目推送绑定批量应用（设置页「同时应用到我的全部项目」，2026-10-10）
+            self._api_me_feishu_hook_apply(body)
+            return
         m = re.match(r"^/api/admin/users/(\d+)$", path)
         if m:
             self._api_admin_update_user(int(m.group(1)), body)
@@ -2047,6 +2051,58 @@ class Handler(BaseHTTPRequestHandler):
         db.set_feishu_hook(project_id, cur_url, cur_secret,
                            ",".join(cur_events), 1 if cur_enabled else 0)
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
+
+    def _api_me_feishu_hook_apply(self, body):
+        """项目推送绑定**批量应用**（设置页「同时应用到我的全部项目」，2026-10-10）。
+
+        把一份配置写进当前用户**本人的全部未归档项目**（归档项目不再产生推送，
+        故不纳入；跨用户项目一律不碰——多用户隔离红线）。字段语义与单项目端点
+        `_api_feishu_hook_set` 完全对齐：**缺省=不改该字段**，因此前端只在输入框
+        有内容时才带 `webhook_url`/`webhook_secret` 键 ⇒「留空 = 各项目保留原值」，
+        只统一「启用推送」与事件勾选；显式传空串=清除。`events` 走白名单校验。
+
+        返回 {ok, updated, archived_skipped, projects}：projects = 实际写入的项目名
+        （供前端回执列出「改了什么」）。
+        """
+        user = self._current_user()
+        req_events = None
+        if "events" in body:
+            req_events = body["events"]
+            if not isinstance(req_events, list) \
+                    or not set(req_events) <= set(feishu.FEISHU_EVENTS):
+                self._respond(400, '{"error":"events 含非法事件"}'.encode("utf-8"),
+                              "application/json; charset=utf-8")
+                return
+        names, skipped = [], 0
+        for proj in db.list_projects(user["id"]):
+            if proj["archived"]:
+                skipped += 1
+                continue
+            row = db.get_feishu_hook(proj["id"])
+            cur_url = (row["webhook_url"] if row is not None else "")
+            cur_secret = (row["webhook_secret"] if row is not None else "")
+            cur_enabled = (bool(row["enabled"]) if row is not None else True)
+            if row is not None:
+                cur_events = [e for e in feishu.FEISHU_EVENTS
+                              if e in (row["events"] or "")]
+            else:
+                # 无绑定行的默认事件集与设置页回显一致（卡片待审核默认关）
+                cur_events = list(feishu.FEISHU_DEFAULT_EVENTS)
+            if "webhook_url" in body:
+                cur_url = str(body["webhook_url"] or "").strip()
+            if "webhook_secret" in body:
+                cur_secret = str(body["webhook_secret"] or "").strip()
+            if req_events is not None:
+                cur_events = req_events
+            if "enabled" in body:
+                cur_enabled = bool(body["enabled"])
+            db.set_feishu_hook(proj["id"], cur_url, cur_secret,
+                               ",".join(cur_events), 1 if cur_enabled else 0)
+            names.append(proj["name"])
+        self._respond(200, json.dumps(
+            {"ok": True, "updated": len(names), "archived_skipped": skipped,
+             "projects": names}, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8")
 
     # ---------- 个人飞书绑定（M2 入站身份映射） ----------
 

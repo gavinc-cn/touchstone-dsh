@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { meApi, projectApi } from '../../api'
 import { toast } from '../../utils/toast'
+import { applyResultText, hookSaveRequest } from '../../utils/feishuHook'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -127,7 +128,7 @@ export default function FeishuPanel() {
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={!!cfg?.enabled}
               onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} />
-            启用飞书推送（总开关，控制本用户默认 webhook 回落）
+            启用飞书推送（总开关：未单独设置的项目按默认事件推送，关闭后这些项目的推送全停）
           </label>
           <div className="text-xs leading-relaxed text-muted-foreground">
             每个用户配置自己的飞书机器人：入站长连接按用户各自拉起，推送未绑定项目时
@@ -283,11 +284,14 @@ export default function FeishuPanel() {
 // 项目推送绑定（原「编辑项目」弹窗内的飞书推送区迁入设置页，2026-09-14）：
 // 每个项目可单独绑定推送群与事件开关（未绑定/未启用时回落上方本人的默认 webhook），
 // webhook/secret 未编辑则保存时不下发该键（后端语义：缺省=保持不变、空串=清除）。
+// 2026-10-10：① 这些开关同时管**群 webhook 与飞书单聊交互卡片**（此前单聊卡片旁路
+// 发送、不受任何开关约束）；② 新增「同时应用到我的全部项目」批量写入（未归档项目）。
 function ProjectHookCard() {
   const [projects, setProjects] = useState([])   // 本人全部项目（含归档，label 标注）
   const [pid, setPid] = useState(null)           // 当前选中项目 id
   const [hook, setHook] = useState(null)         // 选中项目的推送绑定（webhook 打码回显）
   const [input, setInput] = useState({ webhook_url: '', webhook_secret: '' })
+  const [applyAll, setApplyAll] = useState(false)  // 勾选=保存时写入本人全部未归档项目
   const [busy, setBusy] = useState(false)
 
   // 项目列表仅拉一次，默认选中第一个未归档项目（无项目时下拉为空态）
@@ -316,12 +320,17 @@ function ProjectHookCard() {
     if (!pid || !hook) return
     setBusy(true)
     try {
-      const body = { enabled: !!hook.enabled, events: hook.events }
-      if (input.webhook_url.trim()) body.webhook_url = input.webhook_url.trim()
-      if (input.webhook_secret) body.webhook_secret = input.webhook_secret
-      await projectApi.feishuHookSet(pid, body)
-      setInput({ webhook_url: '', webhook_secret: '' })
-      toast('项目飞书推送配置已保存')
+      // 保存目标由 utils/feishuHook 统一构造（勾选批量则走 /api/me/feishu-hook/apply）
+      const req = hookSaveRequest(applyAll, pid, hook, input)
+      if (req.kind === 'all') {
+        const r = await projectApi.feishuHookApplyAll(req.body)
+        setInput({ webhook_url: '', webhook_secret: '' })
+        toast(applyResultText(r))
+      } else {
+        await projectApi.feishuHookSet(req.pid, req.body)
+        setInput({ webhook_url: '', webhook_secret: '' })
+        toast('项目飞书推送配置已保存')
+      }
       projectApi.feishuHookGet(pid).then(setHook).catch(() => { /* 回显失败不报错，保存已生效 */ })
     } catch (e) { toast(e.message) } finally { setBusy(false) }
   }
@@ -332,6 +341,8 @@ function ProjectHookCard() {
     label: p.name + (p.archived ? '（已归档）' : ''),
     search: p.project_dir || '',
   }))
+  // 批量应用的目标数量（已归档项目不参与，与后端 archived_skipped 同口径）
+  const unarchivedCount = projects.filter((p) => !p.archived).length
 
   return (
     <Card className="max-w-xl gap-4 py-4">
@@ -342,7 +353,8 @@ function ProjectHookCard() {
       </CardHeader>
       <CardContent className="space-y-4 px-5">
         <div className="text-xs leading-relaxed text-muted-foreground">
-          每个项目可单独绑定推送群（阻塞事件通知到该群）；未绑定或未启用时回落上方的默认推送 Webhook。
+          每个项目可单独绑定推送群与事件开关；未绑定或未启用时回落上方的默认推送 Webhook。
+          群 Webhook 消息与飞书单聊交互卡片共用这里的开关。
         </div>
         <div className="grid gap-2">
           <Label className="text-xs text-muted-foreground">项目</Label>
@@ -383,8 +395,16 @@ function ProjectHookCard() {
               ))}
             </div>
             <div className="hint">交互等待 / 任务失败默认推送；卡片待审核默认关。Webhook 与签名密钥留空保存时不下发（保持现有值）。</div>
+            <div className="hint">以上开关同时管「群 Webhook 消息」与「飞书单聊交互卡片」：取消勾选「启用推送」后该项目不再推送，事件不勾的也不会推。</div>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={applyAll}
+                onChange={(e) => setApplyAll(e.target.checked)} />
+              同时应用到我的全部项目（{unarchivedCount} 个未归档项目；已归档项目不动）
+            </label>
             <div>
-              <Button variant="outline" disabled={busy} onClick={save}>保存项目推送</Button>
+              <Button variant="outline" disabled={busy} onClick={save}>
+                {applyAll ? '保存并应用到全部项目' : '保存项目推送'}
+              </Button>
             </div>
           </>
         )}

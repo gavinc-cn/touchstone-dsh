@@ -97,6 +97,9 @@ export const projectApi = {
   // 飞书推送绑定（webhook/事件开关; webhook/secret 打码回显, 留空键=保持不变）
   feishuHookGet: (id) => api.get(`/api/projects/${id}/feishu-hook`),
   feishuHookSet: (id, body) => api.patch(`/api/projects/${id}/feishu-hook`, body),
+  // 推送绑定批量应用（「同时应用到我的全部项目」，2026-10-10）：写本人全部未归档项目，
+  // 字段语义同 feishuHookSet（缺省=不改 ⇒ webhook 留空即各项目保留原值）
+  feishuHookApplyAll: (body) => api.post('/api/me/feishu-hook/apply', body),
   // 项目文件预览（会话详情页点击回答里的路径）：后端限定在项目目录/工作目录之内，
   // 返回 {path,rel,root,name,ext,size,mtime,text,truncated,binary}
   filePreview: (id, path) =>

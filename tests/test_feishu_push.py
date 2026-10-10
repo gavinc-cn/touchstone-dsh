@@ -43,7 +43,9 @@ def test_hook_of_levels(monkeypatch):
     h = feishu.hook_of(9)
     assert h["target"] == "https://d" and h["base_url"] == "http://t"
     assert h["user_id"] == 1
-    assert h["events"] == set(feishu.FEISHU_EVENTS)
+    # 无绑定行 ⇒ 默认事件集（交互等待+任务失败，与设置页回显默认一致）；
+    # 此前写死全事件（含卡片待审核）⇒ 界面显示「未勾选」而实际会推（2026-10-10 修）
+    assert h["events"] == set(feishu.FEISHU_DEFAULT_EVENTS)
     # 项目有绑定行 → 按绑定行推送，base_url/user_id 仍取项目所有者
     monkeypatch.setattr(db, "get_feishu_hook", lambda pid: {
         "project_id": pid, "webhook_url": "https://h", "webhook_secret": "sec",
@@ -56,6 +58,85 @@ def test_hook_of_levels(monkeypatch):
     monkeypatch.setattr(feishu, "user_config",
                         lambda uid: {"enabled": False, "default_webhook": "https://d"})
     assert feishu.hook_of(9) is None
+
+
+def test_hook_of_fallback_keeps_project_events(monkeypatch):
+    """绑定行有 enabled 但没填 webhook ⇒ 回落用户默认 webhook 时**事件仍按行内勾选**。
+
+    此前回落分支写死 `set(FEISHU_EVENTS)`（三个全开）⇒ 项目里没勾「卡片待审核」
+    也会推（2026-10-10 修「设置不生效」的次级缺陷）。"""
+    monkeypatch.setattr(db, "get_project", lambda pid: _proj())
+    monkeypatch.setattr(feishu, "user_config",
+                        lambda uid: {"default_webhook": "https://d", "base_url": ""})
+    monkeypatch.setattr(db, "get_feishu_hook", lambda pid: {
+        "project_id": pid, "webhook_url": "", "webhook_secret": "",
+        "events": "blocked_interaction", "enabled": 1})
+    h = feishu.hook_of(9)
+    assert h["target"] == "https://d"
+    assert h["events"] == {"blocked_interaction"}
+
+
+def test_notify_events_gate_levels(monkeypatch):
+    """项目级事件闸门（群 webhook 与飞书单聊卡片共用，2026-10-10）：
+
+    有绑定行 ⇒ enabled=0 空集（该项目全通道静默）、enabled=1 取行内勾选；
+    无绑定行 ⇒ 默认集（交互等待+任务失败）且受项目所有者用户级总开关约束。"""
+    monkeypatch.setattr(db, "get_project", lambda pid: _proj())
+    monkeypatch.setattr(feishu, "user_config", lambda uid: {})
+    monkeypatch.setattr(db, "get_feishu_hook", lambda pid: {
+        "project_id": pid, "webhook_url": "https://h", "webhook_secret": "",
+        "events": "blocked_interaction,task_failed,card_review", "enabled": 0})
+    assert feishu.notify_events(9) == set()                  # 显式关闭：全静默
+    monkeypatch.setattr(db, "get_feishu_hook", lambda pid: {
+        "project_id": pid, "webhook_url": "", "webhook_secret": "",
+        "events": "task_failed", "enabled": 1})
+    assert feishu.notify_events(9) == {"task_failed"}        # 按勾选；与有无 url 无关
+    monkeypatch.setattr(db, "get_feishu_hook", lambda pid: {
+        "project_id": pid, "webhook_url": "https://h", "webhook_secret": "",
+        "events": "", "enabled": 1})
+    assert feishu.notify_events(9) == set()                  # 事件全不勾：空集
+    monkeypatch.setattr(db, "get_feishu_hook", lambda pid: None)
+    assert feishu.notify_events(9) == set(feishu.FEISHU_DEFAULT_EVENTS)
+    monkeypatch.setattr(feishu, "user_config", lambda uid: {"enabled": False})
+    assert feishu.notify_events(9) == set()                  # 无行 + 总开关关
+
+
+def test_dm_card_respects_project_gate(monkeypatch):
+    """飞书单聊交互卡片必须受项目闸门约束（2026-10-10 修实障）：
+
+    用户报障「项目推送绑定全部不勾选，仍然持续收到推送」——根因是 `_dm_interaction_card`
+    只查账号绑定 + 应用凭据，不看项目 enabled/events，也不看用户级总开关。"""
+    monkeypatch.setattr(db, "get_project", lambda pid: _proj())
+    monkeypatch.setattr(feishu, "user_config", lambda uid: {})
+    monkeypatch.setattr(db, "get_feishu_binding_by_user",
+                        lambda uid: {"open_id": "ou_x", "user_id": uid})
+    monkeypatch.setattr(feishu, "app_config",
+                        lambda uid: {"app_id": "cli_x", "app_secret": "sec"})
+    sent = []
+    monkeypatch.setattr(feishu, "rest_send_card",
+                        lambda oid, card, cfg: sent.append(card))
+    card = {"id": 7, "title": "探针卡"}
+    inter = {"kind": "question", "question": "继续吗", "options": [],
+             "answerable": True, "qid": "call_1"}
+    monkeypatch.setattr(db, "get_feishu_hook", lambda pid: {
+        "project_id": pid, "webhook_url": "", "webhook_secret": "",
+        "events": "", "enabled": 0})
+    feishu.card_blocked(9, card, inter)
+    assert sent == []                                        # 项目关闭 ⇒ 不发卡片
+    monkeypatch.setattr(db, "get_feishu_hook", lambda pid: {
+        "project_id": pid, "webhook_url": "", "webhook_secret": "",
+        "events": "blocked_interaction", "enabled": 1})
+    feishu.card_blocked(9, card, inter)
+    assert len(sent) == 1                                    # 开启且勾了交互等待 ⇒ 发
+    monkeypatch.setattr(db, "get_feishu_hook", lambda pid: {
+        "project_id": pid, "webhook_url": "", "webhook_secret": "",
+        "events": "task_failed", "enabled": 1})
+    feishu.card_blocked(9, card, inter)
+    assert len(sent) == 1                                    # 没勾交互等待 ⇒ 不发
+    monkeypatch.setattr(db, "get_feishu_hook", lambda pid: None)   # 无行 ⇒ 默认集含它
+    monkeypatch.setattr(feishu, "user_config", lambda uid: {"enabled": False})
+    feishu.card_blocked(9, card, inter)
+    assert len(sent) == 1                                    # 无行 + 总开关关 ⇒ 不发
 
 
 def test_push_event_filters_and_enqueues(monkeypatch):

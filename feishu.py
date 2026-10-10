@@ -29,6 +29,10 @@ import feishu_conv
 import requests
 
 FEISHU_EVENTS = ("blocked_interaction", "task_failed", "card_review")
+# 未单独绑定项目时的默认事件集（与设置页 `GET /api/projects/<pid>/feishu-hook` 的
+# 默认回显一致：交互等待/任务失败开、卡片待审核默认关）。2026-10-10 之前回落分支
+# 写死全事件 ⇒ 界面显示「未勾选」而实际会推，是与设置页不一致的实障来源。
+FEISHU_DEFAULT_EVENTS = ("blocked_interaction", "task_failed")
 RETRY_DELAYS = (60, 300, 1800)     # 重试退避（秒）：3 次后标 failed 留痕
 SEND_TIMEOUT = 5                   # webhook POST 超时（秒）
 _TICK = 1.0                        # 发送线程轮询间隔（秒）
@@ -71,32 +75,60 @@ def user_config(user_id):
     return db.get_feishu_user_cfg(user_id)
 
 
+def notify_events(project_id):
+    """项目级推送事件闸门（**全通道共用**，2026-10-10 修「设置不生效」实障）。
+
+    群 webhook 文本推送（`push_event`）与飞书单聊交互卡片（`_dm_interaction_card`）
+    都只按本函数放行——此前单聊卡片是旁路发送、不受任何项目开关约束，用户把
+    「启用推送」与全部事件取消勾选后仍持续收到推送。
+
+    口径（先到先算）：
+    - 有绑定行：`enabled=0` ⇒ **该项目全通道静默**（显式关闭，不回落用户配置）；
+      `enabled=1` ⇒ 取行内勾选的事件（可为空集＝都不推）。
+    - 无绑定行：回落项目所有者的默认集 `FEISHU_DEFAULT_EVENTS`，并受其用户级
+      总开关 `enabled` 约束（关 ⇒ 空集）。项目被删（取不到 owner）时按 user_id=0
+      的配置判定，与 `hook_of` 同口径。
+
+    返回 set[str]；空集 = 该项目不推任何事件。
+    """
+    row = db.get_feishu_hook(project_id)
+    if row is not None:
+        if not row["enabled"]:
+            return set()
+        return {e for e in FEISHU_EVENTS if e in (row["events"] or "")}
+    proj = db.get_project(project_id)
+    owner_id = proj["user_id"] if proj else 0
+    if not user_config(owner_id).get("enabled", True):
+        return set()
+    return set(FEISHU_DEFAULT_EVENTS)
+
+
 def hook_of(project_id):
-    """项目推送目的地：绑定行（enabled 且有 url）优先；显式 enabled=0 硬关闭
-    （不回落用户配置）；无绑定行或行内无 url 回落**项目所有者**的用户级配置
-    （其 enabled 总开关 + 默认 webhook）。附 base_url（通知「详情」链接）与
-    user_id（投递记录归属）。
+    """项目推送**群 webhook 目的地**：绑定行 URL 优先；行内无 url（或无绑定行）时
+    回落**项目所有者**的用户级默认 webhook（回落要求其总开关 enabled 开着且配了
+    `default_webhook`）。附 base_url（通知「详情」链接）与 user_id（投递记录归属）。
+
+    事件过滤不在这里判断——一律取 `notify_events`（群与单聊卡片同一闸门），
+    事件集为空即视为不推；这样「回落默认 webhook」时也尊重项目的事件勾选
+    （2026-10-10 前回落分支写死全事件）。
     返回 {"target","secret","events","base_url","user_id"} 或 None（不推）。"""
+    events = notify_events(project_id)
+    if not events:
+        return None
     row = db.get_feishu_hook(project_id)
     proj = db.get_project(project_id)  # 所有者为 0 时（项目被删）回落 user_config(0)={}
     owner_id = proj["user_id"] if proj else 0
     base_url = (user_config(owner_id).get("base_url") or "").rstrip("/") if proj else ""
-    if row is not None:
-        if not row["enabled"]:
-            return None
-        if row["webhook_url"]:
-            return {"target": row["webhook_url"],
-                    "secret": row["webhook_secret"] or "",
-                    "events": {e for e in FEISHU_EVENTS
-                               if e in (row["events"] or "")},
-                    "base_url": base_url, "user_id": owner_id}
+    if row is not None and row["webhook_url"]:
+        return {"target": row["webhook_url"], "secret": row["webhook_secret"] or "",
+                "events": events, "base_url": base_url, "user_id": owner_id}
     cfg = user_config(owner_id)
     if not cfg.get("enabled", True):
         return None
     if not cfg.get("default_webhook"):
         return None
     return {"target": cfg["default_webhook"], "secret": cfg.get("default_secret", ""),
-            "events": set(FEISHU_EVENTS), "base_url": base_url,
+            "events": events, "base_url": base_url,
             "user_id": owner_id}
 
 
@@ -530,10 +562,17 @@ def _build_interaction_card(ctx, project_name):
 
 
 def _dm_interaction_card(project_id, ctx):
-    """旁路：向项目所有者的飞书单聊发交互卡片（绑定 + 应用凭据齐全才发）。
+    """旁路：向项目所有者的飞书单聊发交互卡片（**受 `notify_events` 闸门约束**，
+    再要求账号绑定 + 应用凭据齐全才发）。
+
+    2026-10-10 修实障：此前这里只看绑定与凭据 ⇒ 用户把项目「启用推送」与全部
+    事件取消勾选（甚至关掉用户级总开关）后，单聊卡片仍持续送达，设置形同虚设。
+    现在项目的 `blocked_interaction` 未开即直接不发（与群 webhook 同一闸门）。
     卡片是即时交互载体，不走 outbox（过期提问的分钟级重试无意义）；失败仅
     留痕——群 webhook 文本推送（push_event）始终是主通道，不受影响。"""
     try:
+        if "blocked_interaction" not in notify_events(project_id):
+            return
         proj = db.get_project(project_id)
         owner = (proj["user_id"] if proj else 0) or 0
         binding = db.get_feishu_binding_by_user(owner)
