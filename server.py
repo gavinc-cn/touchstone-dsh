@@ -17,6 +17,7 @@ runner.py（任务轮次执行）、prompts.py（轮次 prompt）。
 
 import base64
 import collections
+import faulthandler
 import json
 import os
 import re
@@ -30,6 +31,12 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote
+
+# 原生崩溃取证（2026-10-09）：本进程 2026-10-08 21:48 在插件形态下两次被 SIGSEGV 带走
+# （薄壳只留一行 `sig=SIGSEGV`，无任何 Python 栈）。faulthandler 常开：SIGSEGV/SIGABRT 等
+# 致命中止时把**各线程的 Python 栈**打印到 stderr ⇒ 插件形态落 `<库目录>/plugin-backend.log`
+# （薄壳逐行落盘）、独立形态落 `.run/server.log`。零成本、不改变任何行为。
+faulthandler.enable()
 
 import auth
 import board
