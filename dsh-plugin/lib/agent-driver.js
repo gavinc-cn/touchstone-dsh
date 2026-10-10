@@ -2231,22 +2231,64 @@ export class AgentDriver {
    * 而 `commands` 可注入且 `command-compact`（`/compact`）在本 profile 已装载
    * （`--dump-config` 可见）。命令是异步长任务（要过一次模型），故**触发即回**
    * `{started:true}`；真正的失败只落宿主日志（平台侧 compact 语义本来就是"发起"）。
+   *
+   * 池外回落（2026-10-10，用户报障「卡片 945 无法 compact」）：平台自建卡会话在宿主侧
+   * 重载/重启后只剩观察（`/live` 的 `owned:false`）而**宿主里仍活着**——此时 `/compact`
+   * 若只认驱动池（旧行为）就必 404「会话不在驱动池中」，前端把这条内部文案原样 toast。
+   * 语义与 `/rename` 的池外回落同款，判定复用**唯一闸门** `_externalTarget`：
+   *   ① 池内 ⇒ 既有路径（`entry.agent` 触发，回执不带 `external`）；
+   *   ② 已看管但宿主无活 agent ⇒ 闸门自写 404 分档文案（会话已结束）；
+   *   ③ 未看管 ⇒ 走 `_lookup` 这个既有唯一 404 出口（原文案一字不变）；
+   *   ④ 已看管且宿主有活 agent ⇒ 对**宿主活 agent** 触发压缩（回执带 `external:true`），
+   *      **不接管**（不入池、不建 handle、不动 `owned`）。
+   *
+   * 为什么池外只能走「直投活 agent」而不是「先接管再压缩」：外部会话的 agent 已在宿主
+   * `agents` store 里注册，`/session` resume（`agents.enter()`）对已注册 id 直接抛
+   * `agent "…" is already registered` ⇒ 接管必 500（C 批 T1 的实测结论）。
    */
   async _compact(res, req) {
     const body = await this._body(req);
-    const entry = this._lookup(res, body);
-    if (!entry) return;
+    const sid = String((body && body.session_id) || '');
+    const entry = this.sessions.get(sid);
+    let agent = entry && entry.agent;
+    let external = false;
+    if (!entry) {
+      const live = this._externalTarget(res, sid);
+      if (live === null) return;             // ② 已看管无活 agent：闸门已回 404 分档
+      if (live === undefined) {              // ③ 未看管：既有唯一 404 出口（原文案）
+        this._lookup(res, body);
+        return;
+      }
+      agent = live;                          // ④ 已看管 + 宿主有活 agent：直投，不接管
+      external = true;
+    }
     const commands = this.ctx.get('commands');
     if (!commands || typeof commands.execute !== 'function') {
       this._json(res, 503, { error: 'commands 服务不可用，无法触发 /compact' });
       return;
     }
     const controller = new AbortController();
-    Promise.resolve(commands.execute(entry.agent, '/compact', [], controller.signal))
-      .then(() => this.logger.info(`touchstone: /compact 完成 sid=${entry.sessionId}`))
+    Promise.resolve(commands.execute(agent, '/compact', [], controller.signal))
+      .then((out) => {
+        // 回执形状（`@deepseek-ai/dsh-commands` 的 `execute`）：`{commandId, result:{kind,text}}`；
+        // 语法/命令名不解析时 resolve `undefined`（该 profile 没挂 command-compact）。关键是
+        // **`kind:'error'` 也是正常 resolve**（真实失败之一：会话非 idle ⇒ busy，见
+        // `dsh-command-compact` 的 expectedFailure 文案）——旧实现无条件记「完成」，会把
+        // 「压根没压」写成成功。池外会话多正被用户驱动，撞 busy 的概率高于池内，故按实况记账
+        // （HTTP 语义不变：仍是「触发即回」，这里只让宿主日志说真话）。
+        const result = (out && out.result) || null;
+        if (!result) {
+          this.logger.warn(`touchstone: /compact 未执行 sid=${sid}: 该 profile 未装载 /compact 命令`);
+        } else if (result.kind === 'error') {
+          this.logger.warn(`touchstone: /compact 未生效 sid=${sid}: ${result.text || '未知原因'}`);
+        } else {
+          this.logger.info(`touchstone: /compact 完成 sid=${sid}${result.text ? `: ${result.text}` : ''}`);
+        }
+      })
       .catch((err) => this.logger.warn(
-        `touchstone: /compact 失败 sid=${entry.sessionId}: ${(err && err.message) || err}`));
-    this._json(res, 200, { ok: true, session_id: entry.sessionId, started: true });
+        `touchstone: /compact 失败 sid=${sid}: ${(err && err.message) || err}`));
+    this._json(res, 200, { ok: true, session_id: sid, started: true,
+                           ...(external ? { external: true } : {}) });
   }
 
   /**

@@ -2266,6 +2266,15 @@ def compact_session(project, card, sid):
     命令），触发即返回——压缩在 dsh 进程内异步进行（要过一次模型），失败落
     宿主日志（原 kimi CLI 子进程压缩与两族 web REST 压缩已随族退场）。
 
+    **池外两跳（2026-10-10 修「卡片 945 无法 compact」）**：宿主侧插件重载/dsh web
+    重启后，平台自建的卡会话在驱动里只剩**观察**（`/live` 的 `owned:false`，宿主里
+    仍活着）——旧实现只认驱动池，compact 必 404「会话不在驱动池中」，前端原样 toast。
+    这里按 `rename_card_session` 同款两跳：首跳 404（=池外）⇒ `_ensure_watch(sid)` 补
+    看管声明（幂等、**只声明不接管**）后重试一次；驱动侧 `/compact` 的池外回落分支按
+    「看管 + 宿主有活 agent」放行（node 半同批实现）。为什么不能「先接管再压缩」：
+    外部会话的 agent 已在宿主 store 注册，`/session` resume 必撞
+    `agent "…" is already registered` ⇒ 500（C 批 T1 实测）。
+
     sid 必须属于该卡片（sessions 清单或主 session_id），不支持的族抛
     RuntimeError（server 转 400）。
     """
@@ -2279,10 +2288,25 @@ def compact_session(project, card, sid):
     # 路线 A P3（2026-10-03）：走驱动 `/compact`（插件侧执行宿主 `/compact`
     # 命令；`ctx.compaction` 服务在插件 ctx 不可注入，命令路径是 P0 探针的结论）。
     # 触发即返回——压缩在 dsh 进程内异步进行（要过一次模型），失败落宿主日志。
-    try:
-        dshdriver.compact(sid)
-    except dshdriver.DshDriverError as e:
-        raise RuntimeError(f"compact 失败: {e}")
+    last = ""
+    for attempt in (1, 2):
+        try:
+            dshdriver.compact(sid)
+            return
+        except dshdriver.DshDriverError as e:
+            last = str(e)
+            pool_miss = getattr(e, "code", None) == 404
+            # 只在首跳 404（池外）补一次看管声明；**force=True** 跳过平台侧陈旧记账
+            # （驱动侧重载会清空 `watched` 表，`_WATCHED` 却仍写着「声明过」）。
+            # 已看管但宿主无活 agent 的 404 重试同样失败，代价只是一次请求，换来判定
+            # 不依赖文案匹配；且第二跳的文案更准确（「会话已结束（宿主无活动 agent）」
+            # 取代含糊的「不在驱动池中」）。
+            if attempt == 1 and pool_miss and _ensure_watch(sid, force=True):
+                print(f"[board] 卡片 compact：池外会话补看管声明后重试 sid={sid}",
+                      flush=True)
+                continue
+            break
+    raise RuntimeError(f"compact 失败: {last}")
 
 
 def fork_compact_session(project, card, sid):

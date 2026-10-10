@@ -1481,3 +1481,90 @@ def test_answer_recovery_row_releases_queued_message(monkeypatch, tmp_path):
     finally:
         _drop_delivery(DEADLOCK_SID)
         drv.stop()
+
+
+# ---------- ⑫ /compact 池外回落（2026-10-10 修「卡片 945 无法 compact」） ----------
+#
+# 报障：卡片 945（平台自建卡，`origin=NULL`）在会话窗里执行 `/compact` 与卡详情里的
+# 「compact」按钮，一律 toast「compact 失败: 会话不在驱动池中: session-d4764338-…」。
+# 现场：该会话的**平台自建身份没变**（`tasks.session_id` 级引用、卡面会话即它），但
+# dsh web 重启（13:31）后驱动的池表清空，宿主侧它仍活着（`/status` 200
+# `{"status":"idle","external":true}`、`/live` 里 `owned:false`）——正是 C 批
+# 「看管的外部会话」那一档。
+# 根因：C 批只给投递（`/prompt`·`/steer`）与作答（`/answer`·`/approval`）开了池外
+# 回落，B 批补了 `/rename`，**`/compact` 仍只认驱动池**（`_lookup`）；「先接管再压缩」
+# 这条路不存在——外部会话的 agent 已在宿主 store 注册，`/session` resume 必撞
+# `agent "…" is already registered` ⇒ 500（C 批 T1 实测）。
+# 修法：驱动侧 `/compact` 复用唯一闸门 `_externalTarget`（看管 + 宿主有活 agent ⇒
+# 对该 agent 触发命令、不接管）；平台侧 `board.compact_session` 补「看管声明两跳」
+# （与 `rename_card_session` 同款：首跳 404 ⇒ `_ensure_watch(force=True)` 后重试一次），
+# 覆盖「驱动侧重载清空看管表 / 平台 `_WATCHED` 记账陈旧」的窗口。
+
+
+def _platform_card(proj, sid, column="review"):
+    """建一张**平台自建卡**（`origin=NULL`，卡 945 形态；与 `_make_sync_card` 相对）。"""
+    cid = db.insert_board_card(proj["id"], "平台自建卡")
+    db.update_board_card(cid, column_key=column, session_id=sid,
+                         sessions=json.dumps([sid]))
+    return cid
+
+
+def _compact_calls(drv):
+    """替身收到的 `/compact` 记号（载荷列表）。"""
+    return [c for c in _calls(drv) if c.get("call") == "/compact"]
+
+
+def test_compact_watched_external_card_session(monkeypatch, tmp_path):
+    """看管 + 宿主有活 agent 的池外卡会话：compact 回落直达宿主 agent，且不接管。"""
+    drv = _real_driver(monkeypatch, mark=str(tmp_path / "calls.log"))
+    try:
+        sid = "session-ext-cp1"
+        drv.ctl("/_ctl/external", {"sid": sid, "cwd": "/tmp/ext"})
+        proj = _proj()
+        cid = _platform_card(proj, sid)
+        board._WATCHED.clear()
+        assert board._ensure_watch(sid) is True
+        board.compact_session(proj, db.get_board_card(cid), sid)   # 不抛 = 成功
+        calls = _compact_calls(drv)
+        assert calls and calls[-1].get("external") is True
+        assert sid not in drv.sessions        # 不接管：池表里没有它
+    finally:
+        drv.stop()
+
+
+def test_compact_external_unwatched_declares_watch_then_retries(monkeypatch, tmp_path):
+    """池外且**未**声明看管：首跳 404 ⇒ 平台补看管声明后重试一次（与 rename 同款）。"""
+    drv = _real_driver(monkeypatch, mark=str(tmp_path / "calls.log"))
+    try:
+        sid = "session-ext-cp2"
+        drv.ctl("/_ctl/external", {"sid": sid, "cwd": "/tmp/ext"})
+        proj = _proj()
+        cid = _platform_card(proj, sid)
+        board._WATCHED.clear()
+        assert sid not in drv.watched
+        board.compact_session(proj, db.get_board_card(cid), sid)
+        assert sid in drv.watched                       # 平台侧补了看管声明
+        assert drv.stats().get("/watch") == 1
+        calls = _compact_calls(drv)
+        assert calls and calls[-1].get("external") is True
+    finally:
+        drv.stop()
+
+
+def test_compact_external_no_live_agent_reports_ended(monkeypatch, tmp_path):
+    """看管但宿主**无**活 agent：明确报「会话已结束」，且不把命令发给任何 agent。"""
+    drv = _real_driver(monkeypatch, mark=str(tmp_path / "calls.log"))
+    try:
+        sid = "session-ext-cp3"
+        drv.ctl("/_ctl/external", {"sid": sid, "cwd": "/tmp/ext", "status": "unknown"})
+        proj = _proj()
+        cid = _platform_card(proj, sid)
+        board._WATCHED.clear()
+        assert board._ensure_watch(sid) is True
+        with pytest.raises(RuntimeError) as e:
+            board.compact_session(proj, db.get_board_card(cid), sid)
+        msg = str(e.value)
+        assert "compact 失败" in msg and "会话已结束" in msg
+        assert _compact_calls(drv) == []                # 没有落到驱动（更没瞎发命令）
+    finally:
+        drv.stop()

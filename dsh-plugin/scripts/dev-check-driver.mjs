@@ -58,7 +58,7 @@ function makeAgent(id, cwd) {
 function makeCtx() {
   const handlers = {};        // 事件名 -> [fn]
   const opts = {};            // 事件名 -> [ctx.on 第三参（注册选项）]
-  const sockets = { agents: new Map(), disposed: [] };
+  const sockets = { agents: new Map(), disposed: [], logs: [], commandResult: null };
   // 「已由原生通道（dsh GUI）兑现过的提问」显式记账（T3 修复轮扩桩）：真宿主里 GUI 作答后
   // 该提问即从待答表移除，`userQuestions.answer` 对同一 callId 必回 false（平台迟到作答
   // 据此收口）。桩**不改**既有默认返回语义（`callId !== 'gone'`），只对显式记账的 callId
@@ -186,7 +186,11 @@ function makeCtx() {
         return {
           async execute(agent, line, attachments) {
             sockets.command = { agentId: agent && agent.id, line, attachments: (attachments || []).length };
-            return { ok: true };
+            // 回执**照真机形状**（`dsh-commands` 的 execute 回 `{commandId, result:{kind,text}}`，
+            // 语法/命令名不解析时才回 undefined）；`sockets.commandResult` 供用例换成
+            // `{kind:'error'}`——真机上「会话非 idle ⇒ busy」正是这种**正常 resolve 的失败**。
+            return sockets.commandResult
+              || { commandId: 'cmd-1', result: { kind: 'success', text: 'Compacted 3 history items (~120 tokens).' } };
           },
         };
       }
@@ -280,7 +284,12 @@ function makeCtx() {
   };
   let routeHandler = null;
   const ctx = {
-    logger: () => ({ info() {}, warn() {} }),
+    // 日志桩：既吞掉噪音，也留档（`sockets.logs`）——「/compact 未生效」这类**只落日志**
+    // 的实况要能被自检断言（旧实现把 `kind:'error'` 也记成「完成」，日志会骗人）。
+    logger: () => ({
+      info: (m) => sockets.logs.push(['info', String(m)]),
+      warn: (m) => sockets.logs.push(['warn', String(m)]),
+    }),
     get(name) {
       if (name === 'webServer') {
         return {
@@ -710,8 +719,9 @@ async function main() {
   const cpt = await (await call(base, token, 'POST', '/compact', { session_id: sid })).json();
   check('/compact → commands.execute("/compact")（触发即回，异步压缩）',
     cpt.ok === true && cpt.started === true && sockets.command
-    && sockets.command.line === '/compact' && sockets.command.agentId === sid,
-    JSON.stringify(sockets.command));
+    && sockets.command.line === '/compact' && sockets.command.agentId === sid
+    && cpt.external === undefined,          // 池内路径不带 external 标记（字节不变）
+    JSON.stringify({ cpt, cmd: sockets.command }));
   const fk = await (await call(base, token, 'POST', '/fork', { session_id: sid })).json();
   check('/fork → sessionController.fork 且回新 sid',
     fk.ok === true && /^session-fork-/.test(fk.new_session_id || '')
@@ -1384,6 +1394,71 @@ async function main() {
   check('/rename 回执以宿主接受值为准（截断/清洗后）',
     xrn4.ok === true && xrn4.title === '很长很长', JSON.stringify(xrn4));
   sockets.renameAccept = null;
+
+  // --- /compact 池外回落（2026-10-10，用户报障「卡片 945 无法 compact」）---
+  // 缺口：C 批只把投递（/prompt·/steer）与作答（/answer·/approval）开了池外回落，
+  // B 批补了 /rename；**会话级控制命令 `/compact` 仍只认驱动池** ⇒ 平台自建卡会话在宿主
+  // 侧重载/重启后变为 `owned:false`（宿主里还活着、平台上只剩看管声明）时，compact 必
+  // 撞 404「会话不在驱动池中」，前端原样 toast 出来。
+  // 语义与 /rename 同款：看管声明（`/watch`）是唯一闸门；看管 + 宿主有活 agent ⇒ 直接对该
+  // agent 触发压缩命令，**不接管**（不入池、不改 owned）；未看管 / 已看管但无活 agent 各自
+  // 走既有 404（原文案 / 分档文案）。为什么不「先接管再压缩」：外部会话的 agent 已在宿主
+  // store 注册，`/session` resume 会撞 `agent "…" is already registered` 必 500（C 批 T1）。
+  const cpSid = 'session-ext-cp';
+  sockets.sessions.store.set(cpSid, { id: cpSid, session: hostSession(cpSid, '/tmp/extcp') });
+  sockets.agents.set(cpSid, makeAgent(cpSid, '/tmp/extcp'));
+  sockets.command = null;
+  const cp1 = await call(base, token, 'POST', '/compact', { session_id: cpSid });
+  const cp1j = await cp1.json();
+  check('/compact 池外未看管：404 原文案（有活 agent 也不触发压缩）',
+    cp1.status === 404 && cp1j.error === `会话不在驱动池中: ${cpSid}`
+    && sockets.command === null, JSON.stringify({ cp1j, cmd: sockets.command }));
+  await call(base, token, 'POST', '/watch', { session_id: cpSid });
+  const cp2 = await call(base, token, 'POST', '/compact', { session_id: cpSid });
+  const cp2j = await cp2.json();
+  check('/compact 看管 + 活 agent：回落触发（external=true、命令打到宿主活 agent）',
+    cp2.status === 200 && cp2j.ok === true && cp2j.started === true && cp2j.external === true
+    && sockets.command && sockets.command.agentId === cpSid
+    && sockets.command.line === '/compact',
+    JSON.stringify({ cp2j, cmd: sockets.command }));
+  check('/compact 回落不接管（会话不入池、owned 口径不变）',
+    driver.sessions.has(cpSid) === false, String(driver.sessions.has(cpSid)));
+  // 日志按**实况**记账（2026-10-10 复核轮；真机取证：`dsh-commands.execute` 的回执是
+  // `{commandId, result:{kind,text}}`，而 `kind:'error'` 也是**正常 resolve**——例如会话非
+  // idle 时 `dsh-command-compact` 把 busy 转成 error 结果。旧实现无条件记「完成」⇒ 日志骗人）。
+  sockets.logs.length = 0;
+  sockets.commandResult = null;
+  await call(base, token, 'POST', '/compact', { session_id: cpSid });   // 成功回执
+  await new Promise((r) => setTimeout(r, 10));
+  check('/compact 成功回执 → 日志记「完成」且带宿主文案',
+    sockets.logs.some(([lv, m]) => lv === 'info' && m.includes('/compact 完成')
+                                   && m.includes('Compacted 3 history items')),
+    JSON.stringify(sockets.logs));
+  sockets.logs.length = 0;
+  sockets.commandResult = {
+    commandId: 'cmd-2',
+    result: { kind: 'error',
+              text: 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.' },
+  };
+  const cp2b = await call(base, token, 'POST', '/compact', { session_id: cpSid });
+  const cp2bj = await cp2b.json();
+  await new Promise((r) => setTimeout(r, 10));
+  check('/compact 失败回执（busy）→ HTTP 仍「触发即回」，日志记「未生效」而非「完成」',
+    cp2b.status === 200 && cp2bj.started === true
+    && sockets.logs.some(([lv, m]) => lv === 'warn' && m.includes('/compact 未生效')
+                                   && m.includes('not idle'))
+    && !sockets.logs.some(([lv, m]) => lv === 'info' && m.includes('/compact 完成')),
+    JSON.stringify({ cp2bj, logs: sockets.logs }));
+  sockets.commandResult = null;
+  sockets.agents.delete(cpSid);
+  sockets.command = null;
+  const cp3 = await call(base, token, 'POST', '/compact', { session_id: cpSid });
+  const cp3j = await cp3.json();
+  check('/compact 看管但无活 agent：404「会话已结束」分档（不触发命令）',
+    cp3.status === 404 && cp3j.error === `会话已结束（宿主无活动 agent）: ${cpSid}`
+    && sockets.command === null, JSON.stringify({ cp3j, cmd: sockets.command }));
+  await call(base, token, 'POST', '/watch', { session_id: cpSid, on: false });
+  sockets.sessions.store.delete(cpSid);
 
   // --- T3 提问认领第三分支（C 批）：池外 + 平台看管 ⇒ 双通道（认领 + 原生照旧）---
   // 看管的外部会话（用户在 dsh GUI 直跑的）改前只「旁听」：挂起标记的 call_id 走旁听口径，

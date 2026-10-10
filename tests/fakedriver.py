@@ -738,11 +738,22 @@ class _Handler(BaseHTTPRequestHandler):
             drv.set_archived(sid, bool(want))
             return self._json(200, {"session_id": sid, "archived": bool(want)})
         if path == "/compact":
+            # `/compact` 池外回落（2026-10-10，与真驱动**同序**）：池内走既有路径；
+            # 池外走 `_external_fallback` 的看管闸（未看管 / 看管但无活 agent 各自
+            # 404 分档）；放行即记一笔 `external:True` 并回 `{started, external}`——
+            # 真插件在此对宿主活 agent 触发 `/compact` 命令，**不接管**会话。
+            sid = str(body.get("session_id") or "")
             sess = self._session_of(body)
+            external = False
             if sess is None:
-                return self._json(404, {"error": "session not found"})
-            drv.note({"call": "/compact", "sid": sess.sid})
-            return self._json(200, {"started": True})
+                row, err = self._external_fallback(sid)
+                if err is not None:
+                    return self._json(err[0], {"error": err[1]})
+                external = True
+            drv.note({"call": "/compact", "sid": sid,
+                      **({"external": True} if external else {})})
+            return self._json(200, {"started": True,
+                                    **({"external": True} if external else {})})
         if path == "/fork":
             sess = self._session_of(body)
             if sess is None:
