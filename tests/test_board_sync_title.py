@@ -1,7 +1,8 @@
-# sync 卡标题/描述口径（2026-10-07）：取「主会话第一次用户提问」——首问原文的
-# 首行进标题、其余行进描述（与手工建卡 QuickAdd「首行=标题、其余行=描述」同约定）。
-# 本文件钉：建卡口径、首问晚到时的补齐、旧口径存量卡回填、用户手工改名/描述不被
-# 覆盖、非主会话不参与、首行溢出并入描述、截断上限。
+# sync 卡标题/描述口径（2026-10-10 改）：标题 = **DSH 当前会话标题**（最后一枚
+# session/title 事件，与 dsh GUI 侧栏 last-wins 一致）、描述 = 主会话第一次用户
+# 提问**全文**。本文件钉：建卡口径、DSH 标题自动更新（LLM 标题落盘）后的同步、
+# 旧口径存量卡回填、用户手工改名/描述不被覆盖、非主会话不参与、回落链
+# （无标题事件→首问首行→sid 短码）、截断上限、幂等。
 # 会话枚举一律打桩（不读真实 ~/.dsh/sessions），DB 走 conftest 的临时库。
 import json
 import os
@@ -60,17 +61,57 @@ def test_split_first_prompt_lines_and_caps():
 
 # ------------------------------------------------------------ 建卡口径
 
-def test_new_card_takes_first_prompt_lines(monkeypatch):
-    """新建 sync 卡：标题 = 首问首行、描述 = 其余行（不再用会话号/会话标题）。"""
+def test_new_card_takes_session_title_and_full_prompt(monkeypatch):
+    """新建 sync 卡：标题 = DSH 当前会话标题（末枚 session/title 事件）、
+    描述 = 首问全文（含首行；不再按「首行=标题」切分）。"""
     proj = _mk_project()
     _patch(monkeypatch, [{"sid": SID, "title": "dsh 生成的标题", "mtime": 0,
+                          "titles": ["【任务描述】帮我看下这个", "dsh 生成的标题"],
                           "first_prompt": "帮我看下这个报错\n栈信息在下面\n第三行"}])
     created = board.sync_sessions(proj)
     assert len(created) == 1
     c = db.get_board_card(created[0])
-    assert c["title"] == "帮我看下这个报错"
-    assert c["description"] == "栈信息在下面\n第三行"
+    assert c["title"] == "dsh 生成的标题"
+    assert c["description"] == "帮我看下这个报错\n栈信息在下面\n第三行"
     assert c["origin"] == "sync" and c["session_id"] == SID
+
+
+def test_new_card_falls_back_to_prompt_first_line_without_title(monkeypatch):
+    """回落链一档：会话还没有任何标题事件（dsh 标题未落盘）时取首问首行；
+    标题事件落盘后由同步拍改写成 DSH 标题（见标题更新用例）。"""
+    proj = _mk_project()
+    _patch(monkeypatch, [{"sid": SID, "title": "", "titles": [], "mtime": 0,
+                          "first_prompt": "首行提问\n细节行"}])
+    created = board.sync_sessions(proj)
+    c = db.get_board_card(created[0])
+    assert c["title"] == "首行提问" and c["description"] == "首行提问\n细节行"
+
+
+def test_session_title_update_propagates_to_card(monkeypatch):
+    """**本需求的钉子**：DSH 侧标题自动更新（兜底截断句 → LLM 标题）后，
+    TS 卡标题跟着更新（不再停在旧标题）。"""
+    proj = _mk_project()
+    cid = _mk_card(proj["id"], title="【任务描述】DSH侧会话标题自", sid=SID)
+    _patch(monkeypatch, [{"sid": SID, "title": "DSH会话标题自动更新到TS侧",
+                          "titles": ["【任务描述】DSH侧会话标题自",
+                                     "DSH会话标题自动更新到TS侧"],
+                          "mtime": 0,
+                          "first_prompt": "【任务描述】DSH侧会话标题自动更新的时候\n其余"}])
+    board.sync_sessions(proj)
+    assert db.get_board_card(cid)["title"] == "DSH会话标题自动更新到TS侧"
+
+
+def test_card_created_before_llm_title_is_updated(monkeypatch):
+    """建卡窗口：建卡时只有兜底标题（卡标题=旧的首枚标题事件），之后 LLM 标题
+    才追加进事件流 —— 卡面标题仍属自动写入形态（命中标题事件历史）⇒ 更新。"""
+    proj = _mk_project()
+    cid = _mk_card(proj["id"], title="【任务描述】帮我看下这个", sid=SID)
+    _patch(monkeypatch, [{"sid": SID, "title": "报错排查", "mtime": 0,
+                          "titles": ["【任务描述】帮我看下这个", "报错排查"],
+                          "first_prompt": "帮我看下这个报错"}])
+    board.sync_sessions(proj)
+    c = db.get_board_card(cid)
+    assert c["title"] == "报错排查" and c["description"] == "帮我看下这个报错"
 
 
 def test_empty_session_not_projected_until_first_prompt(monkeypatch):
@@ -79,14 +120,15 @@ def test_empty_session_not_projected_until_first_prompt(monkeypatch):
     取代旧口径「先落 sid 短码兜底、首问到了再补齐」——看板不再出现
     `session-xxxx` 占位卡；首问落盘后的下一个节拍才建卡，标题口径直接正确。"""
     proj = _mk_project()
-    _patch(monkeypatch, [{"sid": SID, "title": "", "mtime": 0, "first_prompt": ""}])
+    _patch(monkeypatch, [{"sid": SID, "title": "", "titles": [], "mtime": 0,
+                          "first_prompt": ""}])
     assert board.sync_sessions(proj) == []                     # 空会话不投影
-    _patch(monkeypatch, [{"sid": SID, "title": "", "mtime": 0,
+    _patch(monkeypatch, [{"sid": SID, "title": "", "titles": [], "mtime": 0,
                           "first_prompt": "真实首问\n其余内容"}])
     created = board.sync_sessions(proj)                        # 首问落盘 → 建卡
     assert len(created) == 1
     c = db.get_board_card(created[0])
-    assert c["title"] == "真实首问" and c["description"] == "其余内容"
+    assert c["title"] == "真实首问" and c["description"] == "真实首问\n其余内容"
     assert c["session_id"] == SID and c["origin"] == "sync"
     assert board.sync_sessions(proj) == []                     # 不重复建卡
 
@@ -95,7 +137,8 @@ def test_title_only_session_still_projected(monkeypatch):
     """A 类闸的边界：只有会话标题事件、首问未落盘（dsh 自动标题已生成）时照建——
     标题取会话标题、描述留空，回落链保留（首问后到仍由 `_sync_card_follow` 补齐）。"""
     proj = _mk_project()
-    _patch(monkeypatch, [{"sid": SID, "title": "dsh 生成的标题", "mtime": 0,
+    _patch(monkeypatch, [{"sid": SID, "title": "dsh 生成的标题",
+                          "titles": ["dsh 生成的标题"], "mtime": 0,
                           "first_prompt": ""}])
     created = board.sync_sessions(proj)
     assert len(created) == 1
@@ -182,14 +225,44 @@ def test_sweep_never_touches_real_titled_task_cards(monkeypatch):
 # ------------------------------------------------------------ 存量卡回填
 
 def test_legacy_card_title_backfilled(monkeypatch):
-    """旧口径存量卡（标题=旧代码写入的会话标题事件文本）在首个同步拍回填成首问首行。"""
+    """旧口径存量卡（标题=旧代码写入的标题事件文本 / 首问首行）在首个同步拍回填成
+    「DSH 当前标题 + 首问全文」——标题命中标题事件历史即视为自动写入形态。"""
     proj = _mk_project()
     cid = _mk_card(proj["id"], title="旧截断标题", sid=SID)
-    _patch(monkeypatch, [{"sid": SID, "title": "旧截断标题", "mtime": 0,
+    _patch(monkeypatch, [{"sid": SID, "title": "新标题", "mtime": 0,
+                          "titles": ["旧截断标题", "新标题"],
                           "first_prompt": "完整首问第一行\n细节行"}])
     board.sync_sessions(proj)
     c = db.get_board_card(cid)
-    assert c["title"] == "完整首问第一行" and c["description"] == "细节行"
+    assert c["title"] == "新标题"
+    assert c["description"] == "完整首问第一行\n细节行"
+
+
+def test_legacy_prompt_line_title_backfilled(monkeypatch):
+    """旧口径存量卡的另一形态：标题=首问首行（§48 口径，2026-10-07~10-10 写入）
+    同样被回填成 DSH 当前标题（自动形态含首问首行）。"""
+    proj = _mk_project()
+    cid = _mk_card(proj["id"], title="完整首问第一行", sid=SID)
+    _patch(monkeypatch, [{"sid": SID, "title": "LLM 标题", "mtime": 0,
+                          "titles": ["完整首问第一行", "LLM 标题"],
+                          "first_prompt": "完整首问第一行\n细节行"}])
+    board.sync_sessions(proj)
+    assert db.get_board_card(cid)["title"] == "LLM 标题"
+
+
+def test_legacy_description_migrated_to_full_prompt(monkeypatch):
+    """旧口径描述（首问除首行）在同步拍被刷成首问全文；已等于全文时不再写（幂等）。"""
+    proj = _mk_project()
+    cid = _mk_card(proj["id"], title="LLM 标题", description="细节行", sid=SID)
+    _patch(monkeypatch, [{"sid": SID, "title": "LLM 标题", "mtime": 0,
+                          "titles": ["LLM 标题"],
+                          "first_prompt": "完整首问第一行\n细节行"}])
+    board.sync_sessions(proj)
+    assert db.get_board_card(cid)["description"] == "完整首问第一行\n细节行"
+    board.sync_sessions(proj)                                  # 第二拍不产生写
+    first = db.get_board_card(cid)
+    board.sync_sessions(proj)
+    assert first == db.get_board_card(cid)
 
 
 def test_manual_rename_and_description_not_overwritten(monkeypatch):
@@ -199,69 +272,72 @@ def test_manual_rename_and_description_not_overwritten(monkeypatch):
     renamed = _mk_card(proj["id"], title="我改的名字", sid=SID)
     kept = _mk_card(proj["id"], title=SID2[:12], description="用户写的描述", sid=SID2)
     _patch(monkeypatch, [
-        {"sid": SID, "title": "会话标题", "mtime": 0, "first_prompt": "首行\n其余"},
-        {"sid": SID2, "title": "会话标题", "mtime": 0, "first_prompt": "首行\n其余"},
+        {"sid": SID, "title": "会话标题", "titles": ["会话标题"], "mtime": 0,
+         "first_prompt": "首行\n其余"},
+        {"sid": SID2, "title": "会话标题", "titles": ["会话标题"], "mtime": 0,
+         "first_prompt": "首行\n其余"},
     ])
     board.sync_sessions(proj)
     assert db.get_board_card(renamed)["title"] == "我改的名字"
     assert db.get_board_card(renamed)["description"] == ""
     c = db.get_board_card(kept)
-    assert c["title"] == "首行" and c["description"] == "用户写的描述"
+    assert c["title"] == "会话标题" and c["description"] == "用户写的描述"
 
 
 def test_non_main_session_does_not_drive_title(monkeypatch):
-    """只有主会话的首问驱动卡面：卡片 sessions 并集里的子会话（fork 出的）不参与
-    （对齐需求「主会话的第一次用户提问」）。"""
+    """只有主会话驱动卡面：卡片 sessions 并集里的子会话（fork 出的）不参与。"""
     proj = _mk_project()
     cid = _mk_card(proj["id"], title="旧截断标题", sid=SID, sessions=[SID, SID2])
-    _patch(monkeypatch, [{"sid": SID2, "title": "子会话标题", "mtime": 0,
-                          "first_prompt": "子会话首问\n其余"}])
+    _patch(monkeypatch, [{"sid": SID2, "title": "子会话标题", "titles": ["子会话标题"],
+                          "mtime": 0, "first_prompt": "子会话首问\n其余"}])
     board.sync_sessions(proj)
     assert db.get_board_card(cid)["title"] == "旧截断标题"
 
 
 def test_follow_is_idempotent(monkeypatch):
-    """补齐是幂等的：第二拍不再产生写（标题已是首问首行、描述已填）。"""
+    """补齐是幂等的：第二拍不再产生写（标题已是 DSH 标题、描述已是首问全文）。"""
     proj = _mk_project()
     cid = _mk_card(proj["id"], title=SID[:12], sid=SID)
-    _patch(monkeypatch, [{"sid": SID, "title": "", "mtime": 0,
-                          "first_prompt": "首行\n其余"}])
+    _patch(monkeypatch, [{"sid": SID, "title": "会话标题", "titles": ["会话标题"],
+                          "mtime": 0, "first_prompt": "首行\n其余"}])
     board.sync_sessions(proj)
     first = db.get_board_card(cid)
+    assert first["title"] == "会话标题" and first["description"] == "首行\n其余"
     board.sync_sessions(proj)
     second = db.get_board_card(cid)
     assert first == second
 
 
-def test_single_line_prompt_leaves_description_empty(monkeypatch):
-    """单行首问：描述保持空（不写占位内容）。"""
+def test_single_line_prompt_description_is_whole_prompt(monkeypatch):
+    """单行首问：描述 = 该行全文（不再留空——描述口径是「首问全文」）。"""
     proj = _mk_project()
     cid = _mk_card(proj["id"], title=SID[:12], sid=SID)
-    _patch(monkeypatch, [{"sid": SID, "title": "", "mtime": 0,
-                          "first_prompt": "只有一行的首问"}])
+    _patch(monkeypatch, [{"sid": SID, "title": "单行标题", "titles": ["单行标题"],
+                          "mtime": 0, "first_prompt": "只有一行的首问"}])
     board.sync_sessions(proj)
     c = db.get_board_card(cid)
-    assert c["title"] == "只有一行的首问" and c["description"] == ""
+    assert c["title"] == "单行标题" and c["description"] == "只有一行的首问"
 
 
 def test_platform_card_untouched(monkeypatch):
     """非 sync 卡（人工卡 / 平台任务卡）一律不动标题——本口径只服务 sync 卡。"""
     proj = _mk_project()
     cid = _mk_card(proj["id"], title="人工卡标题", sid=SID, origin="")
-    _patch(monkeypatch, [{"sid": SID, "title": "会话标题", "mtime": 0,
-                          "first_prompt": "首行\n其余"}])
+    _patch(monkeypatch, [{"sid": SID, "title": "会话标题", "titles": ["会话标题"],
+                          "mtime": 0, "first_prompt": "首行\n其余"}])
     board.sync_sessions(proj)
     assert db.get_board_card(cid)["title"] == "人工卡标题"
 
 
-def test_list_sessions_item_without_first_prompt_key(monkeypatch):
-    """防回归：list_sessions 桩不带 first_prompt 键时（旧测试桩形态）不炸，
-    按旧口径回落会话标题。"""
+def test_list_sessions_item_without_prompt_and_titles_keys(monkeypatch):
+    """防回归：list_sessions 桩缺 first_prompt / titles 键时（旧测试桩形态）不炸——
+    标题取会话标题、描述不写。"""
     proj = _mk_project()
     _patch(monkeypatch, [{"sid": SID, "title": "会话标题", "mtime": 0}])
     created = board.sync_sessions(proj)
     assert len(created) == 1
-    assert db.get_board_card(created[0])["title"] == "会话标题"
+    c = db.get_board_card(created[0])
+    assert c["title"] == "会话标题" and c["description"] == ""
 
 
 # -------------------------------------------------- 存量子代理卡收口（2026-10-07）

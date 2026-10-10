@@ -3348,8 +3348,11 @@ def _archive_unarchive_edge(card):
 # 最后活动，近似语义为「刚开始不久」）
 SYNC_BUSY_MTIME_S = 120
 
-# sync 卡标题/描述口径（2026-10-07）：标题与描述都取「主会话第一次用户提问」——
-# 首行进标题、其余进描述（与手工建卡的 QuickAdd「首行=标题、其余行=描述」同约定）。
+# sync 卡标题/描述口径（2026-10-10 改）：标题 = DSH **当前**会话标题（末枚
+# `session/title` 事件，与 dsh GUI 侧栏 last-wins 一致——DSH 侧 LLM 自动标题 /
+# 用户改名后，同步节拍跟着改卡标题）、描述 = 主会话第一次用户提问**全文**。
+# 旧口径（2026-10-07~10-10：「首问首行进标题、其余行进描述」）已退场，存量卡由
+# `_sync_card_follow` 在首个同步拍回填（详见 board spec §48）。
 SYNC_TITLE_MAX = 200   # 标题上限（沿用建卡既有截断：insert_board_card 调用处 [:200]）
 SYNC_DESC_MAX = 2000   # 描述上限（防一次长提问把看板负载撑大）
 
@@ -3367,11 +3370,15 @@ _SYNC_MISBUILT_SWEPT = set()
 
 
 def _split_first_prompt(text):
-    """首问原文 → (标题, 描述)：首行=标题、其余行=描述。
+    """首问原文 → (首行, 其余行)：仅服务**回落标题**与**旧口径描述识别**。
 
-    - 首行超 SYNC_TITLE_MAX 的溢出部分并入描述开头（截断不丢内容）；
-    - 描述超 SYNC_DESC_MAX 截断并补省略号；
+    - 首行超 SYNC_TITLE_MAX 的溢出部分并入其余行开头（截断不丢内容）；
+    - 其余行超 SYNC_DESC_MAX 截断并补省略号；
     - 原文为空 → ('', '')（调用方自行兜底标题）。
+
+    新口径下卡标题取 DSH 当前标题、描述取首问全文，本函数不再直接产生卡面字段；
+    保留是因为两处仍要「旧口径形态」的字符串：无标题事件时以首问首行回落成标题
+    （`_sync_card_fields`），以及判定卡描述是否仍是旧口径自动写入（`_sync_card_follow`）。
     """
     text = (text or "").strip()
     if not text:
@@ -3386,6 +3393,18 @@ def _split_first_prompt(text):
     if len(rest) > SYNC_DESC_MAX:
         rest = rest[:SYNC_DESC_MAX] + "…"
     return first, rest
+
+
+def _full_first_prompt(text):
+    """首问原文 → 卡描述：首问**全文**（去首尾空白；超 SYNC_DESC_MAX 截断补省略号）。
+
+    与 `_split_first_prompt` 的「其余行」不同——不再丢掉首行（标题已由 DSH 会话
+    标题承担，描述要的是完整提问）。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    return raw[:SYNC_DESC_MAX] + "…" if len(raw) > SYNC_DESC_MAX else raw
 
 
 def _is_empty_session(item):
@@ -3462,42 +3481,60 @@ def _platform_owned_sids(project_id):
 
 
 def _sync_card_fields(item, sid):
-    """sync 卡**新建**时的 (标题, 描述)。
+    """sync 卡平台自动写入形态的 (标题, 描述) 目标值。
 
-    优先「主会话第一次用户提问」（首行→标题、其余→描述）；无首问时回落会话标题
-    事件、再回落 sid 短码兜底（`_sync_card_fields` 只被**已通过空会话闸**的调用方
-    调用——首问/标题两者皆空的会话根本不会建卡，见 `_is_empty_session`）。建卡后
-    首问一旦落盘，仍由 `_sync_card_follow` 在同步节拍里补齐（覆盖「只有标题、
-    首问后到」的窄窗口，见 board spec「sync 会话归类」）。
+    标题 = **DSH 当前会话标题**（`item["title"]` = 末枚 `session/title` 事件，与
+    dsh GUI 侧栏一致；无标题事件时回落首问首行、再回落 sid 短码）；描述 = 首问
+    **全文**。建卡与 `_sync_card_follow` 补齐共用同一口径（幂等）。
+
+    本函数只被**已通过空会话闸**的调用方调用——首问/标题两者皆空的会话根本不建卡
+    （见 `_is_empty_session`）；建卡后 DSH 侧标题自动更新（LLM 标题、用户改名）与
+    首问落盘，都由 `_sync_card_follow` 在下一个同步节拍里跟上。
     """
-    title, desc = _split_first_prompt(item.get("first_prompt") or "")
+    title = (item.get("title") or "").strip()
     if not title:
-        title = ((item.get("title") or "") or sid[:12])[:SYNC_TITLE_MAX]
-    return title, desc
+        title = _split_first_prompt(item.get("first_prompt") or "")[0]
+    if not title:
+        title = sid[:12]
+    return title[:SYNC_TITLE_MAX], _full_first_prompt(item.get("first_prompt") or "")
+
+
+def _auto_title_forms(item, sid):
+    """平台**可能自动写入过**的卡标题集合（判「卡面标题是否仍属自动写入形态」）。
+
+    含：空、sid 短码、DSH 当前标题、**全部历史标题事件**、旧口径写入的首问首行。
+    历史标题事件一项是为「建卡时只有兜底标题、LLM 标题后到」的窗口准备的——那时
+    平台写进卡面的兜底标题已不是当前标题，只存在于会话的标题事件历史里；用户手工
+    改过的标题不在此集合 ⇒ 整卡不再自动覆盖（尊重用户在卡面的改名）。
+    """
+    forms = {"", sid[:12]}
+    forms.add(((item.get("title") or ""))[:SYNC_TITLE_MAX])
+    forms.update(str(t or "")[:SYNC_TITLE_MAX] for t in (item.get("titles") or []))
+    forms.add(_split_first_prompt(item.get("first_prompt") or "")[0])
+    return forms
 
 
 def _sync_card_follow(card, item, sid):
-    """存量 sync 卡按首问补齐的字段 dict（无变化返回 {}，调用方直接 update）。
+    """存量 sync 卡按「DSH 当前标题 + 首问全文」补齐的字段 dict（无变化返回 {}）。
 
-    只认「主会话」：遍历到的会话不是卡的主会话（多会话并集里的子会话）时不动，
-    对齐需求「主会话的第一次用户提问」。
-    只在卡仍由平台自动写入时动：标题为空 / 等于 sid 短码 / 等于旧口径写入的会话
-    标题事件文本 —— 用户在卡面行内改过标题（title 三者都不等）就整张卡不再自动
-    覆盖；描述只在卡描述为空时填，用户写过的描述不覆盖。
+    只认「主会话」：遍历到的会话不是卡的主会话（多会话并集里的子会话）时不动。
+    只在卡仍由平台自动写入时动（卡标题 ∈ `_auto_title_forms`：空 / sid 短码 / 任一枚
+    会话标题事件 / 旧口径的首问首行）——用户在卡面行内改过标题就整张卡不再自动覆盖
+    （描述也不动）。描述仅在为空、或仍是**旧口径自动写入**（首问除首行）时改成首问
+    全文；用户写过的描述不覆盖。
     """
     if (card["session_id"] or sid) != sid:
         return {}
-    title, desc = _split_first_prompt(item.get("first_prompt") or "")
-    if not title:
-        return {}
     cur_title = (card["title"] or "").strip()
-    auto_titles = {"", sid[:12], ((item.get("title") or "") or "")[:SYNC_TITLE_MAX]}
-    if cur_title not in auto_titles:
+    if cur_title not in _auto_title_forms(item, sid):
         return {}
+    title, desc = _sync_card_fields(item, sid)
     out = {}
     if cur_title != title:
         out["title"] = title
-    if desc and not (card["description"] or "").strip():
+    cur_desc = (card["description"] or "").strip()
+    legacy_desc = _split_first_prompt(item.get("first_prompt") or "")[1]
+    if desc and cur_desc != desc and cur_desc in ("", legacy_desc):
         out["description"] = desc
     return out
 
@@ -3512,10 +3549,10 @@ def sync_sessions(project):
       的会话平台侧已有入口，不再当成"外部直跑会话"投影成卡（见
       `_platform_owned_sids`）。
 
-    新建卡（origin='sync'）：标题/描述=主会话第一次用户提问（首行→标题、其余→
-    描述；无首问时回落会话标题、再回落 sid 短码，落盘后由本函数补齐），绑定
-    主会话，busy→doing / 空闲→review；存量 sync 卡：首问补齐标题/描述（用户改过
-    名的不动）+ dsh 族列映射移交调和器（事件驱动），此处仅归档→done（人工拖到
+    新建卡（origin='sync'）：标题 = DSH 当前会话标题（无标题事件时回落首问首行、
+    再回落 sid 短码）、描述 = 首问全文，绑定主会话，busy→doing / 空闲→review；
+    存量 sync 卡：按 DSH 当前标题 + 首问全文补齐（DSH 侧标题自动更新/改名后跟着改；
+    用户改过名的不动）+ dsh 族列映射移交调和器（事件驱动），此处仅归档→done（人工拖到
     todo/blocked/done 后不再自动搬）；会话存储被删的 sync 卡自动进 done；绑子代理
     会话的存量 sync 卡收口进回收站（每项目一轮）；上述两类误建卡的存量也按同款
     口径收口（每项目一轮，见函数尾注释）。

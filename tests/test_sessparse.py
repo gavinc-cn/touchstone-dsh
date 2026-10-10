@@ -576,8 +576,9 @@ def test_dsh_archived_ids_tolerates_broken_state(monkeypatch):
 
 
 def test_session_title_dsh_and_cache_refresh():
-    """session_title / dsh_title：标题取 session/title 事件；无该事件的会话、不存在的
-    会话、非法 sid 返回 ''；标题按文件 stamp 缓存，文件变化（换标题）后重新读取。"""
+    """session_title / dsh_title：标题取 **最后一枚** session/title 事件（DSH 当前
+    标题，与 dsh GUI 侧栏 last-wins 一致）；无该事件的会话、不存在的会话、非法 sid
+    返回 ''；标题按文件 stamp 缓存，文件变化（换标题/追加标题事件）后重新读取。"""
     _mk_dsh()
     assert sessparse.session_title("dsh", DSH_SID) == "修复登录"
     assert sessparse.dsh_title(DSH_SID) == "修复登录"
@@ -592,28 +593,31 @@ def test_session_title_dsh_and_cache_refresh():
     assert sessparse.session_title("dsh", DSH_SID) == "新标题"   # 缓存失效重读
 
 
-def test_dsh_title_takes_first_event_and_first_prompt():
+def test_dsh_title_takes_last_event_and_first_prompt():
     """标题与首问的口径钉子：
-    - `dsh_title` 取**首个** session/title 事件（多枚标题事件时不变 last-wins——
-      会话窗/任务标题沿用该既有口径，改动需同步 spec）；
+    - `dsh_title` 取**最后一枚** session/title 事件 = DSH 当前标题（dsh 会先写
+      兜底截断句、再由 LLM 标题覆盖、用户改名再追加，last-wins 才与 dsh GUI 一致）；
+      非事件行里的同名字符串（坏行）与空标题事件都不算；
     - `dsh_first_prompt` 取第一条 source.kind=user 的 user/message 原文，内部换行
-      原样保留（看板 sync 卡按「首行进标题、其余进描述」切分）；系统注入消息、
-      空内容消息被跳过；只有图片的提问回落 `[图片]`；无提问/无会话返回 ''。"""
+      原样保留（看板 sync 卡描述 = 首问全文）；系统注入消息、空内容消息被跳过；
+      只有图片的提问回落 `[图片]`；无提问/无会话返回 ''。"""
     _mk_dsh()
     assert sessparse.dsh_first_prompt(DSH_SID) == "请修复"       # 图片块不掺进文本
     assert sessparse.dsh_first_prompt(ABSENT_SID) == ""
     assert sessparse.dsh_first_prompt("../../x") == ""
-    _mk_dsh(sid=DSH_SID2, frames=[[                              # 多条 title 事件
-        {"type": "session/title", "seq": 1, "time": 1, "data": {"title": "首枚"}},
-        {"type": "session/title", "seq": 2, "time": 2, "data": {"title": "末枚"}},
-        {"type": "user/message", "seq": 3, "time": 3, "data": {
-            "source": {"kind": "agent-instructions"},
-            "content": [{"type": "text", "text": "系统注入，不算提问"}]}},
-        {"type": "user/message", "seq": 4, "time": 4, "data": {
-            "source": {"kind": "user"},
-            "content": [{"type": "text", "text": "/orca-git-ops\n提交这批改动"}]}},
-    ]])
-    assert sessparse.dsh_title(DSH_SID2) == "首枚"                # 仍取首个
+    _mk_dsh(sid=DSH_SID2, frames=[
+        [{"type": "session/title", "seq": 1, "time": 1, "data": {"title": "首枚"}}],
+        '{"broken": "session/title"\n',        # 坏行：含同名字符串但非事件行（跳过）
+        [{"type": "session/title", "seq": 3, "time": 3, "data": {"title": "末枚"}},
+         {"type": "session/title", "seq": 4, "time": 4, "data": {"title": ""}},
+         {"type": "user/message", "seq": 5, "time": 5, "data": {
+             "source": {"kind": "agent-instructions"},
+             "content": [{"type": "text", "text": "系统注入，不算提问"}]}},
+         {"type": "user/message", "seq": 6, "time": 6, "data": {
+             "source": {"kind": "user"},
+             "content": [{"type": "text", "text": "/orca-git-ops\n提交这批改动"}]}}],
+    ])
+    assert sessparse.dsh_title(DSH_SID2) == "末枚"                # last-wins（空标题跳过）
     assert sessparse.dsh_first_prompt(DSH_SID2) == "/orca-git-ops\n提交这批改动"
 
 
@@ -637,12 +641,13 @@ def test_dsh_first_prompt_image_only_and_cache_refresh():
 
 
 def test_list_sessions_items_carry_first_prompt():
-    """list_sessions 的条目带 first_prompt（看板 sync 卡建卡/补齐标题的数据源），
-    与 title 一起从同一次解压取出（_dsh_meta 缓存）。"""
+    """list_sessions 的条目带 first_prompt 与 titles（看板 sync 卡建卡/标题同步的
+    数据源），与 title（=当前标题）一起从同一次解压取出（_dsh_meta 缓存）。"""
     _mk_dsh(mtime=1000)
     items = sessparse.list_sessions("dsh", CWD)
     assert [i["sid"] for i in items] == [DSH_SID]
     assert items[0]["title"] == "修复登录" and items[0]["first_prompt"] == "请修复"
+    assert items[0]["titles"] == ["修复登录"]        # 全部标题事件（自动形态判定用）
     assert items[0]["archived"] is False
 
 
