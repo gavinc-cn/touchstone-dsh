@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import SearchSelect from '@/components/ui/search-select'
-import { Bell, Command, Link2, RefreshCw, Webhook } from 'lucide-react'
+import { Bell, Command, Link2, RefreshCw, Stethoscope, Wand2, Webhook } from 'lucide-react'
 
 // 项目推送绑定的事件开关（key 与后端 feishu.FEISHU_EVENTS 一致，数组顺序即渲染顺序；
 // commit_failed 已于 2026-09-13 阻塞让行提交退场时随链路删除，勿再加回）
@@ -57,9 +57,13 @@ export default function FeishuPanel() {
       const r = await meApi.feishuCfgSet(body)
       setInput({ webhook_url: '', secret: '', app_secret: '' })
       // inbound_started=本用户入站长连接随之拉起（首次配置即时生效）；否则凭据变更需重启
-      toast(r?.inbound_started
+      const base = r?.inbound_started
         ? '飞书配置已保存，入站消息长连接已启动'
-        : '飞书配置已保存（应用凭据变更需重启站点生效）')
+        : '飞书配置已保存（应用凭据变更需重启站点生效）'
+      // verify=服务端保存后立刻做的凭据快检（凭据不全时为 null，不探测）
+      if (r?.verify && !r.verify.ok) toast(`${base}；但凭据快检未通过：${r.verify.detail}`)
+      else if (r?.verify?.ok) toast(`${base}；${r.verify.detail}`)
+      else toast(base)
       await load()
     } catch (e) { toast(e.message) } finally { setBusy(false) }
   }
@@ -150,7 +154,7 @@ export default function FeishuPanel() {
               '未配置（填写并保存后自动连接）'
             )}
           </div>
-          <div className="hint">入站指令需：应用开通「机器人」能力 + 权限 im:message / im:message.p2p_msg:readonly / im:resource + 事件订阅选「长连接」并添加 im.message.receive_v1 + 应用发布生效；Secret 保存后不回显（留空=保持现有值），首次配置保存后自动建立长连接，变更凭据需重启站点。</div>
+          <div className="hint">入站指令需：应用开通「机器人」能力 + 权限 im:message.p2p_msg:readonly / im:message.group_at_msg:readonly / im:message:send_as_bot（斜杠指令另需 application:app_slash_command:read|write）+ 事件订阅选「长连接」并添加 im.message.receive_v1、回调 card.action.trigger + 应用发布生效。**下方「飞书接入」卡可扫码建应用并自动配好这些**；Secret 保存后不回显（留空=保持现有值），首次配置保存后自动建立长连接，变更凭据需重启站点。</div>
           <div className="grid gap-2">
             <Label className="text-xs text-muted-foreground">默认推送 Webhook（未绑定项目的回落目标）</Label>
             <Input value={input.webhook_url} onChange={(e) => setInput({ ...input, webhook_url: e.target.value })}
@@ -163,8 +167,14 @@ export default function FeishuPanel() {
           </div>
           <div className="grid gap-2">
             <Label className="text-xs text-muted-foreground">站点访问地址（通知里附「详情」链接，可空）</Label>
-            <Input value={cfg?.base_url || ''} onChange={(e) => setCfg({ ...cfg, base_url: e.target.value })}
-              placeholder="http://192.0.2.10:4601" />
+            <div className="flex gap-2">
+              <Input value={cfg?.base_url || ''} onChange={(e) => setCfg({ ...cfg, base_url: e.target.value })}
+                placeholder="http://192.0.2.10:4601" />
+              <Button variant="ghost" type="button"
+                onClick={() => setCfg({ ...cfg, base_url: window.location.origin })}>
+                用当前站点
+              </Button>
+            </div>
           </div>
           <div className="flex gap-2">
             <Button variant="outline" disabled={busy} onClick={save}>保存配置</Button>
@@ -188,6 +198,12 @@ export default function FeishuPanel() {
           )}
         </CardContent>
       </Card>
+
+      {/* 飞书接入（M5）：扫码建应用 + 自动补齐配置 + 提交发布（全部由用户点击触发） */}
+      <ProvisionCard onCfgChanged={load} />
+
+      {/* 配置自检（M5）：八项体检，逐项给修复指引 */}
+      <DoctorCard />
 
       {/* 项目推送绑定（原「编辑项目」弹窗内的飞书推送区迁入，2026-09-14） */}
       <ProjectHookCard />
@@ -371,6 +387,226 @@ function ProjectHookCard() {
               <Button variant="outline" disabled={busy} onClick={save}>保存项目推送</Button>
             </div>
           </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// 飞书接入（M5 配置自动化，2026-10-10）：把「开发者后台六步」压成一次扫码——
+// 扫码创建应用（后端 lark_oapi.register_app，创建时即预置权限/事件/回调）→ 自动起
+// 长连接 → 自动补齐应用配置 → 可一键提交发布。所有写动作都由用户点击触发；
+// 服务端 TS_FEISHU_PROVISION=0 可整体关闭。等待扫码期间 3s 轮询一次，完成即停。
+function ProvisionCard({ onCfgChanged }) {
+  const [st, setSt] = useState(null)         // {supported,enabled,state,url,error,app_id,steps}
+  const [result, setResult] = useState(null) // apply / publish 的结果摘要
+  const [busy, setBusy] = useState(false)
+
+  async function load() {
+    try { setSt(await meApi.feishuProvisionGet()) } catch (e) { toast(e.message) }
+  }
+  useEffect(() => { load() }, [])
+
+  // 等待扫码：3s 轮询，状态离开 waiting 即停并刷新上方凭据卡（凭据已自动入库）
+  useEffect(() => {
+    if (st?.state !== 'waiting') return undefined
+    const t = setInterval(async () => {
+      try {
+        const r = await meApi.feishuProvisionGet()
+        setSt(r)
+        if (r.state === 'success') {
+          toast(`应用已创建：${r.app_id}`)
+          onCfgChanged?.()
+        } else if (r.state === 'failed') {
+          toast(r.error || '扫码创建失败')
+        }
+      } catch (e) { /* 轮询失败不打扰用户，下一拍重试 */ }
+    }, 3000)
+    return () => clearInterval(t)
+  }, [st?.state])
+
+  async function run(action, body, okMsg) {
+    setBusy(true)
+    try {
+      const r = await meApi.feishuProvisionSet(action, body || {})
+      if (action === 'start') {
+        setSt((s) => ({ ...(s || {}), state: r.state, url: r.url, error: r.error }))
+        if (!r.ok) toast(r.error || '发起失败')
+      } else {
+        setResult({ action, ...r })
+        if (r.ok) toast(okMsg)
+        else toast(r.error || '操作失败')
+        await load()
+      }
+    } catch (e) { toast(e.message) } finally { setBusy(false) }
+  }
+
+  const state = st?.state || 'idle'
+  const disabled = !st?.supported || !st?.enabled
+  return (
+    <Card className="max-w-xl gap-4 py-4">
+      <CardHeader className="px-5 pb-0">
+        <CardTitle className="flex items-center gap-2 text-sm">
+          <Wand2 className="size-4 text-[var(--star-text)]" /> 飞书接入（扫码一键配置）
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 px-5">
+        {!st ? (
+          <div className="text-xs text-muted-foreground">加载中…</div>
+        ) : (
+          <>
+            <div className="text-xs leading-relaxed text-muted-foreground">
+              没有应用也能开始：点「扫码创建飞书应用」→ 用手机飞书打开链接确认 →
+              平台自动拿到 App ID / Secret、建长连接，并自动开通所需权限、订阅事件与卡片回调。
+              发布新版本仍需企业管理员审批（或请管理员对该应用开「免审」）。
+            </div>
+            {!st.supported && (
+              <div className="text-xs text-destructive">
+                本机 lark-oapi 版本过低（扫码创建需 ≥1.5.5）：升级依赖后重试，或按下方自检提示手工配置。
+              </div>
+            )}
+            {!st.enabled && (
+              <div className="text-xs text-[var(--star-text)]">
+                配置自动化已被 TS_FEISHU_PROVISION=0 关闭：可只跑自检，写操作不可用。
+              </div>
+            )}
+            {state === 'waiting' && (
+              <div className="rounded-md border border-border bg-accent/40 px-3 py-2 text-xs">
+                <div>等待你在飞书里确认（链接 10 分钟内有效）：</div>
+                {st.url ? (
+                  <div className="mt-1 break-all font-mono text-[11px]">{st.url}</div>
+                ) : (
+                  <div className="mt-1 text-muted-foreground">正在获取确认链接…</div>
+                )}
+                <div className="mt-1 flex gap-2">
+                  {st.url && (
+                    <Button variant="ghost" size="sm"
+                      onClick={() => { navigator.clipboard?.writeText(st.url); toast('链接已复制') }}>
+                      复制链接
+                    </Button>
+                  )}
+                  <Button variant="ghost" size="sm" disabled={busy}
+                    onClick={() => run('cancel')}>取消</Button>
+                </div>
+              </div>
+            )}
+            {state === 'failed' && st.error && (
+              <div className="text-xs text-destructive">{st.error}</div>
+            )}
+            {state === 'success' && (
+              <div className="text-xs">
+                已接入应用 <span className="font-mono">{st.app_id}</span>
+                {st.error ? <div className="text-destructive">{st.error}</div> : null}
+              </div>
+            )}
+            {!!(st.steps || []).length && (
+              <div className="rounded border border-border/60 text-xs">
+                {st.steps.map((s) => (
+                  <div key={s.key} className="flex items-start gap-2 border-b border-border/40 px-2 py-1.5 last:border-0">
+                    <span>{s.ok ? '✅' : '❌'}</span>
+                    <span className="shrink-0">{s.label}</span>
+                    <span className="truncate text-muted-foreground" title={s.detail}>{s.detail}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" disabled={busy || disabled || state === 'waiting'}
+                onClick={() => {
+                  if (st.app_id && !window.confirm(`当前已接入应用 ${st.app_id}，重新扫码会换成新应用，继续？`)) return
+                  run('start', { force: !!st.app_id })
+                }}>
+                扫码创建飞书应用
+              </Button>
+              <Button variant="ghost" disabled={busy || disabled}
+                onClick={() => run('apply', {}, '应用配置已补齐（发布后线上生效）')}>
+                补齐应用配置
+              </Button>
+              <Button variant="ghost" disabled={busy || disabled}
+                onClick={() => {
+                  // 发布 = 向企业管理员提交一个待审版本，误点代价高：先确认
+                  if (!window.confirm('把当前改动作为新版本提交给企业管理员审批？（发布后需管理员同意才线上生效）')) return
+                  run('publish', {}, '已提交发布，等管理员审批')
+                }}>
+                提交发布
+              </Button>
+              <Button variant="ghost" disabled={busy} onClick={load}>刷新状态</Button>
+            </div>
+            {result?.action === 'publish' && result.ok && (
+              <div className="text-xs text-muted-foreground">
+                已提交版本 {result.version}（version_id={result.version_id || '-'}）；
+                企业管理员审批通过后线上生效。
+              </div>
+            )}
+            <div className="hint">
+              「补齐应用配置」会写你飞书应用的权限/事件订阅/回调（需 application:application:patch 权限，
+              缺权限会给出开通指引）；一键接入不需要它——扫码创建时已按平台清单预置。
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// 配置自检（M5）：八项体检逐项给结论与修复指引。今天配错了只能翻日志，这里一眼看全。
+// 「发送测试消息」会给已绑定的飞书账号发一条 DM（服务端 60s 频控），用来验证发消息权限。
+const DOCTOR_MARKS = { ok: '✅', warn: '⚠️', fail: '❌', skip: '➖' }
+
+function DoctorCard() {
+  const [items, setItems] = useState(null)
+  const [summary, setSummary] = useState(null)
+  const [probe, setProbe] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  async function run() {
+    setBusy(true)
+    try {
+      const r = await meApi.feishuDoctor(probe)
+      setItems(r.items || [])
+      setSummary(r.summary || null)
+    } catch (e) { toast(e.message) } finally { setBusy(false) }
+  }
+
+  // 刻意**不**在挂载时自动跑：自检会对真实飞书发只读请求（token/bot/斜杠），
+  // 每次进设置页都静默打网络既慢又意外——由用户点「运行自检」触发。
+  return (
+    <Card className="max-w-xl gap-4 py-4">
+      <CardHeader className="px-5 pb-0">
+        <CardTitle className="flex items-center gap-2 text-sm">
+          <Stethoscope className="size-4 text-[var(--star-text)]" /> 配置自检
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 px-5">
+        <div className="text-xs leading-relaxed text-muted-foreground">
+          逐项检查「凭据/机器人能力/长连接/事件订阅/权限」，红色项按提示修即可。
+        </div>
+        <label className="flex items-center gap-2 text-xs">
+          <input type="checkbox" checked={probe} onChange={(e) => setProbe(e.target.checked)} />
+          发送测试消息（验证「发消息」权限，会给你已绑定的飞书账号发一条 DM）
+        </label>
+        <div className="flex gap-2">
+          <Button variant="outline" disabled={busy} onClick={run}>运行自检</Button>
+          {!items && <span className="self-center text-xs text-muted-foreground">点「运行自检」开始（会读取你应用的凭据与权限状态）</span>}
+        </div>
+        {items && (
+          <div className="rounded border border-border/60 text-xs">
+            {items.map((it) => (
+              <div key={it.key} className="border-b border-border/40 px-2 py-1.5 last:border-0">
+                <div className="flex items-start gap-2">
+                  <span className="shrink-0">{DOCTOR_MARKS[it.state] || '•'}</span>
+                  <span className="shrink-0">{it.label}</span>
+                  <span className="text-muted-foreground">{it.detail}</span>
+                </div>
+                {it.hint ? <div className="mt-0.5 pl-6 text-muted-foreground">提示：{it.hint}</div> : null}
+              </div>
+            ))}
+          </div>
+        )}
+        {summary && (
+          <div className="text-xs text-muted-foreground">
+            汇总：通过 {summary.ok}、待修 {summary.fail}、提醒 {summary.warn}、跳过 {summary.skip}
+          </div>
         )}
       </CardContent>
     </Card>

@@ -59,6 +59,13 @@ export const meApi = {
   // 飞书快捷指令(斜杠指令): 现状(TS 期望清单 + 飞书侧已注册) / 注册同步 / 清除 TS 指令
   feishuSlashGet: () => api.get('/api/me/feishu/slash-commands'),
   feishuSlashSet: (action) => api.post('/api/me/feishu/slash-commands', { action }),
+  // 飞书配置自动化(M5): 扫码建应用流程现状(轮询口) / 四动作(start|cancel|apply|publish)
+  feishuProvisionGet: () => api.get('/api/me/feishu/provision'),
+  feishuProvisionSet: (action, body = {}) =>
+    api.post('/api/me/feishu/provision', { action, ...body }),
+  // 配置自检(八项); sendProbe=true 时额外发一条测试消息(服务端 60s 频控)
+  feishuDoctor: (sendProbe = false) =>
+    api.post('/api/me/feishu/doctor', { send_probe: !!sendProbe }),
 }
 
 // ---- 项目 ----

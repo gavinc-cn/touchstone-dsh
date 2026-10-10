@@ -1062,6 +1062,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/me/feishu/slash-commands":
             self._api_me_feishu_slash_set(body)
             return
+        if path == "/api/me/feishu/provision":
+            self._api_me_feishu_provision_set(body)
+            return
+        if path == "/api/me/feishu/doctor":
+            self._api_me_feishu_doctor(body)
+            return
         m = re.match(r"^/api/admin/users/(\d+)$", path)
         if m:
             self._api_admin_update_user(int(m.group(1)), body)
@@ -1307,6 +1313,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_me_feishu_outbox()
         elif path == "/api/me/feishu/slash-commands":
             self._api_me_feishu_slash_get()
+        elif path == "/api/me/feishu/provision":
+            self._api_me_feishu_provision_get()
         elif path == "/api/admin/users":
             self._api_admin_list_users()
         elif path == "/api/admin/rag":
@@ -1737,23 +1745,55 @@ class Handler(BaseHTTPRequestHandler):
         }, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
     def _api_me_feishu_cfg_set(self, body):
-        """当前用户飞书配置更新：字段缺省=不改，显式空串=清除
-        （前端对未编辑的 secret/webhook 输入框不下发该键，防误清）。
-        应用凭据齐全时尝试拉起本用户入站长连接：首次配置免重启即时生效；
-        已在运行的（变更凭据）为幂等 no-op，需重启站点重建。inbound_started 供前端提示。"""
+        """当前用户飞书配置更新（业务在 feishu.save_user_config：字段缺省=不改、
+        显式空串=清除；凭据齐全时拉起入站长连接并**即时快检**）。
+        响应 = 既有字段 + verify（快检结果；凭据不全时 null）——前端据此即时提示对错。"""
         user = self._current_user()
-        cfg = feishu.user_config(user["id"])
-        if "enabled" in body:
-            cfg["enabled"] = 1 if body["enabled"] else 0
-        for key in ("default_webhook", "default_secret", "base_url",
-                    "app_id", "app_secret"):
-            if key in body:
-                cfg[key] = str(body[key] or "").strip()
-        db.set_feishu_user_cfg(user["id"], cfg)
-        started = feishu.start_inbound_for(user["id"])
+        out = feishu.save_user_config(user["id"], body)
         self._respond(200, json.dumps(
-            {"ok": True, "inbound_started": bool(started)},
+            {"ok": True, **out},
             ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+    def _api_me_feishu_provision_get(self):
+        """扫码建应用流程现状（设置页轮询口，只读）：能力/总闸/状态/确认链接/步骤。"""
+        user = self._current_user()
+        self._respond(200, json.dumps(feishu.provision_status(user["id"]),
+                                      ensure_ascii=False).encode("utf-8"),
+                      "application/json; charset=utf-8")
+
+    def _api_me_feishu_provision_set(self, body):
+        """扫码建应用四动作（全部返回 200 + 摘要，页面据此渲染引导；非法 action 400）：
+        start=发起（force 覆盖已有应用）/ cancel=取消 / apply=补齐机器人能力+权限+
+        长连接订阅+事件+回调 / publish=提交发布（版本号缺省自动递增）。"""
+        user = self._current_user()
+        action = str(body.get("action") or "")
+        uid = user["id"]
+        if action == "start":
+            out = feishu.provision_start(uid, force=bool(body.get("force")))
+        elif action == "cancel":
+            out = feishu.provision_cancel(uid)
+        elif action == "apply":
+            out = feishu.provision_apply(uid)
+        elif action == "publish":
+            out = feishu.provision_publish(uid,
+                                           version=str(body.get("version") or "") or None,
+                                           remark=str(body.get("remark") or ""),
+                                           changelog=str(body.get("changelog") or ""))
+        else:
+            self._respond(400, json.dumps(
+                {"error": "action 仅支持 start / cancel / apply / publish"},
+                ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8")
+            return
+        self._respond(200, json.dumps(out, ensure_ascii=False).encode("utf-8"),
+                      "application/json; charset=utf-8")
+
+    def _api_me_feishu_doctor(self, body):
+        """配置自检（八项）：只读为主；send_probe=true 时额外发一条测试消息（60s 频控）。"""
+        user = self._current_user()
+        out = feishu.doctor(user["id"], send_probe=bool(body.get("send_probe")))
+        self._respond(200, json.dumps(out, ensure_ascii=False).encode("utf-8"),
+                      "application/json; charset=utf-8")
 
     def _api_me_feishu_outbox(self):
         """当前用户的最近投递记录（target 打码——URL 本身含 token 即凭据）。"""

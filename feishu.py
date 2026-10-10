@@ -831,6 +831,51 @@ SLASH_ICON_KEYS = frozenset((
 ))
 
 
+# ---------- M5 配置自动化：清单真源 / 事件打点 / 环境总闸 ----------
+# 2026-10-10：新用户「扫码一键接入 + 配置补齐 + 自检」批次（设计见
+# doc_ai/plan/202610/20261010_1700_飞书配置自动化（扫码一键接入与配置自检）.md）。
+# 下列清单是**唯一真源**：doctor 的逐项检查、register_app 的 addons 预置、
+# application/v7 config 的补齐三处共用同一份（改这里即可，勿在前端另抄一份）。
+PROVISION_ENV = "TS_FEISHU_PROVISION"   # =0 关闭全部写操作（doctor/status 只读不受影响）
+REQUIRED_SCOPES = (
+    ("im:message.p2p_msg:readonly", "tenant", "接收单聊消息"),
+    ("im:message.group_at_msg:readonly", "tenant", "接收群聊 @机器人 消息"),
+    ("im:message:send_as_bot", "tenant", "以机器人身份发消息/卡片"),
+    ("application:app_slash_command:read", "tenant", "读取斜杠指令"),
+    ("application:app_slash_command:write", "tenant", "注册斜杠指令"),
+)
+REQUIRED_EVENTS = (("im.message.receive_v1", "接收消息"),)
+REQUIRED_CALLBACKS = (("card.action.trigger", "卡片按钮回调"),)
+EVENT_FRESH_S = 300                     # doctor 判「事件订阅真生效」的新鲜窗口（秒）
+SEND_PROBE_MIN_S = 60                   # send_probe 每用户频控（秒），防连点刷屏
+PROVISION_TTL = 600                     # 扫码流程状态存活上限（秒），过期视为 idle
+
+# 应用配置/发布端点（官方 application/v7；能力开关在 ability 子路径）
+_APP_ABILITY_API = "/open-apis/application/v7/applications/%s/ability"
+_APP_CONFIG_API = "/open-apis/application/v7/applications/%s/config"
+_APP_PUBLISH_API = "/open-apis/application/v7/applications/%s/publish"
+_APP_VERSIONS_API = "/open-apis/application/v6/applications/%s/app_versions"
+# 补齐应用配置所需的权限（冷启动点：扫码新建的应用默认没有它，需控制台加一次或管理员免审）
+_PATCH_SCOPE = "application:application:patch"
+_PATCH_SCOPE_HINT = (f"应用缺少「{_PATCH_SCOPE}」权限：请到开发者后台 → 权限管理添加该权限"
+                     "并创建版本发布；或把该权限对应用设为免审后再试")
+
+_LAST_EVENT_TS = {}    # user_id -> 最近一次收到飞书事件（消息/卡片回调）的时刻
+
+
+def _touch_event(user_id):
+    """事件到达打点：入站长连接的 handler 入口调用（消息与卡片回调都算）。
+    doctor 的「事件订阅是否真生效」只能靠真实事件证明（订阅方式配错时连接照样
+    建得起来），此时间戳即唯一证据；仅进程内存态，重启归零。"""
+    _LAST_EVENT_TS[user_id] = time.time()
+
+
+def provision_enabled():
+    """配置自动化写操作（扫码建应用/补齐配置/提交发布）总闸：TS_FEISHU_PROVISION=0 关闭。
+    只读的 status/doctor 不受影响——关掉后仍可体检，只是不能改用户应用配置。"""
+    return (os.environ.get(PROVISION_ENV) or "1") != "0"
+
+
 def _slash_description(desc):
     """指令说明载荷：default_value 兜底 + 中文 i18n。
     **图标不放这里**——2026-10-05 线上取证：官方创建示例把 icon 放 description 内可被接受
@@ -1263,11 +1308,13 @@ def _ws_run(user_id, cfg):
         return  # 依赖未装：入站禁用（M1 出站 webhook 不受影响）
 
     def _handler(data):
+        _touch_event(user_id)      # 事件到达打点（doctor 判「订阅是否真生效」）
         _on_message_event(data, cfg)
 
     def _on_card_sdk(data):
         # 返回值（toast）由 ws 客户端序列化回响应帧——丢弃则点击反馈（toast）
         # 恒不生效（SDK 路径此前即如此）
+        _touch_event(user_id)
         return _on_card_action(_card_sdk_to_dict(data), cfg)
 
     handler = (lark.EventDispatcherHandler.builder("", "")
@@ -2210,9 +2257,525 @@ def start_notifier():
 
 # ---------- CLI（自测通道） ----------
 
+# ---------- M5 配置自动化：凭据快检 / 应用配置补齐 ----------
+
+def verify_credentials(user_id):
+    """凭据快检（保存凭据后的即时反馈）：token 可取 → 机器人信息可读，两步。
+
+    返回 {"ok": bool, "detail": str}，**绝不抛出**；无凭据时零请求。
+    今天保存凭据只写库不校验，错了只能翻日志——本函数是那个缺口的补口。"""
+    cfg = app_config(user_id)
+    if cfg is None:
+        return {"ok": False, "detail": "应用凭据未配置（App ID / App Secret）"}
+    try:
+        _tenant_token(cfg)   # 第一步：凭据正确性（失败码 10003/10014 等）
+        out = _rest("GET", "/open-apis/bot/v3/info", cfg=cfg)
+        # /bot/v3/info 的 bot 在响应**顶层**（无 data 包裹，同 bot_open_id 的读法）
+        bot = out.get("bot") or {}
+        name = bot.get("app_name") or "（未命名）"
+        act = bot.get("activate_status")
+        tail = "已启用" if act == 2 else f"启用状态={act}（可能未发布/未启用）"
+        return {"ok": True, "detail": f"凭据可用：机器人 {name}（{tail}）"}
+    except FeishuRestError as e:
+        return {"ok": False, "detail": str(e)}
+    except Exception as e:   # 兜底：网络/形态异常一律转文案，不抛到 HTTP 层
+        return {"ok": False, "detail": f"探测失败: {e!r}"}
+
+
+def _apply_error(e):
+    """补齐失败的文案：缺 patch 权限给精确开通引导，其余原样透出。"""
+    if _need_scope(e):
+        return _PATCH_SCOPE_HINT
+    return str(e)
+
+
+def provision_apply(user_id):
+    """把平台所需的**机器人能力 + 权限 + 长连接订阅 + 事件 + 回调**一次补齐到
+    用户自己的应用（只动本用户配置里的 app_id，前端永不传 app_id）。
+
+    两步：① PATCH .../ability 开机器人能力（{bot:{enable:true}}）；
+    ② PATCH .../config 一次带上 scope.add_scopes / event.subscription_type=websocket
+    + add_events / callback.add_callbacks。失败即停并如实报告（缺
+    application:application:patch 时给开通引导，不静默）。
+
+    返回 {"ok", "need_patch_scope", "error", "steps":[{key,label,ok,detail}]}。"""
+    if not provision_enabled():
+        return {"ok": False, "need_patch_scope": False, "steps": [],
+                "error": f"配置自动化已关闭（{PROVISION_ENV}=0）"}
+    cfg = app_config(user_id)
+    if cfg is None:
+        return {"ok": False, "need_patch_scope": False, "steps": [],
+                "error": "应用凭据未配置（App ID / App Secret），请先保存凭据"}
+    app_id = cfg["app_id"]
+    steps = []
+    # ① 机器人能力（错误码 210041 即「未开启机器人能力」，先开它）
+    try:
+        _rest("PATCH", _APP_ABILITY_API % app_id,
+              json_body={"bot": {"enable": True}}, cfg=cfg)
+        steps.append({"key": "ability", "label": "开启机器人能力",
+                      "ok": True, "detail": "已开启"})
+    except FeishuRestError as e:
+        steps.append({"key": "ability", "label": "开启机器人能力",
+                      "ok": False, "detail": str(e)})
+        return {"ok": False, "need_patch_scope": _need_scope(e),
+                "error": _apply_error(e), "steps": steps}
+    # ② 权限 + 订阅方式（长连接）+ 事件 + 回调（一次 PATCH，减少请求与半生效窗口）
+    body = {
+        "scope": {"add_scopes": [{"scope_name": n, "token_type": t}
+                                 for n, t, _ in REQUIRED_SCOPES]},
+        "event": {"subscription_type": "websocket",
+                  "add_events": [e for e, _ in REQUIRED_EVENTS]},
+        "callback": {"callback_type": "websocket",
+                     "add_callbacks": [c for c, _ in REQUIRED_CALLBACKS]},
+    }
+    try:
+        _rest("PATCH", _APP_CONFIG_API % app_id, json_body=body, cfg=cfg)
+        steps.append({"key": "config", "label": "权限 / 长连接订阅 / 事件 / 回调",
+                      "ok": True, "detail": "已写入（需发布新版本后生效）"})
+    except FeishuRestError as e:
+        steps.append({"key": "config", "label": "权限 / 长连接订阅 / 事件 / 回调",
+                      "ok": False, "detail": str(e)})
+        return {"ok": False, "need_patch_scope": _need_scope(e),
+                "error": _apply_error(e), "steps": steps}
+    return {"ok": True, "need_patch_scope": False, "error": "", "steps": steps}
+
+
+# ---------- M5 配置自动化：配置自检（doctor） ----------
+
+_LAST_PROBE_TS = {}    # user_id -> 上次发「测试消息」的时刻（send_probe 频控）
+
+
+def _doc_item(key, label, state, detail, hint=""):
+    """doctor 单项（state ∈ ok|fail|warn|skip；hint 是中文修复指引）。"""
+    return {"key": key, "label": label, "state": state, "detail": detail, "hint": hint}
+
+
+def doctor(user_id, send_probe=False):
+    """逐项配置体检（**只读为主**，绝不抛出）：把「存没存上、对不对、通不通」一次说清。
+
+    八项：creds（凭据齐全）/ token（凭据有效）/ bot（机器人能力与启用状态）/
+    inbound_ws（长连接线程在跑）/ inbound_event（**真实收到过事件**——订阅方式配错时
+    连接照样建得起来，此时间戳是唯一证据）/ slash_scope（斜杠指令权限）/
+    send_scope（发消息权限，send_probe=True 时才真发一条自检 DM，60s 频控）/
+    webhook（默认推送地址已配）。
+
+    返回 {"items":[{key,label,state,detail,hint}], "summary":{ok,fail,warn,skip}}。"""
+    cfg = dict(user_config(user_id) or {})
+    has_creds = bool(cfg.get("app_id") and cfg.get("app_secret"))
+    items = [_doc_item(
+        "creds", "应用凭据（App ID / App Secret）",
+        "ok" if has_creds else "fail",
+        "已配置" if has_creds else "未配置",
+        "" if has_creds else "在「飞书机器人配置」填入 App ID 与 App Secret 并保存")]
+
+    token_ok = False
+    if not has_creds:
+        items.append(_doc_item("token", "凭据有效性（tenant_access_token）",
+                               "skip", "凭据未配置，跳过", ""))
+    else:
+        try:
+            _tenant_token(cfg)
+            token_ok = True
+            items.append(_doc_item("token", "凭据有效性（tenant_access_token）",
+                                   "ok", "token 获取成功", ""))
+        except FeishuRestError as e:
+            items.append(_doc_item("token", "凭据有效性（tenant_access_token）",
+                                   "fail", str(e),
+                                   "核对取值：开发者后台 → 凭证与基础信息 的 App ID / App Secret"))
+        except Exception as e:
+            items.append(_doc_item("token", "凭据有效性（tenant_access_token）",
+                                   "fail", f"探测失败: {e!r}", "检查站点到 open.feishu.cn 的网络"))
+
+    if not token_ok:
+        items.append(_doc_item("bot", "机器人能力与启用状态",
+                               "skip", "凭据未通过，跳过", ""))
+    else:
+        try:
+            out = _rest("GET", "/open-apis/bot/v3/info", cfg=cfg)
+            bot = out.get("bot") or {}
+            act = bot.get("activate_status")
+            name = bot.get("app_name") or "（未命名）"
+            ok = act == 2
+            items.append(_doc_item(
+                "bot", "机器人能力与启用状态", "ok" if ok else "warn",
+                f"{name}（activate_status={act}）",
+                "" if ok else "应用能力 → 添加「机器人」，并在版本管理与发布里发布后生效"))
+        except FeishuRestError as e:
+            items.append(_doc_item("bot", "机器人能力与启用状态", "fail", str(e),
+                                   "应用能力 → 添加应用能力 → 机器人，然后创建版本发布"))
+        except Exception as e:
+            items.append(_doc_item("bot", "机器人能力与启用状态", "fail",
+                                   f"探测失败: {e!r}", "稍后重试"))
+
+    st = inbound_status(user_id)
+    if not has_creds:
+        items.append(_doc_item("inbound_ws", "入站长连接（长连接）", "skip",
+                               "凭据未配置，跳过", ""))
+    else:
+        items.append(_doc_item(
+            "inbound_ws", "入站长连接（长连接）",
+            "ok" if st.get("thread") else "fail",
+            "连接线程运行中" if st.get("thread") else "未运行",
+            "" if st.get("thread") else
+            "凭据保存后自动连接；仍不启动看站点日志，并确认事件订阅方式为「长连接」"))
+
+    last_ev = _LAST_EVENT_TS.get(user_id)
+    if not has_creds:
+        items.append(_doc_item("inbound_event", "事件订阅（真实收到过消息）", "skip",
+                               "凭据未配置，跳过", ""))
+    elif last_ev and (time.time() - last_ev) <= EVENT_FRESH_S:
+        items.append(_doc_item("inbound_event", "事件订阅（真实收到过消息）", "ok",
+                               f"{int(time.time() - last_ev)} 秒前收到过事件", ""))
+    else:
+        items.append(_doc_item(
+            "inbound_event", "事件订阅（真实收到过消息）", "warn",
+            "尚未收到过事件" if not last_ev else "最近一次事件已超过 5 分钟",
+            "给机器人**发一条消息**验证：开发者后台 → 事件与回调 → 订阅方式选「长连接」"
+            "并添加 im.message.receive_v1（按钮交互还需回调 card.action.trigger）"))
+
+    if not token_ok:
+        items.append(_doc_item("slash_scope", "斜杠指令权限", "skip", "凭据未通过，跳过", ""))
+    else:
+        try:
+            sl = slash_status(user_id)
+        except Exception as e:
+            # slash_status 只吞 FeishuRestError；响应形态意外（如 data 非 dict）会漏出
+            # 其他异常——doctor 承诺绝不外抛，这里降级为该项 fail。
+            items.append(_doc_item("slash_scope", "斜杠指令权限", "fail",
+                                   f"探测失败: {e!r}",
+                                   "稍后重试；仍失败可在「快捷指令」卡手动「注册 / 同步」看具体报错"))
+            sl = None
+        if sl is None:
+            pass                      # 探测异常：已在上面落 fail 项
+        elif sl.get("need_scope"):
+            items.append(_doc_item(
+                "slash_scope", "斜杠指令权限", "fail", sl.get("error") or "缺权限",
+                "权限管理 添加 application:app_slash_command:read 与 write，"
+                "并创建版本发布；开通后回设置页点「注册 / 同步到飞书」"))
+        elif sl.get("error"):
+            items.append(_doc_item("slash_scope", "斜杠指令权限", "warn",
+                                   str(sl["error"]), "可在设置页「快捷指令」卡重试"))
+        else:
+            items.append(_doc_item("slash_scope", "斜杠指令权限", "ok",
+                                   "权限可用", ""))
+
+    binding = None
+    try:
+        binding = db.get_feishu_binding_by_user(user_id)
+    except Exception:
+        binding = None
+    if not token_ok or not binding:
+        items.append(_doc_item(
+            "send_scope", "发消息权限（可选探测）", "skip",
+            "未绑定飞书账号，跳过" if not binding else "凭据未通过，跳过",
+            "" if binding else "先在下方生成绑定码并在飞书里发「绑定 <码>」"))
+    elif not send_probe:
+        items.append(_doc_item("send_scope", "发消息权限（可选探测）", "skip",
+                               "未探测（勾选「发送测试消息」后重跑自检）", ""))
+    elif (time.time() - (_LAST_PROBE_TS.get(user_id) or 0)) < SEND_PROBE_MIN_S:
+        items.append(_doc_item("send_scope", "发消息权限（可选探测）", "skip",
+                               f"{SEND_PROBE_MIN_S} 秒内已发过测试消息，稍后再试", ""))
+    else:
+        try:
+            rest_send_text(binding["open_id"],
+                           "🔍 Touchstone 配置自检：收到这条消息说明「发消息」权限已开通。",
+                           cfg)
+            _LAST_PROBE_TS[user_id] = time.time()
+            items.append(_doc_item("send_scope", "发消息权限（可选探测）", "ok",
+                                   "测试消息已发送，去飞书查看", ""))
+        except FeishuRestError as e:
+            items.append(_doc_item("send_scope", "发消息权限（可选探测）", "fail", str(e),
+                                   "权限管理 添加 im:message:send_as_bot 并创建版本发布"))
+        except Exception as e:
+            items.append(_doc_item("send_scope", "发消息权限（可选探测）", "fail",
+                                   f"探测失败: {e!r}", "稍后重试"))
+
+    hook = cfg.get("default_webhook") or ""
+    items.append(_doc_item(
+        "webhook", "默认推送 Webhook", "ok" if hook else "warn",
+        "已配置" if hook else "未配置（不影响机器人对话，只影响阻塞事件推送）",
+        "" if hook else "群设置 → 群机器人 → 添加自定义机器人，把 Webhook 填到设置页"))
+
+    summary = {"ok": 0, "fail": 0, "warn": 0, "skip": 0}
+    for it in items:
+        summary[it["state"]] = summary.get(it["state"], 0) + 1
+    return {"items": items, "summary": summary}
+
+
+# ---------- M5 配置自动化：扫码建应用（Device Flow 状态机） ----------
+
+_PROVISION = {}    # user_id -> {"state","url","error","app_id","steps","started_at","cancel"}
+_PROVISION_LOCK = threading.Lock()   # 「读状态 → 写状态」串行化（并发点两下只建一条流程）
+_REGISTER_MIN_VERSION = (1, 5, 5)   # register_app 的 lark-oapi 下限
+
+
+def _lark_min_ok():
+    """lark-oapi 版本是否达标——**只读包元数据，不 import SDK**。
+
+    为什么不 import：`lark_oapi.ws.client` 在模块级调 `asyncio.get_event_loop()`，
+    在非主线程首次 import 有拿不到事件循环的风险（且拖慢首次调用）；真正的 SDK
+    import 只发生在用户点「扫码创建」后的后台线程里（与既有 `_ws_run` 同路径）。"""
+    try:
+        import importlib.metadata as md
+        ver = md.version("lark-oapi")
+    except Exception:
+        return False
+    nums = []
+    for part in ver.split(".")[:3]:
+        digits = ""
+        for ch in part:
+            if not ch.isdigit():
+                break
+            digits += ch
+        nums.append(int(digits or 0))
+    return tuple(nums) >= _REGISTER_MIN_VERSION
+
+
+def _register_app_impl(on_qr_code, on_status_change, cancel_event, addons):
+    """SDK 调用的**可替换封装**（测试打桩点，也是唯一直接碰 SDK 的地方）。"""
+    if not _lark_min_ok():
+        raise RuntimeError("lark-oapi 版本过低或未安装（register_app 需 ≥1.5.5）")
+    import lark_oapi
+    return lark_oapi.register_app(on_qr_code=on_qr_code,
+                                  on_status_change=on_status_change,
+                                  cancel_event=cancel_event, addons=addons)
+
+
+def provision_supported():
+    """本机是否具备「扫码一键建应用」能力（lark-oapi ≥1.5.5 含 register_app）。"""
+    return _lark_min_ok()
+
+
+def _provision_addons():
+    """register_app 的 addons 载荷：**创建时**就把平台所需的权限/事件/回调带上。
+
+    这是绕开 `application:application:patch` 冷启动（新建应用默认没有该权限）
+    的主路径；preset=False 表示不要官方智能体模板（最小权限，只声明我们自己的清单）。"""
+    return {
+        "preset": False,
+        "scopes": {"tenant": [n for n, t, _ in REQUIRED_SCOPES if t == "tenant"]},
+        "events": {"items": {"tenant": [e for e, _ in REQUIRED_EVENTS]}},
+        "callbacks": {"items": [c for c, _ in REQUIRED_CALLBACKS]},
+    }
+
+
+def provision_status(user_id):
+    """扫码流程现状（设置页轮询口，只读）。等待超 TTL 即对外按失败呈现。
+
+    `app_id` = 在跑流程的应用优先，否则回落**用户配置里已接入的应用**——前端据此
+    决定「是否二次确认 + force」，只回进程内状态会让已有应用的用户永远发不出
+    force（扫码换应用死锁；站点重启后连扫码建过应用的用户也会掉进去）。"""
+    st = _PROVISION.get(user_id) or {}
+    state = st.get("state", "idle")
+    error = st.get("error", "")
+    if state == "waiting" and (time.time() - st.get("started_at", 0)) > PROVISION_TTL:
+        state = "failed"
+        error = error or "确认链接已超时（10 分钟有效），可重新发起"
+    # 回落取**配置里的 app_id**（不要求 secret 齐——只填了 App ID 也算「已接入」，
+    # 前端据此二次确认；真正的 force 闸门仍按 app_config（两件齐全）判定）
+    app_id = st.get("app_id") or ((user_config(user_id) or {}).get("app_id") or "")
+    return {"supported": provision_supported(), "enabled": provision_enabled(),
+            "state": state, "url": st.get("url", ""), "error": error,
+            "app_id": app_id, "steps": st.get("steps", []),
+            "age_s": int(time.time() - st["started_at"]) if st.get("started_at") else 0}
+
+
+def provision_start(user_id, force=False):
+    """发起扫码建应用（后台线程跑 Device Flow）。返回 {"ok","state","url","error"}。
+
+    闸门三条：总闸（TS_FEISHU_PROVISION=0）、SDK 可用性、已有应用需 force；
+    同一用户重复点击**不重复建流程**（返回既有流程的现状）。「读状态 → 写状态」
+    全程持 `_PROVISION_LOCK`：并发点两下不会各起一条 Device Flow（复阅 P1）。"""
+    if not provision_enabled():
+        return {"ok": False, "state": "idle", "url": "",
+                "error": f"配置自动化已关闭（{PROVISION_ENV}=0）"}
+    if not provision_supported():
+        return {"ok": False, "state": "idle", "url": "",
+                "error": "本机 lark-oapi 版本过低（register_app 需 ≥1.5.5），请升级依赖后重试"}
+    with _PROVISION_LOCK:
+        cur = _PROVISION.get(user_id) or {}
+        if cur.get("state") == "waiting" and \
+                (time.time() - cur.get("started_at", 0)) <= PROVISION_TTL:
+            return {"ok": True, "state": "waiting", "url": cur.get("url", ""), "error": ""}
+        cfg = app_config(user_id)
+        if cfg is not None and not force:
+            return {"ok": False, "state": "idle", "url": "",
+                    "error": f"已配置应用 {cfg.get('app_id')}；如需换应用请确认后重试"}
+        cancel = threading.Event()
+        _PROVISION[user_id] = {"state": "waiting", "url": "", "error": "", "app_id": "",
+                               "steps": [], "started_at": time.time(), "cancel": cancel}
+        threading.Thread(target=_provision_worker, args=(user_id, cancel), daemon=True,
+                         name=f"feishu-provision-{user_id}").start()
+    return {"ok": True, "state": "waiting", "url": "", "error": ""}
+
+
+def provision_cancel(user_id):
+    """取消进行中的扫码流程（置 cancel_event，SDK 侧即刻收尾）。"""
+    st = _PROVISION.get(user_id) or {}
+    if st.get("state") != "waiting":
+        return {"ok": False, "state": st.get("state", "idle"), "error": "当前没有进行中的扫码流程"}
+    st["cancel"].set()
+    st["state"] = "cancelled"
+    return {"ok": True, "state": "cancelled", "error": ""}
+
+
+def _provision_worker(user_id, cancel):
+    """后台主体：跑 Device Flow（回调里落链接/状态）→ 成功即写凭据 → 起长连接 →
+    自动补齐应用配置（能力/权限/事件/回调），全过程结果落 `_PROVISION` 供前端轮询。
+    凭据不入日志；任何异常都转状态文案，绝不外抛。"""
+    st = _PROVISION[user_id]
+
+    def on_qr(url):
+        st["url"] = url or ""
+
+    def on_status(info):
+        # 域切换（飞书/Lark）时链接作废，等 SDK 给新链接（旧 URL 已失效，不展示误导）
+        if isinstance(info, dict) and info.get("status") == "domain_switched":
+            st["url"] = ""
+
+    try:
+        out = _register_app_impl(on_qr, on_status, cancel, _provision_addons())
+    except Exception as e:
+        if st.get("state") != "cancelled":
+            st["state"] = "failed"
+            st["error"] = f"扫码创建失败: {e}"
+        return
+    if st.get("state") == "cancelled":
+        return
+    app_id = (out or {}).get("client_id") or ""
+    secret = (out or {}).get("client_secret") or ""
+    if not (app_id and secret):
+        st["state"] = "failed"
+        st["error"] = "扫码流程未返回应用凭据（可能超时或未确认），可重新发起"
+        return
+    # 合并写库：保留既有 enabled / webhook / base_url 等字段，只换应用凭据
+    cfg = dict(user_config(user_id) or {})
+    cfg["app_id"] = app_id
+    cfg["app_secret"] = secret
+    db.set_feishu_user_cfg(user_id, cfg)
+    _TOKEN_CACHE.pop(app_id, None)   # 新凭据：清同 app_id 的旧 token 缓存
+    st["app_id"] = app_id
+    try:
+        start_inbound_for(user_id)   # 起长连接（失败只留痕，状态里如实呈现）
+    except Exception as e:
+        print(f"feishu provision: 用户 {user_id} 长连接启动异常: {e!r}",
+              file=sys.stderr, flush=True)
+    applied = provision_apply(user_id)
+    st["steps"] = applied.get("steps") or []
+    st["state"] = "success"
+    st["error"] = "" if applied.get("ok") else \
+        f"应用已创建，但配置补齐未完成：{applied.get('error')}"
+
+
+# ---------- M5 配置自动化：提交发布 ----------
+
+def _next_version(items):
+    """版本号递增：取远端版本列表里的**最大语义版本**补丁位 +1（无版本回 1.0.0）。
+    解析失败的版本（非 x.y.z）忽略；比较用整数元组，避免 "1.0.10" < "1.0.3" 的字符串序陷阱。"""
+    best = None
+    for it in items or []:
+        raw = str((it or {}).get("version") or "").strip()
+        try:
+            nums = tuple(int(x) for x in raw.split("."))
+        except ValueError:
+            continue
+        if len(nums) != 3:
+            continue
+        if best is None or nums > best:
+            best = nums
+    if best is None:
+        return "1.0.0"
+    return "%d.%d.%d" % (best[0], best[1], best[2] + 1)
+
+
+def provision_publish(user_id, version=None, remark="", changelog=""):
+    """提交发布自建应用（POST application/v7/.../publish）：无待发布版本时由飞书自动建版本。
+
+    版本号缺省自动递增（见 `_next_version`）；发布后仍需**租户管理员审批**才线上生效
+    （无 API，走引导）。返回 {"ok","version","version_id","need_patch_scope","error"}。"""
+    if not provision_enabled():
+        return {"ok": False, "version": "", "version_id": "", "need_patch_scope": False,
+                "error": f"配置自动化已关闭（{PROVISION_ENV}=0）"}
+    cfg = app_config(user_id)
+    if cfg is None:
+        return {"ok": False, "version": "", "version_id": "", "need_patch_scope": False,
+                "error": "应用凭据未配置（App ID / App Secret），请先保存凭据"}
+    app_id = cfg["app_id"]
+    ver = str(version or "").strip()
+    try:
+        if not ver:
+            out = _rest("GET", _APP_VERSIONS_API % app_id, cfg=cfg)
+            items = ((out.get("data") or {}).get("items")) or []
+            ver = _next_version(items)
+        body = {"version": ver,
+                "remark": remark or "Touchstone 配置自动化",
+                "changelog": changelog or "自动配置：机器人能力 / 权限 / 长连接事件订阅 / 卡片回调",
+                "pc_default_ability": "bot", "mobile_default_ability": "bot"}
+        out = _rest("POST", _APP_PUBLISH_API % app_id, json_body=body, cfg=cfg)
+        data = out.get("data") or {}
+        return {"ok": True, "version": data.get("version") or ver,
+                "version_id": str(data.get("version_id") or ""),
+                "need_patch_scope": False, "error": ""}
+    except FeishuRestError as e:
+        return {"ok": False, "version": ver, "version_id": "",
+                "need_patch_scope": _need_scope(e), "error": _apply_error(e)}
+    except Exception as e:
+        return {"ok": False, "version": ver, "version_id": "",
+                "need_patch_scope": False, "error": f"发布失败: {e!r}"}
+
+
+# ---------- M5 配置自动化：保存配置（含凭据即时快检） ----------
+
+def save_user_config(user_id, body):
+    """保存用户飞书配置并即时反馈（服务端设置页唯一写口；语义与既有实现逐字一致）：
+    字段缺省=不改、显式空串=清除（前端对未编辑的 secret/webhook 不下发该键，防误清）。
+
+    新增：凭据齐全时立刻 `verify_credentials` 快检——今天保存凭据只写库不校验，
+    填错只能翻日志；`verify` 随响应回给页面做即时提示（凭据不全时为 None，零请求）。
+    返回 {"inbound_started": bool, "verify": {...}|None}。"""
+    cfg = user_config(user_id)
+    if "enabled" in body:
+        cfg["enabled"] = 1 if body["enabled"] else 0
+    for key in ("default_webhook", "default_secret", "base_url",
+                "app_id", "app_secret"):
+        if key in body:
+            cfg[key] = str(body[key] or "").strip()
+    db.set_feishu_user_cfg(user_id, cfg)
+    started = start_inbound_for(user_id)
+    verify = verify_credentials(user_id) if app_config(user_id) else None
+    return {"inbound_started": bool(started), "verify": verify}
+
+
+def _cli_uid(val):
+    """CLI 的用户定位：显式 --user 优先；缺省时库中恰有一个用户即自动选中。
+    返回 (user_id, None)；定位失败返回 (None, 退出码)，原因已打印到 stderr。"""
+    if val:
+        return int(val), None
+    try:
+        users = db.list_users()
+    except Exception as e:
+        print(f"读取用户失败：{e}", file=sys.stderr)
+        return None, 1
+    if len(users) == 1:
+        return users[0]["id"], None
+    if not users:
+        print("库中还没有用户：先启动站点并创建账号", file=sys.stderr)
+        return None, 1
+    names = "、".join(f"{r['username']}(id={r['id']})" for r in users)
+    print(f"库中有多个用户，请用 --user 指定：{names}", file=sys.stderr)
+    return None, 1
+
+
 def _cli():
-    """python3 feishu.py selftest <pid> / send --url U --text T / outbox"""
-    ap = argparse.ArgumentParser(description="Touchstone 飞书出站推送（M1）")
+    """命令行入口（M1 出站 + M5 配置自动化）：
+
+      python3 feishu.py selftest <项目id> / send --url U --text T / outbox
+      python3 feishu.py doctor   [--user ID] [--send-probe]   # 配置自检（有 fail 退出码 1）
+      python3 feishu.py provision [--user ID] [--force] [--no-wait]  # 扫码建应用
+      python3 feishu.py apply    [--user ID]                  # 补齐应用配置
+      python3 feishu.py publish  [--user ID] [--version V]    # 提交发布
+    """
+    ap = argparse.ArgumentParser(description="Touchstone 飞书集成 CLI（出站推送 / 配置自动化）")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_st = sub.add_parser("selftest", help="向项目绑定 webhook 同步发一条测试消息")
     p_st.add_argument("project_id", type=int)
@@ -2221,6 +2784,18 @@ def _cli():
     p_send.add_argument("--secret", default="")
     p_send.add_argument("--text", required=True)
     sub.add_parser("outbox", help="查看最近投递记录")
+    p_doc = sub.add_parser("doctor", help="飞书配置自检（八项；有 fail 退出码 1）")
+    p_doc.add_argument("--user", type=int, default=None, help="用户 id（库中只有一个用户可省）")
+    p_doc.add_argument("--send-probe", action="store_true", help="额外发一条测试消息验证发消息权限")
+    p_prov = sub.add_parser("provision", help="扫码创建飞书应用（打印确认链接，手机飞书打开）")
+    p_prov.add_argument("--user", type=int, default=None)
+    p_prov.add_argument("--force", action="store_true", help="已配置应用时也重新创建")
+    p_prov.add_argument("--no-wait", action="store_true", help="发起后立即返回，不等扫码结果")
+    p_apply = sub.add_parser("apply", help="补齐应用配置（机器人能力/权限/事件/回调）")
+    p_apply.add_argument("--user", type=int, default=None)
+    p_pub = sub.add_parser("publish", help="提交发布（需管理员审批或已开免审）")
+    p_pub.add_argument("--user", type=int, default=None)
+    p_pub.add_argument("--version", default="", help="版本号（缺省自动递增）")
     a = ap.parse_args()
     db.init_db()
     if a.cmd == "selftest":
@@ -2240,6 +2815,77 @@ def _cli():
                              "payload": _payload(a.text), "id": 0, "retries": 0})
         print("OK" if ok else f"FAIL {err}")
         return 0 if ok else 1
+    if a.cmd == "doctor":
+        uid, rc = _cli_uid(a.user)
+        if uid is None:
+            return rc
+        out = doctor(uid, send_probe=a.send_probe)
+        marks = {"ok": "✅", "fail": "❌", "warn": "⚠️", "skip": "➖"}
+        for it in out["items"]:
+            print(f"{marks.get(it['state'], '?')} {it['label']}：{it['detail']}")
+            if it.get("hint"):
+                print(f"   提示：{it['hint']}")
+        s = out["summary"]
+        print(f"汇总：ok={s.get('ok', 0)} fail={s.get('fail', 0)} "
+              f"warn={s.get('warn', 0)} skip={s.get('skip', 0)}")
+        return 1 if s.get("fail") else 0
+    if a.cmd == "provision":
+        uid, rc = _cli_uid(a.user)
+        if uid is None:
+            return rc
+        out = provision_start(uid, force=a.force)
+        if not out.get("ok"):
+            print(f"发起失败：{out.get('error')}", file=sys.stderr)
+            return 1
+        if out.get("url"):
+            print(f"确认链接（手机飞书打开）：{out['url']}")
+        if a.no_wait:
+            print("已发起扫码流程（10 分钟内有效），稍后用 `doctor` 查看结果")
+            return 0
+        print("等待你在飞书里确认…（10 分钟有效）")
+        printed = out.get("url") or ""
+        st = provision_status(uid)
+        deadline = time.time() + PROVISION_TTL
+        while st.get("state") == "waiting" and time.time() < deadline:
+            time.sleep(2)
+            st = provision_status(uid)
+            if st.get("url") and st["url"] != printed:   # 链接可能稍后就绪/换域
+                printed = st["url"]
+                print(f"确认链接（手机飞书打开）：{printed}")
+        if st.get("state") != "success":
+            print(f"未完成（state={st.get('state')}）：{st.get('error') or '等待超时'}",
+                  file=sys.stderr)
+            return 1
+        print(f"✅ 应用已创建：{st.get('app_id')}")
+        for s in st.get("steps") or []:
+            print(f"  {'✅' if s.get('ok') else '❌'} {s.get('label')}：{s.get('detail')}")
+        if st.get("error"):
+            print(f"⚠️ {st['error']}")
+        return 0
+    if a.cmd == "apply":
+        uid, rc = _cli_uid(a.user)
+        if uid is None:
+            return rc
+        out = provision_apply(uid)
+        for s in out.get("steps") or []:
+            print(f"{'✅' if s.get('ok') else '❌'} {s.get('label')}：{s.get('detail')}")
+        if not out.get("ok"):
+            print(f"补齐失败：{out.get('error')}", file=sys.stderr)
+            return 1
+        print("✅ 应用配置已补齐（需创建版本发布后线上生效；可接着 `publish`）")
+        return 0
+    if a.cmd == "publish":
+        uid, rc = _cli_uid(a.user)
+        if uid is None:
+            return rc
+        out = provision_publish(uid, version=a.version or None)
+        if not out.get("ok"):
+            print(f"发布失败：{out.get('error')}", file=sys.stderr)
+            return 1
+        print(f"✅ 已提交发布：版本 {out.get('version')}"
+              f"（version_id={out.get('version_id') or '-'}）")
+        print("   发布需租户管理员审批（或管理员已开免审）后线上生效")
+        return 0
     for r in db.feishu_outbox_recent(30):
         print(r["id"], r["status"], r["retries"],
               (r["last_error"][:60] or "-"), r["created_at"])
