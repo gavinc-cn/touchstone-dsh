@@ -14,6 +14,7 @@ import { findSlashToken } from '../utils/slashToken'
 import { isPlaceholderImage } from '../utils/media'
 import { mediaDisplayUrl } from '../utils/mediaText'
 import { sessionRenameNotice } from '../utils/sessionRename'
+import { syncOpsFit } from '../utils/opsFit'
 import { openSessionInDsh } from '../lib/dshHost'
 import { useDshHostCaps } from '../hooks/useDshHost'
 import BoardDetail from './BoardDetail.jsx'
@@ -32,11 +33,13 @@ import { Play, Trash2, Check, Undo2, ArrowRight, Plus, Settings, MessageSquare, 
 
 // 卡片操作行按钮（2026-10-10 窄屏自适应批次）——两种形态，样式全在 CSS：
 //   OpsTextButton 带文字：<icon(宽列)> + <icon(窄列)> + <label> 三个兄弟节点，由
-//     components.css 的容器查询二选一（列宽 > 236px 显示图标+文字，≤ 236px 只显示图标）。
-//     窄屏只显示图标时靠 title/aria-label 保住可读性（悬浮有文案、读屏可识别）。
-//   OpsIconButton 纯图标：只挂 .board-opbtn，跟随窄列收窄内边距。
+//     components.css 二选一显示：默认「宽列图标 + 文字」，所属操作行被量测判为
+//     .is-compact（空间不够）时只显示窄列图标。收档只藏文字、不改语义——
+//     title/aria-label 仍在（悬浮有文案、读屏可识别）。
+//   OpsIconButton 纯图标：只挂 .board-opbtn，跟随收档一起收窄内边距。
 // 为什么不用 <span> 包住原图标：Button 基类只有兄弟级 `[&_svg]:size-4` 规则，
 // 包一层会让图标尺寸规则失配（图标变大）；三个兄弟节点则与既有样式零冲突。
+// 收档判定见 utils/opsFit.js（按每张卡自己的操作行量，先收文字、再折行）。
 function OpsTextButton({ icon: Icon, iconNarrow: IconNarrow, label, className = '', ...props }) {
   return (
     <Button size="sm" className={`board-opbtn ${className}`.trim()}
@@ -142,6 +145,8 @@ export default function BoardTab({ project }) {
   const previewRef = useRef(null)                 // 拖拽当前预览落点 {col, index}
   const ghostRef = useRef(null)                   // ghost DOM + 抓取偏移 {el, dx, dy}
   const origColumnRef = useRef(null)              // 拖拽开始时卡片所在列（判定用）
+  const colsRef = useRef(null)                    // .board-cols 根（操作行收档量测/观察范围）
+  const opsFitRoRef = useRef(null)                // 操作行收档的 ResizeObserver（列宽变化重测）
 
   async function reload() {
     if (!projectId) return
@@ -221,6 +226,28 @@ export default function BoardTab({ project }) {
       el.style.transform = ''
     }
   })
+  // 卡片操作行收档（2026-10-10 二批「先收文字、后折行」）：列宽不够时先把按钮文字收成
+  // 纯图标（保持单行），只有连图标都放不下才落到 CSS 的 flex-wrap 折行兜底。判据与量法
+  // 见 utils/opsFit.js——按**每张卡自己的操作行**量（同列各卡按钮 3~6 个，按列宽一刀切
+  // 会把放得下的卡也收掉文字）。
+  // 每次渲染后重测（卡上按钮随状态增删/换列/改名），列宽变化由 ResizeObserver 兜住
+  // （窗口缩放、侧栏开合、分栏变化都不一定触发重渲染）。effect 无依赖数组 = 每次渲染后跑，
+  // 量测本身不 setState（只切 DOM class），不会自激。
+  useLayoutEffect(() => {
+    const root = colsRef.current
+    if (!root) return
+    syncOpsFit(root)
+    if (!opsFitRoRef.current && typeof ResizeObserver !== 'undefined') {
+      opsFitRoRef.current = new ResizeObserver(() => {
+        if (colsRef.current) syncOpsFit(colsRef.current)
+      })
+      opsFitRoRef.current.observe(root)
+    }
+  })
+  useEffect(() => () => {
+    opsFitRoRef.current?.disconnect()
+    opsFitRoRef.current = null
+  }, [])
   const selCard = cards.find((c) => c.id === selId) || null
   const commentsOf = (cid) => (data?.comments || []).filter((m) => m.card_id === cid)
 
@@ -674,7 +701,7 @@ export default function BoardTab({ project }) {
           <Trash2 /> 回收站
         </Button>
       </div>
-      <div className="board-cols">
+      <div className="board-cols" ref={colsRef}>
         {COLUMNS.map((col) => {
           const flt = filters[col.key] || 'all'
           // 测试任务条目三列上映（v2c T4，裁决 R16）：doing/review/done 按服务端

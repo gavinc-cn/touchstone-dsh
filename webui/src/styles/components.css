@@ -624,30 +624,40 @@ body.projlist-dragging { cursor: grabbing; user-select: none; }
   font-size: calc(11px * var(--fs)); font-weight: 600; line-height: 16px;
   color: var(--logo-fg); background: var(--star);
 }
-/* 卡片操作行（2026-10-10 窄屏自适应批次）：flex-wrap 让按钮在窄列折行，不再被卡片裁掉
-   ——此前是 flex 默认 nowrap，而 Button 基类带 shrink-0 + whitespace-nowrap ⇒ 放不下就溢出被裁。
-   窄列（≤236px，即卡片内容盒放不下「带文字的按钮行」）再把带文字的按钮收紧成纯图标：
-   文字进 .board-oplabel、紧凑图标进 .board-opicon，宽列反之（两者由 CSS 二选一显示）；
-   纯图标按钮只需 .board-opbtn 即可跟随收窄内边距。阈值依据见
-   doc_ai/spec/webui/前端结构与约定.md「看板卡片操作行」与
-   doc_ai/plan/202610/20261010_1150_看板卡片按钮行窄屏自适应（量测与候选方案）.md。
-   判定用容器查询（按**列宽**，与侧栏/窗口宽度无关） */
+/* 卡片操作行（2026-10-10 窄屏自适应批次；同日二批改为「先收文字、后折行」）：
+   空间不够时的优先级 = ① 去掉按钮文字（收成纯图标，仍是单行）→ ② 才允许折行。
+   折行兜底 = flex-wrap：此前是 flex 默认 nowrap，而 Button 基类带 shrink-0 +
+   whitespace-nowrap ⇒ 放不下就溢出被卡片裁掉。
+   两个图标槽位：文字进 .board-oplabel、紧凑图标进 .board-opicon，默认「图标 + 文字」，
+   收档（.is-compact）后只显示紧凑图标；纯图标按钮只需 .board-opbtn 即可跟随收窄内边距。
+   谁收档由 JS 按**每张卡自己的操作行**量测决定（webui/src/utils/opsFit.js）——同列各卡
+   按钮个数不同（3~6 个），按列宽一刀切会把放得下的卡也收掉文字；只有连图标都放不下时
+   才落到折行兜底。口径与量测依据见 doc_ai/spec/webui/前端结构与约定.md「看板卡片操作行」 */
 .board-card-ops { display: flex; gap: 4px; row-gap: 4px; margin-top: 6px; flex-wrap: wrap; }
 .board-oplabel { white-space: nowrap; }
 .board-opwide { display: inline-flex; align-items: center; }
 .board-opicon { display: none; }
-.board-col { container-type: inline-size; container-name: bcol; }
+/* 量测态（syncOpsFit 量到结论即撤）：关掉折行，让「文字全显时的单行溢出量」暴露在
+   scrollWidth 上；不关折行的话行会自己折成多行，scrollWidth 恒等于 clientWidth（量不出来） */
+.board-ops-measure .board-card-ops { flex-wrap: nowrap; }
+/* 操作按钮只过渡配色，不参与过渡的属性里绝不含内边距/尺寸：收档切换是**量测驱动**的布局
+   决定，内边距一旦参与过渡就会产生 150ms 的中间宽度——实测 1100 视口收档行在过渡起点宽
+   208px > 可用 180px ⇒ 短暂折行（真机验收正好抓到 26 张），量测也会读到动画起点。
+   !important：Button 基类 transition-all 在 utilities 层，层序压过本文件的 @layer legacy */
+.board-card-ops .board-opbtn { transition-property: color, background-color, border-color, box-shadow !important; }
+.board-card-ops.is-compact .board-oplabel { display: none; }
+.board-card-ops.is-compact .board-opwide { display: none; }
+.board-card-ops.is-compact .board-opicon { display: inline-flex; align-items: center; }
+/* 收档内边距必须 !important：本文件整体在 @layer legacy（低于 utilities），Button 的
+   px-3 / has-[>svg]:px-2.5 在 utilities 层——同层选择器再具体也压不过层序（实测收档后
+   按钮仍是 36~42px 宽、「通过/打回」5 按钮行 208px ⇒ 220px 列里照样折行）。收到 6px 后
+   图标按钮 28~30px，该行 160px，最窄列（220px）也单行放得下 */
+.board-card-ops.is-compact .board-opbtn { padding-left: 6px !important; padding-right: 6px !important; gap: 0 !important; }
 /* 列头（2026-10-10 同批）：flex-wrap + 标签不缩、包一层 .board-col-label（文本节点无法被
    选择器命中）。此前 nowrap flex 会把列名压到 13px ⇒ 中文逐字竖排（「待/开/发」），
    或整体需要 245px 而列宽只有 239px ⇒ 横向溢出 4px；现在空间不足时下拉整体落到第二行 */
 .board-col-head { flex-wrap: wrap; row-gap: 4px; }
 .board-col-label { white-space: nowrap; flex: 0 0 auto; }
-@container bcol (max-width: 240px) {
-  .board-card-ops .board-opbtn { padding-left: 6px; padding-right: 6px; gap: 0; }
-  .board-card-ops .board-opbtn .board-oplabel { display: none; }
-  .board-card-ops .board-opbtn .board-opwide { display: none; }
-  .board-card-ops .board-opbtn .board-opicon { display: inline-flex; align-items: center; }
-}
 /* 「开始」分裂按钮（2026-10-06 独立 worktree 起跑入口）：主按钮 + ▾ 下拉触发并排，
    间距与同一操作行其它按钮一致（▾ 由 ActionMenu 外包一层 inline-flex，不改按钮样式） */
 .board-split { display: inline-flex; align-items: center; gap: 4px; }
