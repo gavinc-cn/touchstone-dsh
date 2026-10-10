@@ -26,6 +26,7 @@ import glob
 import json
 import os
 import re
+import threading
 
 import zstandard
 
@@ -88,10 +89,30 @@ class _Entries:
 
 # ---------------------------------------------------------------- dsh 解析
 
-# dsh 会话文件为多帧 zstd 拼接（每帧一批 JSONL 事件行），用 zstandard 的
-# stream_reader(read_across_frames=True) 跨帧解压（项目唯一第三方依赖，见
-# requirements.txt）
-_DSH_DEC = zstandard.ZstdDecompressor()
+# dsh 会话文件为多帧 zstd 拼接（每帧一批 JSONL 事件行），逐帧 `decompressobj` 解压
+# （项目唯一第三方依赖，见 requirements.txt）。
+#
+# **解压器必须按线程隔离**（2026-10-09 定因的 SIGSEGV 实障）：zstandard 的
+# `ZstdDecompressor` **实例并发调用 `decompressobj()` 不是线程安全的**——原先这里
+# 是模块级共享实例，而站点是多线程的（HTTP 请求线程池 + board 30s 调度线程 +
+# 会话窗读口），并发解压直接 **SIGSEGV 打崩整个后端**（面板 502，薄壳不自愈）。
+# 实测对照（8 线程 × 25s 反复解压真实会话文件）：共享实例 **core dumped**；
+# 每线程独立实例同负载 765 次解压**零崩溃**。崩溃现场见
+# `doc_ai/bug_report/20261009_0600_插件后端两次SIGSEGV…`（faulthandler 栈落在
+# `server.py:_api_get_board` 的 `session_title` 调用行，扩展模块清单只有
+# `zstandard.backend_c`）。
+_DEC_TLS = threading.local()
+
+
+def _dec():
+    """取**本线程**的 zstd 解压器（无则新建并缓存，随线程回收）。
+
+    不要改回模块级共享实例——那正是 SIGSEGV 的根因（见上方注释）。
+    """
+    d = getattr(_DEC_TLS, "d", None)
+    if d is None:
+        d = _DEC_TLS.d = zstandard.ZstdDecompressor()
+    return d
 
 
 def _dsh_decompressed(path):
@@ -115,7 +136,7 @@ def _dsh_decompressed(path):
     chunks = []
     rest = buf
     while rest:
-        obj = _DSH_DEC.decompressobj()
+        obj = _dec().decompressobj()
         try:
             chunks.append(obj.decompress(rest))
         except zstandard.ZstdError:
@@ -193,7 +214,7 @@ def _dsh_header(path):
     for _ in range(_DSH_HEADER_FRAMES):
         if not rest:
             break
-        obj = _DSH_DEC.decompressobj()
+        obj = _dec().decompressobj()
         try:
             text = obj.decompress(rest).decode("utf-8", "replace")
         except zstandard.ZstdError:

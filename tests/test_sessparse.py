@@ -732,3 +732,30 @@ def test_retired_family_attrs_removed():
     """退场族的解析器/常量确实不在模块里（B5 删除验收）：逐名断言 not hasattr。"""
     for name in REMOVED_NAMES:
         assert not hasattr(sessparse, name), f"{name} 应随族退场删除"
+
+
+def test_decompressor_is_thread_local():
+    """回归钉子（2026-10-09 SIGSEGV 根因，见 doc_ai/bug_report/…SIGSEGV）：
+
+    zstd 解压器必须**按线程隔离**——共享 `ZstdDecompressor` 实例并发调用
+    `decompressobj()` 不是线程安全的，会直接 SIGSEGV 打崩整个后端（实测 8 线程
+    × 25s 反复解压真实会话文件：共享实例 core dumped，线程局部实例 765 次零崩溃）。
+    这里用**结构断言**钉住（真并发复现会带走整个 pytest 进程，放
+    `tests/e2e_zstd_threadsafe.py`，不默认收集）。
+    """
+    import threading
+
+    got = {}
+
+    def grab(key):
+        got[key] = sessparse._dec()
+
+    ts = [threading.Thread(target=grab, args=(k,)) for k in ("a", "b")]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert got["a"] is not None and got["b"] is not None
+    assert got["a"] is not got["b"], "不同线程必须拿到不同解压器实例"
+    assert sessparse._dec() is sessparse._dec(), "同线程内应复用实例"
+    assert not hasattr(sessparse, "_DSH_DEC"), "旧的模块级共享实例不得回归"
