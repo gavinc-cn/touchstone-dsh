@@ -196,6 +196,17 @@ The platform's own Python dependencies are installed with pip, not npm:
 
 ```bash
 pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/requirements.txt
+# Windows: python -m pip install ...   (the official installer ships python.exe, not python3)
+```
+
+The plugin resolves the interpreter itself when you do not configure one: it probes `python` first, then
+`python3` (the same order as `touchstone.cmd`), and uses the first one that actually runs. If that is not the
+interpreter where you installed the dependencies, the missing-dependency page prints the exact command for the
+interpreter it picked; to pin another one, set `pythonPath` in the profile patch:
+
+```yaml
+- id: touchstone-dsh
+  config: { pythonPath: /path/to/python }
 ```
 
 No `repoDir` is needed: the package carries `server.py` and `webui/dist-plugin`, so the plugin falls back to

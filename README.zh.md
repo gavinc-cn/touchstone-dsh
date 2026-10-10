@@ -178,6 +178,16 @@ node ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/dsh-plugin/scrip
 
 ```bash
 pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/requirements.txt
+# Windows 用 python -m pip install ...（官方安装器只装 python.exe，没有 python3）
+```
+
+解释器不用配也行：插件自己探——先试 `python`、再试 `python3`（与 `touchstone.cmd` 同序），
+用第一个真能跑起来的那个。如果探到的不是你装依赖的那支，缺依赖提示页里给的就是**它探到的那支**
+的解释器命令；想指定别支，在 profile patch 里写 `pythonPath`：
+
+```yaml
+- id: touchstone-dsh
+  config: { pythonPath: /path/to/python }
 ```
 
 **不需要配 `repoDir`**：包里带着 `server.py` 与 `webui/dist-plugin`，插件缺省就用包自身目录。

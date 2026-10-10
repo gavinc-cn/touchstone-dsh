@@ -27,9 +27,11 @@ PROFILE_DIR="$HOME/.dsh/profiles/$PROFILE"
 PKG_NAME="$(node -p "require('$REPO_DIR/package.json').name")"
 
 # 解释器探测链（2026-10-02 去硬编码，原写死某个 conda 环境的解释器绝对路径）:
-#   TS_DSH_PYTHON / TS_PYTHON 显式指定 → 常见 conda 环境 → PATH 上的 python3 → 报错;
+#   TS_DSH_PYTHON / TS_PYTHON 显式指定 → 常见 conda 环境 → PATH 上的 python → python3 → 报错;
 #   conda/PATH 候选里优先「能导入运行依赖（zstandard/requests）」的那个, 避免选中
 #   同机其他缺依赖的环境; 全都不满足时回落到首个存在的解释器。
+#   PATH 档的顺序 2026-10-11 改为 python 优先（用户口径「兜底应该用 python」）, 与插件薄壳
+#   lib/index.js 的 PYTHON_CANDIDATES 同序; Linux 上两者通常都在, 改序不改变命中结果。
 _depline() { "$1" -c 'import zstandard, requests' >/dev/null 2>&1; }
 
 pick_python() {
@@ -39,6 +41,7 @@ pick_python() {
   done
   for cand in "$HOME"/{mini,ana}conda3/envs/*/bin/python3 \
               /opt/{mini,ana}conda3/envs/*/bin/python3 \
+              "$(command -v python || true)" \
               "$(command -v python3 || true)"; do
     [[ -n "$cand" && -x "$cand" ]] || continue
     [[ -n "$fallback" ]] || fallback="$cand"
@@ -48,7 +51,7 @@ pick_python() {
   return 1
 }
 PYTHON_PATH="$(pick_python)" || {
-  echo "错误: 未找到可用的 python3；请用 TS_DSH_PYTHON=/path/to/python3 显式指定" >&2
+  echo "错误: 未找到可用的 Python 解释器（依次试过 python、python3）；请用 TS_DSH_PYTHON=/path/to/python 显式指定" >&2
   exit 1
 }
 

@@ -6,7 +6,7 @@ Windows 原生运行的首选入口（bash/nohup/kill 不可用），Linux 上�
 .run/server.log）。用法:
 
     python3 touchstone.py start|stop|restart|status|build|test|test-full|test-ui
-    # Windows: python touchstone.py 或 touchstone.cmd
+    # Windows: python touchstone.py 或 touchstone.cmd（后者自动解析 python → python3）
 
 行为对齐 touchstone.sh:
 - start / restart 先按需构建前端（npm install 按需：依赖指纹未变化则跳过，
@@ -117,8 +117,11 @@ def precheck_deps():
         import requests   # noqa: F401
         import zstandard  # noqa: F401
     except ImportError as e:
-        print_err(f"错误: python3 缺少运行依赖（{e}），请先执行:")
-        print_err("    python3 -m pip install -r requirements.txt")
+        # 用当前解释器自己的路径提示（不写死 python3/python）: Windows 官方安装器只有
+        # `python.exe`、Linux 惯例是 `python3`, 报用户机器上真正在跑的那个最不容易误导。
+        py = sys.executable or "python"
+        print_err(f"错误: 当前解释器缺少运行依赖（{e}），请先执行:")
+        print_err(f"    {py} -m pip install -r requirements.txt")
         sys.exit(1)
 
 

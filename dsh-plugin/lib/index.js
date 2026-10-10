@@ -68,6 +68,30 @@ const LIVE_KEY = Symbol.for('touchstone.live');
 const FATAL_PY_MODULES = ['zstandard', 'requests'];
 const PREFLIGHT_TIMEOUT_MS = 10000;
 
+/**
+ * 缺省解释器探测顺序（未配置 config.pythonPath 时）: `python` → `python3`。
+ *
+ * 为什么 `python` 排第一（2026-10-11 用户裁定「兜底应该用 python, 不要用 python3」）:
+ *  - **Windows 上没有 `python3` 这个名字**（官方安装器只装 `python.exe` / `py.exe`）,
+ *    桌面端零配置安装下, 写死 `python3` 会让 `spawn` 直接 `ENOENT` —— 比「找到解释器但
+ *    缺依赖」更糟：预检连跑都跑不起来, 只能走 `skip()` 放行, 然后后端在导入期崩掉,
+ *    用户既看不到缺什么、也拿不到可复制的修复命令。
+ *  - Linux 上两者都在（本机用户 shell 的 `python`/`python3` 同为 conda my_pyenv）,
+ *    顺序换成 `python` 优先不改变命中结果。
+ *  - 用 `python3` 当第二档是为了兜住「只有 python3、没有 python」的环境
+ *    （部分精简发行版/容器镜像如此）, 比单点写死更稳。
+ *  探测方式 = 真 spawn 一次 `-c pass`（受 PATH 解析、能识破 Microsoft Store 的
+ *  `python3.exe` 占位别名——它是 GUI 应用, 跑起来不会正常退出）, 而不是查文件表。
+ */
+const PYTHON_CANDIDATES = ['python', 'python3'];
+const PYTHON_PROBE_TIMEOUT_MS = 5000;
+/**
+ * 探测用的命令。带一个可识别的标记：测试里的假解释器要能把「探测调用」与
+ * 「依赖预检调用」区分开（两者都是 `-c`），否则探测会污染预检的调用记录。
+ * 标记写成 Python 注释, 对真解释器没有任何语义影响。
+ */
+const PYTHON_PROBE_CODE = 'pass  # touchstone-python-probe';
+
 /** 子进程句柄与解析出的后端端口（每 profile 一个插件实例, 模块级单例即可） */
 let child = null;
 let backendPort = 0;
@@ -82,6 +106,51 @@ let backendHint = '';
 function escapeHtml(text) {
   return String(text).replace(/[&<>"]/g,
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+/**
+ * 探一个候选解释器能不能真跑起来（`-c pass`, 5s 超时）。
+ *
+ * 为什么不是「查文件在不在」: spawn 走 PATH 解析, 而 Windows 的 Microsoft Store
+ * 别名会在 PATH 上放一个 `python3.exe` 占位（是 GUI 应用, 跑起来不返回）——
+ * 只有真跑一次才知道它是不是能用的解释器。任何异常（ENOENT/超时）都算不可用。
+ * `env` 由调用方传（用 `{...process.env, ...extraEnv}`）: profile 的 extraEnv 可能改 PATH,
+ * 探测必须与随后真正 spawn 后端的环境一致, 否则会出现「探测到 A、实际跑 B」。
+ */
+function canRunPython(name, env) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (ok) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    let proc = null;
+    try {
+      proc = spawn(name, ['-c', PYTHON_PROBE_CODE], { stdio: 'ignore', env });
+    } catch {
+      done(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGKILL'); } catch { /* 已退出：忽略 */ }
+      done(false);
+    }, PYTHON_PROBE_TIMEOUT_MS);
+    if (timer.unref) timer.unref();
+    proc.on('error', () => { clearTimeout(timer); done(false); });
+    proc.on('close', (code) => { clearTimeout(timer); done(code === 0); });
+  });
+}
+
+/**
+ * 解析未配置 pythonPath 时该用哪个解释器: 按 PYTHON_CANDIDATES 顺序探测, 返回第一个能跑的。
+ * 全都跑不起来（或本平台一个都没有）时返回 null, 由调用方给明确的配置指引。
+ */
+async function resolveDefaultPython(env = process.env) {
+  for (const name of PYTHON_CANDIDATES) {
+    if (await canRunPython(name, env)) return name;
+  }
+  return null;
 }
 
 /**
@@ -107,7 +176,7 @@ function readRequirementNames(repoDir) {
  *   advisory —— requirements.txt 里缺失的可选依赖（只影响对应功能）
  *   skipped  —— 预检本身没跑成（解释器缺失/超时/输出不可解析）⇒ 调用方照常启动
  */
-function preflightDeps(pythonPath, repoDir, logger) {
+function preflightDeps(pythonPath, repoDir, logger, env) {
   const advisory = readRequirementNames(repoDir)
     .filter((name) => !FATAL_PY_MODULES.includes(name.toLowerCase()));
   const script = [
@@ -136,7 +205,9 @@ function preflightDeps(pythonPath, repoDir, logger) {
       logger.warn(`touchstone: 依赖预检未完成（${why}）, 照常启动后端`);
       settle({ fatal: [], advisory: [], skipped: true });
     };
-    const proc = spawn(pythonPath, argv, { cwd: repoDir, stdio: ['ignore', 'pipe', 'pipe'] });
+    // env 必须显式传（与探测/启动后端同一份）: profile 的 extraEnv 可能改 PATH,
+    // 不传就出现「探测用 A、预检用 B」的分裂（2026-10-11 自检抓到的真 bug）。
+    const proc = spawn(pythonPath, argv, { cwd: repoDir, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     const timer = setTimeout(() => {
       skip(`超过 ${PREFLIGHT_TIMEOUT_MS}ms`);
@@ -177,8 +248,11 @@ function preflightDeps(pythonPath, repoDir, logger) {
 /**
  * 依赖缺失时的面板提示页（代替 503 JSON）: 缺什么 + 一条可直接复制的修复命令
  * + 修完怎么让插件重来（停用再启用即会重跑 apply, 按 spec §8.8 不必重启 dsh web）。
+ *
+ * `viaDefault` = 这个解释器是缺省兜底探到的（用户没配 `pythonPath`）, 页面上要说明一句 ——
+ * 否则用户修完命令仍可能指错解释器, 且不知道该往哪里配。
  */
-function renderDepHint(pythonPath, repoDir, missing) {
+function renderDepHint(pythonPath, repoDir, missing, viaDefault) {
   const cmd = `${pythonPath} -m pip install -r ${join(repoDir, 'requirements.txt')}`;
   return '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
     + '<title>Touchstone 后端未启动</title></head>'
@@ -190,8 +264,34 @@ function renderDepHint(pythonPath, repoDir, missing) {
     + '<pre style="background:#0d0f12;border:1px solid #2a2f36;border-radius:6px;'
     + `padding:.8rem 1rem;overflow:auto">${escapeHtml(cmd)}</pre>`
     + '<p>装完把本插件<b>停用再启用</b>（Plugins 面板里那一行的开关）即会重试，不必重启 dsh web。</p>'
-    + '<p style="color:#8b949e">若这个解释器不对，可在 profile patch 的 touchstone 条目里配置 '
-    + '<code>pythonPath</code> 指向含这些依赖的解释器。</p>'
+    + (viaDefault
+      ? '<p style="color:#8b949e">上面这个解释器是<b>缺省探测</b>得到的（未配置 '
+        + '<code>pythonPath</code>：依次试 <code>python</code>、<code>python3</code>）。'
+        + '若它不是你机器上装了依赖的那个，直接在它里面装依赖最省事（上面这条命令就是）；'
+        + '也可以改用另一个解释器 —— 在 profile patch 的 <code>touchstone-dsh</code> 条目里写 '
+        + '<code>pythonPath</code> 指向它。</p>'
+      : '<p style="color:#8b949e">若这个解释器不对，可在 profile patch 的 <code>touchstone-dsh</code> 条目里配置 '
+        + '<code>pythonPath</code> 指向含这些依赖的解释器。</p>')
+    + '</body></html>';
+}
+
+/**
+ * 缺省解释器一个都跑不起来时的提示页: 这不是「缺依赖」而是「找不到 Python」,
+ * 要给的是安装/配置指引, 不是 pip 命令（此时 pip 也没得跑）。
+ */
+function renderNoPythonHint() {
+  return '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
+    + '<title>Touchstone 后端未启动</title></head>'
+    + '<body style="margin:0;padding:2rem;font:14px/1.75 ui-monospace,Menlo,Consolas,monospace;'
+    + 'background:#14161a;color:#e6e6e6">'
+    + '<h2 style="color:#ffb454;margin:0 0 .9rem">Touchstone 后端未启动：找不到 Python 解释器</h2>'
+    + '<p>依次探测 <code>python</code>、<code>python3</code> 都没能跑起来（未配置 '
+    + '<code>pythonPath</code>）。</p>'
+    + '<p>请先安装 Python 3.12+（<code>python.org</code>，Windows 上安装时勾选 '
+    + '<code>Add python.exe to PATH</code>），然后在 profile patch 的 '
+    + '<code>touchstone-dsh</code> 条目里写 <code>pythonPath</code> 指向它；'
+    + '若解释器已装好只是不在 PATH 上，也要靠这个配置项指过去。</p>'
+    + '<p style="color:#8b949e">配置后把本插件<b>停用再启用</b>即会重试，不必重启 dsh web。</p>'
     + '</body></html>';
 }
 
@@ -334,7 +434,8 @@ function stopChild(proc, logger, why) {
 /**
  * cordis 插件入口。config 来自 profile patch insert 条目（install.sh 写入）:
  *   repoDir    Touchstone 平台根（可选; 缺省 = 包自身目录, 因为包是自包含的）
- *   pythonPath Python 解释器（默认 python3; 本机应指含 zstandard 的 conda env）
+ *   pythonPath Python 解释器（可选; 缺省按 `python` → `python3` 顺序真跑一次探一个,
+ *              本机该指含 zstandard 的 conda env 或已 pip 装过依赖的那支）
  *   extraEnv   透传子进程的额外环境变量（如 TOUCHSTONE_DB 指向隔离实例库）
  * 返回组合 disposer（注销路由 + 断开驱动 + SIGTERM 子进程），dsh 停用插件时调用；
  * 另有「启用即回收上一份壳」与「掉线自检」两条自愈路径（见文件头注释）。
@@ -403,13 +504,25 @@ export async function apply(ctx, config = {}) {
   // 依赖预检（2026-10-07）: 缺硬依赖时**不 spawn** —— spawn 了也必然在导入期退出,
   // 日志里只留一行 traceback。改为把「缺什么 + 一条可复制的修复命令」同时送进
   // 日志与面板（backendHint 由 proxy 渲染）, 让 npm 安装真正做到「装完就知道缺什么」。
-  const pythonPath = config.pythonPath || 'python3';
-  const deps = await preflightDeps(pythonPath, repoDir, logger);
+  // 解释器（2026-10-11 改）: 配置优先; 没配就按 `python` → `python3` 真探一次
+  // （Windows 上没有 python3 这个名字, 写死它会直接 ENOENT——那样连缺依赖都报不出来）。
+  // 探测用「与随后 spawn 后端同一份 env」, extraEnv 里改过 PATH 时两者才一致。
+  const childEnv = { ...process.env, ...extraEnv };
+  const pythonPath = config.pythonPath || await resolveDefaultPython(childEnv);
+  if (!pythonPath) {
+    backendHint = renderNoPythonHint();
+    logger.warn(`touchstone: 找不到 Python 解释器（依次试过 ${PYTHON_CANDIDATES.join(', ')}）, 插件不启动后端`);
+    logger.warn('touchstone: 请安装 Python 3.12+ 或在本插件 config 里配 pythonPath, 然后停用再启用');
+    return;
+  }
+  const viaDefault = !config.pythonPath;
+  if (viaDefault) logger.info(`touchstone: 未配置 pythonPath, 缺省探到解释器: ${pythonPath}`);
+  const deps = await preflightDeps(pythonPath, repoDir, logger, childEnv);
   let myChild = null;
   /** 本次壳的开的后端日志流（teardown 关闭；null = 不可用/未启动） */
   let myLog = null;
   if (deps.fatal.length) {
-    backendHint = renderDepHint(pythonPath, repoDir, deps.fatal);
+    backendHint = renderDepHint(pythonPath, repoDir, deps.fatal, viaDefault);
     logger.warn(`touchstone: 后端未启动 —— Python 运行依赖缺失: ${deps.fatal.join(', ')}`);
     logger.warn(`touchstone: 修复: ${pythonPath} -m pip install -r ${join(repoDir, 'requirements.txt')}`);
     logger.warn('touchstone: 装完把本插件停用再启用即会重试（不必重启 dsh web）');
@@ -424,7 +537,7 @@ export async function apply(ctx, config = {}) {
     // EOF 即自主退出（实测父 kill -9 后 1.94s 退出）。改成 'ignore' 会让该通道失效。
     myChild = spawn(pythonPath, args, {
       cwd: repoDir,
-      env: { ...process.env, ...extraEnv },
+      env: childEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child = myChild;
@@ -533,3 +646,18 @@ export async function apply(ctx, config = {}) {
 // 注意: agents 服务**不在这里声明**——本插件的反代职责不应因「某 profile 没有 agent loop」
 // 而整包不加载; agent 驱动改用 ctx.inject(['agents'], ...) 延迟注入（见 agent-driver.js）。
 export const inject = ['webServer'];
+
+// 自检入口（2026-10-11）: `node lib/index.js --resolve-python` 打印缺省解释器解析结果
+// —— 给 scripts/dev-check-python.mjs 用真 PATH 驱动「python → python3」探测顺序的判决,
+// 也方便排障时在用户机器上一条命令看到「本机探到哪支」。命中输出名字、退出码 0;
+// 一个都探不到输出一行错误、退出码 1。被 dsh import 时 process.argv[1] 不是本文件, 不触发。
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+    && process.argv.includes('--resolve-python')) {
+  const found = await resolveDefaultPython();
+  if (found) {
+    console.log(found);
+    process.exit(0);
+  }
+  console.error(`no python interpreter found (tried: ${PYTHON_CANDIDATES.join(', ')})`);
+  process.exit(1);
+}
