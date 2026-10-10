@@ -10,6 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ArrowLeft, Boxes, Brain, Check, KeyRound, Link2, LogOut, Palette } from 'lucide-react'
 import { AUTO, AUTO_PREVIEW, SKINS, applySkin, getSkin, resolveSkin, skinLabel } from '../utils/skin'
 import { FONT_SCALES, applyFontScale, getFontScale } from '../utils/fontScale'
+import { BRIGHTNESSES, applyBrightness, getBrightness } from '../utils/brightness'
 import RagPanel from '../components/settings/RagPanel.jsx'
 import FeishuPanel from '../components/settings/FeishuPanel.jsx'
 import AssetsPanel from '../components/settings/AssetsPanel.jsx'
@@ -100,6 +101,7 @@ export default function Settings() {
 function AppearanceSection() {
   const [skin, setSkin] = useState(getSkin())
   const [fs, setFs] = useState(getFontScale())
+  const [br, setBr] = useState(getBrightness())
   // 当前实际生效的皮肤：'auto' 需现场解析（宿主明暗 / 系统偏好）
   const effective = resolveSkin(skin)
 
@@ -113,13 +115,15 @@ function AppearanceSection() {
     <Card className="max-w-xl gap-4 py-4">
       <CardHeader className="px-5 pb-0">
         <CardTitle className="flex items-center gap-2 text-sm">
-          <Palette className="size-4 text-primary" /> 外观主题
+          <Palette className="size-4 text-[var(--star-text)]" /> 外观主题
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4 px-5">
         <div className="text-xs leading-relaxed text-muted-foreground">
-          选择界面配色与字体大小，点选即生效，记录在本浏览器（localStorage），不影响其他用户。
+          选择界面配色、文字亮度与字体大小，点选即生效，记录在本浏览器（localStorage），不影响其他用户。
           「DSH 深色 / DSH 浅色」对齐 dsh 自身外观；「跟随 DSH」按 dsh 宿主的明暗自动切换。
+          文字亮度只压文字色梯（正文/次级/强调文字及日志、气泡、菜单文字），不动状态色、背景与按钮填充；
+          浅色皮肤（DSH 浅色）下不生效——与 dsh 宿主 dim-text 插件的口径一致。
         </div>
         {/* 跟随 DSH：整行一张卡（它不是皮肤，故与下面四张具体皮肤卡分行） */}
         <button type="button"
@@ -163,6 +167,22 @@ function AppearanceSection() {
             </button>
           ))}
         </div>
+        {/* 文字亮度: 只压「文字色梯」(utils/brightness.js 写 <html> 的 data-bright),
+            样本字画各档正文色; 不动状态色/背景/按钮填充, 浅色皮肤下不生效 */}
+        <div className="grid grid-cols-3 gap-3">
+          {BRIGHTNESSES.map((b) => (
+            <button key={b.id} type="button" data-br={b.id} title={b.hint}
+              className={'br-pick' + (br === b.id ? ' active' : '')}
+              onClick={() => { applyBrightness(b.id); setBr(b.id) }}>
+              <span className="sample">文A</span>
+              <span className="br-pick-txt">
+                <span>{b.label}</span>
+                <span className="sub">{b.hint}</span>
+              </span>
+              {br === b.id && <Check className="ml-auto size-3.5 text-[var(--star)]" />}
+            </button>
+          ))}
+        </div>
       </CardContent>
     </Card>
   )
@@ -186,7 +206,7 @@ function PasswordSection() {
     <Card className="max-w-xl gap-4 py-4">
       <CardHeader className="px-5 pb-0">
         <CardTitle className="flex items-center gap-2 text-sm">
-          <KeyRound className="size-4 text-primary" /> 修改密码
+          <KeyRound className="size-4 text-[var(--star-text)]" /> 修改密码
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4 px-5">

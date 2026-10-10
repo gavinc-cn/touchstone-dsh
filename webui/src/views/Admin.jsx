@@ -124,7 +124,7 @@ export default function Admin() {
           <Card className="gap-0 py-0">
             <CardHeader className="border-b border-border/60 px-5 py-4">
               <CardTitle className="flex items-center gap-2 text-sm">
-                <Users className="size-4 text-primary" /> 用户列表
+                <Users className="size-4 text-[var(--star-text)]" /> 用户列表
                 <span className="font-normal text-muted-foreground">{users.length} 人</span>
                 <Button variant="outline" size="sm" className="ml-auto" onClick={openAdd}>
                   <Plus /> 新增用户

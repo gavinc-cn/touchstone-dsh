@@ -116,7 +116,7 @@ export default function FeishuPanel() {
       <Card className="max-w-xl gap-4 py-4">
         <CardHeader className="px-5 pb-0">
           <CardTitle className="flex items-center gap-2 text-sm">
-            <Bell className="size-4 text-primary" /> 飞书机器人配置
+            <Bell className="size-4 text-[var(--star-text)]" /> 飞书机器人配置
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4 px-5">
@@ -143,7 +143,7 @@ export default function FeishuPanel() {
           </div>
           <div className="text-xs" title="凭据齐全且连接线程已启动时，机器人才能接收飞书消息；连接失败细节看 server.log">
             入站长连接：{cfg?.inbound?.thread ? (
-              <span className="text-primary">运行中</span>
+              <span className="text-[var(--star-text)]">运行中</span>
             ) : cfg?.inbound?.configured ? (
               '已配置，待启动（重启站点生效）'
             ) : (
@@ -199,7 +199,7 @@ export default function FeishuPanel() {
       <Card className="max-w-xl gap-4 py-4">
         <CardHeader className="px-5 pb-0">
           <CardTitle className="flex items-center gap-2 text-sm">
-            <Link2 className="size-4 text-primary" /> 飞书账号绑定
+            <Link2 className="size-4 text-[var(--star-text)]" /> 飞书账号绑定
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 px-5">
@@ -321,7 +321,7 @@ function ProjectHookCard() {
     <Card className="max-w-xl gap-4 py-4">
       <CardHeader className="px-5 pb-0">
         <CardTitle className="flex items-center gap-2 text-sm">
-          <Webhook className="size-4 text-primary" /> 项目推送绑定
+          <Webhook className="size-4 text-[var(--star-text)]" /> 项目推送绑定
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4 px-5">
@@ -426,7 +426,7 @@ function SlashCommandCard() {
     <Card className="max-w-xl gap-4 py-4">
       <CardHeader className="px-5 pb-0">
         <CardTitle className="flex items-center gap-2 text-sm">
-          <Command className="size-4 text-primary" /> 快捷指令（输入框打「/」）
+          <Command className="size-4 text-[var(--star-text)]" /> 快捷指令（输入框打「/」）
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 px-5">
@@ -441,7 +441,7 @@ function SlashCommandCard() {
           <>
             {data.error && <div className="text-xs text-destructive">{data.error}</div>}
             {data.need_scope && (
-              <div className="text-xs text-primary">
+              <div className="text-xs text-[var(--star-text)]">
                 缺「应用指令」权限：点「发飞书权限卡片」→ 你的飞书私聊会收到一张引导卡片，
                 在上面点「我已开通，重试注册」即由后端重试（无需回站点手动重试）。
               </div>
@@ -481,7 +481,7 @@ function SlashCommandCard() {
                     ? '权限引导卡片已发送（去飞书私聊查看）'
                     : `上次清除：删除 ${result.deleted?.length || 0} 条`}
                 {result.card_sent ? (
-                  <div className="text-primary">已把权限引导卡片发到你的飞书私聊，点卡片上的「我已开通，重试注册」即自动重试</div>
+                  <div className="text-[var(--star-text)]">已把权限引导卡片发到你的飞书私聊，点卡片上的「我已开通，重试注册」即自动重试</div>
                 ) : null}
                 {result.card_error ? <div className="text-destructive">{result.card_error}</div> : null}
                 {result.failed?.length ? (

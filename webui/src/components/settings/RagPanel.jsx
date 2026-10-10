@@ -72,7 +72,7 @@ export default function RagPanel() {
     <Card className="max-w-xl gap-4 py-4">
       <CardHeader className="px-5 pb-0">
         <CardTitle className="flex items-center gap-2 text-sm">
-          <Brain className="size-4 text-primary" /> 案例库语义检索（RAG）
+          <Brain className="size-4 text-[var(--star-text)]" /> 案例库语义检索（RAG）
           {cfg && (cfg.configured
             ? <Badge>已启用</Badge>
             : <Badge variant="secondary">未启用</Badge>)}

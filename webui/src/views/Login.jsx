@@ -122,7 +122,7 @@ export default function Login() {
         </CardContent>
         <CardFooter className="flex-col items-center gap-3 pt-0">
           <button type="button"
-            className="text-sm text-primary underline-offset-4 hover:underline"
+            className="text-sm text-[var(--run)] underline-offset-4 hover:underline"
             onClick={switchMode}>
             {mode === 'login' ? '没有账号？注册新用户' : '已有账号？返回登录'}
           </button>

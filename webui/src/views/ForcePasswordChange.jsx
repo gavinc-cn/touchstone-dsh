@@ -59,7 +59,7 @@ export default function ForcePasswordChange() {
           <div className="justify-self-center"><TouchstoneLogo size={40} /></div>
           <div className="text-center">
             <CardTitle className="flex items-center justify-center gap-2 font-serif text-lg">
-              <KeyRound className="size-4 text-primary" /> 首次登录须修改密码
+              <KeyRound className="size-4 text-[var(--star-text)]" /> 首次登录须修改密码
             </CardTitle>
             <CardDescription className="mt-1">
               账号 {auth.username} 仍在使用一次性初始口令
@@ -100,7 +100,7 @@ export default function ForcePasswordChange() {
         </CardContent>
         <CardFooter className="flex-col items-center pt-0">
           <button type="button"
-            className="text-sm text-primary underline-offset-4 hover:underline"
+            className="text-sm text-[var(--run)] underline-offset-4 hover:underline"
             onClick={() => auth.logout()}>
             退出登录
           </button>

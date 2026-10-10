@@ -2,6 +2,7 @@
    默认 dsh-dark(DSH 深色) / dsh-light(DSH 浅色) —— 对齐 dsh 自身外观, 见 doc_ai/spec/ui/DSH明暗主题.md
    starlight(星夜金, bikeops 运营后台设计语言) / classic(经典蓝, 原 GitHub 暗色板) 为存量两套
    选择与解析(含「跟随 DSH」)在 utils/skin.js; <html data-skin="..."> 上恒为具体皮肤 id
+   文字亮度档(原样/偏暗/更暗)在 utils/brightness.js, <html data-bright="...">; 见文件末尾「文字亮度档」段
    整体包进 @layer legacy: 让位于 shadcn/Tailwind 的 utilities,
    避免全局 button/input 等裸元素规则污染 shadcn 组件 */
 @layer legacy {
@@ -9,8 +10,11 @@
   --bg: #0B1426; --panel: #141E36; --panel2: #1F2D4D; --border: #2A3A5E;
   /* 注意: 不再定义 --muted, 该名字已被 shadcn 占用(背景语义);
      旧样式中的文字灰全部改用 --muted-foreground */
-  --text: #F5F1E8; --dim: rgba(245, 241, 232, 0.42);
-  --star: #E8B86D; --aurora: #7BC8D6;
+  /* 文字亮度三档(utils/brightness.js 写 <html data-bright>): hi=原样 / mid=偏暗(缺省) / lo=更暗;
+     --text 缺省即 mid, normal/dimmer 两档的覆盖见文件末尾「文字亮度档」段 */
+  --text-hi: #F5F1E8; --text-mid: #D8D4CB; --text-lo: #BDB9B1;
+  --text: var(--text-mid); --dim: rgba(245, 241, 232, 0.42);
+  --star: #E8B86D; --star-text: #E8B86D; --aurora: #7BC8D6;
   --pass: #8FBC6E; --fail: #E07A8C; --retest: #F2A65A; --run: #7BC8D6; --fix: #E8B86D;
   --mono: var(--ff-mono);
 
@@ -19,9 +23,9 @@
   --card-bg: rgba(20, 30, 54, 0.55); --card-bd: rgba(232, 184, 109, 0.18);
   --card-blur: 18px; --card-radius: 12px;
   --logo-1: #E8B86D; --logo-2: #F2A65A; --logo-fg: #0B1426;
-  --tab-active: var(--star);
+  --tab-active: var(--star-text);
   --login-glow: #1F2D4D;
-  --admin-badge: var(--star); --ok-text: var(--pass);
+  --admin-badge: var(--star-text); --ok-text: var(--pass);
   --inset-bg: #0A1120; --inset-text: #A6B3C8;
   --row-hover: rgba(232, 184, 109, .06); --row-open: rgba(232, 184, 109, .10);
   --rz-hover: rgba(232, 184, 109, .30);
@@ -68,8 +72,9 @@
 /* 皮肤 classic(经典蓝): 原 GitHub 暗色板的全部取值 */
 :root[data-skin='classic'] {
   --bg: #0d1117; --panel: #151b23; --panel2: #1b2230; --border: #2a3140;
-  --text: #c9d1d9; --dim: #7d8590;
-  --star: #58a6ff; --aurora: #58a6ff;
+  --text-hi: #c9d1d9; --text-mid: #b6bfc8; --text-lo: #a3acb5;
+  --text: var(--text-mid); --dim: #7d8590;
+  --star: #58a6ff; --star-text: #58a6ff; --aurora: #58a6ff;
   --pass: #3fb950; --fail: #f85149; --retest: #d29922; --run: #58a6ff; --fix: #a371f7;
 
   --scrollbar: #30363d; --scrollbar-hover: #30363d;
@@ -106,8 +111,9 @@
    另两处 dsh 签名单品在本文件末尾(scrollbar 5px 胶囊 / 超椭圆圆角)。 */
 :root[data-skin='dsh-dark'] {
   --bg: #151517; --panel: #1b1b1c; --panel2: #2c2c2e; --border: #ffffff1f;
-  --text: #f9fafb; --dim: #81858c;
-  --star: #f9fafb; --aurora: #7aaaff;
+  --text-hi: #f9fafb; --text-mid: #cfd3d6; --text-lo: #adb2b8;
+  --text: var(--text-mid); --dim: #81858c;
+  --star: #f9fafb; --star-text: #e1e5ee; --aurora: #7aaaff;
   --pass: #22c55e; --fail: #f25a5a; --retest: #f59e0b; --run: #7aaaff; --fix: #b197fc;
 
   --scrollbar: #3c3c3d; --scrollbar-hover: #545557; --scrollbar-w: 5px;
@@ -119,9 +125,9 @@
   --shadow-toast: 0 0 0 .5px #fff3, 0 3px 8px 0 #0000000a, 0 0 20px 0 #0000000d;
   --shadow-ghost: 0 0 0 .5px #fff3, 0 6px 20px 0 #0000004d;
   --logo-1: #f9fafb; --logo-2: #e9ecf2; --logo-fg: #0f1115;
-  --tab-active: var(--star);
+  --tab-active: var(--star-text);
   --login-glow: #232324;
-  --admin-badge: var(--star); --ok-text: var(--pass);
+  --admin-badge: var(--star-text); --ok-text: var(--pass);
   --inset-bg: #1b1b1c; --inset-text: #cfd3d6;
   --row-hover: #ffffff14; --row-open: #ffffff24; --rz-hover: #ffffff3d;
   --step-active-bg: #7aaaff1a; --case-running-bg: #7aaaff24;
@@ -131,16 +137,16 @@
   --seg-retest-1: #c47a2a; --seg-retest-2: #f59e0b;
   --grad-pass-1: #4ed17e; --grad-pass-2: #1b7a42;
   --grad-fail-1: #f25a5a; --grad-fail-2: #a32b2b;
-  --lp-prompt: #7aaaff; --lp-compact: #ffa94d; --lp-round: #f9fafb;
+  --lp-prompt: #7aaaff; --lp-compact: #ffa94d; --lp-round: var(--text);
   --lp-done: #22c55e; --lp-err: #f25a5a; --lp-json: #4dabf7;
   --err-bg: #f25a5a14; --err-bd: #f25a5a4d; --err-bd-strong: #f25a5a66;
-  --bubble-user-bg: #2c2c2e; --bubble-user-bd: #ffffff1f; --bubble-user-text: #f9fafb;
+  --bubble-user-bg: #2c2c2e; --bubble-user-bd: #ffffff1f; --bubble-user-text: var(--text);
   --composer-focus: #7aaaff;
   --agent-on-text: #0f1115;
   --ask: #f59e0b;
   --menu-bg: #2c2c2e; --menu-bd: #ffffff1f;
-  --menu-fg: #f9fafb; --menu-key: #adb2b8; --menu-mut: #81858c;
-  --menu-on-bg: #ffffff24; --menu-on-fg: #f9fafb;
+  --menu-fg: var(--text); --menu-key: var(--muted-foreground); --menu-mut: var(--dim);
+  --menu-on-bg: #ffffff24; --menu-on-fg: var(--star-text);
   --seq-4: #faa2c1; --seq-5: #6dccff; --seq-6: #adb5bd;
   --lp-cmd: #adb5bd; --lp-dim: #81858c;
   --chart-axis: #ffffff3d; --chart-grid: #ffffff14;
@@ -149,8 +155,10 @@
 
 :root[data-skin='dsh-light'] {
   --bg: #ffffff; --panel: #f9fafb; --panel2: #f5f6f7; --border: #0000001a;
-  --text: #0f1115; --dim: #979da6;
-  --star: #0f1115; --aurora: #4176e6;
+  /* 浅色皮肤三档同值 ⇒ 文字亮度档对它等价于不生效(与 dsh 宿主 dim-text 同口径, 见 utils/brightness.js) */
+  --text-hi: #0f1115; --text-mid: #0f1115; --text-lo: #0f1115;
+  --text: var(--text-mid); --dim: #979da6;
+  --star: #0f1115; --star-text: #0f1115; --aurora: #4176e6;
   /* 状态色取 dsh 浅色侧的对应成员: 成功用 file-diff-added-marker(#01a241, 白底可读),
      失败用 state-error-primary, 警告用 state-warn-label(amber-600), 修复用浅色语法紫 */
   --pass: #01a241; --fail: #ec1313; --retest: #dd8629; --run: #4176e6; --fix: #6741d9;
@@ -164,9 +172,9 @@
   --shadow-toast: 0 0 0 .5px #00000029, 0 3px 8px 0 #0000000a, 0 0 20px 0 #0000000d;
   --shadow-ghost: 0 0 0 .5px #00000029, 0 6px 20px 0 #00000029;
   --logo-1: #0f1115; --logo-2: #3c3c3d; --logo-fg: #ffffff;
-  --tab-active: var(--star);
+  --tab-active: var(--star-text);
   --login-glow: #ebeef2;
-  --admin-badge: var(--star); --ok-text: var(--pass);
+  --admin-badge: var(--star-text); --ok-text: var(--pass);
   --inset-bg: #f9fafb; --inset-text: #353638;
   --row-hover: #2631480f; --row-open: #2631481a; --rz-hover: #26314824;
   --step-active-bg: #4176e61a; --case-running-bg: #4176e624;
@@ -190,6 +198,41 @@
   --lp-cmd: #868e96; --lp-dim: #adb2b8;
   --chart-axis: #00000029; --chart-grid: #00000014;
   color-scheme: light;
+}
+
+/* ================= 文字亮度档(2026-10-09) =================
+   设置页「文字亮度」三档: 原样(normal) / 偏暗(dim, 缺省) / 更暗(dimmer)
+   —— 各皮肤块里的 --text 就取 mid(偏暗), 所以这里只需给出 normal 与 dimmer 两个覆盖。
+
+   作用范围=**文字色梯**, 由四个根 token 承载(其余派生 token 与 shadcn 的 --foreground 家族
+   都引用它们, 自动跟随):
+     --text              正文(含 --foreground 家族 / 日志轮次 / 用户气泡 / 「/」菜单正文)
+     --muted-foreground  次级文字(基准与档位覆盖都在 index.css 的皮肤块旁: 那里的皮肤块是
+                         **无层**样式, 会盖过本文件的 @layer legacy, 故不能写在这边)
+     --inset-text        等宽块(日志/JSON)文字
+     --star-text         强调文字(导航选中/设置页分区标题/方案图纸编号…); --star 仍只管
+                         边框/填充/徽标等装饰位, 品牌墨不随档位变
+   dsh-dark 的两档取值全部取自 dsh 色板(neutral-bluish 50/300/400 与 200), 其中
+   「偏暗」= dsh 宿主 dim-text 插件的实况值(正文 #cfd3d6), 面板与宿主同观感。
+   starlight/classic 无色板可依, 按各自画布同比例下压后手工定值; 其金色/蓝色强调文字
+   (#E8B86D / #58a6ff)不随档位变。dsh-light 三档同值 ⇒ 不写覆盖块。 */
+:root[data-skin='starlight'][data-bright='normal'] {
+  --text: var(--text-hi);
+}
+:root[data-skin='starlight'][data-bright='dimmer'] {
+  --text: var(--text-lo);
+}
+:root[data-skin='classic'][data-bright='normal'] {
+  --text: var(--text-hi);
+}
+:root[data-skin='classic'][data-bright='dimmer'] {
+  --text: var(--text-lo);
+}
+:root[data-skin='dsh-dark'][data-bright='normal'] {
+  --text: var(--text-hi); --star-text: #f9fafb;
+}
+:root[data-skin='dsh-dark'][data-bright='dimmer'] {
+  --text: var(--text-lo); --star-text: #cfd3d6; --inset-text: #adb2b8;
 }
 
 * { box-sizing: border-box; }

@@ -523,7 +523,7 @@ export default function TasksTab({ onCreated } = {}) {
                               <TableCell className="px-2 font-mono">{r.exit_code == null ? '—' : r.exit_code}</TableCell>
                               <TableCell className="px-2 font-mono text-xs">{fmtTime(r.started_at)}</TableCell>
                               <TableCell className="px-2 font-mono text-xs">{fmtTime(r.ended_at)}</TableCell>
-                              <TableCell className="px-2 text-primary">查看日志</TableCell>
+                              <TableCell className="px-2 text-[var(--star-text)]">查看日志</TableCell>
                             </TableRow>
                           ))}
                           {!rounds.length && (

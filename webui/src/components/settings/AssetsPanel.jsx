@@ -108,7 +108,7 @@ export default function AssetsPanel() {
       <Card className="max-w-2xl gap-4 py-4">
         <CardHeader className="px-5 pb-0">
           <CardTitle className="flex items-center gap-2 text-sm">
-            <Boxes className="size-4 text-primary" /> 内置资产
+            <Boxes className="size-4 text-[var(--star-text)]" /> 内置资产
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 px-5">
