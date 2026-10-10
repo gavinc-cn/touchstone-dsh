@@ -2946,8 +2946,29 @@ class Handler(BaseHTTPRequestHandler):
             # 压缩新建后的绑定）也要归档——I2「done 卡全部绑定会话都归档」。
             # best-effort：失败只记提示 + 退避重试，不回滚绑定。
             board.archive_bound_session(db.get_board_card(card_id), newly_bound)
-        self._respond(200, json.dumps(board.card_json(db.get_board_card(card_id)),
-                                      ensure_ascii=False).encode("utf-8"),
+        rename_info = None
+        if "title" in fields and fields["title"].strip() != (card["title"] or "").strip():
+            # 卡面改名 → 同步改 DSH 会话名（2026-10-10 用户需求）：只认**改后的主会话**
+            # （同一次 PATCH 里换绑/解绑以新状态为准），best-effort——失败不改卡面，
+            # 只把原因回给前端（`session_rename.ok=false`）。
+            fresh = db.get_board_card(card_id)
+            sid = str((fresh["session_id"] if fresh else "") or "")
+            if sid:
+                ok, err, accepted = board.rename_card_session(sid, fields["title"].strip())
+                rename_info = {"ok": ok, "session_id": sid}
+                if not ok:
+                    rename_info["error"] = err
+                elif accepted and accepted != fields["title"]:
+                    # 宿主规范化/截断（`normalizeSessionTitle` 的 UTF-8 字节预算，实测
+                    # 约 80 字节）：**只如实上报，不回写卡面**——卡面是用户输入，平台不
+                    # 替用户缩短内容（2026-10-10 真机教训：回写会把长标题静默截断，
+                    # 用户原文丢失）。前端据 `accepted_title` 提示「DSH 侧标题被截断」，
+                    # 由用户自行决定是否缩短卡名。
+                    rename_info["accepted_title"] = accepted
+        payload = board.card_json(db.get_board_card(card_id))
+        if rename_info:
+            payload["session_rename"] = rename_info
+        self._respond(200, json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
 
     def _api_board_delete_card(self, project_id, card_id):

@@ -3992,7 +3992,7 @@ def _watch_generation_sync():
     return True
 
 
-def _ensure_watch(sid):
+def _ensure_watch(sid, force=False):
     """声明「平台看管该会话」（幂等，成功才入缓存）；失败留痕返回 False，不重试。
 
     先过**代次对账**（中枢重连 ⇒ 陈旧记账作废，见 `_watch_generation_sync`），
@@ -4001,14 +4001,21 @@ def _ensure_watch(sid):
     （旧插件无 `/watch` ⇒ 404、驱动不可达、令牌错）都只打印一行诊断并返回 False
     ——**不重试**：调用方（`chat._external_preflight`）据此拒投并给明确文案，比反复
     打驱动更有用；下一轮调和器扫描会自然重试一次（缓存里没有它）。
+
+    `force=True` 跳过缓存命中、**强制重发一次声明**（成功后照常入缓存）。唯一调用方是
+    `rename_card_session` 的 404 重试：那里的 404 恰恰说明「驱动侧认为没看管」，而
+    `_WATCHED` 是**平台侧进程内记账**、可能与驱动侧脱节（实测 2026-10-10：带外
+    `POST /watch {on:false}`、以及驱动在 `session/disposed` 时自清看管表，
+    都会让缓存变陈旧）——缓存命中就不能让它挡住这次重试。
     """
     sid = str(sid or "")
     if not sid:
         return False
     _watch_generation_sync()
-    with _watch_lock:
-        if sid in _WATCHED:
-            return True
+    if not force:
+        with _watch_lock:
+            if sid in _WATCHED:
+                return True
     try:
         ok = bool(dshdriver.watch_session(sid))
     except Exception as exc:                       # noqa: BLE001 — 失败降级为拒投
@@ -4023,6 +4030,48 @@ def _ensure_watch(sid):
     with _watch_lock:
         _WATCHED.add(sid)
     return True
+
+
+# 卡面改名的驱动调用超时（秒）：best-effort 的同步链路，快失败比让 HTTP worker 挂满
+# 默认 120s 有用（2026-10-10 需求「TS 卡面改名 → DSH 会话名同步」）。
+RENAME_TIMEOUT = 10
+
+
+def rename_card_session(sid, title):
+    """卡面改名 → 同步改 DSH 会话标题（best-effort）。返回 `(ok, error, accepted)`。
+
+    两跳（2026-10-10 用户需求，B 档）：
+      ① `dshdriver.rename`：覆盖**池内**会话（平台建/恢复过的：任务会话、平台起过的卡、
+         会话窗发过消息被 resume 的）；
+      ② 首跳 404（池外）⇒ `_ensure_watch(sid)` 声明看管（幂等、**只声明不接管**）后
+         重试一次：覆盖用户在 dsh GUI 直跑、驱动只观察的会话——驱动侧 `/rename` 的
+         池外回落分支按「看管 + 宿主有活 agent」放行（node 半同批实现）。
+    失败**不抛**：卡面是用户的编辑，必须先生效；调用方（server 端点）把原因回给前端。
+    `accepted` = 驱动回执里宿主**接受**的标题（可能被 dsh 规范化/按字节预算截断），
+    成功时非空——调用方据此回写卡面，保证两侧逐字一致。
+    """
+    sid = str(sid or "")
+    title = str(title or "").strip()
+    if not sid or not title:
+        return False, "缺少会话或标题，未同步 DSH 会话名", ""
+    last = ""
+    for attempt in (1, 2):
+        try:
+            r = dshdriver.rename(sid, title, timeout=RENAME_TIMEOUT) or {}
+            return True, "", str(r.get("title") or title)
+        except Exception as exc:                   # noqa: BLE001 — 统一降级为原因串
+            last = str(exc)
+            pool_miss = getattr(exc, "code", None) == 404
+            # 只在「池外」这一跳补一次看管声明（已看管无活 agent 的 404 重试同样失败，
+            # 但代价只是一次请求，换来判定逻辑不依赖文案匹配）。**force=True**：这一跳的
+            # 404 正说明驱动侧认为没看管，平台侧 `_WATCHED` 缓存可能陈旧（带外撤销、
+            # 驱动在 session/disposed 时自清），不能被它挡住重发。
+            if attempt == 1 and pool_miss and _ensure_watch(sid, force=True):
+                print(f"[board] 卡面改名：池外会话补看管声明后重试 sid={sid}",
+                      flush=True)
+                continue
+            break
+    return False, last, ""
 
 
 def _watch_card_refs():

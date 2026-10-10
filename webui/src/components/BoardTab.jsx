@@ -13,6 +13,7 @@ import { ST_LABEL } from '../utils/renderMd'
 import { findSlashToken } from '../utils/slashToken'
 import { isPlaceholderImage } from '../utils/media'
 import { mediaDisplayUrl } from '../utils/mediaText'
+import { sessionRenameNotice } from '../utils/sessionRename'
 import { openSessionInDsh } from '../lib/dshHost'
 import { useDshHostCaps } from '../hooks/useDshHost'
 import BoardDetail from './BoardDetail.jsx'
@@ -396,7 +397,13 @@ export default function BoardTab({ project }) {
     editIdRef.current = null
     setEditId(null)
     if (!t || t === card.title) return          // 空标题/未改动：不请求，直接退出编辑
-    try { await boardApi.updateCard(projectId, card.id, { title: t }); await reload() }
+    try {
+      // 卡面改名会同步改 DSH 会话名（服务端 best-effort）：未同步/被截断时如实提示
+      const r = await boardApi.updateCard(projectId, card.id, { title: t })
+      const msg = sessionRenameNotice(r)
+      if (msg) toast(msg)
+      await reload()
+    }
     catch (e) { toast(e.message) }
   }
 

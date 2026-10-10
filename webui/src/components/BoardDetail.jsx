@@ -9,6 +9,7 @@ import { toast } from '../utils/toast'
 import { renderMd } from '../utils/renderMd'
 import { absToMedia } from '../utils/mediaText'
 import { isPlaceholderImage } from '../utils/media'
+import { sessionRenameNotice } from '../utils/sessionRename'
 import { useResizable } from '../hooks/useResizable'
 import { RzHandles } from './RzHandles'
 import SessionModal from './SessionModal'
@@ -70,7 +71,13 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
   }, [projectId, card.id, card.updated_at])
 
   async function save(patch) {
-    try { await boardApi.updateCard(projectId, card.id, patch); await reload() }
+    try {
+      // 改标题会同步改 DSH 会话名（服务端 best-effort）：未同步/被截断时如实提示
+      const r = await boardApi.updateCard(projectId, card.id, patch)
+      const msg = sessionRenameNotice(r)
+      if (msg) toast(msg)
+      await reload()
+    }
     catch (e) { toast(e.message) }
   }
   // 一体文本拆分保存：第一行=标题（空则取「未命名」，截 200），其余=描述

@@ -266,9 +266,17 @@ def fork(session_id, at_seq=None):
     return _request("POST", "/fork", payload, timeout=60)
 
 
-def rename(session_id, title):
-    """改会话标题（与 dsh 侧栏同一份标题）。返回 `{title}`。"""
-    return _request("POST", "/rename", {"session_id": session_id, "title": title})
+def rename(session_id, title, timeout=REQUEST_TIMEOUT):
+    """改会话标题（与 dsh 侧栏同一份标题）。返回 `{title, [external]}`。
+
+    `title` 是**宿主接受值**（可能被 `normalizeSessionTitle` 规范化/按 UTF-8 字节预算
+    截断），调用方据此回写卡面可保证两侧逐字一致（见 board.rename_card_session）。
+
+    `timeout` 可缩短：卡面改名是 best-effort 的同步链路（`PATCH /board/cards/<cid>`），
+    不能让驱动侧僵死把 HTTP worker 拖满默认 120s。
+    """
+    return _request("POST", "/rename", {"session_id": session_id, "title": title},
+                    timeout=timeout)
 
 
 def set_model(session_id, model, provider="", reasoning_effort=""):

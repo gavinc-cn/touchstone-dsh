@@ -120,6 +120,10 @@ class FakeDriver:
         # 看管端点硬失败开关（测试用，同 `archive_fail` 口径）：置字符串后
         # `/watch` 一律 404——模拟**旧插件**没有该端点，平台据此降级为拒投。
         self.watch_fail = None
+        # `/rename` 的「宿主接受值」钩子（测试用，可调用则用它规范化标题）：
+        # 真宿主 `sessionController.rename` 会走 `normalizeSessionTitle` 的
+        # UTF-8 字节预算并回**接受值**，平台据此把卡面回写成同一串（2026-10-10）。
+        self.rename_accept = None
         # 建/恢复会话硬失败开关（测试用，同 `watch_fail` 口径）：置字符串后
         # `/session` 一律 500——模拟「会话已不存在 / 恢复失败」，供卡片会话投递
         # 自愈（2026-10-10）用例断言「接不回时给明确文案、不再白投一次」。
@@ -752,14 +756,27 @@ class _Handler(BaseHTTPRequestHandler):
                     new.last_seq = int(at_seq)
             return self._json(200, {"new_session_id": new.sid})
         if path == "/rename":
+            # 卡面改名 → DSH 会话名（2026-10-10 B 档）：与真驱动**同序**——池内走原
+            # 路径；池外走 `_external_fallback` 的看管闸（未看管 / 看管但无活 agent
+            # 各自 404 分档）；空标题在**定档之后**才 400（真驱动同款判定顺序）。
+            sid = str(body.get("session_id") or "")
             sess = self._session_of(body)
+            external = False
             if sess is None:
-                return self._json(404, {"error": "session not found"})
-            title = str(body.get("title") or "")
+                row, err = self._external_fallback(sid)
+                if err is not None:
+                    return self._json(err[0], {"error": err[1]})
+                external = True
+            title = str(body.get("title") or "").strip()
             if not title:
                 return self._json(400, {"error": "title required"})
-            drv.note({"call": "/rename", "sid": sess.sid, "title": title})
-            return self._json(200, {"title": title})
+            # 宿主规范化/截断后回**接受值**（`rename_accept` 由用例注入），
+            # 平台据此回写卡面保证两侧逐字一致。
+            accepted = drv.rename_accept(title) if callable(drv.rename_accept) else title
+            drv.note({"call": "/rename", "sid": sid, "title": title,
+                      "accepted": accepted, "external": external})
+            return self._json(200, {"ok": True, "session_id": sid, "title": accepted,
+                                    **({"external": True} if external else {})})
         if path == "/model":
             sess = self._session_of(body)
             if sess is None:

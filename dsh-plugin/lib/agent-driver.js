@@ -2319,11 +2319,35 @@ export class AgentDriver {
     this._json(res, 200, { ok: true, session_id: entry.sessionId, new_session_id: newSid });
   }
 
-  /** `POST /rename`：会话标题（平台侧「会话命名」；与 dsh 侧栏同一份标题）。 */
+  /**
+   * `POST /rename`：会话标题（平台侧「会话命名」；与 dsh 侧栏同一份标题）。
+   *
+   * 池外回落（2026-10-10 用户需求「TS 看板卡改名 → DSH 会话名同步」）：平台**看管**
+   * （`/watch`，只声明不接管）且宿主仍有活 agent 的池外会话（用户在 dsh GUI 直跑的）
+   * ⇒ 直接改宿主会话标题，回执带 `external:true`。判定复用 `/prompt`·`/steer` 的
+   * **唯一闸门** `_externalTarget`，三档语义一字不差：
+   *   ① 池内 ⇒ 原路径（本函数开头已单独处理）；
+   *   ② 已看管但宿主无活 agent ⇒ 闸门自写 404 分档文案（会话已结束）；
+   *   ③ 未看管 ⇒ 走 `_lookup` 这个既有唯一 404 出口（原文案不变）；**判定顺序同
+   *      `/prompt`**：先定档再校验空标题——池外未看管的空标题仍先撞 404，不被 400 截胡。
+   * 为什么**不接管**（不入池、不建 handle、不动 `owned`）：改名只需要宿主
+   * `sessionController.rename`（内部 `resolveAgent(sessionId)` 对任何宿主可解析的会话
+   * 都可用），一旦收养就会改 `owned` 与项目占用/`ext:` 行口径，代价远大于改名本身。
+   */
   async _rename(res, req) {
     const body = await this._body(req);
-    const entry = this._lookup(res, body);
-    if (!entry) return;
+    const sid = String((body && body.session_id) || '');
+    const entry = this.sessions.get(sid);
+    let external = false;
+    if (!entry) {
+      const live = this._externalTarget(res, sid);
+      if (live === null) return;               // ② 已看管无活 agent：闸门已回 404 分档
+      if (live === undefined) {                // ③ 未看管：既有唯一 404 出口（原文案）
+        this._lookup(res, body);
+        return;
+      }
+      external = true;                         // 已被看管且宿主有活 agent：改名回落
+    }
     const title = String(body.title == null ? '' : body.title).trim();
     if (!title) {
       this._json(res, 400, { error: 'title 不能为空' });
@@ -2334,9 +2358,9 @@ export class AgentDriver {
       this._json(res, 503, { error: 'sessionController 服务不可用，无法改名' });
       return;
     }
-    const value = await controller.rename({ sessionId: entry.sessionId, title });
+    const value = await controller.rename({ sessionId: sid, title });
     this._json(res, 200, {
-      ok: true, session_id: entry.sessionId,
+      ok: true, session_id: sid, ...(external ? { external: true } : {}),
       title: String((value && value.title) || title),
     });
   }

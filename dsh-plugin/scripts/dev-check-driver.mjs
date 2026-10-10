@@ -213,7 +213,14 @@ function makeCtx() {
             }
             return { sessionId: childId };
           },
-          async rename(req) { sockets.renamed = req; return { title: req.title, seq: 1 }; },
+          async rename(req) {
+            sockets.renamed = req;
+            // 真宿主会把标题规范化/截断（`normalizeSessionTitle` 的 UTF-8 字节预算），
+            // 并把**接受值**放进回执；`sockets.renameAccept` 用来验平台据此回写卡面。
+            const accept = typeof sockets.renameAccept === 'function'
+              ? sockets.renameAccept(req.title) : req.title;
+            return { title: accept, seq: 1 };
+          },
           async selectModel(req) {
             sockets.selected = req;
             // 与真宿主同形：resolved selection 里带（可选的）reasoningEffort
@@ -1323,6 +1330,60 @@ async function main() {
     r7.status === 400 && p7.error === 'prompt 不能为空' && r9.status === 400
     && r8.status === 404 && p8.error === '会话不在驱动池中: session-never-watched',
     JSON.stringify({ prompt: r7.status, steer: r9.status, unwatched: p8 }));
+
+  // --- /rename 池外回落（2026-10-10，需求「TS 卡面改名 → DSH 会话名同步」）---
+  // 语义：平台侧看板卡改名要能同步到用户在 dsh GUI 直跑的会话。看管声明仍是唯一闸门
+  // （未看管 / 看管但无活 agent 一律 404 分档，与 /prompt 同款），且**只改名不接管**
+  // ——接管会改 `owned` 与项目占用口径，代价远大于改名本身。
+  // 判定的顺序也照抄 /prompt：池内 ⇒ 原路径（空标题 400 不变）；池外未看管 ⇒ 先撞
+  // 404 原文案（不被 400 截胡）；池外已看管 ⇒ 活 agent 回落 / 无活 agent 404 分档。
+  const xrnPool = await (await call(base, token, 'POST', '/rename',
+    { session_id: sid, title: '池内改名' })).json();
+  check('/rename 池内：既有路径不变（无 external 标记、回执带标题）',
+    xrnPool.ok === true && xrnPool.external === undefined && xrnPool.title === '池内改名'
+    && sockets.renamed.sessionId === sid, JSON.stringify(xrnPool));
+  // 池外 + 未看管：既有 404 原文案一字不变（**即使宿主有活 agent**）
+  sockets.sessions.store.set('session-ext-rn',
+    { id: 'session-ext-rn', session: hostSession('session-ext-rn', '/tmp/ext') });
+  sockets.agents.set('session-ext-rn', makeAgent('session-ext-rn', '/tmp/ext'));
+  const xrn1 = await call(base, token, 'POST', '/rename',
+    { session_id: 'session-ext-rn', title: '不该生效' });
+  const xrn1j = await xrn1.json();
+  check('/rename 池外未看管：404 原文案（有活 agent 也不改名）',
+    xrn1.status === 404 && xrn1j.error === '会话不在驱动池中: session-ext-rn'
+    && sockets.agents.get('session-ext-rn').calls.length === 0, JSON.stringify(xrn1j));
+  const xrn1b = await call(base, token, 'POST', '/rename',
+    { session_id: 'session-ext-rn', title: '   ' });
+  const xrn1bj = await xrn1b.json();
+  check('/rename 池外未看管 + 空标题：仍先撞 404（判定顺序同 /prompt）',
+    xrn1b.status === 404 && xrn1bj.error === '会话不在驱动池中: session-ext-rn',
+    JSON.stringify(xrn1bj));
+  // 池外 + 已看管 + 活 agent：改名回落（external=true），且不入池
+  await call(base, token, 'POST', '/watch', { session_id: 'session-ext-rn' });
+  const xrn2 = await (await call(base, token, 'POST', '/rename',
+    { session_id: 'session-ext-rn', title: '外部会话改名' })).json();
+  check('/rename 池外看管+活 agent：回落改名（external=true、不接管）',
+    xrn2.ok === true && xrn2.external === true && xrn2.title === '外部会话改名'
+    && sockets.renamed.sessionId === 'session-ext-rn'
+    && !driver.sessions.has('session-ext-rn'),
+    JSON.stringify({ xrn2, inPool: driver.sessions.has('session-ext-rn') }));
+  // 池外 + 已看管 + 宿主无活 agent：404 分档（不新建会话、不兜底）
+  sockets.agents.delete('session-ext-rn');
+  const xrn3 = await call(base, token, 'POST', '/rename',
+    { session_id: 'session-ext-rn', title: 'x' });
+  const xrn3j = await xrn3.json();
+  check('/rename 看管但无活 agent：404「会话已结束」分档',
+    xrn3.status === 404 && xrn3j.error === '会话已结束（宿主无活动 agent）: session-ext-rn',
+    JSON.stringify(xrn3j));
+  await call(base, token, 'POST', '/watch', { session_id: 'session-ext-rn', on: false });
+  sockets.sessions.store.delete('session-ext-rn');
+  // 宿主规范化/截断 ⇒ 回执以**宿主接受值**为准（平台据此回写卡面，保证两侧逐字一致）
+  sockets.renameAccept = (t) => String(t).slice(0, 4);
+  const xrn4 = await (await call(base, token, 'POST', '/rename',
+    { session_id: sid, title: '很长很长的标题' })).json();
+  check('/rename 回执以宿主接受值为准（截断/清洗后）',
+    xrn4.ok === true && xrn4.title === '很长很长', JSON.stringify(xrn4));
+  sockets.renameAccept = null;
 
   // --- T3 提问认领第三分支（C 批）：池外 + 平台看管 ⇒ 双通道（认领 + 原生照旧）---
   // 看管的外部会话（用户在 dsh GUI 直跑的）改前只「旁听」：挂起标记的 call_id 走旁听口径，
