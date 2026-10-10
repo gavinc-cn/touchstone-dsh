@@ -5,6 +5,9 @@
 // - 三种形态: SessionModal(任务列表弹窗) / BugsTab 修复页(常驻内嵌) / 看板会话查看(board 模式)
 // - board 模式({projectId, sid, cid}): 不看任务看卡片会话, 无 SSE 走 2s 轮询增量,
 //   输入区按 meta.capabilities 门控(评论投递主会话), 图片因 media 端点按任务寻址而降级为占位
+// - 过程组(2026-10-10): 连续 ≥2 条「过程条目」(think/tool_call/tool_result) 收成一行摘要
+//   (如「工具 5 次 · skill, bash ×3 · 思考 2 段」), 默认折起; 展开后组内条目仍各自折叠。
+//   派生规则在 utils/sessionGroups.js(纯函数, 有单测); 虚拟滚动记账单位随之从「条目」变「行」
 // 数据来源: 后端解析 dsh 会话存储(~/.dsh/sessions/**/session*.jsonl.zstd, 多帧 zstd 事件流)
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, memo } from 'react'
 import { taskApi, boardApi, projectApi } from '../api'
@@ -23,6 +26,8 @@ import { findSlashToken } from '../utils/slashToken'
 import { canStop, ownedHint } from '../utils/sessionOwned'
 // 提问索引侧栏的纯派生（用户提问 + agent 问答混排 / 回答文本解析 / 占位与悬浮文案）
 import { buildQuestionIndex, questionLabel, questionTitle } from '../utils/sessionQa'
+// 过程条目整组折叠的纯派生（分组 / seq→行映射 / 组摘要文案）
+import { buildRows, summarizeProc } from '../utils/sessionGroups'
 import { useDshHostCaps } from '../hooks/useDshHost'
 import { openSessionInDsh } from '../lib/dshHost'
 import { List, Wrench, CircleX, Check, Zap, TriangleAlert, Copy, Undo2, ChevronDown, ChevronUp,
@@ -81,10 +86,16 @@ function rowAt(off, y) {
   return lo
 }
 
-/** 单条消息渲染; entries 为 append-only 不可变数据, memo 后历史消息不随新消息重渲染(避免 O(n²) renderMd) */
-const Entry = memo(function Entry({ e, taskId, agent, pid, boardPid, boardSid, flash, expand,
-                                    rwState, copied,
-                                    onCopy, onRewind, onOpenPath }) {
+/** 单条消息渲染: 内容 + （独立行时）外层 .sess-entry 包裹层。
+    - wrap=true（独立行）：包 `.sess-entry`（data-seq 供提问索引跳转定位、flash 触发闪烁高亮）
+    - wrap=false（过程组内条目）：只出内容，**不带** `.sess-entry`（虚拟滚动以「行」为测量单元，
+      组内条目混进 `.sess-entry[data-seq]` 会让高度记账与窗口切片错乱）
+    - 无可见内容（空正文 think / 空 usage / 未知 kind）时**整体返回 null**——与改造前逐字一致，
+      否则会留下只有 margin 的幽灵行（真机数据里空正文 think 占 think 的 41%）
+    entries 为 append-only 不可变数据, memo 后历史消息不随新消息重渲染(避免 O(n²) renderMd) */
+const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, boardPid, boardSid,
+                                            expand, rwState, copied,
+                                            onCopy, onRewind, onOpenPath }) {
   // 回答正文里的路径链接（.md-path）：点击开文件预览弹窗。内容由
   // dangerouslySetInnerHTML 生成，故用事件委托——只拦 .md-path，普通外链保持默认跳转
   const onBodyClick = useCallback((ev) => {
@@ -220,13 +231,46 @@ const Entry = memo(function Entry({ e, taskId, agent, pid, boardPid, boardSid, f
   }
   return null
   })()
-  return body ? <div className={'sess-entry' + (flash ? ' flash' : '')} data-seq={e.seq}>{body}</div> : null
+  if (!body) return null
+  // 独立行才包 .sess-entry（跳转锚点/闪烁高亮挂在这一层；组内条目只出内容）
+  return wrap
+    ? <div className={'sess-entry' + (flash ? ' flash' : '')} data-seq={e.seq}>{body}</div>
+    : body
+})
+
+/** 过程组行(2026-10-10): 连续 ≥2 条过程条目收成一行摘要, 默认折起; 展开后组内条目仍各自
+    折叠。row = utils/sessionGroups.buildRows 产出的 proc 行({key,seq,proc,items}); data-seq
+    取组内首条 seq —— 跳转落在组内任一条目时, 定位与闪烁都落在这一行上(见 MessageList) */
+const ProcRow = memo(function ProcRow({ row, flash, expandSeqs, taskId, agent, pid,
+                                        boardPid, boardSid, onOpenPath }) {
+  const ref = useRef(null)
+  // 跳转落点在组内(提问索引的 agent 问答项) → 自动展开该组; 非受控写法: 只在 false→true
+  // 时写一次 DOM open, 之后保持浏览器原生开合行为, 用户手动折叠后不被打扰
+  const expand = !!expandSeqs && row.items.some((it) => expandSeqs.has(it.seq))
+  useEffect(() => { if (expand && ref.current) ref.current.open = true }, [expand])
+  const s = summarizeProc(row.items)
+  return (
+    <div className={'sess-entry' + (flash ? ' flash' : '')} data-seq={row.seq}>
+      <details className={'sess-msg proc' + (s.errors ? ' has-err' : '')} ref={ref}>
+        <summary><Wrench className="inline h-3 w-3" /> {s.text}</summary>
+        <div className="sess-proc-body">
+          {row.items.map((it) => (
+            <EntryBody key={it.seq} e={it} taskId={taskId} agent={agent} pid={pid}
+              boardPid={boardPid} boardSid={boardSid} onOpenPath={onOpenPath}
+              expand={!!expandSeqs && expandSeqs.has(it.seq)} />
+          ))}
+        </div>
+      </details>
+    </div>
+  )
 })
 
 /* 消息流(滚动容器 + 窗口化虚拟滚动): 抽成 memo 组件隔离击键重渲染
-   - 只渲染 [start, end) 窗口内的条目, 窗口外上下用等高占位 div 撑起滚动条;
+   - 以「展示行」为单位: 连续 ≥2 条过程条目被 utils/sessionGroups 收成一个 proc 组行
+     (窗口切片按行, 不会把组切半); 行内条目仍各自折叠
+   - 只渲染 [start, end) 窗口内的行, 窗口外上下用等高占位 div 撑起滚动条;
      滚动时按 scrollTop 在前缀和上二分重算窗口(rAF 节流), 实测高度回写缓存修正占位偏差
-   - 高度缓存: seq -> 含间距高度(条目 offsetHeight + ROW_GAP); 未测量条目按"已测量样本
+   - 高度缓存: 行 seq -> 含间距高度(行 offsetHeight + ROW_GAP); 未测量行按"已测量样本
      均值"估算(比固定值更贴近真实会话), ResizeObserver 兜底捕获 details 展开/图片加载
    - 贴底模式(距底 < STICK_PX): 窗口固定为尾部, 新消息到达自动跟随(窗口向右增长,
      超过 TAIL_MAX 收缩回 TAIL_MIN —— 收缩发生在用户看底部时, 不影响可见内容)
@@ -239,30 +283,33 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
     jumpSeq, onJumpHandled, rwEnabled, rwBusy, rewindingMid, copiedSeq, onCopy, onRewind,
     onSwitchSession,
     onOpenPath }) {
-  const n = entries.length
-  const heightsRef = useRef(new Map())      // seq -> 实测高度(含间距); 离开窗口后保留供回头定位
+  // 展示行(纯派生, 有单测): rows = 行数组, rowIndexOf = 任意条目 seq → 所属行下标
+  // (跳转目标可能落在组内, 只需定位到该组所在行)
+  const { rows, rowIndexOf } = useMemo(() => buildRows(entries), [entries])
+  const n = rows.length
+  const heightsRef = useRef(new Map())      // 行 seq -> 实测高度(含间距); 离开窗口后保留供回头定位
   const observedRef = useRef(new Set())     // ResizeObserver 已观察节点(尺寸变化兜底)
   const roRef = useRef(null)
   const [tick, setTick] = useState(0)       // 高度缓存版本: 测量/尺寸变化后自增触发重算
   const [range, setRange] = useState(null)  // 渲染窗口 [start, end); null=按尾部推导(首帧)
   const stickRef = useRef(true)             // 贴底模式(新消息跟随)
   const rafRef = useRef(0)
-  const jumpRef = useRef(null)              // 待定位的跳转 seq(渲染后定位)
+  const jumpRef = useRef(null)              // 待定位跳转 {row: 行 seq, seq: 条目 seq}(渲染后定位)
   const holdRafRef = useRef(0)              // 跳转落点连钉帧(rAF 句柄)
   const pinRef = useRef(false)              // 连钉窗口内: 跳过 deltaAbove 补偿(防把落点推走)
   // 上次提交时的滚动容器尺寸 {sh 内容高, ch 视口高}: 贴底 snap 的判据(有变化才跟随)
   const boxViewRef = useRef(null)
 
-  // 前缀和: off[i] = 第 i 条顶部的累计高度; off[n] = 全量内容总高(未测量按估算)
+  // 前缀和: off[i] = 第 i 行顶部的累计高度; off[n] = 全量内容总高(未测量按估算)
   const off = useMemo(() => {
     const a = new Float64Array(n + 1)
     const h = heightsRef.current
     let sum = 0
     for (const v of h.values()) sum += v
     const est = h.size ? sum / h.size : EST_ROW_H   // 估算自适应: 已测量样本均值
-    for (let i = 0; i < n; i++) a[i + 1] = a[i] + (h.get(entries[i].seq) || est)
+    for (let i = 0; i < n; i++) a[i + 1] = a[i] + (h.get(rows[i].seq) || est)
     return a
-  }, [entries, n, tick])
+  }, [rows, n, tick])
   // 首帧(range=null)按尾部推导, 避免闪一下空列表
   const [rs, re] = range ?? [Math.max(0, n - TAIL_MIN), n]
 
@@ -312,15 +359,17 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
     })
   }, [n, atBottomRef])
 
-  // 跳转(提问索引): 先把窗口扩到目标附近, 渲染后由下方 effect 定位
+  // 跳转(提问索引): 先把窗口扩到目标附近, 渲染后由下方 effect 定位。
+  // 目标可能落在过程组内(agent 问答的调用/结果条目) —— 定位与闪烁按"所属行"走:
+  // row 取该行首条 seq(data-seq 锚点), seq 仍是条目 seq(闪烁高亮仍精确到条目所在的组行)
   useEffect(() => {
     if (jumpSeq == null) return
-    const idx = entries.findIndex((x) => x.seq === jumpSeq)
-    if (idx < 0) { onJumpHandled(jumpSeq); return }
+    const idx = rowIndexOf.get(jumpSeq)
+    if (idx == null) { onJumpHandled(jumpSeq); return }
     stickRef.current = false
-    jumpRef.current = jumpSeq
+    jumpRef.current = { row: rows[idx].seq, seq: jumpSeq }
     setRange([Math.max(0, idx - 5), Math.min(n, idx + 25)])
-  }, [jumpSeq, entries, n, onJumpHandled])
+  }, [jumpSeq, rows, rowIndexOf, n, onJumpHandled])
 
   // ResizeObserver: 窗口内条目尺寸变化(details 展开/收起、图片加载)触发重测;
   // 也观察滚动容器自身——composer 高度变化(排队 chip 出现等)会让视口变矮,
@@ -381,7 +430,8 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
     }
     const js = jumpRef.current
     if (js != null) {
-      const el = box.querySelector(`[data-seq="${js}"]`)
+      // 锚点取所属行(data-seq=行首条 seq): 目标落在过程组内时定位到组行本身
+      const el = box.querySelector(`[data-seq="${js.row}"]`)
       if (el) {
         el.scrollIntoView({ block: 'start' })
         jumpRef.current = null
@@ -397,7 +447,7 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
         let okN = 0
         const repin = () => {
           const b = boxRef.current
-          const e2 = b && b.querySelector(`[data-seq="${js}"]`)
+          const e2 = b && b.querySelector(`[data-seq="${js.row}"]`)
           if (!e2 || !b) {
             pinRef.current = false
             holdRafRef.current = 0
@@ -414,7 +464,7 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
           }
         }
         holdRafRef.current = requestAnimationFrame(repin)
-        onJumpHandled(js)
+        onJumpHandled(js.seq)
       }
     }
     if (changed) setTick((t) => t + 1)
@@ -431,14 +481,22 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
       ) : (
         <>
           {rs > 0 && <div className="sess-pad" style={{ height: off[rs] }}></div>}
-          {entries.slice(rs, re).map((e) => {
+          {rows.slice(rs, re).map((row) => {
+            // 行内任一条目被高亮(跳转闪烁) → 整行闪烁: 独立行=自身 seq, 过程组=组内命中
+            const flash = flashSeq != null && row.items.some((it) => it.seq === flashSeq)
+            if (row.proc) {
+              return <ProcRow key={row.key} row={row} flash={flash} expandSeqs={expandSeqs}
+                taskId={taskId} agent={agent} pid={pid} boardPid={boardPid}
+                boardSid={boardSid} onOpenPath={onOpenPath} />
+            }
+            const e = row.items[0]
             // 每条提问的回退按钮态：族无 rewind 能力或无 anchor 消息 id → 不渲染；
             // 会话忙（在跑/有排队）→ 置灰（服务端同样 409）；回退中 → 禁用防连点
             const rw = (!rwEnabled || !e.mid) ? ''
               : (rewindingMid === e.mid ? 'running' : (rwBusy ? 'busy' : 'on'))
-            return <Entry key={e.seq} e={e} taskId={taskId} agent={agent}
+            return <EntryBody key={row.key} e={e} wrap taskId={taskId} agent={agent}
               pid={pid} boardPid={boardPid} boardSid={boardSid}
-              flash={flashSeq === e.seq} expand={!!expandSeqs && expandSeqs.has(e.seq)} rwState={rw}
+              flash={flash} expand={!!expandSeqs && expandSeqs.has(e.seq)} rwState={rw}
               copied={copiedSeq === e.seq} onCopy={onCopy} onRewind={onRewind}
               onOpenPath={onOpenPath} />
           })}
@@ -717,7 +775,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   const [connected, setConnected] = useState(false)
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
-  // 回答里的路径链接（Entry 事件委托上报）当前预览的文件路径（''=不弹预览窗）
+  // 回答里的路径链接（EntryBody 事件委托上报）当前预览的文件路径（''=不弹预览窗）
   const [previewPath, setPreviewPath] = useState('')
   const [injecting, setInjecting] = useState('')       // 排队消息「立即注入」进行中的行 key
   const [passing, setPassing] = useState(false)        // 「通过」按钮进行中（防连点）
@@ -1427,7 +1485,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     } catch (e) { toast(e.message) } finally { setPassing(false) }
   }
   // 回答里的路径链接（Entry 事件委托上报）→ 打开文件预览弹窗。
-  // 稳定引用：MessageList/Entry 均为 memo，回调换引用会让整棵消息子树重渲染
+  // 稳定引用：MessageList/EntryBody/ProcRow 均为 memo，回调换引用会让整棵消息子树重渲染
   const openPreview = useCallback((p) => setPreviewPath(p || ''), [])
   // 复制某条提问原文（含附件 markdown 引用，原样复制；kimi web 同款：图标切 ✓ 1.4s）
   function copyEntry(e) {

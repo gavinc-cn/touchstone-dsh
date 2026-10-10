@@ -984,6 +984,22 @@ body.tabbar-dragging, body.tabbar-dragging * { cursor: grabbing !important; user
   margin: 7px 0 0; padding: 0; background: transparent; border: none; white-space: pre-wrap;
   word-break: break-all; font-family: var(--mono); font-size: calc(11px * var(--fs)); color: var(--inset-text); max-height: 280px; overflow: auto;
 }
+/* 过程组(2026-10-10)：连续 ≥2 条过程条目(思考/工具调用/结果)收成一行摘要，默认折起；
+   组内条目仍各自折叠。外框由组容器提供，组内条目去掉重复外框、只留折叠行，
+   左侧竖线标出"这些都属于同一次过程"；含错误时整行转红，错误不被静默埋掉 */
+.sess-msg.proc {
+  align-self: flex-start; width: 100%; background: var(--inset-bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 9px;
+}
+.sess-msg.proc > summary { cursor: pointer; color: var(--muted-foreground); font-size: calc(11.5px * var(--fs)); font-family: var(--mono); }
+.sess-msg.proc.has-err { border-color: var(--err-bd-strong); }
+.sess-msg.proc.has-err > summary { color: var(--fail); }
+.sess-proc-body {
+  display: flex; flex-direction: column; gap: 6px; margin-top: 7px;
+  padding-left: 8px; border-left: 2px solid var(--border);
+}
+.sess-proc-body .sess-msg.tool { background: transparent; border: none; border-radius: 0; padding: 0; }
+.sess-proc-body .sess-msg.tool.err { border-left: 2px solid var(--err-bd-strong); padding-left: 6px; }
 /* usage 小灰字行(右对齐, kimi web 风格) */
 .sess-usage { align-self: flex-end; font-size: calc(10.5px * var(--fs)); color: var(--dim); font-family: var(--mono); padding-right: 4px; margin-top: -6px; }
 /* 分隔条(上下文压缩等) */
