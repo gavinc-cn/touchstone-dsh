@@ -165,7 +165,11 @@ async function scenario(label, stdoutText, opts = {}) {
   const webServer = makeWebServer();
   const ctx = makeCtx(webServer, logs);
   console.log(`\n-- ${label}`);
-  const config = { repoDir: dir };
+  // **backend 显式钉成 python**（2026-10-15 M8）：本档全部场景都是「Python 链」——
+  // 解释器探测、依赖预检、缺依赖提示页。缺省翻成 node 之后不钉的话，走的会是 Node 分支
+  // （假仓库里没有 `backend/server.js` ⇒ 入口缺失提示页），13 条会红在**错误的原因**上。
+  // 显式 `backend: python` 正是 Python 版未退役的证明：这条链现在仍被完整测着。
+  const config = { repoDir: dir, backend: 'python' };
   if (opts.pythonPath) config.pythonPath = fakePython;
   // PATH 只留本场景的目录（或置空）——不配 pythonPath 时, 探测与 spawn 都只看这里
   config.extraEnv = { PATH: opts.pathDir === null ? '' : (opts.pathDir || dir) };

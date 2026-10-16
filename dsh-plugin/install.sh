@@ -50,10 +50,17 @@ pick_python() {
   [[ -n "$fallback" ]] && { echo "$fallback"; return 0; }
   return 1
 }
-PYTHON_PATH="$(pick_python)" || {
-  echo "错误: 未找到可用的 Python 解释器（依次试过 python、python3）；请用 TS_DSH_PYTHON=/path/to/python 显式指定" >&2
-  exit 1
-}
+# **Python 现在是可选的**（2026-10-15 M8：插件缺省后端由 python 翻成 node）：
+# 缺省后端＝包内的 `backend/server.js`（要求宿主 Node ≥ 22.19，靠 node:sqlite），
+# 所以「不再要求用户机器上有 Python 与 pip」正是翻缺省的全部收益 —— 装插件不该再被
+# 解释器卡住。解释器只在两种情况下需要：① profile 里显式 `backend: python`（回滚/排障）；
+# ② 独立形态（`start.sh` / `touchstone.sh`）仍走 `server.py`。
+# 探不到就只提示一句、**不再**往配置里塞 pythonPath（旧行为是硬报错 exit 1）。
+PYTHON_PATH="$(pick_python || true)"
+if [[ -z "$PYTHON_PATH" ]]; then
+  echo "提示: 未找到 Python 解释器（依次试过 python、python3）—— 不影响安装：本插件缺省后端是 Node。"
+  echo "      只有要回滚到 Python 后端（profile 里显式写 backend: python）或跑独立形态时才需要它。"
+fi
 
 [[ -d "$PROFILE_DIR" ]] || { echo "错误: profile 不存在: $PROFILE_DIR（先用 dsh web 初始化）"; exit 1; }
 if [[ ! -f "$REPO_DIR/webui/dist-plugin/index.html" ]]; then
@@ -76,7 +83,14 @@ node "$REPO_DIR/dsh-plugin/scripts/select-bundle.mjs" "$PROFILE_DIR/package.json
 
 echo "完成（包名 $PKG_NAME）。重启 dsh web 生效（package.json 变更 dsh-hmr 也会热重载）;"
 echo "之后侧栏 Plugins 面板里会出现 Touchstone 卡片与该行开关。"
-echo "repoDir 不再必填（缺省 = 包自身目录, 包里自带 Python 平台与预构建前端）;"
-echo "只有要指向本机开发检出、或指定解释器时才在 $PROFILE_DIR/cordis.patch.yml 里加:"
-echo "  - id: touchstone-dsh"
-echo "    config: { repoDir: $REPO_DIR, pythonPath: $PYTHON_PATH }"
+echo "后端缺省＝包内 Node 实现（backend/server.js，要求宿主 Node ≥ 22.19）;"
+echo "repoDir 不再必填（缺省 = 包自身目录, 包里自带 Node/Python 平台与预构建前端）;"
+echo "只有要指向本机开发检出、或指定解释器（回滚到 Python 后端）时才在 $PROFILE_DIR/cordis.patch.yml 里加:"
+if [[ -n "$PYTHON_PATH" ]]; then
+  echo "  - id: touchstone-dsh"
+  echo "    config: { repoDir: $REPO_DIR, pythonPath: $PYTHON_PATH }"
+  echo "  （要回滚到 Python 后端再加一项 backend: python；注意删掉 backend 键等于 node）"
+else
+  echo "  - id: touchstone-dsh"
+  echo "    config: { repoDir: $REPO_DIR }        # 本机无 Python：缺省 Node 后端直接可用"
+fi

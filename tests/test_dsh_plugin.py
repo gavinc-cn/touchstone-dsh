@@ -825,6 +825,33 @@ def test_shell_stdout_sink_harness():
     assert "✗" not in out, out
 
 
+def test_install_sh_no_python_harness():
+    """跑 `dsh-plugin/scripts/dev-check-install.mjs`：**没有 Python 也能装**（2026-10-15 M8）。
+
+    背景：插件缺省后端由 python 翻成 node，全部收益是「不再要求用户机器上有 Python 与 pip」。
+    但 `install.sh` 此前在探不到解释器时直接 `exit 1`（"错误: 未找到可用的 Python 解释器"）
+    —— 缺省已经是 node，用户却连装都装不上。本档用假仓库 + 假 HOME + 受控 PATH 跑**真
+    install.sh**，钉住三条：① 无 Python ⇒ exit 0、给提示、**不**往配置行塞 `pythonPath`
+    且真走到 `dsh plugin add`；② 有 Python ⇒ 照旧给 `pythonPath`（显式 `backend: python`
+    回滚要用）；③ 负对照——同一环境里「必须有解释器」的探法必须失败（证明①的绿不是环境
+    自带的）。「无 Python」档把脚本里**绝对**的 conda 候选 sed 到不存在的根（测试替身，
+    本机 /opt/miniconda3 真实存在，不挡掉就永远探得到），替身只动环境不动被测逻辑。
+    """
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node 不可用（跳过插件安装路径自检）")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proc = subprocess.run([node, "scripts/dev-check-install.mjs"],
+                          cwd=os.path.join(root, "dsh-plugin"),
+                          capture_output=True, text=True, timeout=120)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, f"install.sh 自检失败：\n{out}"
+    assert "OVERALL: PASS" in out
+    assert "✗" not in out, out
+
+
 def test_client_shortcut_harness():
     """跑 `dsh-plugin/scripts/dev-check-shortcuts.mjs`：客户端快捷键两条通道（2026-10-04）。
 

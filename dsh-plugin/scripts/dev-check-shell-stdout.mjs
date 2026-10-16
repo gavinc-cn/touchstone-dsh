@@ -56,9 +56,18 @@ function fakeServerSource() {
   ].join('\n');
 }
 
+/**
+ * 假后端写成**两个入口路径**（2026-10-15 M8）：缺省后端已由 python 翻成 node，
+ * 而本档测的是「stdout/stderr 落盘 + 跨 chunk marker 解析」这条**与后端无关**的薄壳管道。
+ * 两个入口各给一份，`backend/server.js` 才是它现在真正走的那条（只给 `server.py` 会走成
+ * 「Node 后端入口缺失」提示页 —— 翻转当天本档 10 条就是这么红的）。
+ */
 function makeFakeRepo() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-shell-stdout-'));
-  fs.writeFileSync(path.join(dir, 'server.py'), fakeServerSource());
+  const src = fakeServerSource();
+  fs.writeFileSync(path.join(dir, 'server.py'), src);
+  fs.mkdirSync(path.join(dir, 'backend'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'backend', 'server.js'), src);
   return dir;
 }
 

@@ -38,10 +38,22 @@ const handler = (req, res) => {
 };
 const dispose = await apply(ctx, {
   repoDir,
+  // **backend 显式钉成 python**（2026-10-15 M8）：本档的契约是「走**真实 server.py** 验全链路」，
+  // 而 pythonPath 这个入参只在 Python 分支有意义。缺省翻成 node 之后不钉的话，它会**静默**
+  // 改成跑 Node 后端 —— 仍然 PASS，但已经不是本档声称在测的那条链（实测：翻转当天它带着
+  // `[warn] touchstone[node]` 的输出 PASS 了）。缺省（node）路径的全链路另由
+  // `dev-check-backend.mjs` 场景 A/B 覆盖（真起 backend/server.js + /api/auth/me + SPA）。
+  backend: 'python',
   pythonPath: process.argv[3] || 'python3',
   // 隔离库：真机常有实例占着默认库（同库单实例锁 → 新进程 exit 3），
   // 且隔离实例必须显式给管理员口令（否则随机一次性口令 + 首次强制改密门）
-  extraEnv: { TOUCHSTONE_DB: dbFile, TS_ADMIN_PASSWORD: 'shell-check' },
+  // TOUCHSTONE_RUN_DIR 也是隔离的一部分：server.py 默认把实际端口写到 <仓库>/.run/server.port，
+  // 临时实例退出时会把它删掉（真实实例的端口标记，touchstone.sh status 靠它读）——必须挪走。
+  extraEnv: {
+    TOUCHSTONE_DB: dbFile,
+    TOUCHSTONE_RUN_DIR: path.join(os.tmpdir(), `ts-shell-check-run-${process.pid}`),
+    TS_ADMIN_PASSWORD: 'shell-check',
+  },
 });
 if (!routes.has('/touchstone')) { console.error('FAIL: /touchstone 路由未注册'); process.exit(1); }
 

@@ -64,17 +64,27 @@ function makeCtx(webServer, rows) {
   };
 }
 
-/** 写假 server.py（node 脚本，可被 node 直接执行；只做三件事）。 */
+/**
+ * 写假后端（node 脚本，可被 node 直接执行；只做三件事）。
+ *
+ * **2026-10-15 M8**：缺省后端由 python 翻成 node ⇒ 两个入口路径各写一份 ——
+ * `backend/server.js` 是**缺省路径本身**，`server.py` 留给显式 `backend: python` 的形态。
+ * 只写 `server.py` 的话，本档测到的会是「Node 后端入口缺失」提示页，而不是薄壳的生命周期
+ * （翻转当天就是这么红了 4 条，红在正确的原因上）。
+ */
 function makeFakeRepo() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-shell-check-'));
-  fs.writeFileSync(path.join(dir, 'server.py'), [
+  const src = [
     "const fs = require('fs');",
     "fs.appendFileSync(process.env.FAKE_PID_FILE, process.pid + '\\n');",
     "process.stdout.write('TOUCHSTONE_LISTEN 45998\\n');",
     "process.on('SIGTERM', () => process.exit(0));",
     'setInterval(() => {}, 1000);',
     '',
-  ].join('\n'));
+  ].join('\n');
+  fs.writeFileSync(path.join(dir, 'server.py'), src);
+  fs.mkdirSync(path.join(dir, 'backend'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'backend', 'server.js'), src);
   return dir;
 }
 

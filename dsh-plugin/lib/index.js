@@ -1,12 +1,14 @@
 /**
  * Touchstone dsh 插件 — Node 薄壳（服务端半）
  * 职责四件（路线 A 起，见 doc_ai/spec/dsh_plugin/dsh插件形态.md）:
- *  1. spawn Touchstone 的 server.py 子进程（127.0.0.1 随机端口 + 插件版前端 + 免登信任头）
+ *  1. spawn Touchstone 后端子进程（127.0.0.1 随机端口 + 插件版前端 + 免登信任头）:
+ *     缺省 Node（`backend/server.js`，2026-10-15 M8 翻）/ `config.backend: python` 时 Python（`server.py`）
  *  2. 向 dsh webServer 注册 /touchstone 前缀路由, 全量反代到子进程（流式管道, SSE 不缓冲）
  *  3. agent 驱动（路线 A）: 进程内会话池 + 会话事件 SSE 推送, 挂 /touchstone-agent 前缀;
  *     驱动地址与一次性令牌经环境变量下发给 server.py（见 lib/agent-driver.js）
  *  4. 插件停用时注销路由、断开 SSE、释放常驻会话并 SIGTERM 子进程（server.py 侧有优雅退出）
- * 静态页/SPA 回退/REST/SSE 全部由 Python 现有逻辑承载, 薄壳本身不实现业务。
+ * 静态页/SPA 回退/REST/SSE 全部由后端自身承载, 薄壳本身不实现业务
+ * （两版后端共用同一份 apply() 其余逻辑: 端口解析、日志落盘、stopBackend、驱动下发都不分叉）。
  *
  * 生命周期自愈（2026-10-04，修「Plugins 面板停用不回收」）:
  *   dsh 热重载换下条目时**不保证**走到本插件的 disposer。真机实测（隔离 profile）：
@@ -91,6 +93,61 @@ const PYTHON_PROBE_TIMEOUT_MS = 5000;
  * 标记写成 Python 注释, 对真解释器没有任何语义影响。
  */
 const PYTHON_PROBE_CODE = 'pass  # touchstone-python-probe';
+
+/**
+ * 后端实现选择（2026-10-11 M0 起为 `config.backend`；**2026-10-15 M8 翻缺省**）：
+ * `config.backend` = `'node'`（**缺省**）| `'python'`（显式，仍完整可用）。
+ *
+ * 为什么是配置键而不是「有 Python 就用 Python、没有就自动用 Node」：换后端是**验收动作**，
+ * 必须能一行改回；自动探测会让「对拍还没过的版本」在用户机器上被静默启用。
+ *
+ * 缺省值变迁（M8，用户 2026-10-15 裁决「默认可以改为 nodejs 后台，但 python 版现在不能删」）：
+ *  - 翻转前：缺省 python（Node 是影子/可选路径，未验收前谁都不受影响）；
+ *  - 翻转后：缺省 node（Node 已在 M0–M7.5 逐项对拍过关，Gate 1 的全量对拍判据已达成）；
+ *  - Python 版**不退役**：`server.py` 与包内 `*.py` 照旧随包分发，`backend: python`
+ *    是观测期唯一的回滚动作（**必须显式写 `python`，删键现在等于 node**）。
+ *
+ * `backend: 'node'` 时整条 Python 链（解释器探测 + 依赖预检 + 缺依赖提示页）**一律跳过** ——
+ * 那正是换 Node 的收益本身（不再要求用户机器上有 Python 与 pip）。改由 Node 侧自己的能力探测
+ * （`node:sqlite`，见 `renderNodeRuntimeHint`）兜「宿主 Node 太老」这一类失败。
+ */
+const BACKEND_PYTHON = 'python';
+const BACKEND_NODE = 'node';
+
+/** Node 后端入口（相对 repoDir）。进程契约见方案 §3.2，两版 argv 只差入口路径与 node 选项。 */
+const NODE_ENTRY_REL = 'backend/server.js';
+
+/**
+ * 只给 Node 后端的进程选项：`node:sqlite` 在 22.x 是实验特性，每次启动往 stderr 打
+ * `ExperimentalWarning`（R1c）——而 `plugin-backend.log` 是排障唯一证据源，噪声必须压掉。
+ */
+const NODE_EXTRA_FLAGS = ['--disable-warning=ExperimentalWarning'];
+
+/**
+ * 宿主 Node 能力探测（M8 新增）。判据是**能力**而不是版本号比较：
+ * `node:sqlite` 从 22.5 才有、且 22.19 之前必须显式 `--experimental-sqlite` 才 import 得到
+ * （方案 R1 实测：22.19 unflag 可用），而自编译/裁剪过的 Node 也可能没编进 sqlite。
+ * 所以真 spawn 一个 `process.execPath`（＝随后要拉起后端的那一个二进制）探一次，
+ * 探测用的 flags 与 env 与随后 spawn **同一份** —— 与「缺省解释器改真 spawn 探一次」同一条口径。
+ *
+ * 探到 `DatabaseSync` 不是函数也算失败：import 成功但 API 缺失（22.5-22.18 带 flag 的形态）
+ * 会在建库那一刻才炸，那时用户看到的只是「后端起不来」。
+ */
+const NODE_PROBE_CODE = 'import("node:sqlite").then((m)=>{'
+  + 'if(typeof m.DatabaseSync!=="function"){console.error("node:sqlite 无 DatabaseSync");process.exit(4)}'
+  + 'console.log("node:sqlite ok");process.exit(0)},(e)=>{'
+  + 'console.error(String((e&&e.message)||e));process.exit(3)})';
+/** 探测超时（与 Python 侧 PREFLIGHT_TIMEOUT_MS 同量级：探不动就放行，绝不卡住激活） */
+const NODE_PROBE_TIMEOUT_MS = 5000;
+
+/** 解析 `config.backend`；未知值 warn 一句后按缺省 node 处理（不静默、不猜测） */
+function resolveBackend(config, logger) {
+  const raw = config.backend;
+  if (raw === undefined || raw === null || raw === '') return BACKEND_NODE;
+  if (raw === BACKEND_PYTHON || raw === BACKEND_NODE) return raw;
+  logger.warn(`touchstone: 未知的 config.backend=${JSON.stringify(raw)}（只认 python/node），按缺省 node 处理`);
+  return BACKEND_NODE;
+}
 
 /** 子进程句柄与解析出的后端端口（每 profile 一个插件实例, 模块级单例即可） */
 let child = null;
@@ -246,6 +303,75 @@ function preflightDeps(pythonPath, repoDir, logger, env) {
 }
 
 /**
+ * 真 spawn 探一次宿主 Node 能力（判据与理由见 `NODE_PROBE_CODE`），返回
+ * `{ ok, skipped, detail }`：
+ *   ok=true   —— 能力齐备（`detail` 是子进程 stdout 那一行，进日志当证据）；
+ *   ok=false  —— 探到了且不满足（`detail` = 子进程 stderr / 退出码）⇒ 调用方**不 spawn 后端**；
+ *   skipped   —— 探测本身没跑成（超时 / 无法 spawn / 无输出）⇒ **照常启动后端**：
+ *                与 Python 依赖预检同一口径（预检不确定不许阻断一个本来能跑的部署），
+ *                真起不来还有「起来就崩」提示页兜底。
+ *
+ * env 必须与随后 spawn 后端同一份（profile 的 extraEnv 可能改 `NODE_OPTIONS`/`PATH`），
+ * flags 也同一份（`NODE_EXTRA_FLAGS`）——「探测用 A、启动用 B」的分裂是 Python 侧踩过的真 bug。
+ */
+function probeNodeRuntime(execPath, flags, env) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const skip = (why) => settle({ ok: false, skipped: true, detail: why });
+    let proc = null;
+    try {
+      proc = spawn(execPath, [...flags, '-e', NODE_PROBE_CODE], {
+        cwd: homedir(), env, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      skip(error && error.message ? error.message : String(error));
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      skip(`超过 ${NODE_PROBE_TIMEOUT_MS}ms`);
+      try {
+        proc.kill('SIGKILL');
+      } catch { /* 已退出：忽略 */ }
+    }, NODE_PROBE_TIMEOUT_MS);
+    if (timer.unref) timer.unref();
+    proc.stdout.on('data', (buf) => { stdout += String(buf); });
+    proc.stderr.on('data', (buf) => { stderr += String(buf); });
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      skip(err.message);
+    });
+    // 用 close 而不是 exit：exit 可能早于 stdout 最后一个数据块（Python 预检的同一教训）。
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      const out = stdout.trim().split('\n').pop() || '';
+      const err = stderr.trim().split('\n').pop() || '';
+      if (code === 0) {
+        if (!out) { skip('无输出'); return; }
+        settle({ ok: true, skipped: false, detail: out });
+        return;
+      }
+      settle({ ok: false, skipped: false, detail: err || `探测进程退出 code=${code}` });
+    });
+  });
+}
+
+/**
+ * 能力探测的测试缝（`dev-check-backend.mjs` 场景 G 用；生产路径恒为 null ⇒ 走真探测）。
+ * 「宿主 Node 太老」这一支在真机上造不出来（本机是能力齐备的 Node），不给缝就只能是未验项。
+ */
+let nodeProbeForTest = null;
+export function _setNodeRuntimeProbeForTest(fn) {
+  nodeProbeForTest = fn;
+}
+
+/**
  * 依赖缺失时的面板提示页（代替 503 JSON）: 缺什么 + 一条可直接复制的修复命令
  * + 修完怎么让插件重来（停用再启用即会重跑 apply, 按 spec §8.8 不必重启 dsh web）。
  *
@@ -292,6 +418,88 @@ function renderNoPythonHint() {
     + '<code>touchstone-dsh</code> 条目里写 <code>pythonPath</code> 指向它；'
     + '若解释器已装好只是不在 PATH 上，也要靠这个配置项指过去。</p>'
     + '<p style="color:#8b949e">配置后把本插件<b>停用再启用</b>即会重试，不必重启 dsh web。</p>'
+    + '</body></html>';
+}
+
+/**
+ * Node 后端入口缺失时的提示页（缺省实现；也可显式配 `backend: node`）。
+ * 与「找不到 Python」并列的一类失败：装的是老包（包里还没有 `backend/` 目录）、
+ * 或 repoDir 指到了老检出。这条路径**不早退**——照常注册路由，面板因此能看到原因，
+ * 而不是一个 404 白页。
+ */
+function renderNoNodeBackendHint(repoDir) {
+  return '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
+    + '<title>Touchstone 后端未启动</title></head>'
+    + '<body style="margin:0;padding:2rem;font:14px/1.75 ui-monospace,Menlo,Consolas,monospace;'
+    + 'background:#14161a;color:#e6e6e6">'
+    + '<h2 style="color:#ffb454;margin:0 0 .9rem">Touchstone 后端未启动：Node 后端入口缺失</h2>'
+    + `<p>没找到 <code>${escapeHtml(`${repoDir}/backend/server.js`)}</code>，`
+    + '而本插件走的是 Node 后端（<b>缺省实现</b>，也可显式配 <code>backend: node</code>）。</p>'
+    + '<p>两种常见原因：① 装的是不含 Node 后端的旧包 —— 重跑 <code>dsh-plugin/install.sh</code>；'
+    + '② profile patch 里的 <code>repoDir</code> 指向了另一个检出 —— 改成含 '
+    + '<code>backend/server.js</code> 的那个目录，或删掉该项用缺省（包自身目录）。</p>'
+    + '<p style="color:#8b949e">改完把本插件<b>停用再启用</b>即会重试，不必重启 dsh web。'
+    + '要退回 Python 后端：把 <code>backend</code> <b>显式写成</b> <code>python</code>'
+    + '（包里的 <code>server.py</code> 仍在，Python 版未退役；注意<b>删掉该键现在等于 node</b>，'
+    + '不能靠删键回退）。</p>'
+    + '</body></html>';
+}
+
+/**
+ * 宿主 Node 能力不足时的提示页（M8 新增）。为什么需要：缺省翻成 node 之后，
+ * 「宿主 Node 太老」从「可选路径的边角情况」变成**默认路径上的头号失败**——
+ * `node:sqlite` 在 22.5 才有、22.19 之前要显式 `--experimental-sqlite`，更老的 Node 直接没有这个 builtin。
+ * 那时后端会在 import 期就退出，面板只会显示 503 JSON 或一段日志尾巴，用户不知道该升级什么、
+ * 也不知道其实**有一条一行配置的退路**。
+ */
+function renderNodeRuntimeHint({ execPath, version, detail, logPath }) {
+  return '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
+    + '<title>Touchstone 后端未启动</title></head>'
+    + '<body style="margin:0;padding:2rem;font:14px/1.75 ui-monospace,Menlo,Consolas,monospace;'
+    + 'background:#14161a;color:#e6e6e6">'
+    + '<h2 style="color:#ffb454;margin:0 0 .9rem">Touchstone 后端未启动：宿主 Node 不满足要求</h2>'
+    + `<p>当前运行 dsh 的 Node 是 <code>${escapeHtml(String(version))}</code>`
+    + `（<code>${escapeHtml(String(execPath))}</code>），探测 <code>node:sqlite</code> 未通过：</p>`
+    + `<pre style="background:#0d0f12;border:1px solid #2a2f36;border-radius:6px;padding:.8rem 1rem;`
+    + `overflow:auto">${escapeHtml(String(detail || ''))}</pre>`
+    + '<p>Node 后端要求 <b>Node &gt;= 22.19</b>（该版本起 <code>node:sqlite</code> 免 flag 可用；'
+    + '22.5–22.18 需要 <code>--experimental-sqlite</code>，更老的版本没有这个内建模块）。'
+    + '两条出路任选一条：</p>'
+    + '<p>① <b>升级 Node 到 22.19+</b>，重启 dsh web（后端用的是宿主那个 Node，'
+    + '与 PATH 上的 <code>node</code> 无关）；<br>'
+    + '② <b>改回 Python 后端</b>：在 profile patch 的 <code>touchstone-dsh</code> 条目里'
+    + ' <b>显式</b>写 <code>backend: python</code>（注意<b>删掉该键等于 node</b>），'
+    + '然后停用再启用本插件 —— Python 版随包分发、未退役。</p>'
+    + '<p style="color:#8b949e">后端日志：<code>'
+    + `${escapeHtml(logPath || '<库目录>/plugin-backend.log')}</code></p>`
+    + '</body></html>';
+}
+
+/**
+ * `backend: node` 且进程**起来就崩**时的提示页（M0 评审 I3）。
+ * 为什么需要：「入口缺失」只是新开关失败的一种；更常见的是入口在、跑不起来
+ * （宿主 Node 版本不认 `--disable-warning`、`dist-plugin` 缺失、被执行策略拦、脚本自身报错）。
+ * 那时 `backendPort` 一直是 0，proxy 只会回通用 503 JSON —— 面板里显示一段 JSON 原文，
+ * 用户既不知道发生了什么、也不知道去哪看。提示页给三件事：失败原因、日志路径、怎么回退。
+ */
+function renderBackendCrashHint({ entryPath, logPath, code, signal }) {
+  return '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
+    + '<title>Touchstone 后端未启动</title></head>'
+    + '<body style="margin:0;padding:2rem;font:14px/1.75 ui-monospace,Menlo,Consolas,monospace;'
+    + 'background:#14161a;color:#e6e6e6">'
+    + '<h2 style="color:#ffb454;margin:0 0 .9rem">Touchstone 后端未启动：Node 后端进程退出</h2>'
+    + `<p>入口 <code>${escapeHtml(entryPath)}</code> 起来了但没有报出监听端口就退出`
+    + `（code=${escapeHtml(String(code))}${signal ? `, signal=${escapeHtml(String(signal))}` : ''}）。</p>`
+    + '<p>下一步：看后端日志里的最后几行（启动失败原因就在那里）——</p>'
+    + `<pre style="background:#0d0f12;border:1px solid #2a2f36;border-radius:6px;padding:.8rem 1rem;`
+    + `overflow:auto">tail -n 40 ${escapeHtml(logPath || '<库目录>/plugin-backend.log')}</pre>`
+    + '<p>常见原因：<code>dist-plugin</code> 构建产物缺失、被执行策略拦下、入口脚本自身报错。'
+    + '若日志里是 <code>node:sqlite</code> / <code>ERR_UNKNOWN_BUILTIN_MODULE</code> 一类，'
+    + '那是宿主 Node 太老 —— 升级到 22.19+ 或改回 <code>backend: python</code>。'
+    + '改完把本插件<b>停用再启用</b>即会重试。</p>'
+    + '<p style="color:#8b949e">要退回 Python 后端：把 profile 里的 <code>backend</code> '
+    + '<b>显式写成</b> <code>python</code>（Python 版随包分发、未退役；'
+    + '注意<b>删掉该键现在等于 node</b>）。</p>'
     + '</body></html>';
 }
 
@@ -445,9 +653,16 @@ export async function apply(ctx, config = {}) {
   // repoDir 缺省 = 包自身目录（自包含包: 包里就有 server.py 与 webui/dist-plugin）, 用户零配置即可跑;
   // 显式 config.repoDir 仍优先 —— 要指向开发中的工作副本、或包被拆开放置时才需要写。
   const repoDir = config.repoDir || PACKAGE_DIR;
-  if (!existsSync(join(repoDir, 'server.py'))) {
-    logger.warn(`touchstone: 找不到 ${repoDir}/server.py（repoDir 配置有误, 或安装包不完整）, 插件不启动`);
-    return;
+  const backend = resolveBackend(config, logger);
+  const entryRel = backend === BACKEND_NODE ? NODE_ENTRY_REL : 'server.py';
+  const entryPath = join(repoDir, entryRel);
+  const entryMissing = !existsSync(entryPath);
+  if (entryMissing) {
+    logger.warn(`touchstone: 找不到 ${entryPath}（repoDir 配置有误, 或安装包不完整）`);
+    // Python 侧行为与改动前一致：不注册路由、直接退出（存量用户不受影响）。
+    // Node 侧改为继续往下走：注册路由 + backendHint，让新开关的失败在面板里自解释。
+    if (backend !== BACKEND_NODE) return;
+    backendHint = renderNoNodeBackendHint(repoDir);
   }
   // ① 启用即回收：上一份壳若没走到 disposer（热重载换下不 dispose），它的路由与
   //    server.py 子进程都还在。必须先回收干净再注册，否则本实例 register 抛
@@ -478,8 +693,9 @@ export async function apply(ctx, config = {}) {
   const driverUrl = webServer && webServer.port
     ? `http://127.0.0.1:${webServer.port}/touchstone-agent` : '';
 
+  // 两个后端共用的参数尾巴（方案 §3.2 的进程契约）：只差入口路径与 node 的进程选项，
+  // 因此从入口之后的部分**逐字相同** —— 薄壳不需要为哪个后端分叉。
   const args = [
-    `${repoDir}/server.py`,
     '--host', '127.0.0.1',                        // 只绑回环: 信任头等价 admin, 不得对外网开放
     '--port', '0',                                // 随机端口, 按 stdout 的 TOUCHSTONE_LISTEN 行解析
     '--web-dir', `${repoDir}/webui/dist-plugin`,  // 插件版前端(base=/touchstone/)
@@ -507,35 +723,78 @@ export async function apply(ctx, config = {}) {
   // 解释器（2026-10-11 改）: 配置优先; 没配就按 `python` → `python3` 真探一次
   // （Windows 上没有 python3 这个名字, 写死它会直接 ENOENT——那样连缺依赖都报不出来）。
   // 探测用「与随后 spawn 后端同一份 env」, extraEnv 里改过 PATH 时两者才一致。
+  //
+  // 这一段按 backend 分叉**只到「决定用什么命令拉起」为止**：探测/预检属 Python 专有，
+  // 之后 spawn、日志落盘、端口解析、退出处理全部共用（见下面的 launch 分支）。
   const childEnv = { ...process.env, ...extraEnv };
-  const pythonPath = config.pythonPath || await resolveDefaultPython(childEnv);
-  if (!pythonPath) {
-    backendHint = renderNoPythonHint();
-    logger.warn(`touchstone: 找不到 Python 解释器（依次试过 ${PYTHON_CANDIDATES.join(', ')}）, 插件不启动后端`);
-    logger.warn('touchstone: 请安装 Python 3.12+ 或在本插件 config 里配 pythonPath, 然后停用再启用');
-    return;
-  }
-  const viaDefault = !config.pythonPath;
-  if (viaDefault) logger.info(`touchstone: 未配置 pythonPath, 缺省探到解释器: ${pythonPath}`);
-  const deps = await preflightDeps(pythonPath, repoDir, logger, childEnv);
   let myChild = null;
   /** 本次壳的开的后端日志流（teardown 关闭；null = 不可用/未启动） */
   let myLog = null;
-  if (deps.fatal.length) {
-    backendHint = renderDepHint(pythonPath, repoDir, deps.fatal, viaDefault);
-    logger.warn(`touchstone: 后端未启动 —— Python 运行依赖缺失: ${deps.fatal.join(', ')}`);
-    logger.warn(`touchstone: 修复: ${pythonPath} -m pip install -r ${join(repoDir, 'requirements.txt')}`);
-    logger.warn('touchstone: 装完把本插件停用再启用即会重试（不必重启 dsh web）');
-  } else {
-    backendHint = '';
-    if (deps.advisory.length) {
-      logger.warn(`touchstone: 可选依赖未安装（只影响对应功能, 不影响启动）: ${deps.advisory.join(', ')}`);
+  /** 待拉起的命令（null = 本次不拉后端：入口缺失/缺依赖/缺解释器，三种都有提示页） */
+  let launch = null;
+  if (backend === BACKEND_NODE) {
+    // Node 后端：不探测解释器、不跑依赖预检、不会有缺依赖提示页。
+    // 用 process.execPath（= 当前 dsh 宿主跑的那个 node）而不是 PATH 上的 `node`：
+    // 用户机器上可能根本没有 node 在 PATH 里（dsh 自己是打包运行的），
+    // 而且这样能保证「探测的 Node」与「拉起后端的 Node」是同一个二进制（同一个 runtime）。
+    if (!entryMissing) {
+      // 能力探测（M8）：探不到的常见形态是 import 期就退出的后端 —— 那时日志里只有一行
+      // `ERR_UNKNOWN_BUILTIN_MODULE: No such built-in module: node:sqlite`，用户无从下手。
+      // 探测本身不确定（超时/无法 spawn）**不阻断启动**，见 probeNodeRuntime。
+      const probe = nodeProbeForTest
+        ? await nodeProbeForTest()
+        : await probeNodeRuntime(process.execPath, NODE_EXTRA_FLAGS, childEnv);
+      const logPath = backendLogPath(extraEnv);
+      if (probe.ok) {
+        backendHint = '';
+        // 观测期（Gate 1）要靠这行判「这次到底跑的是哪一版、跑在什么 Node 上」。
+        logger.info(`touchstone: 宿主 Node ${process.versions.node} 能力探测通过（${probe.detail}）`);
+        launch = { cmd: process.execPath, argv: [...NODE_EXTRA_FLAGS, entryPath, ...args] };
+      } else if (probe.skipped) {
+        backendHint = '';
+        logger.warn(`touchstone: 宿主 Node 能力探测未完成（${probe.detail}）, 照常启动后端`);
+        launch = { cmd: process.execPath, argv: [...NODE_EXTRA_FLAGS, entryPath, ...args] };
+      } else {
+        backendHint = renderNodeRuntimeHint({
+          execPath: process.execPath, version: process.versions.node, detail: probe.detail, logPath,
+        });
+        logger.warn(`touchstone: 后端未启动 —— 宿主 Node ${process.versions.node} 不满足要求: ${probe.detail}`);
+        logger.warn('touchstone: 两条出路: ① 升级 Node 到 >= 22.19 后重启 dsh web; '
+          + '② 在本插件 config 里显式写 backend: python（Python 版随包分发、未退役）后停用再启用');
+      }
     }
-    logger.info(`touchstone: 启动后端 ${pythonPath} ${args.join(' ')}`);
+  } else {
+    const pythonPath = config.pythonPath || await resolveDefaultPython(childEnv);
+    if (!pythonPath) {
+      backendHint = renderNoPythonHint();
+      logger.warn(`touchstone: 找不到 Python 解释器（依次试过 ${PYTHON_CANDIDATES.join(', ')}）, 插件不启动后端`);
+      logger.warn('touchstone: 请安装 Python 3.12+ 或在本插件 config 里配 pythonPath, 然后停用再启用');
+      return;
+    }
+    const viaDefault = !config.pythonPath;
+    if (viaDefault) logger.info(`touchstone: 未配置 pythonPath, 缺省探到解释器: ${pythonPath}`);
+    const deps = await preflightDeps(pythonPath, repoDir, logger, childEnv);
+    if (deps.fatal.length) {
+      backendHint = renderDepHint(pythonPath, repoDir, deps.fatal, viaDefault);
+      logger.warn(`touchstone: 后端未启动 —— Python 运行依赖缺失: ${deps.fatal.join(', ')}`);
+      logger.warn(`touchstone: 修复: ${pythonPath} -m pip install -r ${join(repoDir, 'requirements.txt')}`);
+      logger.warn('touchstone: 装完把本插件停用再启用即会重试（不必重启 dsh web）');
+    } else {
+      backendHint = '';
+      if (deps.advisory.length) {
+        logger.warn(`touchstone: 可选依赖未安装（只影响对应功能, 不影响启动）: ${deps.advisory.join(', ')}`);
+      }
+      launch = { cmd: pythonPath, argv: [entryPath, ...args] };
+    }
+  }
+
+  if (launch) {
+    logger.info(`touchstone: 启动后端（${backend}） ${launch.cmd} ${launch.argv.join(' ')}`);
     // stdio[0] 必须是 pipe 且**永不写入**：这是父死感知的 A 通道——dsh 进程无论
-    // 优雅退出还是被 kill -9，OS 都会关闭该管道写端，Python 侧 os.read(0) 收到
-    // EOF 即自主退出（实测父 kill -9 后 1.94s 退出）。改成 'ignore' 会让该通道失效。
-    myChild = spawn(pythonPath, args, {
+    // 优雅退出还是被 kill -9，OS 都会关闭该管道写端，后端读到 EOF 即自主退出
+    // （Python 侧实测父 kill -9 后 1.94s 退出；Node 侧走 process.stdin 的 end/close）。
+    // 改成 'ignore' 会让该通道失效。
+    myChild = spawn(launch.cmd, launch.argv, {
       cwd: repoDir,
       env: childEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -549,25 +808,36 @@ export async function apply(ctx, config = {}) {
       if (!myLog) return;
       try { myLog.write(line + '\n'); } catch { /* 流已坏：忽略，绝不打断读取 */ }
     };
+    let sawListen = false;   // 是否报出过监听端口（判「起来就崩」用，见 renderBackendCrashHint）
     pumpLines(myChild.stdout, (line) => {
       writeLog(line);
       const m = line.match(/^TOUCHSTONE_LISTEN (\d+)/);
       if (m) {
+        sawListen = true;
         backendPort = Number(m[1]);
         logger.info(`touchstone: 后端就绪 127.0.0.1:${backendPort}`);
       }
     });
     pumpLines(myChild.stderr, (line) => {
       writeLog(line);
-      if (line.trim()) logger.warn(`touchstone[py]: ${line.trim()}`);
+      if (line.trim()) logger.warn(`touchstone[${backend === BACKEND_NODE ? 'node' : 'py'}]: ${line.trim()}`);
     });
+    // 「起来就崩」不再只留一行 dsh 日志：Node 分支给面板一个可读提示页（Python 分支行为不动）。
+    const crashed = (code, sig) => {
+      if (sawListen || backend !== BACKEND_NODE) return;   // 只在 Node 分支、且从未就绪时给提示页
+      backendHint = renderBackendCrashHint({
+        entryPath, logPath: backendLogPath(extraEnv), code, signal: sig,
+      });
+    };
     myChild.on('exit', (code, sig) => {
       writeLog(`[touchstone] 后端退出 code=${code} sig=${sig}`);
       logger.warn(`touchstone: 后端退出 code=${code} sig=${sig}`);
+      crashed(code, sig);
     });
     myChild.on('error', (err) => {
       writeLog(`[touchstone] 后端拉起失败: ${err.message}`);
       logger.warn(`touchstone: 后端拉起失败: ${err.message}`);
+      crashed('spawn-error', null);
     });
   }
 
