@@ -1,6 +1,6 @@
 {
   "name": "@gavinc-cn/touchstone-dsh",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "AI-agent-driven automated testing platform for DeepSeek Harness (dsh): Markdown case library, bug reports, per-project serial queue, development board and built-in load testing.",
   "license": "MIT",
   "author": "Touchstone contributors",
@@ -27,6 +27,10 @@
   "files": [
     "*.py",
     "requirements.txt",
+    "backend/server.js",
+    "backend/lib",
+    "backend/routes",
+    "backend/schema",
     "builtin_prompts",
     "extensions",
     "dsh-plugin/cordis.patch.yml",
@@ -55,6 +59,7 @@
   },
   "scripts": {
     "build:client": "node dsh-plugin/scripts/build.mjs",
+    "test:backend": "node --test \"backend/test/**/*.test.mjs\"",
     "prepack": "node dsh-plugin/scripts/prepack-check.mjs"
   },
   "repository": {
