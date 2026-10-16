@@ -1,0 +1,1451 @@
+{
+  "format": 1,
+  "schemaVersion": 1,
+  "generatedBy": "tools/export_schema.py",
+  "note": "目标 schema（实测导出）。列顺序不入契约：老库经 ALTER 补列的顺序与新库 DDL 顺序不同，比对按列集合。",
+  "tables": [
+    {
+      "name": "users",
+      "ddl": "CREATE TABLE users (\n    id             INTEGER PRIMARY KEY AUTOINCREMENT,\n    username       TEXT UNIQUE NOT NULL,\n    pass_hash      TEXT NOT NULL,\n    salt           TEXT NOT NULL,\n    must_change_pw INTEGER NOT NULL DEFAULT 0,\n    created_at     TEXT NOT NULL\n)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "username",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "pass_hash",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "salt",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "must_change_pw",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "created_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        }
+      ],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_users_1",
+          "unique": 1,
+          "origin": "u",
+          "partial": 0,
+          "sql": null,
+          "columns": [
+            "username"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "sessions",
+      "ddl": "CREATE TABLE sessions (\n    token      TEXT PRIMARY KEY,\n    user_id    INTEGER NOT NULL,\n    created_at TEXT NOT NULL,\n    expires_at TEXT NOT NULL\n)",
+      "columns": [
+        {
+          "name": "token",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "user_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "created_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "expires_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        }
+      ],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_sessions_1",
+          "unique": 1,
+          "origin": "pk",
+          "partial": 0,
+          "sql": null,
+          "columns": [
+            "token"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "projects",
+      "ddl": "CREATE TABLE projects (\n    id          INTEGER PRIMARY KEY AUTOINCREMENT,\n    user_id     INTEGER NOT NULL DEFAULT 0,\n    name        TEXT NOT NULL,\n    project_dir TEXT NOT NULL,\n    agent_path  TEXT NOT NULL DEFAULT '',\n    work_dir    TEXT NOT NULL,\n    bug_dir     TEXT NOT NULL,\n    guide_text  TEXT NOT NULL DEFAULT '',\n    commit_spec TEXT NOT NULL DEFAULT '',\n    deploy_spec TEXT NOT NULL DEFAULT '',\n    env_label   TEXT NOT NULL DEFAULT '',\n    model       TEXT NOT NULL DEFAULT '',\n    skill_understand TEXT NOT NULL DEFAULT '',\n    skill_deploy TEXT NOT NULL DEFAULT '',\n    skill_commit TEXT NOT NULL DEFAULT '',\n    skill_test TEXT NOT NULL DEFAULT '',\n    skill_cases TEXT NOT NULL DEFAULT '',\n    reasoning_effort TEXT NOT NULL DEFAULT '',\n    permission_mode TEXT NOT NULL DEFAULT '',\n    created_at  TEXT NOT NULL\n, archived INTEGER NOT NULL DEFAULT 0)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "user_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "project_dir",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "agent_path",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "work_dir",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "bug_dir",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "guide_text",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "commit_spec",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "deploy_spec",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "env_label",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "model",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "skill_understand",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "skill_deploy",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "skill_commit",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "skill_test",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "skill_cases",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "reasoning_effort",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "permission_mode",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "created_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "archived",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_projects_user_name",
+          "unique": 1,
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE UNIQUE INDEX idx_projects_user_name ON projects(user_id, name)",
+          "columns": [
+            "user_id",
+            "name"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "tasks",
+      "ddl": "CREATE TABLE tasks (\n    id           INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id   INTEGER NOT NULL,\n    name         TEXT NOT NULL,\n    auto_fix     INTEGER NOT NULL DEFAULT 0,\n    retest       TEXT NOT NULL DEFAULT '不复测',\n    stop_type    TEXT NOT NULL DEFAULT 'rounds',\n    stop_value   TEXT NOT NULL DEFAULT '1',\n    task_type    TEXT NOT NULL DEFAULT 'normal',\n    start_stage  TEXT NOT NULL DEFAULT '',\n    end_stage    TEXT NOT NULL DEFAULT '',\n    payload      TEXT NOT NULL DEFAULT '',\n    extra        TEXT NOT NULL DEFAULT '',\n    status       TEXT NOT NULL DEFAULT 'queued',\n    session_id   TEXT NOT NULL DEFAULT '',\n    model        TEXT NOT NULL DEFAULT '',\n    permission   TEXT NOT NULL DEFAULT '',\n    auto_commit  INTEGER NOT NULL DEFAULT 0,\n    auto_deploy  INTEGER NOT NULL DEFAULT 0,\n    auto_retest  INTEGER NOT NULL DEFAULT 0,\n    cases_base   INTEGER NOT NULL DEFAULT 0,\n    fresh_prompt INTEGER NOT NULL DEFAULT 0,\n    current_round INTEGER NOT NULL DEFAULT 0,\n    new_bugs     INTEGER NOT NULL DEFAULT 0,\n    date_from    TEXT NOT NULL DEFAULT '',\n    date_to      TEXT NOT NULL DEFAULT '',\n    -- 复压标记（2026-10-06）：1=下一次执行只跑发压运行（跳过 agent 轮），用后即清\n    load_rerun   INTEGER NOT NULL DEFAULT 0,\n    created_at   TEXT NOT NULL,\n    started_at   TEXT,\n    ended_at     TEXT,\n    error        TEXT NOT NULL DEFAULT ''\n)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "project_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "auto_fix",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "retest",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'不复测'",
+          "pk": 0
+        },
+        {
+          "name": "stop_type",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'rounds'",
+          "pk": 0
+        },
+        {
+          "name": "stop_value",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'1'",
+          "pk": 0
+        },
+        {
+          "name": "task_type",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'normal'",
+          "pk": 0
+        },
+        {
+          "name": "start_stage",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "end_stage",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "payload",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "extra",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'queued'",
+          "pk": 0
+        },
+        {
+          "name": "session_id",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "model",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "permission",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "auto_commit",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "auto_deploy",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "auto_retest",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "cases_base",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "fresh_prompt",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "current_round",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "new_bugs",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "date_from",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "date_to",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "load_rerun",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "created_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "started_at",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "ended_at",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "error",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_tasks_project",
+          "unique": 0,
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX idx_tasks_project ON tasks(project_id)",
+          "columns": [
+            "project_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "rounds",
+      "ddl": "CREATE TABLE rounds (\n    id         INTEGER PRIMARY KEY AUTOINCREMENT,\n    task_id    INTEGER NOT NULL,\n    round_no   INTEGER NOT NULL,\n    status     TEXT NOT NULL DEFAULT 'running',\n    exit_code  INTEGER,\n    log_path   TEXT NOT NULL DEFAULT '',\n    started_at TEXT NOT NULL,\n    ended_at   TEXT,\n    summary    TEXT NOT NULL DEFAULT '',\n    kind       TEXT NOT NULL DEFAULT 'agent',\n    run_key    TEXT NOT NULL DEFAULT ''\n)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "task_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "round_no",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'running'",
+          "pk": 0
+        },
+        {
+          "name": "exit_code",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "log_path",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "started_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "ended_at",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "summary",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "kind",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'agent'",
+          "pk": 0
+        },
+        {
+          "name": "run_key",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_rounds_task",
+          "unique": 0,
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX idx_rounds_task ON rounds(task_id)",
+          "columns": [
+            "task_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "board_cards",
+      "ddl": "CREATE TABLE board_cards (\n    id             INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id     INTEGER NOT NULL,\n    title          TEXT NOT NULL,\n    description    TEXT NOT NULL DEFAULT '',\n    column_key     TEXT NOT NULL DEFAULT 'todo',\n    sort_order     INTEGER NOT NULL DEFAULT 0,\n    session_id     TEXT NOT NULL DEFAULT '',\n    sessions       TEXT NOT NULL DEFAULT '[]',\n    block_kind     TEXT,\n    block_text     TEXT NOT NULL DEFAULT '',\n    parent_card_id INTEGER,\n    readonly       INTEGER NOT NULL DEFAULT 0,\n    model          TEXT NOT NULL DEFAULT '',\n    scheduled_at   INTEGER,\n    worktree       TEXT NOT NULL DEFAULT '',\n    jira_key       TEXT NOT NULL DEFAULT '',\n    last_error     TEXT NOT NULL DEFAULT '',\n    last_error_at  INTEGER,\n    origin         TEXT,\n    done_at        TEXT,\n    trashed        INTEGER NOT NULL DEFAULT 0,\n    trashed_at     TEXT,\n    created_at     TEXT NOT NULL,\n    updated_at     TEXT NOT NULL,\n    -- 2026-10-07 起：卡片状态（列）被平台/agent 改动、而用户还没打开过卡片 ⇒ 1\n    -- （前端卡面打「有更新」标记，用户打开卡片详情即清 0）。用户自己拖列/点按钮\n    -- 造成的列变化不置位（见 update_board_card 的 mark_unread 形参）。\n    unread         INTEGER NOT NULL DEFAULT 0\n)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "project_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "description",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "column_key",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'todo'",
+          "pk": 0
+        },
+        {
+          "name": "sort_order",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "session_id",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "sessions",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'[]'",
+          "pk": 0
+        },
+        {
+          "name": "block_kind",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "block_text",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "parent_card_id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "readonly",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "model",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "scheduled_at",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "worktree",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "jira_key",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "last_error",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "last_error_at",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "origin",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "done_at",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "trashed",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "trashed_at",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "created_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "updated_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "unread",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_board_cards_project",
+          "unique": 0,
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX idx_board_cards_project ON board_cards(project_id)",
+          "columns": [
+            "project_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "board_comments",
+      "ddl": "CREATE TABLE board_comments (\n    id         INTEGER PRIMARY KEY AUTOINCREMENT,\n    card_id    INTEGER NOT NULL,\n    text       TEXT NOT NULL,\n    sent       INTEGER NOT NULL DEFAULT 0,\n    session_id TEXT NOT NULL DEFAULT '',\n    sent_text  TEXT NOT NULL DEFAULT '',\n    created_at TEXT NOT NULL\n)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "card_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "text",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "sent",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "session_id",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "sent_text",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "created_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_board_comments_card",
+          "unique": 0,
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX idx_board_comments_card ON board_comments(card_id)",
+          "columns": [
+            "card_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "board_settings",
+      "ddl": "CREATE TABLE board_settings (\n    project_id INTEGER PRIMARY KEY,\n    json       TEXT NOT NULL DEFAULT '{}'\n)",
+      "columns": [
+        {
+          "name": "project_id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "json",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'{}'",
+          "pk": 0
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "app_settings",
+      "ddl": "CREATE TABLE app_settings (\n    key  TEXT PRIMARY KEY,\n    json TEXT NOT NULL DEFAULT '{}'\n)",
+      "columns": [
+        {
+          "name": "key",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "json",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'{}'",
+          "pk": 0
+        }
+      ],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_app_settings_1",
+          "unique": 1,
+          "origin": "pk",
+          "partial": 0,
+          "sql": null,
+          "columns": [
+            "key"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "user_prefs",
+      "ddl": "CREATE TABLE user_prefs (\n    user_id    INTEGER NOT NULL,\n    project_id INTEGER NOT NULL DEFAULT 0,  -- 0=跨项目全局偏好（预留）\n    key        TEXT NOT NULL,\n    value      TEXT NOT NULL DEFAULT '{}',\n    updated_at TEXT NOT NULL,\n    PRIMARY KEY (user_id, project_id, key)\n)",
+      "columns": [
+        {
+          "name": "user_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "project_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 2
+        },
+        {
+          "name": "key",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 3
+        },
+        {
+          "name": "value",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'{}'",
+          "pk": 0
+        },
+        {
+          "name": "updated_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        }
+      ],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_user_prefs_1",
+          "unique": 1,
+          "origin": "pk",
+          "partial": 0,
+          "sql": null,
+          "columns": [
+            "user_id",
+            "project_id",
+            "key"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "feishu_hooks",
+      "ddl": "CREATE TABLE feishu_hooks (\n    project_id     INTEGER PRIMARY KEY,\n    webhook_url    TEXT NOT NULL DEFAULT '',\n    webhook_secret TEXT NOT NULL DEFAULT '',\n    events         TEXT NOT NULL DEFAULT 'blocked_interaction,task_failed',\n    enabled        INTEGER NOT NULL DEFAULT 1\n)",
+      "columns": [
+        {
+          "name": "project_id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "webhook_url",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "webhook_secret",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "events",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'blocked_interaction,task_failed'",
+          "pk": 0
+        },
+        {
+          "name": "enabled",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "1",
+          "pk": 0
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "feishu_outbox",
+      "ddl": "CREATE TABLE feishu_outbox (\n    id         INTEGER PRIMARY KEY AUTOINCREMENT,\n    user_id    INTEGER NOT NULL DEFAULT 0,  -- 投递归属用户（0=系统/遗留，设置页按用户过滤）\n    target     TEXT NOT NULL,\n    secret     TEXT NOT NULL DEFAULT '',\n    payload    TEXT NOT NULL,\n    status     TEXT NOT NULL DEFAULT 'pending',\n    retries    INTEGER NOT NULL DEFAULT 0,\n    next_at    REAL NOT NULL DEFAULT 0,\n    dedup_key  TEXT NOT NULL DEFAULT '',\n    last_error TEXT NOT NULL DEFAULT '',\n    created_at TEXT NOT NULL\n)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "user_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "target",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "secret",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "payload",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'pending'",
+          "pk": 0
+        },
+        {
+          "name": "retries",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "next_at",
+          "type": "REAL",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "dedup_key",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "last_error",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "created_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "feishu_user_cfgs",
+      "ddl": "CREATE TABLE feishu_user_cfgs (\n    user_id INTEGER PRIMARY KEY,\n    json    TEXT NOT NULL DEFAULT '{}'\n)",
+      "columns": [
+        {
+          "name": "user_id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "json",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'{}'",
+          "pk": 0
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "feishu_bindings",
+      "ddl": "CREATE TABLE feishu_bindings (\n    open_id            TEXT PRIMARY KEY,\n    user_id            INTEGER NOT NULL UNIQUE,\n    default_project_id INTEGER NOT NULL DEFAULT 0,\n    bound_at           TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),\n    cur_sid        TEXT    NOT NULL DEFAULT '',   -- 当前会话 id（空=未绑定会话）\n    cur_project_id INTEGER NOT NULL DEFAULT 0,    -- 当前会话所属项目（投递队列归属）\n    cur_title      TEXT    NOT NULL DEFAULT '',   -- 绑定时标题快照\n    cur_bound_at   TEXT    NOT NULL DEFAULT ''    -- 绑定时刻（localtime）\n)",
+      "columns": [
+        {
+          "name": "open_id",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "user_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "default_project_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "bound_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "datetime('now', 'localtime')",
+          "pk": 0
+        },
+        {
+          "name": "cur_sid",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "cur_project_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "cur_title",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "cur_bound_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        }
+      ],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_feishu_bindings_1",
+          "unique": 1,
+          "origin": "pk",
+          "partial": 0,
+          "sql": null,
+          "columns": [
+            "open_id"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_feishu_bindings_2",
+          "unique": 1,
+          "origin": "u",
+          "partial": 0,
+          "sql": null,
+          "columns": [
+            "user_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "wait_items",
+      "ddl": "CREATE TABLE wait_items (\n    id          INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id  INTEGER NOT NULL,\n    kind        TEXT NOT NULL,\n    target_id   TEXT NOT NULL,\n    state       TEXT NOT NULL DEFAULT 'waiting',\n    seq         INTEGER NOT NULL,\n    created_at  TEXT NOT NULL,\n    claimed_at  TEXT,\n    claimed_by  TEXT,\n    ended_at    TEXT,\n    not_before  REAL NOT NULL DEFAULT 0,\n    retries     INTEGER NOT NULL DEFAULT 0,\n    meta        TEXT NOT NULL DEFAULT '{}',\n    -- v3c（2026-09-23）：证据与心跳迁到行（v3 §2.4）——last_seen=最近一次心跳\n    -- 时间戳（epoch 秒，waitq.touch_unit 写）；evidence=证据 JSON 文本\n    -- （desc/reason/pid 登记证据 + busy=…(poll|sse) 心跳证据，判活读口同此处）\n    last_seen   REAL NOT NULL DEFAULT 0,\n    evidence    TEXT NOT NULL DEFAULT ''\n)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "project_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "kind",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "target_id",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "state",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'waiting'",
+          "pk": 0
+        },
+        {
+          "name": "seq",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "created_at",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "claimed_at",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "claimed_by",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "ended_at",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "not_before",
+          "type": "REAL",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "retries",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "meta",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'{}'",
+          "pk": 0
+        },
+        {
+          "name": "last_seen",
+          "type": "REAL",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "evidence",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_wait_active",
+          "unique": 1,
+          "origin": "c",
+          "partial": 1,
+          "sql": "CREATE UNIQUE INDEX idx_wait_active ON wait_items(kind, target_id)\n    WHERE state IN ('waiting','starting','running','finishing')",
+          "columns": [
+            "kind",
+            "target_id"
+          ]
+        },
+        {
+          "name": "idx_wait_pick",
+          "unique": 0,
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX idx_wait_pick ON wait_items(state, project_id, seq)",
+          "columns": [
+            "state",
+            "project_id",
+            "seq"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "chat_msgs",
+      "ddl": "CREATE TABLE chat_msgs (\n    id          TEXT PRIMARY KEY,\n    project_id  INTEGER NOT NULL,\n    sid         TEXT NOT NULL,\n    task_id     INTEGER,\n    card_id     INTEGER,\n    message     TEXT NOT NULL,\n    state       TEXT NOT NULL,\n    error       TEXT NOT NULL DEFAULT '',\n    inject      INTEGER NOT NULL DEFAULT 0,\n    created_at  INTEGER NOT NULL,\n    started_at  INTEGER,\n    ended_at    INTEGER\n)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 1
+        },
+        {
+          "name": "project_id",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "sid",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "task_id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "card_id",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "message",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "state",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "error",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "''",
+          "pk": 0
+        },
+        {
+          "name": "inject",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": "0",
+          "pk": 0
+        },
+        {
+          "name": "created_at",
+          "type": "INTEGER",
+          "notnull": 1,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "started_at",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "ended_at",
+          "type": "INTEGER",
+          "notnull": 0,
+          "dflt": null,
+          "pk": 0
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_chat_msgs_sid",
+          "unique": 0,
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX idx_chat_msgs_sid ON chat_msgs(sid, created_at)",
+          "columns": [
+            "sid",
+            "created_at"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_chat_msgs_1",
+          "unique": 1,
+          "origin": "pk",
+          "partial": 0,
+          "sql": null,
+          "columns": [
+            "id"
+          ]
+        }
+      ]
+    }
+  ]
+}

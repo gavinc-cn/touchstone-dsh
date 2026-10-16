@@ -1,0 +1,154 @@
+{
+  "format": 1,
+  "schemaVersion": 1,
+  "generatedBy": "tools/export_schema.py",
+  "note": "数据级/结构重建迁移：两版执行**同一份**清单。when=null 表示无条件执行（语句自身幂等）；kind=rows 的 sql 是只读 SELECT，返回 ≥1 行才执行；kind=index_origin_unique 表示表上存在 UNIQUE 约束索引才执行。handler 需宿主语言实现（未知 handler 必须报错退出，不得静默跳过）。",
+  "guards": {
+    "rows": "SELECT 返回 ≥1 行才执行该步",
+    "index_origin_unique": "PRAGMA index_list(表) 里存在 origin='u' 的索引才执行"
+  },
+  "handlers": {
+    "projects_guide_text_merge": "废弃列 commit_spec/deploy_spec 的内容并入 guide_text 后清空两列",
+    "projects_work_dir_from_legacy_cases_root": "工作目录化：旧 work_dir（案例库根）改存工作目录，bug_dir 列废弃置空",
+    "feishu_appsettings_bridge": "飞书配置用户级化：旧全局 app_settings['feishu'] 迁给 admin 的用户级配置"
+  },
+  "handlerImpl": {
+    "python": "db.py MIGRATION_HANDLERS",
+    "node": "backend/lib/db.js HANDLERS"
+  },
+  "steps": [
+    {
+      "id": "2026-09-04_projects_guide_text_merge",
+      "desc": "废弃列 commit_spec/deploy_spec 的内容并入 guide_text 后清空两列",
+      "when": {
+        "kind": "rows",
+        "sql": "SELECT 1 FROM projects WHERE trim(coalesce(commit_spec,'')) != '' OR trim(coalesce(deploy_spec,'')) != '' LIMIT 1"
+      },
+      "handler": "projects_guide_text_merge"
+    },
+    {
+      "id": "2026-09-04_projects_user_id_backfill",
+      "desc": "多用户隔离：存量项目（user_id=0）归 admin",
+      "when": {
+        "kind": "rows",
+        "sql": "SELECT 1 FROM projects WHERE user_id=0 LIMIT 1"
+      },
+      "sql": [
+        "UPDATE projects SET user_id= COALESCE((SELECT id FROM users WHERE username='admin'), 0) WHERE user_id=0"
+      ]
+    },
+    {
+      "id": "2026-09-13_board_cards_clear_commit_block_text",
+      "desc": "阻塞让行提交退场：清理存量卡片上的机器文案 block_text",
+      "when": {
+        "kind": "rows",
+        "sql": "SELECT 1 FROM board_cards WHERE block_text LIKE '提交中：%' OR block_text LIKE '提交失败：%' LIMIT 1"
+      },
+      "sql": [
+        "UPDATE board_cards SET block_text='' WHERE block_text LIKE '提交中：%' OR block_text LIKE '提交失败：%'"
+      ]
+    },
+    {
+      "id": "2026-09-13_board_cards_clear_commit_errors",
+      "desc": "阻塞让行提交退场：清理存量卡片上的提交失败 last_error",
+      "when": {
+        "kind": "rows",
+        "sql": "SELECT 1 FROM board_cards WHERE last_error LIKE '阻塞让行提交失败%' OR last_error LIKE '阻塞让行提交异常%' LIMIT 1"
+      },
+      "sql": [
+        "UPDATE board_cards SET last_error='', last_error_at=NULL WHERE last_error LIKE '阻塞让行提交失败%'    OR last_error LIKE '阻塞让行提交异常%'"
+      ]
+    },
+    {
+      "id": "2026-09-04_projects_drop_global_unique_name",
+      "desc": "旧库 projects.name 全局 UNIQUE → (user_id,name) 用户内唯一：重建表",
+      "when": {
+        "kind": "index_origin_unique",
+        "table": "projects"
+      },
+      "sql": [
+        "ALTER TABLE projects RENAME TO projects_old",
+        "CREATE TABLE projects (\n    id          INTEGER PRIMARY KEY AUTOINCREMENT,\n    user_id     INTEGER NOT NULL DEFAULT 0,\n    name        TEXT NOT NULL,\n    project_dir TEXT NOT NULL,\n    agent_path  TEXT NOT NULL DEFAULT '',\n    work_dir    TEXT NOT NULL,\n    bug_dir     TEXT NOT NULL,\n    guide_text  TEXT NOT NULL DEFAULT '',\n    commit_spec TEXT NOT NULL DEFAULT '',\n    deploy_spec TEXT NOT NULL DEFAULT '',\n    env_label   TEXT NOT NULL DEFAULT '',\n    created_at  TEXT NOT NULL\n)",
+        "INSERT INTO projects(id, user_id, name, project_dir, agent_path, work_dir, bug_dir,\n                     guide_text, commit_spec, deploy_spec, env_label, created_at)\nSELECT id, user_id, name, project_dir, agent_path, work_dir, bug_dir,\n       guide_text, commit_spec, deploy_spec, env_label, created_at\nFROM projects_old",
+        "DROP TABLE projects_old"
+      ]
+    },
+    {
+      "id": "2026-09-04_projects_user_name_unique_index",
+      "desc": "补建用户内唯一索引 idx_projects_user_name（重建之后执行）",
+      "when": null,
+      "sql": [
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)"
+      ]
+    },
+    {
+      "id": "2026-08-30_projects_work_dir_from_legacy_cases_root",
+      "desc": "工作目录化：旧 work_dir（案例库根）改存工作目录，bug_dir 列废弃置空",
+      "when": {
+        "kind": "rows",
+        "sql": "SELECT 1 FROM projects WHERE bug_dir != '' LIMIT 1"
+      },
+      "handler": "projects_work_dir_from_legacy_cases_root"
+    },
+    {
+      "id": "2026-09-19_board_cards_queue_state_doing",
+      "desc": "P4 排队占位单态化：blocked+queue 归位 doing+queue",
+      "when": {
+        "kind": "rows",
+        "sql": "SELECT 1 FROM board_cards WHERE block_kind='queue' AND column_key='blocked' LIMIT 1"
+      },
+      "sql": [
+        "UPDATE board_cards SET column_key='doing' WHERE block_kind='queue' AND column_key='blocked'"
+      ]
+    },
+    {
+      "id": "2026-09-09_feishu_appsettings_bridge",
+      "desc": "飞书配置用户级化：旧全局 app_settings['feishu'] 迁给 admin 的用户级配置",
+      "when": {
+        "kind": "rows",
+        "sql": "SELECT 1 FROM app_settings WHERE key='feishu' LIMIT 1"
+      },
+      "handler": "feishu_appsettings_bridge"
+    },
+    {
+      "id": "2026-09-24_drop_leases",
+      "desc": "v3d 租约层删除：DROP 存量 leases 表与索引（幂等）",
+      "when": null,
+      "sql": [
+        "DROP TABLE IF EXISTS leases",
+        "DROP INDEX IF EXISTS idx_leases_project"
+      ]
+    },
+    {
+      "id": "2026-09-21_wait_items_claimed_to_starting",
+      "desc": "v2a 状态机扩七枚举：claimed 行归一 starting",
+      "when": {
+        "kind": "rows",
+        "sql": "SELECT 1 FROM wait_items WHERE state='claimed' LIMIT 1"
+      },
+      "sql": [
+        "UPDATE wait_items SET state='starting' WHERE state='claimed'"
+      ]
+    },
+    {
+      "id": "2026-09-21_wait_items_rebuild_active_index",
+      "desc": "活跃唯一索引口径扩到四活跃态（旧库 WHERE 仍含 claimed 时重建）",
+      "when": {
+        "kind": "rows",
+        "sql": "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_wait_active' AND coalesce(sql,'') NOT LIKE '%''starting''%' LIMIT 1"
+      },
+      "sql": [
+        "DROP INDEX idx_wait_active",
+        "CREATE UNIQUE INDEX idx_wait_active ON wait_items(kind, target_id) WHERE state IN ('waiting','starting','running','finishing')"
+      ]
+    },
+    {
+      "id": "2026-10-11_schema_version_stamp",
+      "desc": "M1：把 schema 版本号写入 app_settings['schema_version']（两侧对拍前置断言）",
+      "when": null,
+      "sql": [
+        "INSERT INTO app_settings(key, json) VALUES('schema_version', '1') ON CONFLICT(key) DO UPDATE SET json=excluded.json"
+      ]
+    }
+  ]
+}
