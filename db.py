@@ -275,6 +275,285 @@ def now_str():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+# --------------------------------------------------------------------------
+# 声明式迁移清单（数据级 / 结构重建）——**两侧唯一真源**（M1 地基）
+# --------------------------------------------------------------------------
+# 背景（2026-10-11，Node 后端重写 M1）：Node 后端要与 Python 后端**开同一个库文件**，
+# 两边必须执行同一套迁移。分两类：
+#   ① DDL 补列（ALTER TABLE ADD COLUMN）：不共享清单——Node 侧用「向导出的目标 schema
+#      收敛」的通用做法（目标由 tools/export_schema.py 从本文件实测导出）；
+#   ② 数据级迁移与表重建（本清单）：**无法从 schema 推导**，必须逐条共享，
+#      Python 与 Node 执行同一份 backend/schema/migrations.json。
+#
+# 导出与漂移守卫：`python3 tools/export_schema.py`（改本清单后必须重跑），
+# pytest `tests/test_schema_export.py` 断言「重新导出 == 已提交文件」。
+#
+# 每步字段：
+#   id      : 稳定标识（日期前缀 + 语义）。语义变了就换新 id，不要改老 id 的含义。
+#   desc    : 一句话说明（写进 migrations.json，两侧共用同一份文案）。
+#   when    : 运行条件；None = 无条件执行（语句自身必须幂等）
+#             {"kind": "rows", "sql": "<SELECT>"}           → 该 SELECT 返回 ≥1 行才执行
+#             {"kind": "index_origin_unique", "table": "t"} → 表上存在 UNIQUE 约束索引
+#                                                              （PRAGMA index_list 的
+#                                                              origin='u'）才执行
+#   sql     : 语句列表（按序执行，单步内共用一次事务）
+#   handler : 需宿主语言实现的步骤名（Python: MIGRATION_HANDLERS；Node 同名实现）；
+#             与 sql 二选一。**未知 handler 一律报错退出**，绝不静默跳过。
+#
+# 顺序即执行顺序（列表序 = 事务序）。表重建必须在补列**之后**：Python 的旧实现就是
+# 「先 ALTER 补列、再重建」，重建的 INSERT…SELECT 只搬 12 个老列，于是那次重建会把
+# 后加的列丢掉、下次启动由补列重新加回（存量极老库的一次性现象，两侧必须一致）。
+MIGRATIONS = [
+    {
+        "id": "2026-09-04_projects_guide_text_merge",
+        "desc": "废弃列 commit_spec/deploy_spec 的内容并入 guide_text 后清空两列",
+        "when": {"kind": "rows",
+                 "sql": "SELECT 1 FROM projects WHERE trim(coalesce(commit_spec,'')) != ''"
+                        " OR trim(coalesce(deploy_spec,'')) != '' LIMIT 1"},
+        "handler": "projects_guide_text_merge",
+    },
+    {
+        "id": "2026-09-04_projects_user_id_backfill",
+        "desc": "多用户隔离：存量项目（user_id=0）归 admin",
+        "when": {"kind": "rows", "sql": "SELECT 1 FROM projects WHERE user_id=0 LIMIT 1"},
+        "sql": ["UPDATE projects SET user_id="
+                " COALESCE((SELECT id FROM users WHERE username='admin'), 0)"
+                " WHERE user_id=0"],
+    },
+    {
+        "id": "2026-09-13_board_cards_clear_commit_block_text",
+        "desc": "阻塞让行提交退场：清理存量卡片上的机器文案 block_text",
+        "when": {"kind": "rows",
+                 "sql": "SELECT 1 FROM board_cards WHERE block_text LIKE '提交中：%'"
+                        " OR block_text LIKE '提交失败：%' LIMIT 1"},
+        "sql": ["UPDATE board_cards SET block_text=''"
+                " WHERE block_text LIKE '提交中：%' OR block_text LIKE '提交失败：%'"],
+    },
+    {
+        "id": "2026-09-13_board_cards_clear_commit_errors",
+        "desc": "阻塞让行提交退场：清理存量卡片上的提交失败 last_error",
+        "when": {"kind": "rows",
+                 "sql": "SELECT 1 FROM board_cards WHERE last_error LIKE '阻塞让行提交失败%'"
+                        " OR last_error LIKE '阻塞让行提交异常%' LIMIT 1"},
+        "sql": ["UPDATE board_cards SET last_error='', last_error_at=NULL"
+                " WHERE last_error LIKE '阻塞让行提交失败%'"
+                "    OR last_error LIKE '阻塞让行提交异常%'"],
+    },
+    {
+        "id": "2026-09-04_projects_drop_global_unique_name",
+        "desc": "旧库 projects.name 全局 UNIQUE → (user_id,name) 用户内唯一：重建表",
+        "when": {"kind": "index_origin_unique", "table": "projects"},
+        # 语句照抄旧实现：只搬 12 个老列（后加的 model/archived/skill_* 五列/
+        # reasoning_effort/permission_mode 共 9 列不在其中，丢列由下次启动的补列重新加回
+        # ——两侧一致；ancient 夹具与对拍器都按「两轮快照」钉住这条）
+        "sql": [
+            "ALTER TABLE projects RENAME TO projects_old",
+            """CREATE TABLE projects (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL DEFAULT 0,
+    name        TEXT NOT NULL,
+    project_dir TEXT NOT NULL,
+    agent_path  TEXT NOT NULL DEFAULT '',
+    work_dir    TEXT NOT NULL,
+    bug_dir     TEXT NOT NULL,
+    guide_text  TEXT NOT NULL DEFAULT '',
+    commit_spec TEXT NOT NULL DEFAULT '',
+    deploy_spec TEXT NOT NULL DEFAULT '',
+    env_label   TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+)""",
+            """INSERT INTO projects(id, user_id, name, project_dir, agent_path, work_dir, bug_dir,
+                     guide_text, commit_spec, deploy_spec, env_label, created_at)
+SELECT id, user_id, name, project_dir, agent_path, work_dir, bug_dir,
+       guide_text, commit_spec, deploy_spec, env_label, created_at
+FROM projects_old""",
+            "DROP TABLE projects_old",
+        ],
+    },
+    {
+        "id": "2026-09-04_projects_user_name_unique_index",
+        "desc": "补建用户内唯一索引 idx_projects_user_name（重建之后执行）",
+        "when": None,
+        "sql": ["CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name"
+                " ON projects(user_id, name)"],
+    },
+    {
+        "id": "2026-08-30_projects_work_dir_from_legacy_cases_root",
+        "desc": "工作目录化：旧 work_dir（案例库根）改存工作目录，bug_dir 列废弃置空",
+        "when": {"kind": "rows", "sql": "SELECT 1 FROM projects WHERE bug_dir != '' LIMIT 1"},
+        "handler": "projects_work_dir_from_legacy_cases_root",
+    },
+    {
+        "id": "2026-09-19_board_cards_queue_state_doing",
+        "desc": "P4 排队占位单态化：blocked+queue 归位 doing+queue",
+        "when": {"kind": "rows",
+                 "sql": "SELECT 1 FROM board_cards WHERE block_kind='queue'"
+                        " AND column_key='blocked' LIMIT 1"},
+        "sql": ["UPDATE board_cards SET column_key='doing'"
+                " WHERE block_kind='queue' AND column_key='blocked'"],
+    },
+    {
+        "id": "2026-09-09_feishu_appsettings_bridge",
+        "desc": "飞书配置用户级化：旧全局 app_settings['feishu'] 迁给 admin 的用户级配置",
+        "when": {"kind": "rows",
+                 "sql": "SELECT 1 FROM app_settings WHERE key='feishu' LIMIT 1"},
+        "handler": "feishu_appsettings_bridge",
+    },
+    {
+        "id": "2026-09-24_drop_leases",
+        "desc": "v3d 租约层删除：DROP 存量 leases 表与索引（幂等）",
+        "when": None,
+        "sql": ["DROP TABLE IF EXISTS leases", "DROP INDEX IF EXISTS idx_leases_project"],
+    },
+    {
+        "id": "2026-09-21_wait_items_claimed_to_starting",
+        "desc": "v2a 状态机扩七枚举：claimed 行归一 starting",
+        "when": {"kind": "rows", "sql": "SELECT 1 FROM wait_items WHERE state='claimed' LIMIT 1"},
+        "sql": ["UPDATE wait_items SET state='starting' WHERE state='claimed'"],
+    },
+    {
+        "id": "2026-09-21_wait_items_rebuild_active_index",
+        "desc": "活跃唯一索引口径扩到四活跃态（旧库 WHERE 仍含 claimed 时重建）",
+        "when": {"kind": "rows",
+                 "sql": "SELECT 1 FROM sqlite_master WHERE type='index'"
+                        " AND name='idx_wait_active'"
+                        " AND coalesce(sql,'') NOT LIKE '%''starting''%' LIMIT 1"},
+        "sql": [
+            "DROP INDEX idx_wait_active",
+            "CREATE UNIQUE INDEX idx_wait_active ON wait_items(kind, target_id)"
+            " WHERE state IN ('waiting','starting','running','finishing')",
+        ],
+    },
+    {
+        "id": "2026-10-11_schema_version_stamp",
+        "desc": "M1：把 schema 版本号写入 app_settings['schema_version']（两侧对拍前置断言）",
+        "when": None,
+        "sql": ["INSERT INTO app_settings(key, json) VALUES('schema_version', '1')"
+                " ON CONFLICT(key) DO UPDATE SET json=excluded.json"],
+    },
+]
+
+# schema 版本号（与 migrations.json 的 schemaVersion 同源；两侧对拍前先断言相等）
+SCHEMA_VERSION = 1
+
+
+def _mh_projects_guide_text_merge(conn):
+    """handler：废弃列 commit_spec/deploy_spec 并入 guide_text 后清空（幂等）。"""
+    rows = conn.execute(
+        "SELECT id, guide_text, commit_spec, deploy_spec FROM projects").fetchall()
+    for r in rows:
+        extra = []
+        if (r["commit_spec"] or "").strip():
+            extra.append("git commit message 规范：" + r["commit_spec"].strip())
+        if (r["deploy_spec"] or "").strip():
+            extra.append("部署说明：" + r["deploy_spec"].strip())
+        if extra:
+            merged = (r["guide_text"] or "").rstrip()
+            merged = merged + "\n\n" + "\n".join(extra) if merged else "\n".join(extra)
+            conn.execute(
+                "UPDATE projects SET guide_text=?, commit_spec='', deploy_spec=''"
+                " WHERE id=?", (merged, r["id"]))
+
+
+def _mh_projects_work_dir_from_legacy_cases_root(conn):
+    """handler：旧 work_dir（案例库根）改存工作目录；bug_dir 置空（幂等标记=bug_dir 非空）。
+
+    旧 work_dir 以 free_style 结尾则取其父目录，否则回落 <项目目录>/.touchstone；
+    磁盘文件一律不动。取父目录分支派生路径与原值一致；回落分支按新版默认目录派生。
+    """
+    for r in conn.execute(
+            "SELECT id, project_dir, work_dir FROM projects"
+            " WHERE bug_dir != ''").fetchall():
+        old = (r["work_dir"] or "").strip().rstrip("/")
+        if old.endswith("/" + CASES_SUBDIR):
+            new_w = os.path.dirname(old)
+        else:
+            new_w = os.path.join(r["project_dir"] or "~", ".touchstone")
+        conn.execute("UPDATE projects SET work_dir=?, bug_dir='' WHERE id=?",
+                     (new_w, r["id"]))
+
+
+def _mh_feishu_appsettings_bridge(conn):
+    """handler：旧全局飞书配置 app_settings['feishu'] → admin 的用户级配置。
+
+    已有用户级配置则不覆盖；坏 JSON 视为空配置（与旧实现逐字一致）。注意只 INSERT、
+    不删 app_settings 行，故本步长期可重入（有用户级配置后恒为 no-op）。
+    """
+    row = conn.execute(
+        "SELECT json FROM app_settings WHERE key='feishu'").fetchone()
+    if row is None:
+        return
+    try:
+        legacy = json.loads(row["json"])
+    except ValueError:
+        legacy = {}
+    if legacy and legacy.get("app_id") or legacy.get("default_webhook") \
+            or legacy.get("base_url") or legacy.get("app_secret") \
+            or legacy.get("default_secret"):
+        admin = conn.execute(
+            "SELECT id FROM users WHERE username='admin'").fetchone()
+        if admin is not None and not conn.execute(
+                "SELECT 1 FROM feishu_user_cfgs WHERE user_id=?",
+                (admin["id"],)).fetchone():
+            conn.execute(
+                "INSERT INTO feishu_user_cfgs(user_id, json) VALUES(?,?)",
+                (admin["id"], json.dumps(legacy, ensure_ascii=False)))
+
+
+# 步骤名 → 宿主语言实现（Node 侧 backend/lib/db.js 有同名注册表）
+MIGRATION_HANDLERS = {
+    "projects_guide_text_merge": _mh_projects_guide_text_merge,
+    "projects_work_dir_from_legacy_cases_root":
+        _mh_projects_work_dir_from_legacy_cases_root,
+    "feishu_appsettings_bridge": _mh_feishu_appsettings_bridge,
+}
+
+
+def migration_when_hit(conn, when):
+    """判定一条声明式迁移的运行条件是否成立（when 为空 = 无条件执行）。
+
+    守卫 SQL 只读、方言中立（两侧同一份），kind 只有两种：`rows`（有行即跑）与
+    `index_origin_unique`（表上存在 UNIQUE 约束索引即跑）。未知 kind 直接报错。
+    """
+    if not when:
+        return True
+    kind = when.get("kind")
+    if kind == "rows":
+        return conn.execute(when["sql"]).fetchone() is not None
+    if kind == "index_origin_unique":
+        return any(r["origin"] == "u"
+                   for r in conn.execute(f"PRAGMA index_list({when['table']})"))
+    raise ValueError(f"未知迁移守卫 kind: {kind!r}")
+
+
+def run_declared_migrations():
+    """执行 MIGRATIONS 清单（migrate() 末尾调用；幂等、可重复跑）。
+
+    每条一步一个短连接（与 db.py 其余读写同口径），成功即 commit；返回本次**实际
+    执行**的步骤 id 列表（跳过的步不计入，供启动日志与测试断言）。未知 handler
+    抛 RuntimeError（绝不静默跳过——静默跳过会让两侧库悄悄分叉）。
+    """
+    executed = []
+    for step in MIGRATIONS:
+        conn = connect()
+        try:
+            if not migration_when_hit(conn, step.get("when")):
+                continue
+            for stmt in step.get("sql") or ():
+                conn.execute(stmt)
+            name = step.get("handler")
+            if name:
+                handler = MIGRATION_HANDLERS.get(name)
+                if handler is None:
+                    raise RuntimeError(f"未知迁移 handler: {name}（步骤 {step['id']}）")
+                handler(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        executed.append(step["id"])
+    return executed
+
+
 def init_db():
     """建表 + 种子（仅 admin 用户）。返回是否本次新建了默认账号（透传 seed_admin，
     server 启动横幅据此决定是否提示初始口令）。
@@ -379,86 +658,14 @@ def migrate():
             conn.execute("ALTER TABLE projects ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''")
         if "permission_mode" not in pcols:
             conn.execute("ALTER TABLE projects ADD COLUMN permission_mode TEXT NOT NULL DEFAULT ''")
-        # 提交规范/部署说明字段废弃（信息并入项目附加提示词）：存量内容迁移到
-        # guide_text 后清空两列；幂等——只处理非空行，迁移完即空
-        rows = conn.execute(
-            "SELECT id, guide_text, commit_spec, deploy_spec FROM projects").fetchall()
-        for r in rows:
-            extra = []
-            if (r["commit_spec"] or "").strip():
-                extra.append("git commit message 规范：" + r["commit_spec"].strip())
-            if (r["deploy_spec"] or "").strip():
-                extra.append("部署说明：" + r["deploy_spec"].strip())
-            if extra:
-                merged = (r["guide_text"] or "").rstrip()
-                merged = merged + "\n\n" + "\n".join(extra) if merged else "\n".join(extra)
-                conn.execute(
-                    "UPDATE projects SET guide_text=?, commit_spec='', deploy_spec=''"
-                    " WHERE id=?", (merged, r["id"]))
-        conn.execute(
-            "UPDATE projects SET user_id="
-            " COALESCE((SELECT id FROM users WHERE username='admin'), 0)"
-            " WHERE user_id=0")
-        # 阻塞让行提交退场（2026-09-13）：平台不再自动提交（移交 kimi hook 扩展
-        # extensions/kimi-hooks），清理存量卡片上的机器文案。幂等：只命中机器
-        # 文案行，清完即空。
-        conn.execute(
-            "UPDATE board_cards SET block_text=''"
-            " WHERE block_text LIKE '提交中：%' OR block_text LIKE '提交失败：%'")
-        conn.execute(
-            "UPDATE board_cards SET last_error='', last_error_at=NULL"
-            " WHERE last_error LIKE '阻塞让行提交失败%'"
-            "    OR last_error LIKE '阻塞让行提交异常%'")
-        # 旧库 projects.name 是全局 UNIQUE；多用户下改为 (user_id, name) 用户内唯一。
-        # SQLite 无法直接删除列约束，重建表（重建后同一语句块内建唯一索引）。
-        unique_old = [r for r in conn.execute("PRAGMA index_list(projects)")
-                      if r["origin"] == "u"]
-        if unique_old:
-            conn.execute("ALTER TABLE projects RENAME TO projects_old")
-            conn.executescript("""
-CREATE TABLE projects (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL DEFAULT 0,
-    name        TEXT NOT NULL,
-    project_dir TEXT NOT NULL,
-    agent_path  TEXT NOT NULL DEFAULT '',
-    work_dir    TEXT NOT NULL,
-    bug_dir     TEXT NOT NULL,
-    guide_text  TEXT NOT NULL DEFAULT '',
-    commit_spec TEXT NOT NULL DEFAULT '',
-    deploy_spec TEXT NOT NULL DEFAULT '',
-    env_label   TEXT NOT NULL DEFAULT '',
-    created_at  TEXT NOT NULL
-);
-INSERT INTO projects(id, user_id, name, project_dir, agent_path, work_dir, bug_dir,
-                     guide_text, commit_spec, deploy_spec, env_label, created_at)
-SELECT id, user_id, name, project_dir, agent_path, work_dir, bug_dir,
-       guide_text, commit_spec, deploy_spec, env_label, created_at
-FROM projects_old;
-DROP TABLE projects_old;
-CREATE UNIQUE INDEX idx_projects_user_name ON projects(user_id, name);
-""")
-        else:
-            # 新库（或非 UNIQUE 库）：补建用户内唯一索引（幂等）
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name"
-                " ON projects(user_id, name)")
-        # 工作目录化迁移（2026-08-30，一次性；幂等标记=bug_dir 非空）：
-        # 旧版 work_dir 语义为案例库根（项目目录下旧版默认数据目录的 free_style 子目录），
-        # 改存工作目录（<项目目录>/.touchstone）；bug_dir 列废弃置空（bug 报告目录改由
-        # work_dir 派生）。旧 work_dir 以 free_style 结尾则取其父目录，否则回落
-        # <项目目录>/.touchstone；磁盘文件一律不动。取父目录分支派生路径与原值一致；
-        # 回落分支按新版默认目录（<项目目录>/.touchstone）派生。
-        for r in conn.execute(
-                "SELECT id, project_dir, work_dir FROM projects"
-                " WHERE bug_dir != ''").fetchall():
-            old = (r["work_dir"] or "").strip().rstrip("/")
-            if old.endswith("/" + CASES_SUBDIR):
-                new_w = os.path.dirname(old)
-            else:
-                new_w = os.path.join(r["project_dir"] or "~", ".touchstone")
-            conn.execute("UPDATE projects SET work_dir=?, bug_dir='' WHERE id=?",
-                         (new_w, r["id"]))
+        # 本块原还有四段数据级迁移（guide_text 合并 / user_id 回填 / 卡片文案清理 /
+        # 重建表 / 工作目录化）——M1（2026-10-11）起全部移到声明式清单 MIGRATIONS，
+        # 由 migrate() 末尾的 run_declared_migrations() 执行（与 Node 侧共用一份
+        # backend/schema/migrations.json）。DDL 补列留在原处不动（Node 侧用目标
+        # schema 收敛等价覆盖，目标 schema 由 tools/export_schema.py 实测导出）。
+        # 旧库 projects.name 全局 UNIQUE 的重建、以及工作目录化迁移，都见 MIGRATIONS
+        # 的 2026-09-04_projects_drop_global_unique_name 与
+        # 2026-08-30_projects_work_dir_from_legacy_cases_root。
     # board_cards 表补列（旧库升级）
     with connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(board_cards)")}
@@ -486,12 +693,6 @@ CREATE UNIQUE INDEX idx_projects_user_name ON projects(user_id, name);
         if "unread" not in cols:
             conn.execute("ALTER TABLE board_cards"
                          " ADD COLUMN unread INTEGER NOT NULL DEFAULT 0")
-    # P4 排队占位单态化迁移（2026-09-19，一次性；幂等：迁移后无 blocked+queue 行）：
-    # 占位列 2026-09-10 起已落 doing，blocked+queue 仅存量兼容；P4 删除全部双态
-    # 判定后该形态无人认领，先归位 doing+queue（磁盘/列语义等价，设计 §5.2）
-    with connect() as conn:
-        conn.execute("UPDATE board_cards SET column_key='doing'"
-                     " WHERE block_kind='queue' AND column_key='blocked'")
     # feishu_outbox 补 user_id 列（2026-09-09 起投递归属用户，设置页按用户过滤）
     with connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(feishu_outbox)")}
@@ -509,49 +710,10 @@ CREATE UNIQUE INDEX idx_projects_user_name ON projects(user_id, name);
                           ("cur_bound_at", "TEXT NOT NULL DEFAULT ''")):
             if name not in cols:
                 conn.execute(f"ALTER TABLE feishu_bindings ADD COLUMN {name} {ddl}")
-    # 旧全局飞书配置迁移（2026-09-09 起飞书设置用户级）：旧的 app_settings['feishu']
-    # 由 admin 在后台管理页配置，迁移给 admin 自己的用户配置（已有私户配置则不覆盖）
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT json FROM app_settings WHERE key='feishu'").fetchone()
-        if row is not None:
-            try:
-                legacy = json.loads(row["json"])
-            except ValueError:
-                legacy = {}
-            if legacy and legacy.get("app_id") or legacy.get("default_webhook") \
-                    or legacy.get("base_url") or legacy.get("app_secret") \
-                    or legacy.get("default_secret"):
-                admin = conn.execute(
-                    "SELECT id FROM users WHERE username='admin'").fetchone()
-                if admin is not None and not conn.execute(
-                        "SELECT 1 FROM feishu_user_cfgs WHERE user_id=?",
-                        (admin["id"],)).fetchone():
-                    conn.execute(
-                        "INSERT INTO feishu_user_cfgs(user_id, json) VALUES(?,?)",
-                        (admin["id"], json.dumps(legacy, ensure_ascii=False)))
-    # v3d（2026-09-24）：租约层删除——`leases` 表（P5 建、v3a 起只写不读的镜像）
-    # 随「占用 / 让行」概念一并退场：占用 = 该单元在「正在开发」队列里有活跃行
-    # （wait_items.state），无需第二表征。幂等 DROP：表已不在则零改写；
-    # 存量库中的历史行无读口（v3a 起读侧全切行），直接丢弃。
-    with connect() as conn:
-        conn.execute("DROP TABLE IF EXISTS leases")
-        conn.execute("DROP INDEX IF EXISTS idx_leases_project")
-    # v2a T1（2026-09-21，裁决 R3）：wait_items 状态机扩七枚举，claimed 被
-    # starting 吸收。① 存量 claimed 行归一 starting（幂等：改完即无 claimed 行）；
-    # ② 活跃唯一索引口径扩到四活跃态——旧库索引 WHERE 仍含 'claimed' 时重建
-    # （重复启动看索引定义已含 'starting' 即跳过，零改写）。state 列无 CHECK
-    # 约束（建表 DDL 复核），无需表重建。
-    with connect() as conn:
-        conn.execute("UPDATE wait_items SET state='starting' WHERE state='claimed'")
-        row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='index'"
-            " AND name='idx_wait_active'").fetchone()
-        if row is not None and "'starting'" not in (row["sql"] or ""):
-            conn.execute("DROP INDEX idx_wait_active")
-            conn.execute(
-                "CREATE UNIQUE INDEX idx_wait_active ON wait_items(kind, target_id)"
-                " WHERE state IN ('waiting','starting','running','finishing')")
+    # P4 占位单态化（blocked+queue → doing+queue）、旧全局飞书配置桥接、leases 表
+    # DROP、claimed 行归一与 idx_wait_active 重建——四段数据级/结构迁移自 M1
+    # （2026-10-11）起移入声明式清单 MIGRATIONS（见文件上方），由下方
+    # run_declared_migrations() 统一执行。
     # v3c（2026-09-23）：证据与心跳迁到行（v3 §2.4，裁决 R2/R11）——wait_items
     # 补 last_seen（心跳时间戳）/evidence（证据 JSON 文本），承载登记证据
     # （desc/reason/pid）与心跳证据（busy=…(poll|sse)）。幂等：PRAGMA table_info
@@ -565,6 +727,9 @@ CREATE UNIQUE INDEX idx_projects_user_name ON projects(user_id, name);
         if "evidence" not in wcols:
             conn.execute("ALTER TABLE wait_items ADD COLUMN"
                          " evidence TEXT NOT NULL DEFAULT ''")
+    # 清单收尾：数据级 / 结构重建迁移（M1 起与 Node 侧共用 backend/schema/
+    # migrations.json）。放最后执行——清单里所有步骤都只依赖上面已补齐的列。
+    run_declared_migrations()
 
 
 # 本次进程随机生成的一次性初始口令（仅「未设 TS_ADMIN_PASSWORD 且实际发生种子」时非空），
