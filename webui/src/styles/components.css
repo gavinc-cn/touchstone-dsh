@@ -615,6 +615,14 @@ body.projlist-dragging { cursor: grabbing; user-select: none; }
 /* 卡片 id（#345）/ 测试任务条目 id（任务 #96）：弱化等宽小字，与状态徽标并列但不抢眼；
    align-self 居中——行高由同排的状态徽标（padding+border）决定，不设会贴顶（2026-09-17） */
 .board-card-id { font-family: var(--mono); font-size: calc(11px * var(--fs)); color: var(--dim); align-self: center; }
+/* 卡面「最后更新时间」小字（2026-10-10 批次）：与 .board-card-id 同族——弱化等宽小字，
+   与状态徽标同排但不抢眼；align-self 居中理由同上一行（行高由同排药丸决定）。
+   nowrap：「3 分钟前」这类文案内部不能断行，放不下时整体换到下一行（徽标行本就 flex-wrap）。
+   语义见 utils/cardTime.js——卡片行最后被改写的时刻，**不是**会话活动时间 */
+.board-card-time {
+  font-family: var(--mono); font-size: calc(11px * var(--fs)); color: var(--dim);
+  align-self: center; white-space: nowrap;
+}
 /* 「有更新」标记（2026-10-07 批次）：卡片状态被平台/agent 改动、用户还没打开过这张卡
    ⇒ 卡面打此标记（服务端 board_cards.unread 权威，打开详情即清，见 BoardTab.openCard）。
    实心药丸（皮肤强调色底 + --logo-fg 反色字：深色皮肤=近白底深字，浅色皮肤=近黑底白字），

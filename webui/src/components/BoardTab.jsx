@@ -9,6 +9,7 @@ import { boardApi, prefsApi, projectApi } from '../api'
 import { toast } from '../utils/toast'
 import { QUEUE_STATE_LABEL, queueStateChipClass } from '../utils/queueBadge'
 import { showUnreadBadge } from '../utils/unreadBadge'
+import { cardTimeLabel, cardTimeTitle } from '../utils/cardTime'
 import { ST_LABEL } from '../utils/renderMd'
 import { findSlashToken } from '../utils/slashToken'
 import { isPlaceholderImage } from '../utils/media'
@@ -818,6 +819,10 @@ export default function BoardTab({ project }) {
                       {card.block_kind === 'manual' && <span className="bug-status retest">{card.block_text || '手动阻塞'}</span>}
                       {card.origin === 'sync' && <span className="bug-status pending">同步</span>}
                       {card.jira_key && <span className="bug-status pending">{card.jira_key}</span>}
+                      {/* 最后更新时间（2026-10-10 批次，用户需求「看板卡片上应该显示一个
+                          最后更新时间」）：放徽标行末尾——不碰操作行（那行有窄屏量测
+                          opsFit，塞文字会干扰量测），也不额外占一行高度 */}
+                      <CardTime card={card} />
                     </div>
                     {card.last_error && <div className="board-card-err">{card.last_error}</div>}
                     <div className="board-card-ops" onClick={(e) => {
@@ -1023,6 +1028,23 @@ export default function BoardTab({ project }) {
 
 // 行内标题编辑框高度上限（px）：超长标题超过后转框内滚动，防把卡片撑爆
 const TITLE_EDIT_MAX_H = 240
+
+/** 卡面「最后更新时间」小字（2026-10-10 批次，用户需求原文「看板卡片上应该显示一个
+ *  最后更新时间」）：读服务端 `card.updated_at_ts`（毫秒 epoch，由 board.card_ts_ms
+ *  从 `updated_at` 按**服务器本地时间**换算——库里存的是无时区标记的本地串，直接在前端
+ *  解析会按浏览器时区差 8 小时）⇒ 相对时间「🕒 3 分钟前」；悬浮 title 给精确到秒的
+ *  **浏览器本地**时刻。
+ *
+ *  语义 = 卡片行最后被改写的时刻（改名/改描述/搬列/排队态变化/平台收尾搬列…）；
+ *  **agent 在会话里干活不刷它**——「agent 还在不在动」看同排队列态徽标与卡内会话窗，
+ *  别把本小字读成会话活动时间（用户口径确认见 utils/cardTime.js）。
+ *  时间戳缺失/坏值（老服务端载荷 / 坏库值 ⇒ None）一律不渲染：宁可少显示也不显示错。
+ *  不额外加定时器：看板本就有 SSE 事件唤醒 + 60s 兜底重取，重渲染即重算相对时间。 */
+function CardTime({ card }) {
+  const label = cardTimeLabel(card)
+  if (!label) return null
+  return <span className="board-card-time" title={cardTimeTitle(card)}>🕒 {label}</span>
+}
 
 // 卡片「标题+内容」行数上限：合计最多显示 6 行，超出截断（末尾省略号）。
 // 标题按自身换行最多 clamp 6 行（CSS）；内容行数 = 6 - 标题实际显示行数

@@ -96,6 +96,30 @@ def card_workspace(project, card):
     return wt or project["project_dir"]
 
 
+def card_ts_ms(ts_str):
+    """库内时间串（`YYYY-MM-DD HH:MM:SS`，db.now_str 口径=**服务器本地时间**）→ 毫秒 epoch。
+
+    卡面「最后更新时间」（2026-10-10 批次）的下发形态：库里存的是无时区标记的本地
+    时间串（本容器=UTC，Windows 原生运行=+8），前端若直接 `new Date(串)` 会按浏览器
+    本地时区解析 ⇒ 在 UTC 服务器 + 北京浏览器下整整差 8 小时。故一律在服务端换算成
+    epoch（与前端既有的 `scheduled_at`/`last_error_at` 同口径），前端只管按浏览器
+    时区渲染。
+
+    解释口径必须与写入口径互逆：`db.now_str` 用 `time.strftime`（本地时间），此处用
+    `time.mktime`（同按本地时区反解）——Linux(UTC)/Windows(+8) 下都自洽，见
+    tests/test_board_card_time.py 的 TZ 钉子用例。
+
+    坏值/空值返回 None（前端不渲染该小字），绝不抛异常打穿读板路径；不用 0 兜底
+    （0 会被前端当 1970 年渲染）。
+    """
+    if not ts_str:
+        return None
+    try:
+        return int(time.mktime(time.strptime(ts_str, "%Y-%m-%d %H:%M:%S"))) * 1000
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def card_json(row, running=False, busy=False, msg_queued=False, queue_state=None):
     """卡片 Row -> 前端 dict。running=平台在管运行；busy=会话级运行
     （平台运行或外部 busy——用户在 dsh GUI 直跑的同步卡会话，前端徽标
@@ -112,7 +136,11 @@ def card_json(row, running=False, busy=False, msg_queued=False, queue_state=None
     （queue_state_of 判定序最高级即 answer 在场 ⟺ answer_pending，免二次点查）。
     worktree（2026-10-06 批次）：独立 worktree 卡的落点绝对路径，空串=普通卡
     （前端据此渲染 🌿 徽标与详情行；只写不改口径见 plan D3）——经 `_card_opt`
-    读取，兼容无该列的老库。"""
+    读取，兼容无该列的老库。
+    updated_at_ts（2026-10-10 批次）：`updated_at` 的毫秒 epoch 形态（`card_ts_ms`
+    换算，服务器本地时间解释），供卡面渲染「最后更新时间」的相对时间/本地绝对时间；
+    语义务必与 `updated_at` 一致=**卡片行最后被改写的时刻**（agent 在会话里干活不刷
+    它，会话活动时间是另一回事）。坏值/空值 ⇒ None，前端不渲染该小字。"""
     if queue_state is None:
         answer = is_answer_pending(row["id"])
         queue_state = queue_state_of(row, running, busy, msg_queued, answer=answer)
@@ -130,6 +158,7 @@ def card_json(row, running=False, busy=False, msg_queued=False, queue_state=None
             "last_error": row["last_error"], "last_error_at": row["last_error_at"],
             "worktree": _card_opt(row, "worktree"),
             "created_at": row["created_at"], "updated_at": row["updated_at"],
+            "updated_at_ts": card_ts_ms(row["updated_at"]),
             # 状态有更新·用户未打开（2026-10-07 批次）：卡面打「有更新」标记的依据，
             # 置位/清除全在 db 层派生维护，读侧只透传布尔值。
             "unread": bool(_card_opt(row, "unread") or 0),
