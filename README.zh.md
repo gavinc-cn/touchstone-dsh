@@ -30,8 +30,9 @@ Touchstone 把「我们真该多测一点」变成一条持续转动的流水线
 一个写者（不会有两个 agent 同时改同一份检出），并且全流程可观测——逐轮实时日志、可渲染的会话窗口、
 以及基于 SSE 的看板。
 
-Touchstone 是**本地运行**的：Python 站点 + SQLite + 文件系统工作区。除了你的 `dsh` 宿主发起的模型
-调用之外，数据不出本机。
+Touchstone 是**本地运行**的：独立形态是 Python 站点；插件形态自 2026-10-15 起缺省走包内 Node 后端
+（要回 Python 就在插件 config 里显式写 `backend: python`）。两种形态都是 SQLite + 文件系统工作区，
+除了你的 `dsh` 宿主发起的模型调用之外，数据不出本机。
 
 ## 主要特性
 
@@ -50,8 +51,8 @@ Touchstone 是**本地运行**的：Python 站点 + SQLite + 文件系统工作�
 - **内置压测**。压测任务先让 agent 产出场景与脚本，之后由平台自己发压，一个任务可跑 N 次，每次都有
   指标、图表与 Markdown/JSON 报告。
 - **可选集成**。飞书（Lark）推送通知与卡片双向作答；案例库的可选语义检索（RAG）。
-- **自包含技术栈**。后端：Python 标准库 + 4 个小依赖；前端：React + Vite；存储：SQLite + 普通文件。
-  Linux 与 Windows 均可运行。
+- **自包含技术栈**。后端：包内 Node 后端（插件形态缺省，需 Node 22.19+）或 Python 标准库 + 4 个小依赖
+  （独立形态 / `backend: python`）；前端：React + Vite；存储：SQLite + 普通文件。Linux 与 Windows 均可运行。
 
 ## 界面截图
 
@@ -123,8 +124,8 @@ flowchart LR
 
 | 依赖 | 版本 | 用途 |
 |------|------|------|
-| Python | 3.12+ | 运行站点（实测 3.12） |
-| Node.js | 22.19+ 或 24+ | 运行 `dsh` 宿主（仅构建前端时 Node 18+ 即可） |
+| Node.js | 22.19+ 或 24+ | 运行 `dsh` 宿主**与插件形态的后端**（缺省；仅构建前端时 Node 18+ 即可） |
+| Python | 3.12+ | 独立形态（`./touchstone.sh start`）与插件形态的 `backend: python`（实测 3.12） |
 | DeepSeek Harness（`dsh`） | 当前版本 | agent 执行——插件形态必需 |
 
 ### 1. 克隆并安装
@@ -132,7 +133,7 @@ flowchart LR
 ```bash
 git clone https://github.com/gavinc-cn/touchstone-dsh.git
 cd touchstone-dsh
-python3 -m pip install -r requirements.txt
+python3 -m pip install -r requirements.txt   # 独立形态 / 插件形态配了 backend: python 才需要
 ```
 
 ### 2. 启动站点（独立形态）
@@ -174,23 +175,27 @@ node ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/dsh-plugin/scrip
 # 4) 重启 dsh web，打开 http://127.0.0.1:3080，用侧栏里的 Touchstone 入口（Alt+T 开关面板）
 ```
 
-平台自身的 Python 依赖走 pip，npm 不管：
+**插件形态缺省不需要 Python。** 自 2026-10-15 起薄壳拉起的是包内 Node 后端（先探宿主 Node 的
+`node:sqlite`，过旧则给提示页并列出两条出路）。只有用 Python 后端时才需要 Python —— 即独立形态，
+或在插件 config 里显式写 `backend: python`（观测期的一行回滚；**删掉该键不再有任何回退效果**，
+缺省就是 `node`）。走 Python 后端时，平台自身的依赖走 pip，npm 不管：
 
 ```bash
 pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/requirements.txt
 # Windows 用 python -m pip install ...（官方安装器只装 python.exe，没有 python3）
 ```
 
-解释器不用配也行：插件自己探——先试 `python`、再试 `python3`（与 `touchstone.cmd` 同序），
-用第一个真能跑起来的那个。如果探到的不是你装依赖的那支，缺依赖提示页里给的就是**它探到的那支**
+配了 Python 后端且未指定解释器时，插件自己探——先试 `python`、再试 `python3`（与 `touchstone.cmd`
+同序），用第一个真能跑起来的那个。如果探到的不是你装依赖的那支，缺依赖提示页里给的就是**它探到的那支**
 的解释器命令；想指定别支，在 profile patch 里写 `pythonPath`：
 
 ```yaml
 - id: touchstone-dsh
-  config: { pythonPath: /path/to/python }
+  config: { backend: python, pythonPath: /path/to/python }
 ```
 
-**不需要配 `repoDir`**：包里带着 `server.py` 与 `webui/dist-plugin`，插件缺省就用包自身目录。
+**不需要配 `repoDir`**：包里带着 `server.py`、`backend/`（Node 后端）与 `webui/dist-plugin`，
+插件缺省就用包自身目录。
 
 **方式 B —— 从检出安装（开发用）:**
 

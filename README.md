@@ -31,8 +31,10 @@ remembers what it already tried. A unified queue keeps exactly one writer per pr
 editing the same checkout at once), and the whole thing is observable — live round logs, a rendered
 session window, and an SSE-backed board.
 
-Touchstone runs **locally**. It is a Python web site with a SQLite database and a file-system workspace;
-no data leaves your machine except for the model calls your `dsh` host makes.
+Touchstone runs **locally**. Standalone mode is a Python web site; plugin mode defaults to the bundled Node
+backend (since 2026-10-15, with `backend: python` as the one-line fallback). Either way it is a SQLite
+database plus a file-system workspace, and no data leaves your machine except for the model calls your
+`dsh` host makes.
 
 ## Highlights
 
@@ -56,8 +58,9 @@ no data leaves your machine except for the model calls your `dsh` host makes.
   drives the load itself, N runs per task, with per-run metrics, charts, and Markdown/JSON reports.
 - **Optional integrations.** Feishu (Lark) push notifications with two-way answering from chat cards, and
   RAG-based semantic search over the case library.
-- **Self-contained stack.** Backend: Python standard library plus four small dependencies. Frontend: React
-  + Vite. Storage: SQLite + plain files. Runs on Linux and Windows.
+- **Self-contained stack.** Backend: the bundled Node backend (plugin-mode default, needs Node 22.19+) or
+  the Python standard library plus four small dependencies (standalone mode / `backend: python`).
+  Frontend: React + Vite. Storage: SQLite + plain files. Runs on Linux and Windows.
 
 ## Screenshots
 
@@ -133,8 +136,8 @@ flowchart LR
 
 | Requirement | Version | Needed for |
 |-------------|---------|------------|
-| Python | 3.12+ | The server (verified on 3.12) |
-| Node.js | 22.19+ or 24+ | Running the `dsh` host (the front-end build alone needs Node 18+) |
+| Node.js | 22.19+ or 24+ | The `dsh` host **and the plugin-mode backend** (default; the front-end build alone needs Node 18+) |
+| Python | 3.12+ | Standalone mode (`./touchstone.sh start`) and plugin mode with `backend: python` (verified on 3.12) |
 | DeepSeek Harness (`dsh`) | current release | Agent execution — required for plugin mode |
 
 ### 1. Clone and install
@@ -142,7 +145,7 @@ flowchart LR
 ```bash
 git clone https://github.com/gavinc-cn/touchstone-dsh.git
 cd touchstone-dsh
-python3 -m pip install -r requirements.txt
+python3 -m pip install -r requirements.txt   # needed for standalone mode / plugin mode with backend: python
 ```
 
 ### 2. Start the site (standalone mode)
@@ -192,25 +195,30 @@ node ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/dsh-plugin/scrip
 # 4) restart the dsh web UI, open http://127.0.0.1:3080, use the Touchstone entry (Alt+T toggles the panel)
 ```
 
-The platform's own Python dependencies are installed with pip, not npm:
+**Plugin mode needs no Python by default.** Since 2026-10-15 the plugin shell starts the bundled Node
+backend (it probes the host Node for `node:sqlite` first; if the host is too old it shows a hint page with
+the two ways out). Python is used only for the Python backend — standalone mode, or `backend: python` in the
+plugin config, which is the one-line fallback during the observation window (deleting the key no longer
+reverts anything: the default *is* `node` now). For that Python backend, the platform's own dependencies are
+installed with pip, not npm:
 
 ```bash
 pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/requirements.txt
 # Windows: python -m pip install ...   (the official installer ships python.exe, not python3)
 ```
 
-The plugin resolves the interpreter itself when you do not configure one: it probes `python` first, then
-`python3` (the same order as `touchstone.cmd`), and uses the first one that actually runs. If that is not the
-interpreter where you installed the dependencies, the missing-dependency page prints the exact command for the
-interpreter it picked; to pin another one, set `pythonPath` in the profile patch:
+With the Python backend, the plugin resolves the interpreter itself when you do not configure one: it probes
+`python` first, then `python3` (the same order as `touchstone.cmd`), and uses the first one that actually
+runs. If that is not the interpreter where you installed the dependencies, the missing-dependency page prints
+the exact command for the interpreter it picked; to pin another one, set `pythonPath` in the profile patch:
 
 ```yaml
 - id: touchstone-dsh
-  config: { pythonPath: /path/to/python }
+  config: { backend: python, pythonPath: /path/to/python }
 ```
 
-No `repoDir` is needed: the package carries `server.py` and `webui/dist-plugin`, so the plugin falls back to
-its own directory.
+No `repoDir` is needed: the package carries `server.py`, `backend/` (the Node backend) and
+`webui/dist-plugin`, so the plugin falls back to its own directory.
 
 **Option B — from a checkout (development):**
 
