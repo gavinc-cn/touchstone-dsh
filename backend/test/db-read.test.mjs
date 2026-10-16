@@ -416,7 +416,10 @@ function detectPython() {
 }
 
 const PYTHON_SKIP = detectPython() ? false : `未找到可用的 Python 解释器: ${PYTHON}（TS_PYTHON 可指定）`;
-const PARITY_SKIP = PYTHON_SKIP
+// 探针**可能不在发布树里**（公开仓范围不含 tools/parity/）⇒ 缺文件算「对拍不可用」，
+// 整条跳过，绝不硬失败、也绝不假装通过。
+const PROBE_SKIP = fs.existsSync(PROBE) ? false : `缺对拍探针: ${PROBE}（发布树不含 tools/parity/probe）`;
+const PARITY_SKIP = PYTHON_SKIP || PROBE_SKIP
   || (fs.existsSync(SNAPSHOT) ? false : `缺冻结库快照: ${SNAPSHOT}（TS_PARITY_DB 可指定）`);
 
 /** 文件 sha256（证明探针只读：跑前跑后必须一致） */

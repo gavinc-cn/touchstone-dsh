@@ -27,6 +27,13 @@ const ROOT = path.resolve(import.meta.dirname, '..', '..');
 const PROBE = path.join(ROOT, 'tools', 'parity', 'probe', 'zstd_frames.py');
 const VARIANT_GEN = path.join(ROOT, 'tools', 'parity', 'probe', 'make_zstd_variants.py');
 
+/**
+ * 探针可用性：发布树**可以不带** `tools/parity/probe/`（公开仓范围不含内部量具）⇒
+ * 缺文件时跳过跨语言那一半，**不能**把它当成失败；本模块自身的断言照跑。
+ */
+const PROBE_SKIP = fs.existsSync(PROBE)
+  ? false : `缺对拍探针: ${PROBE}（发布树不含 tools/parity/probe）`;
+
 /** 用 node:zlib 造 n 帧（每帧内容独立压缩，等价 dsh 的「一次追加一帧」） */
 function makeFrames(texts) {
   return Buffer.concat(texts.map((t) => zstdCompressSync(Buffer.from(t, 'utf8'))));
@@ -191,6 +198,7 @@ function realSessionFiles(limit = 3) {
 }
 
 test('真会话文件：与 Python zstandard.decompressobj() 逐帧一致（本模块的立身之本）', (t) => {
+  if (PROBE_SKIP) return t.skip(PROBE_SKIP);
   const files = realSessionFiles(3);
   if (!files.length) return t.skip('本机没有 ~/.dsh/sessions 会话文件');
   // **先冻结字节再对拍**：会话文件边写边追加，两侧各自读原文件会得到假差异（实测：全量
@@ -234,6 +242,7 @@ test('头变体语料：checksum / FCS 档 / 字典 / skippable / 截断尾 的�
   // 也与 Python 逐帧比长度——「真文件没覆盖到的分支」也有证据。
   // 注：dictFlag=3（4 字节 Dictionary_ID）本机 python-zstandard 无 API 可造（它只写 2 字节），
   // 扫描器里是 `dictFlag === 3 ? 4 : dictFlag` 同一条表达式，此处如实标注未覆盖。
+  if (PROBE_SKIP) return t.skip(PROBE_SKIP);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-zstd-variants-'));
   try {
     let listed;
