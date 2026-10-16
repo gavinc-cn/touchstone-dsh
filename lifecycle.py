@@ -20,8 +20,14 @@ Python 后端是 dsh 宿主进程 spawn 的子进程。宿主退出/崩溃/被 `
      父还活着（例如 stdin 不是管道、或管道被无关方关闭）只记日志不自杀。
 
 2. **同库单实例** `SingleInstance`
-   - `<db>.lock` 排它锁（`platcompat.lock_fd`）+ `<db>.pid` 记录
-     `{pid, ppid, repo_dir, parent_watch, started_at}`。
+   - `<db>.lock` 上**两道锁**：`flock` 排它（`platcompat.lock_fd`）+ 同一文件上的
+     **SQLite 排它锁**（`locking_mode=EXCLUSIVE` + 一次写事务，持锁到进程结束）；
+     再写 `<db>.pid` 记录 `{pid, ppid, repo_dir, parent_watch, started_at}`。
+     - 为什么要两道（2026-10-11，Node 后端 M1）：flock 只有 Python 侧有（Node 无
+       stdlib flock），Node 版改用 SQLite 自身的排它锁，两种锁**互不相干**
+       ⇒ 只靠 flock 挡不住 Node 版实例（实测：Node 持锁时 Python 的 flock 照样
+       成功）。两边都取 SQLite 锁后，同语言与跨语言互斥都成立，且 `kill -9` 后
+       由内核/文件锁自动释放，无需清理残留。
    - 锁被占时：读 pid 记录——若记录进程**由父死感知托管**（`parent_watch=true`）
      且其父已死 ⇒ 判定为**存量孤儿**（升级前的强杀残留），SIGTERM 后重试拿锁；
      否则视为真·另一实例，明确报错退出（防双写同库）。
@@ -39,6 +45,7 @@ Python 后端是 dsh 宿主进程 spawn 的子进程。宿主退出/崩溃/被 `
 import json
 import os
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -225,6 +232,8 @@ class SingleInstance:
         self.reason = ""
         self.reaped_pid = 0
         self._fd = None
+        # SQLite 排它锁的连接（第二道闸，M1）；持锁期间常驻，release 时关闭
+        self._lock_conn = None
 
     # ---------- 记录读写 ----------
 
@@ -259,17 +268,21 @@ class SingleInstance:
 
     @staticmethod
     def _looks_like_server(pid):
-        """粗校验 pid 是否是 touchstone 的 server.py（防 PID 复用误杀）。
+        """粗校验 pid 是否是 touchstone 的后端（防 PID 复用误杀）。
 
+        两版后端的命令行都要认：Python 是 `server.py`，Node 是 `backend/server.js`
+        （2026-10-11 M1 起 Node 版也走同一套 `.pid` 记录与孤儿收口）。
         读不到命令行时返回 True（宁可不杀——见 acquire 的调用点：仅在
         「pid 记录声明 parent_watch 且其父已死」时才走到这里）。
         """
         try:
             if sys.platform.startswith("linux"):
                 with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
-                    return b"server.py" in f.read()
+                    cmdline = f.read()
+                return b"server.py" in cmdline or b"server.js" in cmdline
             import psutil
-            return any("server.py" in str(a) for a in psutil.Process(int(pid)).cmdline())
+            argv = [str(a) for a in psutil.Process(int(pid)).cmdline()]
+            return any("server.py" in a or "server.js" in a for a in argv)
         except Exception:                        # noqa: BLE001
             return True
 
@@ -308,12 +321,93 @@ class SingleInstance:
 
     # ---------- 加锁 ----------
 
+    def _acquire_sqlite_lock(self):
+        """第二道闸：同一锁文件上的 SQLite 排它锁（M1，2026-10-11）。
+
+        Node 版没有 stdlib `flock`，改用 SQLite 自身的排它锁：在 `<db>.lock` 上
+        `PRAGMA locking_mode=EXCLUSIVE` + 一次写事务，锁持有到进程/连接结束
+        （`kill -9` 由内核释放，无残留文件要清理）。两种锁机制**互不相干**，所以
+        两边都要取这一道，跨语言互斥才成立（实测：Node 持锁时 Python 的 flock
+        照样能拿到）。
+
+        返回 `(状态, 文案)`：
+          - `("ok", "")`      拿到（连接挂在 `self._lock_conn`）
+          - `("busy", "")`    被占用（调用方报「另一实例」并退出）
+          - `("unusable", 文案)` 锁文件本身不可用（损坏/是目录/打不开）——
+            **不再降级放行**（2026-10-11 评审 P1）：降级等于互斥无声消失，
+            实测「先起 Python 再起 Node」双方都能就绪 ⇒ 同库双写。
+        """
+        try:
+            conn = sqlite3.connect(self.lock_path, timeout=0)
+        except sqlite3.Error as e:
+            return "unusable", self._unusable_reason(e)
+        try:
+            conn.execute("PRAGMA busy_timeout=0")
+            conn.execute("PRAGMA locking_mode=EXCLUSIVE")
+            # 必须真写一次：EXCLUSIVE 模式在首个写事务时取锁并一直持有
+            conn.execute("CREATE TABLE IF NOT EXISTS lock_holder ("
+                         " id INTEGER PRIMARY KEY CHECK (id = 1),"
+                         " pid INTEGER NOT NULL, started_at INTEGER NOT NULL)")
+            conn.execute("INSERT OR REPLACE INTO lock_holder(id, pid, started_at)"
+                         " VALUES(1, ?, ?)", (os.getpid(), int(time.time())))
+            conn.commit()
+        except sqlite3.Error as e:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            if "locked" in str(e) or "busy" in str(e):
+                return "busy", ""
+            return "unusable", self._unusable_reason(e)
+        self._lock_conn = conn
+        return "ok", ""
+
+    def _unusable_reason(self, error):
+        """锁文件不可用的报错文案（与 Node `lock.js:unusableLockReason` 同义）。"""
+        return (f"单实例锁文件不可用：{self.lock_path}（库 {self.db_file}）。原因：{error}。"
+                f"该文件应为 SQLite 库或 0 字节空文件；内容损坏/被换成目录时无法建立互斥，"
+                f"继续启动会与另一版后端同库双写（任务重复执行、队列行被抢）。"
+                f"修复：确认没有实例在跑之后把它移走再启动"
+                f"（mv {self.lock_path} {self.lock_path}.broken）；"
+                f"或显式 --allow-shared-db 自担双写风险。")
+
+    def _release_sqlite_lock(self):
+        """释放 SQLite 排它锁（幂等）。"""
+        conn, self._lock_conn = self._lock_conn, None
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+
+    def _try_take_locks(self):
+        """两道锁的状态：`("ok"|"busy"|"unusable", 文案)`。
+
+        flock 拿到但 SQLite 被占/不可用时**回退 flock**：留着不放会挡住下一个 Python
+        实例去走「孤儿收口 → 重试」的路径（它只看到 flock 被占），把可恢复的孤儿变成死锁。
+        """
+        if not platcompat.lock_fd(self._fd, blocking=False):
+            return "busy", ""
+        state, detail = self._acquire_sqlite_lock()
+        if state == "ok":
+            return "ok", ""
+        try:
+            platcompat.unlock_fd(self._fd)
+        except OSError:
+            pass
+        return state, detail
+
     def acquire(self):
-        """拿同库单实例锁。True=拿到（已写 pid 记录）；False=被真·另一实例占用。
+        """拿同库单实例锁。True=拿到（已写 pid 记录）；False=不能独占（`reason` 说明原因）。
 
         非阻塞试锁 + 存量孤儿收口：拿到即写记录返回；拿不到先读 pid 记录——
         若记录进程由父死感知托管且其父已死，判为存量孤儿，SIGTERM 后在
         `stale_wait` 内重试；否则立即返回 False 并给出可执行的报错文案。
+
+        **不再有「降级为无锁运行」分支**（2026-10-11 评审 P1）：锁文件打不开/损坏时
+        返回 False（调用方 exit 3）并给修复步骤——静默降级会让互斥无声消失、同库双写，
+        那比「启动被拒」严重得多。
         """
         os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
         if self.allow_shared:
@@ -322,15 +416,18 @@ class SingleInstance:
         try:
             fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o644)
         except OSError as e:
-            self.log(f"[lifecycle] 锁文件打开失败（降级为无锁运行）: {e}")
-            return True
+            self.reason = self._unusable_reason(e)
+            return False
         self._fd = fd
-        deadline = time.time() + max(self.stale_wait, 0.5) + 1.0
         reaped = False
         while True:
-            if platcompat.lock_fd(fd, blocking=False):
+            state, detail = self._try_take_locks()
+            if state == "ok":
                 self._write_record(os.getpid())
                 return True
+            if state == "unusable":
+                self.reason = detail
+                return False
             rec = self._read_record()
             if rec and not reaped and self._reap_stale(rec):
                 reaped = True                   # 孤儿已收口：其锁随进程退出释放，再试
@@ -343,9 +440,14 @@ class SingleInstance:
                     f"（TOUCHSTONE_DB / 插件 extraEnv.TOUCHSTONE_DB），"
                     f"或显式 --allow-shared-db 自担双写风险。")
             else:
-                self.reason = (f"锁文件被占用且无归属记录：{self.lock_path}"
-                               f"（库 {self.db_file}）。若确认无实例在跑，"
-                               f"删除该锁文件后重试。")
+                # 无归属记录时**不要**教用户删锁文件：删掉后新实例会在新 inode 上取锁，
+                # 与仍在运行的占用者双写（flock 与 SQLite 锁同理）。给安全的两个出口。
+                self.reason = (
+                    f"锁文件被占用且无归属记录：{self.lock_path}"
+                    f"（库 {self.db_file}）。占用者可能是另一版后端的异常窗口"
+                    f"（Node 版取锁后、写 .pid 前被杀）或残留的第三方进程；"
+                    f"如需并行请用独立库（TOUCHSTONE_DB / 插件 extraEnv.TOUCHSTONE_DB），"
+                    f"或显式 --allow-shared-db 自担双写风险。")
             return False
         # 不可达：while True 内所有分支都 return（保静态检查可读性）
 
@@ -354,6 +456,7 @@ class SingleInstance:
         rec = self._read_record()
         if rec and int(rec.get("pid") or 0) == os.getpid():
             self._remove_record()
+        self._release_sqlite_lock()
         if self._fd is not None:
             platcompat.unlock_fd(self._fd)
             try:

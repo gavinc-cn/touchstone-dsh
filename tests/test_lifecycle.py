@@ -16,7 +16,9 @@
 """
 import json
 import os
+import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -330,7 +332,15 @@ _needs_dist = pytest.mark.skipif(
 
 
 def _server_env(db):
-    env = dict(os.environ, TOUCHSTONE_DB=db, TS_ADMIN_PASSWORD="ts-lifecycle-pw")
+    """起真 server.py 用的隔离环境。
+
+    `TOUCHSTONE_RUN_DIR` 必须指到临时目录：server.py 默认把实际端口写进
+    `<仓库>/.run/server.port`，而用例退出时 `_cleanup()` 会删掉它——直接跑会**删掉真实
+    实例（插件形态生产后端）的端口标记**（实测：跑完 pytest 后 `.run/server.port` 消失，
+    生产后端仍在 :40237 跑）。与 tools/parity 的 `buildBackendEnv` 同口径。
+    """
+    env = dict(os.environ, TOUCHSTONE_DB=db, TS_ADMIN_PASSWORD="ts-lifecycle-pw",
+               TOUCHSTONE_RUN_DIR=tempfile.mkdtemp(prefix="ts-lifecycle-run-"))
     env.pop("TS_PARENT_WATCH", None)
     return env
 
@@ -418,3 +428,236 @@ def test_server_parent_watch_exits_when_parent_killed(tmp_path):
     finally:
         _kill(spid)
         _kill(middle.pid)
+
+
+# ---------- 2b. 第二道闸：SQLite 排它锁（M1，2026-10-11）----------
+#
+# Node 后端没有 stdlib flock，改用同一 `<db>.lock` 文件上的 SQLite 排它锁
+# （`PRAGMA locking_mode=EXCLUSIVE` + 一次写事务，持锁到进程结束）。两种锁机制
+# **互不相干**：Node 持 SQLite 锁时 Python 的 flock 照样能拿到 ⇒ 只靠 flock 挡不住
+# Node 版实例。下面几条是「跨语言互斥真的成立」的证据；最后一条是反例自证。
+
+NODE_LOCK_HOLD_SRC = """
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(process.env.TS_LOCK_PATH, { timeout: 0 });
+db.exec('PRAGMA busy_timeout=0');
+db.exec('PRAGMA locking_mode=EXCLUSIVE');
+db.exec('CREATE TABLE IF NOT EXISTS lock_holder (id INTEGER PRIMARY KEY CHECK (id = 1),'
+      + ' pid INTEGER NOT NULL, started_at INTEGER NOT NULL)');
+db.prepare('INSERT OR REPLACE INTO lock_holder(id, pid, started_at) VALUES(1, ?, ?)')
+  .run(process.pid, Math.floor(Date.now() / 1000));
+console.log('HOLDING');
+setTimeout(() => {}, 60000);
+"""
+
+NODE_LOCK_TRY_SRC = """
+const { DatabaseSync } = require('node:sqlite');
+try {
+  const db = new DatabaseSync(process.env.TS_LOCK_PATH, { timeout: 0 });
+  db.exec('PRAGMA busy_timeout=0');
+  db.exec('PRAGMA locking_mode=EXCLUSIVE');
+  db.exec('CREATE TABLE IF NOT EXISTS lock_holder (id INTEGER PRIMARY KEY CHECK (id = 1),'
+        + ' pid INTEGER NOT NULL, started_at INTEGER NOT NULL)');
+  db.prepare('INSERT OR REPLACE INTO lock_holder(id, pid, started_at) VALUES(1, ?, ?)')
+    .run(process.pid, 0);
+  console.log('GOT');
+} catch (e) {
+  console.log('BUSY:' + e.message);
+  process.exit(1);
+}
+"""
+
+NODE = shutil.which("node")
+
+# 「像 Node 后端的进程」：`-e` 脚本 + argv 里带 backend/server.js（供 _looks_like_server 命中）
+NODE_FAKE_BACKEND_SRC = "setTimeout(() => {}, 60000)"
+
+
+def _spawn_node(src, lock_path):
+    env = dict(os.environ, TS_LOCK_PATH=lock_path)
+    return subprocess.Popen([NODE, "--disable-warning=ExperimentalWarning", "-e", src],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            env=env)
+
+
+@pytest.mark.skipif(not NODE, reason="需要 node 可执行文件（跨语言互斥用例）")
+def test_node_sqlite_lock_blocks_python_instance(tmp_path):
+    """Node 版实例持锁时，Python 版实例必须被拒（否则两版会同库双写）。"""
+    db = str(tmp_path / "t.db")
+    proc = _spawn_node(NODE_LOCK_HOLD_SRC, db + ".lock")
+    try:
+        assert proc.stdout.readline().strip() == "HOLDING"
+        inst = lifecycle.SingleInstance(db, logger=lambda m: None)
+        assert inst.acquire() is False, "Node 持锁时 Python 竟拿到锁：跨语言互斥失效"
+        assert "--allow-shared-db" in inst.reason
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+@pytest.mark.skipif(not NODE, reason="需要 node 可执行文件（跨语言互斥用例）")
+def test_python_sqlite_lock_blocks_node(tmp_path):
+    """Python 版实例持锁时，Node 版的同款取锁动作必须 busy 失败。"""
+    db = str(tmp_path / "t.db")
+    inst = lifecycle.SingleInstance(db, logger=lambda m: None)
+    assert inst.acquire() is True
+    try:
+        proc = _spawn_node(NODE_LOCK_TRY_SRC, db + ".lock")
+        out, _err = proc.communicate(timeout=30)
+        assert proc.returncode == 1, out
+        assert out.strip().startswith("BUSY:"), out
+    finally:
+        inst.release()
+
+
+@pytest.mark.skipif(not NODE, reason="需要 node 可执行文件（跨语言互斥用例）")
+def test_sqlite_gate_is_load_bearing(tmp_path, monkeypatch):
+    """反例自证：短路第二道闸后，Node 持锁时 Python **必须能**拿到锁。
+
+    证明 `test_node_sqlite_lock_blocks_python_instance` 测的是 SQLite 锁本身——
+    Node 侧没有 flock，只靠 flock 时 Python 一定成功（本用例绿），因此上一条的红
+    只可能来自第二道闸。
+    """
+    db = str(tmp_path / "t.db")
+    proc = _spawn_node(NODE_LOCK_HOLD_SRC, db + ".lock")
+    try:
+        assert proc.stdout.readline().strip() == "HOLDING"
+        monkeypatch.setattr(lifecycle.SingleInstance, "_acquire_sqlite_lock",
+                            lambda self: ("ok", ""))
+        inst = lifecycle.SingleInstance(db, logger=lambda m: None)
+        assert inst.acquire() is True, "短路第二道闸后仍拿不到锁：说明 flock 也挡住了（用例前提有误）"
+        inst.release()
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_sqlite_lock_released_on_sigkill(tmp_path):
+    """持锁进程被 `kill -9` ⇒ 锁自动释放，新实例无需任何清理即可接手。"""
+    db = str(tmp_path / "t.db")
+    child_src = (
+        "import sys, time\n"
+        f"sys.path.insert(0, {ROOT!r})\n"
+        "import lifecycle\n"
+        f"inst = lifecycle.SingleInstance({db!r}, logger=lambda m: None)\n"
+        "assert inst.acquire()\n"
+        "print('LOCKED', flush=True)\n"
+        "time.sleep(60)\n")
+    proc = subprocess.Popen([PY, "-c", child_src], stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "LOCKED"
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=10)
+        inst = lifecycle.SingleInstance(db, logger=lambda m: None)
+        assert inst.acquire() is True
+        inst.release()
+    finally:
+        _kill(proc.pid)
+
+
+def test_sqlite_lock_writes_holder_row(tmp_path):
+    """锁文件真的变成了带归属行的 SQLite 库（第二道闸确实在写，不是空转）。
+
+    只能在 `release()` 之后读：EXCLUSIVE 模式下持锁期间别的连接读不了这个文件
+    （这正是互斥的来源）。
+    """
+    db = str(tmp_path / "t.db")
+    inst = lifecycle.SingleInstance(db, logger=lambda m: None)
+    assert inst.acquire() is True
+    inst.release()
+    conn = sqlite3.connect(db + ".lock")
+    try:
+        row = conn.execute("SELECT pid, started_at FROM lock_holder WHERE id=1").fetchone()
+    finally:
+        conn.close()
+    assert row is not None, "锁文件里没有 lock_holder 行：第二道闸没真写"
+    assert row[0] == os.getpid() and row[1] > 0
+
+
+@pytest.mark.skipif(not NODE, reason="需要 node 可执行文件（跨语言用例）")
+def test_looks_like_server_accepts_node_backend():
+    """孤儿收口要认两版后端的命令行（Python `server.py` / Node `backend/server.js`）。"""
+    proc = subprocess.Popen([NODE, "--disable-warning=ExperimentalWarning", "-e",
+                             "setTimeout(() => {}, 60000)", "backend/server.js"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        time.sleep(0.4)
+        assert lifecycle.SingleInstance._looks_like_server(proc.pid) is True
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+@pytest.mark.skipif(not NODE, reason="需要 node 可执行文件（跨语言用例）")
+def test_reap_stale_node_orphan(tmp_path):
+    """Node 版孤儿（宿主被 kill -9、它被 init 收养）能被 SIGTERM 收口。
+
+    为什么要「中间进程 + 杀宿主」这一套：若孤儿的父进程还活着，它死后是**僵尸**，
+    `kill(pid, 0)` 仍成功 ⇒ `pid_alive` 恒为真，收口等待循环必然超时。真实的孤儿
+    由 init 收养并回收，僵尸这条只存在于「测试自己当父进程」的构造里。
+    """
+    db = str(tmp_path / "t.db")
+    middle_src = (
+        "import subprocess, sys, time\n"
+        f"p = subprocess.Popen([{NODE!r}, '--disable-warning=ExperimentalWarning',\n"
+        f"                      '-e', {NODE_FAKE_BACKEND_SRC!r}, 'backend/server.js'],\n"
+        "                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+        "                     stderr=subprocess.DEVNULL)\n"
+        "print(p.pid, flush=True)\n"
+        "time.sleep(120)\n")
+    middle = subprocess.Popen([PY, "-c", middle_src], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, text=True)
+    orphan_pid = 0
+    try:
+        orphan_pid = int(middle.stdout.readline().strip())
+        assert platcompat.pid_alive(orphan_pid)
+        os.kill(middle.pid, signal.SIGKILL)          # 模拟宿主被 kill -9
+        middle.wait(timeout=10)
+        time.sleep(0.5)                              # 等它被 init 收养（ppid=1）
+        inst = lifecycle.SingleInstance(db, logger=lambda m: None, stale_wait=5)
+        assert inst._reap_stale({"pid": orphan_pid, "ppid": middle.pid,
+                                 "repo_dir": "/repo", "parent_watch": True,
+                                 "backend": "node"}) is True
+        assert inst.reaped_pid == orphan_pid
+        assert not platcompat.pid_alive(orphan_pid)
+    finally:
+        _kill(orphan_pid)
+        _kill(middle.pid)
+
+
+# ---------- 2c. 锁文件不可用 ⇒ fail closed（2026-10-11 评审 P1）----------
+#
+# 评审实测：锁文件是垃圾内容/是目录时，两版**都能就绪** ⇒ 跨语言互斥无声消失、同库双写。
+# 现在一律拒绝启动（调用方 exit 3）并给出「移走再启动」的修复步骤；确要自担风险走
+# --allow-shared-db。这三条就是那个决策的钉子。
+
+def test_lock_path_is_directory_fails_closed(tmp_path):
+    """锁路径是个目录（打不开）⇒ 拒绝启动并给修复步骤，不再「降级为无锁运行」。"""
+    db = str(tmp_path / "t.db")
+    os.makedirs(db + ".lock")                     # 锁路径占成目录
+    inst = lifecycle.SingleInstance(db, logger=lambda m: None)
+    assert inst.acquire() is False
+    assert "单实例锁文件不可用" in inst.reason
+    assert f"{db}.lock" in inst.reason and ".broken" in inst.reason
+    assert "--allow-shared-db" in inst.reason
+
+
+def test_lock_file_garbage_fails_closed(tmp_path):
+    """锁文件是文本垃圾（不是 SQLite 库）⇒ 拒绝启动。"""
+    db = str(tmp_path / "t.db")
+    with open(db + ".lock", "w", encoding="utf-8") as f:
+        f.write("这不是 SQLite 库\n")
+    inst = lifecycle.SingleInstance(db, logger=lambda m: None)
+    assert inst.acquire() is False
+    assert "单实例锁文件不可用" in inst.reason
+
+
+def test_allow_shared_bypasses_unusable_lock(tmp_path):
+    """逃生口仍有效：--allow-shared-db 时锁文件损坏也照常起步（自担双写风险）。"""
+    db = str(tmp_path / "t.db")
+    os.makedirs(db + ".lock")
+    logs = []
+    inst = lifecycle.SingleInstance(db, allow_shared=True, logger=logs.append)
+    assert inst.acquire() is True
+    assert any("--allow-shared-db" in m for m in logs)
+    inst.release()
