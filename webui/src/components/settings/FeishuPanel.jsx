@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import { meApi, projectApi } from '../../api'
 import { toast } from '../../utils/toast'
 import { applyResultText, hookSaveRequest } from '../../utils/feishuHook'
-import { buildCfgBody, withPushEnabled, pushStatusText } from '../../utils/feishuPush'
+import { buildCfgBody, isPushEnabled, withPushEnabled, pushStatusText } from '../../utils/feishuPush'
+import { provisionGates, provisionNotices, provisionQrUrl } from '../../utils/feishuProvision'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -439,9 +440,11 @@ function ProjectHookCard() {
 }
 
 // 飞书接入（M5 配置自动化，2026-10-10）：把「开发者后台六步」压成一次扫码——
-// 扫码创建应用（后端 lark_oapi.register_app，创建时即预置权限/事件/回调）→ 自动起
+// 扫码创建应用（后端能力，创建时即预置权限/事件/回调）→ 自动起
 // 长连接 → 自动补齐应用配置 → 可一键提交发布。所有写动作都由用户点击触发；
 // 服务端 TS_FEISHU_PROVISION=0 可整体关闭。等待扫码期间 3s 轮询一次，完成即停。
+// 两个闸门正交（M9，2026-10-15）：supported=本机后端有没有扫码建应用能力（只关扫码入口），
+// enabled=配置自动化总开关（关全部写操作）；判定与文案见 utils/feishuProvision.js。
 function ProvisionCard({ onCfgChanged }) {
   const [st, setSt] = useState(null)         // {supported,enabled,state,url,error,app_id,steps}
   const [result, setResult] = useState(null) // apply / publish 的结果摘要
@@ -487,7 +490,14 @@ function ProvisionCard({ onCfgChanged }) {
   }
 
   const state = st?.state || 'idle'
-  const disabled = !st?.supported || !st?.enabled
+  // 两个闸门是正交的（M9 拆细，2026-10-15）：supported=本机后端能不能扫码建应用，
+  // enabled=配置自动化总开关。曾经合成一个 disabled 喂给三个按钮 ⇒ supported 恒 false 时
+  // 「补齐应用配置」「提交发布」被连坐禁掉，整卡不可操作。判定与文案见 utils/feishuProvision.js。
+  const gates = provisionGates(st)
+  const notices = provisionNotices(st)
+  // 二维码链接：后端两版都是**对象**（oracle 原样存 SDK 回调的 dict，见 utils/feishuProvision.js），
+  // 直接渲染 st.url 会显示 [object Object]。取值统一走 provisionQrUrl（双形态容错）。
+  const qrUrl = provisionQrUrl(st)
   return (
     <Card className="max-w-xl gap-4 py-4">
       <CardHeader className="px-5 pb-0">
@@ -505,28 +515,23 @@ function ProvisionCard({ onCfgChanged }) {
               平台自动拿到 App ID / Secret、建长连接，并自动开通所需权限、订阅事件与卡片回调。
               发布新版本仍需企业管理员审批（或请管理员对该应用开「免审」）。
             </div>
-            {!st.supported && (
-              <div className="text-xs text-destructive">
-                本机 lark-oapi 版本过低（扫码创建需 ≥1.5.5）：升级依赖后重试，或按下方自检提示手工配置。
+            {notices.map((n) => (
+              <div key={n.key} className={n.tone === 'closed' ? 'text-xs text-[var(--star-text)]' : 'text-xs text-destructive'}>
+                {n.text}
               </div>
-            )}
-            {!st.enabled && (
-              <div className="text-xs text-[var(--star-text)]">
-                配置自动化已被 TS_FEISHU_PROVISION=0 关闭：可只跑自检，写操作不可用。
-              </div>
-            )}
+            ))}
             {state === 'waiting' && (
               <div className="rounded-md border border-border bg-accent/40 px-3 py-2 text-xs">
                 <div>等待你在飞书里确认（链接 10 分钟内有效）：</div>
-                {st.url ? (
-                  <div className="mt-1 break-all font-mono text-[11px]">{st.url}</div>
+                {qrUrl ? (
+                  <div className="mt-1 break-all font-mono text-[11px]">{qrUrl}</div>
                 ) : (
                   <div className="mt-1 text-muted-foreground">正在获取确认链接…</div>
                 )}
                 <div className="mt-1 flex gap-2">
-                  {st.url && (
+                  {qrUrl && (
                     <Button variant="ghost" size="sm"
-                      onClick={() => { navigator.clipboard?.writeText(st.url); toast('链接已复制') }}>
+                      onClick={() => { navigator.clipboard?.writeText(qrUrl); toast('链接已复制') }}>
                       复制链接
                     </Button>
                   )}
@@ -556,18 +561,18 @@ function ProvisionCard({ onCfgChanged }) {
               </div>
             )}
             <div className="flex flex-wrap gap-2">
-              <Button variant="outline" disabled={busy || disabled || state === 'waiting'}
+              <Button variant="outline" disabled={busy || gates.scanDisabled || state === 'waiting'}
                 onClick={() => {
                   if (st.app_id && !window.confirm(`当前已接入应用 ${st.app_id}，重新扫码会换成新应用，继续？`)) return
                   run('start', { force: !!st.app_id })
                 }}>
                 扫码创建飞书应用
               </Button>
-              <Button variant="ghost" disabled={busy || disabled}
+              <Button variant="ghost" disabled={busy || gates.writeDisabled}
                 onClick={() => run('apply', {}, '应用配置已补齐（发布后线上生效）')}>
                 补齐应用配置
               </Button>
-              <Button variant="ghost" disabled={busy || disabled}
+              <Button variant="ghost" disabled={busy || gates.writeDisabled}
                 onClick={() => {
                   // 发布 = 向企业管理员提交一个待审版本，误点代价高：先确认
                   if (!window.confirm('把当前改动作为新版本提交给企业管理员审批？（发布后需管理员同意才线上生效）')) return
@@ -575,7 +580,7 @@ function ProvisionCard({ onCfgChanged }) {
                 }}>
                 提交发布
               </Button>
-              <Button variant="ghost" disabled={busy} onClick={load}>刷新状态</Button>
+              <Button variant="ghost" disabled={busy || gates.refreshDisabled} onClick={load}>刷新状态</Button>
             </div>
             {result?.action === 'publish' && result.ok && (
               <div className="text-xs text-muted-foreground">

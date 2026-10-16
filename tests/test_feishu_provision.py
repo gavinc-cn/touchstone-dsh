@@ -286,6 +286,49 @@ class _RegStub:
         return dict(self.result)
 
 
+def test_on_qr_callback_shape_is_the_sdk_dict_not_a_string(monkeypatch):
+    """**真机口径**：`lark_oapi` 给 `on_qr_code` 的是一个 **dict**，不是一个 URL 字符串。
+
+    为什么单列一条：本文件里其它用例的 `_RegStub` 调的是 `on_qr_code(self.url)`（字符串）——
+    于是「`st["url"]` 是字符串」在**本套件里**永远成立，而真机上不成立。
+    `lark_oapi/scene/registration/__init__.py:298` 的实际调用是
+    `self._on_qr_code({"url": qr_url, "expire_in": expire_in})`；oracle 的
+    `feishu.py:3051` 是 `st["url"] = url or ""`（原样存）⇒ 生产里 `provision_status()["url"]`
+    是**对象** `{"url": …, "expire_in": …}`，HTTP 响应里 `url` 是对象。
+
+    这条不是「补一条断言」，而是钉住**oracle 的既有事实**（Python 侧不改）：
+    Node 移植件与前端都以它为准（Node 侧曾无意取 `.url` 变字符串，
+    被实例级对拍用例 `m9_feishu_device_start` 抓出；前端改双形态容错，两版后端都能用）。
+    """
+    uid = 987654
+    _reset_provision(uid)
+    seen = {}
+
+    def sdk_like(on_qr_code, on_status_change, cancel_event, addons):
+        # 逐字照 `scene/registration:298` 的调用形态：dict，不是字符串
+        payload = {"url": "https://accounts.feishu.cn/qrcode?device_code=DC-shape",
+                   "expire_in": 600}
+        seen["payload"] = payload
+        on_qr_code(payload)
+        return None            # 无凭据 ⇒ worker 走「未返回应用凭据」失败分支，URL 已落状态
+
+    monkeypatch.setattr(feishu, "_register_app_impl", sdk_like)
+    cancel = __import__("threading").Event()
+    feishu._PROVISION[uid] = {"state": "waiting", "url": "", "error": "", "app_id": "",
+                              "steps": [], "started_at": time.time(), "cancel": cancel}
+    try:
+        feishu._provision_worker(uid, cancel)      # 直接跑 worker（桩立即返回 ⇒ 同步收尾）
+        st = feishu._PROVISION[uid]
+        assert st["url"] == seen["payload"], (
+            "oracle 的口径是**原样存** `on_qr_code` 收到的值 ⇒ 真机上是 dict。"
+            "若这里变成字符串，说明 oracle 被改了（本仓硬约束：Python 侧不改），"
+            "或 SDK 换了回调形态 —— 两种都必须先改 Node 移植件与这段判据")
+        assert isinstance(st["url"], dict) and set(st["url"]) == {"url", "expire_in"}
+        assert st["state"] == "failed" and "未返回应用凭据" in st["error"]
+    finally:
+        feishu._PROVISION.pop(uid, None)
+
+
 def _wait_state(user_id, state, timeout=3.0):
     """等后台线程把状态推进到目标态（测试期轮询，超时即断言失败）。"""
     deadline = time.time() + timeout
