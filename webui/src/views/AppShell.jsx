@@ -84,6 +84,9 @@ export default function AppShell() {
   const suppressTabClick = useRef(false)                // 拖动结束后吞掉紧随的 click（防误切页）
   const tabDragRef = useRef(null)                       // {key, sx, on}
   const [projModal, setProjModal] = useState(false)
+  // 项目列表首次加载是否结束：空状态文案据此区分「还在加载」与「一个项目都没有」；
+  // 直接用 store.loading.projects 会被 5s 轮询反复置真 ⇒ 文案每 5s 闪一次
+  const [projLoaded, setProjLoaded] = useState(false)
   const [editId, setEditId] = useState(null)
   const [agents, setAgents] = useState([])
   const [dupModal, setDupModal] = useState(false)
@@ -541,7 +544,7 @@ export default function AppShell() {
   }
 
   useEffect(() => {
-    store.loadProjects()
+    store.loadProjects().finally(() => setProjLoaded(true))
     // 与旧实现一致: 5s 轮询任务与 bug 状态; 项目列表同刷(侧栏看板三列数量保持新鲜)
     refreshTimer.current = setInterval(() => {
       const st = useAppStore.getState()
@@ -609,11 +612,20 @@ export default function AppShell() {
         </div>
         <div className="flex items-center justify-between px-4 pt-3 pb-1 font-mono text-[calc(10px*var(--fs))] uppercase tracking-[0.14em] text-muted-foreground">
           <span>{showArchived ? '已归档项目' : '项目列表'}</span>
-          <button type="button" title={showArchived ? '返回项目列表' : '查看已归档项目'}
-            className="rounded p-0.5 hover:text-foreground"
-            onClick={() => setShowArchived((v) => !v)}>
-            {showArchived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
-          </button>
+          <div className="flex items-center gap-1">
+            {/* 新建项目入口：与右上角「添加项目」同一条路径，但落在左侧——
+                dsh 桌面版窗口控制按钮只盖右上角，这里任何窗口尺寸都点得到（卡 987） */}
+            <button type="button" title="添加项目"
+              className="rounded p-0.5 hover:text-foreground"
+              onClick={() => openProjectModal()}>
+              <Plus size={13} />
+            </button>
+            <button type="button" title={showArchived ? '返回项目列表' : '查看已归档项目'}
+              className="rounded p-0.5 hover:text-foreground"
+              onClick={() => setShowArchived((v) => !v)}>
+              {showArchived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
+            </button>
+          </div>
         </div>
         <div className="flex-1 space-y-1 overflow-y-auto p-2">
           {visibleProjects.map((p) => (
@@ -789,8 +801,27 @@ export default function AppShell() {
               </TabsContent>
             </Tabs>
           ) : (
-            <div className="mt-20 text-center text-sm text-muted-foreground">
-              ← 选择一个项目，或点击"添加项目"创建
+            /* 空状态（未选中项目）：首屏「建项目」入口必须自带在这里。
+               dsh 桌面版把本面板当**全窗口浮层**（dsh-plugin/src/client.js 的
+               position:fixed; inset:0），系统窗口控制按钮（最小化/最大化/关闭）画在右上角
+               盖住页面 —— 头部右上角那颗「添加项目」实测落在 x2445-2543 / y8-40，
+               正被控件区 x2421-2559 / y0-40 整块盖住（卡 987：新装用户零项目时无处可点）。
+               放在主区中央的按钮不会被任何窗口装饰覆盖。 */
+            <div className="mt-20 flex flex-col items-center gap-3 px-6 text-center text-sm text-muted-foreground">
+              {projLoaded && !store.projects.length ? (
+                <>
+                  <div className="text-[calc(15px*var(--fs))] font-semibold text-foreground">还没有项目</div>
+                  <p className="max-w-[560px] leading-relaxed">
+                    创建一个项目：绑定被测代码目录与工作目录，案例库（free_style）与
+                    Bug 报告（bug_report）会在工作目录下自动生成。
+                  </p>
+                </>
+              ) : (
+                <div>← 选择一个项目，或点击「添加项目」创建</div>
+              )}
+              <Button size="lg" data-empty-cta="add-project" onClick={() => openProjectModal()}>
+                <Plus /> 添加项目
+              </Button>
             </div>
           )}
         </div>

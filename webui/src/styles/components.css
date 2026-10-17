@@ -945,12 +945,15 @@ body.tabbar-dragging, body.tabbar-dragging * { cursor: grabbing !important; user
 .sess-qitem.on { background: var(--accent); color: var(--accent-foreground); }
 .sess-qitem-i { flex: none; font-size: calc(10px * var(--fs)); opacity: 0.7; font-family: var(--mono); }
 .sess-qitem-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* agent 问答项（2026-10-09）：与用户提问同列混排，靠 🤔 前缀 + 略亮文字区分；
-   未答/被中断的整条压暗（显示占位文案）；悬停/选中仍走上面的强调底色 */
-.sess-qitem.ask { color: var(--text); }
-.sess-qitem.ask.pend { color: var(--dim); }
-.sess-qitem.ask:hover, .sess-qitem.ask.on { color: var(--accent-foreground); }
-.sess-qitem-ask { margin-right: 4px; opacity: 0.85; }
+/* agent 问答项（2026-10-09 引入；2026-10-16 表情前缀退场 → 纯颜色标识 → **当天晚场再改跟主题**）：
+   与用户提问同列混排，**只靠文字色**区分：ask=主题色（`--ask`，各皮肤取自身主题色：
+   星夜金→金 / 经典蓝·dsh-dark·dsh-light→蓝，见 theme.css），user=次级灰；
+   未答/被中断（`.pend`）压淡但保留色相（显示占位文案）；悬停/选中**不改文字色**
+   （否则一 highlight 颜色标识就没了；用户提问项照旧走上面的 accent-foreground）。
+   左侧色条已于 2026-10-16 晚场按用户要求去掉（原来的 ::before 2px 竖条） */
+.sess-qitem.ask { color: var(--ask); }
+.sess-qitem.ask.pend { color: color-mix(in srgb, var(--ask) 55%, transparent); }
+.sess-qitem.ask:hover, .sess-qitem.ask.on { color: var(--ask); }
 /* 消息条目统一包裹层：flex 容器，使 .sess-msg 的 align-self(flex-end 右对齐气泡等) 生效 */
 /* margin-bottom 是条目间距(与 SessionView ROW_GAP=10 一致)——虚拟滚动的占位高度按
    "offsetHeight + 该间距"记账，改一处须同步另一处 */

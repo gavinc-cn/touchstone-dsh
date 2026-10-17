@@ -58,8 +58,11 @@
   --menu-bg: #1e1c26; --menu-bd: #35313f;
   --menu-fg: #e6e3ef; --menu-key: #a5a0b8; --menu-mut: #8b86a0;
   --menu-on-bg: rgba(255, 255, 255, .09); --menu-on-fg: #fff;
-  /* 「需用户作答/审批」提示色(原写死 amber #f59e0b; 白底上作为文字对比度仅约 2:1 ⇒ 抽 token) */
-  --ask: #f59e0b;
+  /* 「需用户作答/审批」提示色(原写死 amber #f59e0b; 白底上作为文字对比度仅约 2:1 ⇒ 抽 token)。
+     2026-10-16 起改为**跟随皮肤主题色**, 不再固定琥珀 —— 提问索引 agent 问答项、
+     问答/审批交互卡、看板阻塞卡「等待回答」徽标三处共用这一个 token, 故改这里三处同跟随。
+     星夜金的身份色是金(--star-text / --star), 经典蓝与 DSH 两套的身份色是蓝(见各皮肤块) */
+  --ask: var(--star-text);
   /* 压测图表补充序列色(前三个序列复用 --run/--retest/--fail, 第 4~6 个原先写死在 LoadPanels) */
   --seq-4: #8ab4f8; --seq-5: #c58af9; --seq-6: #f6bf72;
   /* 日志行的次级色(原写死在 .log-line.lp-cmd/.lp-dim) */
@@ -101,6 +104,7 @@
   --bubble-user-bg: #12305e; --bubble-user-bd: #1f6feb66; --bubble-user-text: #dbe7ff;
   --composer-focus: #1f6feb88;
   --agent-on-text: #dbe7ff;
+  --ask: var(--star-text);          /* 经典蓝: 主题色就是蓝 #58a6ff(此前漏覆盖, 会落到 :root 的琥珀) */
 }
 
 /* ================= DSH 皮肤: 与 dsh 自身外观对齐(2026-10-09) =================
@@ -143,7 +147,7 @@
   --bubble-user-bg: #2c2c2e; --bubble-user-bd: #ffffff1f; --bubble-user-text: var(--text);
   --composer-focus: #7aaaff;
   --agent-on-text: #0f1115;
-  --ask: #f59e0b;
+  --ask: var(--run);                /* DSH 深色: 品牌位是单色墨, 蓝色是业务态色 ⇒ 取 --run #7aaaff */
   --menu-bg: #2c2c2e; --menu-bd: #ffffff1f;
   --menu-fg: var(--text); --menu-key: var(--muted-foreground); --menu-mut: var(--dim);
   --menu-on-bg: #ffffff24; --menu-on-fg: var(--star-text);
@@ -190,7 +194,7 @@
   --bubble-user-bg: #edf3fe; --bubble-user-bd: #d3e2ff; --bubble-user-text: #0f1115;
   --composer-focus: #4176e6;
   --agent-on-text: #ffffff;
-  --ask: #dd8629;
+  --ask: var(--run);                /* DSH 浅色: 同深色口径, 取 --run #4176e6 */
   --menu-bg: #ffffff; --menu-bd: #0000001a;
   --menu-fg: #0f1115; --menu-key: #61666b; --menu-mut: #979da6;
   --menu-on-bg: #2631481a; --menu-on-fg: #0f1115;
