@@ -15,6 +15,10 @@
 //        思考等级选项=该模型支持档位，来自 /api/agents/models 的 efforts，空则用内置档位表),
 //        queueRows/injecting/onInject(排队消息行 + 「立即注入」按钮: 平台队列行
 //         msgId=撤销排队立即投递当前上下文; dsh 宿主 inbox 行只展示、无按钮),
+//        cancelling/onCancelQueuedRow/onCancelQueue(2026-10-17「取消排队」：
+//         行内「取消」= 只撤那一条并把原文放回输入框；底部按钮在「有排队消息且无运行轮次」
+//         时走 onCancelQueue（纯平台侧取消，不碰轮次）——此前它与「停止」共用一次点击，
+//         没有运行轮次时会被停止链路判成失败、消息撤不掉),
 //        answerPending/deliveringAnswer/onDeliverAnswer(已作答·待送达行 + 「立即送达」),
 //        slashOpen/slashQuery/slashItems/onSlashSelect/onSlashClose/onSlashDisabled(SlashMenu 透传),
 //        onPasteFiles/onDropFiles/onUploadFiles(附件上传), taRef(textarea ref, 供 SessionView autoGrow)
@@ -24,6 +28,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Send, Square, Plus, FileText, X, Zap } from 'lucide-react'
 import SlashMenu from './SlashMenu'
 import { queueStatePlaceholder } from '../utils/queueBadge'
+import { cancellableRow } from '../utils/queueRestore'
 
 /** 权限档选项（值 manual/yolo/auto + 标签与描述取自 kimi web 客户端同款文案
     ＝设计出处，见 kimi-code 仓库 i18n permission* 词条；服务端按
@@ -48,6 +53,7 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
     permMode, modelSel, modelOpts, onSetModel, onSetPermission,
     effortSel, effortOpts, onSetEffort,
     queueRows, injecting, onInject,
+    cancelling, onCancelQueuedRow, onCancelQueue,
     answerPending, deliveringAnswer, onDeliverAnswer,
     slashOpen, slashQuery, slashItems, onSlashSelect, onSlashClose, onSlashDisabled,
     onPasteFiles, onDropFiles, onUploadFiles, taRef }) {
@@ -104,6 +110,11 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
   const canStop = (queuedN || 0) > 0 || (chatRunning && (board || !(caps.queue && taskRunning)))
   // 按钮文案（两种语义共用一个按钮）：有排队消息且当前无运行 turn ⇒「取消排队」
   const stopLabel = (queuedN || 0) > 0 && !chatRunning ? '取消排队' : '停止'
+  // 两个语义的**分派点**（2026-10-17）：文案为「取消排队」时点击走纯平台侧取消动作
+  // （onCancelQueue），不再借用停止链路——没有在跑的轮次时停止回执必是 stopped=false，
+  // 用户拿到「该会话未在运行或无法停止」而排队消息其实已被取消（用户报障）。
+  // 文案为「停止」时语义不变（打断当前轮），停止的排队副作用按既有计划另批拆开。
+  const cancelOnly = stopLabel === '取消排队' && !!onCancelQueue
   // 外部会话置灰（C 批 T8）：轮次归 dsh GUI 持有，平台的停止/中断对它无效——文案为
   // 「停止」时置灰（仅置灰不隐藏，用户看得见按钮在、但停不了）；「取消排队」是平台侧
   // 动作（撤销 m: 行，不碰 dsh 侧轮次），对外部会话照常有效，不连坐
@@ -138,6 +149,9 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
           {queueRows.map((q) => {
             // 可注入：平台排队行（msgId 且未在执行）
             const canInject = caps.steer && q.msgId && q.state !== 'running'
+            // 可取消（2026-10-17）：平台排队行且未开始执行——行内「取消」只撤这一条，
+            // 并把原文放回输入框（dsh 宿主 inbox 行与「发送中」行撤不掉）
+            const canCancel = !!onCancelQueuedRow && cancellableRow(q)
             return (
               <div key={q.key} className="sess-queue-row" title={q.text}>
                 <span className={'sess-queue-tag' + (q.state === 'server' ? ' on' : '')}>
@@ -153,6 +167,14 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
                     title="立即注入：不等队列，直接投递到会话当前上下文"
                     onClick={() => onInject(q)}>
                     <Zap className="h-3 w-3" /> 立即注入
+                  </Button>
+                )}
+                {canCancel && (
+                  <Button size="sm" variant="outline" className="sess-queue-btn"
+                    disabled={cancelling === q.key}
+                    title="取消这条排队消息：撤销排队，并把原文放回输入框"
+                    onClick={() => onCancelQueuedRow(q)}>
+                    <X className="h-3 w-3" /> 取消
                   </Button>
                 )}
               </div>
@@ -306,7 +328,11 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
         {/* 停止/取消排队（有排队消息或会话运行中；两者可并存——停止不影响继续排队发送）；
             外部会话（stopGreyed）仍显示按钮但置灰：那是 dsh GUI 持有的轮次，平台停不了 */}
         {canStop && (
-          <Button variant="outline" size="sm" onClick={onStop} disabled={stopGreyed}>
+          <Button variant="outline" size="sm" title={cancelOnly
+              ? '取消排队：撤销本会话全部排队消息，并把原文放回输入框（不打断当前轮次）'
+              : '停止当前对话（打断当前轮次）'}
+            onClick={cancelOnly ? onCancelQueue : onStop}
+            disabled={cancelOnly ? cancelling === '__all__' : stopGreyed}>
             <Square /> {stopLabel}
           </Button>
         )}

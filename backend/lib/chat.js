@@ -1171,6 +1171,43 @@ export function cancelQueued({ sid = null, cardId = null } = {}, options = {}) {
   return count;
 }
 
+/**
+ * 取消排队中的消息**并回带原文**（`mode=cancel_queue` 端点的实现；用户点「取消排队」）。
+ *
+ * 与 `cancelQueued` 的差别只有「回带」：后者是停止入口共用的计数壳。用户显式取消排队时，
+ * 前端要把消息原文放回输入框，而 `msgsOfSid` 下发给前端的展示文本被截到 120 字——
+ * 回填必须由服务端给**全量原文**，否则长消息被静默截断。
+ *
+ * 逐行只在 `cancel()` 真命中（`chat_msgs` 的 queued→cancelled 原子守卫是仲裁点，R12）
+ * 时才收进结果：与 worker claim 竞态下已被抢走执行的消息既不会被取消、也不会回带，
+ * 前端不会把仍在执行的消息错放回输入框。返回按入队顺序（`msgRows` 的 created_at,id）。
+ *
+ * `filter.msgId` 非空 ⇒ 只取消该条（归属校验由端点层做，本函数只管状态）。
+ *
+ * @param {{sid?: string|null, cardId?: number|string|null, msgId?: string|null}} [filter]
+ * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
+ * @returns {{cancelled: number, msgs: Array<{id: string, text: string}>}}
+ */
+export function cancelQueuedDetail({ sid = null, cardId = null, msgId = null } = {}, options = {}) {
+  if (!sid && !cardId && !msgId) return { cancelled: 0, msgs: [] };
+  let rows;
+  if (msgId) {
+    const one = waitq.msgGet(msgId, options);
+    if (one === null || one.state !== STATE_QUEUED) return { cancelled: 0, msgs: [] };
+    rows = [one];
+  } else {
+    rows = waitq.msgRows({ sid, cardId, states: [STATE_QUEUED] }, options);
+  }
+  const msgs = [];
+  for (const row of rows) {
+    // 先取原文再取消：取消是终态迁移，但仍按「命中才回带」的次序写，读一次即用一次
+    const text = row.message === null || row.message === undefined ? '' : String(row.message);
+    if (!cancel(row.id, options)) continue;
+    msgs.push({ id: row.id, text });
+  }
+  return { cancelled: msgs.length, msgs };
+}
+
 // --------------------------------------------------------------------------
 // 立即注入（chat.py:452-493）
 // --------------------------------------------------------------------------

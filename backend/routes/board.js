@@ -64,7 +64,7 @@ import { unquote } from '../lib/query.js';
 import { DSH_EFFORT_LEVELS, DSH_PERMISSION_PRESETS, familyCapabilities, normalizeEffort,
   sessFamily } from '../lib/servercaps.js';
 import * as sessparse from '../lib/sessparse.js';
-import { injectMsg } from './sessions.js';
+import { cancelQueueAction, injectMsg } from './sessions.js';
 
 // --------------------------------------------------------------------------
 // 常量（照抄 server.py:2820-2830 / 5029-5154 的字面量）
@@ -598,6 +598,14 @@ async function apiBoardCardAction(ctx, projectId, cardId, action) {
   const [row, card] = boardOwned(ctx, projectId, cardId);
   if (row === null) return;
   if (action === 'stop') {
+    // body 在 stop 分支按需读（`ctx.readBody` 记忆化，时机对齐 Python `do_POST:1048` 的
+    // 「分派前统一读体」）：缺省（旧前端不带体）⇒ 原样停止，响应体一字不变。
+    // `mode=cancel_queue` ⇒ 会话窗「取消排队」：纯平台侧取消排队消息、不碰轮次（2026-10-17）。
+    const body = await ctx.readBody();
+    if (pyStrScalar(pyGet(body, 'mode') || '') === 'cancel_queue') {
+      cancelQueueAction(ctx, body, { cardId });
+      return;
+    }
     const hit = await board.stopCard(cardId, { db: ctx.db });
     ctx.json(200, { ok: true, stopped: hit });
     return;

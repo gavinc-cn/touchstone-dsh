@@ -214,6 +214,38 @@ def test_cancel_queued_by_card(monkeypatch):
     assert calls["rm"] == [rec["id"]]
 
 
+def test_cancel_queued_detail_returns_full_text(monkeypatch):
+    """取消排队并回带原文（mode=cancel_queue 端点）：按 sid 批量、按 msg_id 单条、
+    只回带真命中的行，且 text 是**全文**（展示面 msgs_of_sid 截 120 字，回填输入框
+    必须拿到原文）；cancelled=0 不是错误（重复取消/不存在/已开跑）。"""
+    fake, calls = _fake_runner(busy=True)
+    monkeypatch.setattr(runner, "INSTANCE", fake)
+    long_text = "长" * 300
+    r1 = chat.submit(9, "s-1", long_text, task_id=3, family="dsh_plugin")
+    r2 = chat.submit(9, "s-1", "第二条", task_id=3, family="dsh_plugin")
+    r3 = chat.submit(9, "s-2", "别的会话", task_id=4, family="dsh_plugin")
+
+    assert chat.cancel_queued_detail() == {"cancelled": 0, "msgs": []}   # 空过滤不误伤全库
+
+    # 展示面（msgs_of_sid）只给前 120 字——回填输入框必须靠 detail 的全文
+    assert len(chat.msgs_of_sid("s-1")[0]["text"]) == 120
+    out = chat.cancel_queued_detail(sid="s-1")
+    assert [m["id"] for m in out["msgs"]] == [r1["id"], r2["id"]]        # 按入队顺序
+    assert out["cancelled"] == 2
+    assert out["msgs"][0]["text"] == long_text                          # 全文，不截 120 字
+    assert waitq.msg_get(r3["id"])["state"] == chat.STATE_QUEUED        # 别的 sid 不动
+    assert calls["rm"] == [r1["id"], r2["id"]]
+
+    # msg_id 口径：只动那一条（归属校验在端点层做，本函数只管状态）；重复/不存在都回带空
+    assert chat.cancel_queued_detail(msg_id=r3["id"]) == {
+        "cancelled": 1, "msgs": [{"id": r3["id"], "text": "别的会话"}]}
+    assert waitq.msg_get(r2["id"])["state"] == chat.STATE_CANCELLED     # 单条口径不牵连同会话其它行
+    assert chat.cancel_queued_detail(msg_id=r1["id"]) == {"cancelled": 0, "msgs": []}  # 终态不复活
+    assert chat.cancel_queued_detail(msg_id="不存在的id") == {"cancelled": 0, "msgs": []}
+    assert chat.cancel_queued_detail(msg_id="不存在的id",
+                                     sid="s-1") == {"cancelled": 0, "msgs": []}
+
+
 def test_live_of_sid_tracks_queue_and_run(monkeypatch):
     """live_of_sid：本会话有排队/执行中的消息即为真（看板调和器「消息驱动
     的会话」判定——消息排队时会话尚未 busy，仅凭 busy 会漏判），终态为假。"""

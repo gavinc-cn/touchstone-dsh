@@ -554,6 +554,42 @@ test('cancel③：cancelQueued 按 sid / cardId 过滤计数；空过滤返回 0
   });
 });
 
+test('cancel③：cancelQueuedDetail 回带全文并按 sid/cardId/msgId 三口径；只回带真命中的行', async () => {
+  await withFixture('chatm4-c3', async (fx) => {
+    const pid = project(fx);
+    const removed = [];
+    chat.setRunnerInstance({ removeMsg: (msgId) => removed.push(msgId), submitMsg: () => {} });
+    // 长消息：展示面（msgsOfSid）会截到 120 字，回填输入框必须拿到全文——这是本函数存在的理由
+    const long = '长'.repeat(300);
+    insertMsg(fx.db, { id: 'd1', projectId: pid, sid: 'sid-d', message: long, state: 'queued', createdAt: 1 });
+    insertMsg(fx.db, { id: 'd2', projectId: pid, sid: 'sid-d', message: 'b', state: 'queued', createdAt: 2 });
+    insertMsg(fx.db, { id: 'd3', projectId: pid, sid: 'sid-d', message: 'c', state: 'running', createdAt: 3 });
+    insertMsg(fx.db, { id: 'd4', projectId: pid, sid: 'sid-e', cardId: 91, message: 'd', state: 'queued', createdAt: 4 });
+    insertMsg(fx.db, { id: 'd5', projectId: pid, sid: 'sid-e', cardId: 92, message: 'e', state: 'queued', createdAt: 5 });
+
+    assert.deepEqual(chat.cancelQueuedDetail({}, { db: fx.db }), { cancelled: 0, msgs: [] },
+      '空过滤返回空（不误伤全库）');
+
+    const bySid = chat.cancelQueuedDetail({ sid: 'sid-d' }, { db: fx.db });
+    assert.equal(bySid.cancelled, 2);
+    assert.deepEqual(bySid.msgs.map((m) => m.id), ['d1', 'd2'], '按入队顺序（created_at,id）');
+    assert.equal(bySid.msgs[0].text, long, '回带全文，不受展示面 120 字截断影响');
+    assert.equal(waitq.msgGet('d3', { db: fx.db }).state, 'running', 'running 不取消也不回带');
+    assert.deepEqual(removed, ['d1', 'd2'], '命中行逐条摘内存键（runner.removeMsg）');
+
+    assert.deepEqual(chat.cancelQueuedDetail({ msgId: 'd5' }, { db: fx.db }),
+      { cancelled: 1, msgs: [{ id: 'd5', text: 'e' }] }, '按 msgId 单条取消');
+    assert.equal(waitq.msgGet('d4', { db: fx.db }).state, 'queued', '单条口径不牵连同卡其它行');
+    assert.deepEqual(chat.cancelQueuedDetail({ msgId: 'd5' }, { db: fx.db }),
+      { cancelled: 0, msgs: [] }, '重复取消不回带（queued 原子守卫）');
+    assert.deepEqual(chat.cancelQueuedDetail({ msgId: 'nope' }, { db: fx.db }),
+      { cancelled: 0, msgs: [] }, '不存在的 id 静默 0');
+
+    assert.deepEqual(chat.cancelQueuedDetail({ cardId: 91 }, { db: fx.db }).msgs.map((m) => m.id),
+      ['d4'], '按 cardId 过滤');
+  });
+});
+
 // ==========================================================================
 // ④ runUnit 三条终态 + 终态钩子
 // ==========================================================================

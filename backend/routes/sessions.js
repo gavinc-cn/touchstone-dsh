@@ -49,7 +49,7 @@ import {
   sessFamily, sessionOwned, sessionPermissionMode,
 } from '../lib/servercaps.js';
 import {
-  boardOwnsSid, boardSessionRunning, interactionOfSid, projectBusy, sessionQueueState,
+  boardOwnsSid, boardSessionRunning, projectBusy, sessionQueueState,
   taskSince, unitState,
 } from '../lib/serverstate.js';
 
@@ -244,7 +244,11 @@ export async function boardSessionMessages(ctx, projectId) {
     data.card_column = owner.column_key;
     data.card_worktree = String(dbmod.rowOpt(owner, 'worktree', '') || '').trim();
     data.answer_pending = board.isAnswerPending(ownerCid, options);
-    data.interaction = interactionOfSid(sid);    // M3：调和器缓存未搬 ⇒ null（见 serverstate）
+    // 待答交互（会话窗问答对话框的数据源）：读**调和器缓存** `board._IW_CACHE`
+    // —— 由 `board.iwOnce` 每轮从 dsh 状态帧写；缓存为空/无等待时为 null。
+    // 这里曾经误用 `serverstate.interactionOfSid`（M3 的「空实例」占位，恒 null），
+    // 导致 Node 后端下会话窗永远不出现提问/审批卡片（用户报障：卡 980）。
+    data.interaction = board.interactionOfSid(sid);
     data.owned = sessionOwned(sid);              // 三态：true 池内 / false 外部 / null 未知
     data.family = family;
     if (family === 'dsh_plugin') {
@@ -700,16 +704,69 @@ export async function injectMsg(ctx, project, sid, body, taskId = null) {
  *
  * `chat.stop` 自 M4 起是 **async**（要 await 驱动的 /cancel）：漏 await 会让「停止」在
  * 响应之后才生效——`cancelQueued` 的落库态与驱动的中断调用都会晚一拍。
+ *
+ * **2026-10-17 加 `mode`**（设计《双通道继续与停止同效》§4.2(d)、本批只落平台侧）：
+ * body `{"mode":"cancel_queue"}` ⇒ 只取消排队消息、**不碰轮次**（走 `cancelQueueAction`，
+ * 响应回带被取消消息的全文供前端放回输入框）；缺省/其它值 ⇒ 原样「停止」（旧前端不带体
+ * 照常走这条，行为与响应体一字不变）。为什么必须拆开：没有在跑的轮次时会话窗那个
+ * 「取消排队」按钮走停止链路必被驱动 404 判成 stopped=false，用户看到的是
+ * 「该会话未在运行或无法停止」而排队消息其实已被取消——动作与结果对不上。
  */
 export async function taskSessionChatStop(ctx, taskId) {
-  await ctx.readBody();                                  // 见上：时机照 Python，值不消费
+  const body = await ctx.readBody();                     // 见上：时机照 Python；本批起要消费 mode
   const { task } = ctx.sessionContext(taskId);
   if (task === null) {
     ctx.error(404, 'task not found');                    // 紧凑
     return;
   }
-  await chat.stop(task.session_id || '', { db: ctx.db });
+  const sid = task.session_id || '';
+  if (pyStrOrEmpty(body.mode) === STOP_MODE_CANCEL_QUEUE) {
+    cancelQueueAction(ctx, body, { sid, taskId });
+    return;
+  }
+  await chat.stop(sid, { db: ctx.db });
   ctx.text(200, '{"ok":true}', 'application/json; charset=utf-8');   // 紧凑（Python 是字节串）
+}
+
+/** 端点 body 的 `mode` 取值：只有这一个是「取消排队」，其余（含缺省/旧前端不带体）都是「停止」 */
+export const STOP_MODE_CANCEL_QUEUE = 'cancel_queue';
+
+/**
+ * `mode=cancel_queue` 的共用实现（任务/看板两路）：**只取消平台排队消息，不碰轮次**。
+ *
+ * 这是会话窗「取消排队」按钮的服务端落点，与「停止」是两件事（用户 2026-10-16 裁定 U4：
+ * 停止只打断当前轮；取消排队是另一个显式动作）。**纯平台侧**：删的是 `chat_msgs` 排队行
+ * 与 `m:` 等待项行，不经过驱动 ⇒ 池外会话（dsh GUI 直跑/看管未接回）同样有效——这正是
+ * 原实现（借用 stop 链路，被驱动 404 判失败）修不好的那一档。
+ *
+ * 响应回带被取消消息的 `{id,text}`（**全文**，见 `chat.cancelQueuedDetail`）：前端要把
+ * 原文放回输入框，而下发给前端的排队行文本被截到 120 字。`cancelled=0` 不是错误
+ * （消息可能已被 worker 抢走执行，或已被别的路径取消）——前端据此提示「已不在排队中」。
+ *
+ * `body.msg_id` 非空 ⇒ 只取消该条（排队行的行内「取消」按钮）；归属判定照 `injectMsg`
+ * 的双/三重口径，不命中同一个 404 文案（不细分，避免暴露他人消息是否存在）。
+ *
+ * @param {object} ctx 请求上下文
+ * @param {object} body 请求体（消费 `mode`/`msg_id`）
+ * @param {{sid?: string, cardId?: number|null, taskId?: number|null, projectId?: number|null}} [scope]
+ */
+export function cancelQueueAction(ctx, body, scope = {}) {
+  const { sid = '', cardId = null, taskId = null, projectId = null } = scope;
+  const msgId = pyStrOrEmpty(body.msg_id);
+  if (msgId) {
+    const info = chat.msgInfo(msgId, { db: ctx.db });
+    // Python `sid and info.get("sid") != sid`：只有调用方给了 sid 才比 sid（看板按卡过滤）
+    if (info === null || (sid && info.sid !== sid)
+        || (projectId !== null && info.project_id !== projectId)
+        || (cardId !== null && info.card_id !== cardId)
+        || (taskId !== null && info.task_id !== taskId)) {
+      ctx.errorSpaced(404, '消息不存在或不在该会话下');
+      return;
+    }
+  }
+  const out = chat.cancelQueuedDetail(
+    { sid: sid || null, cardId, msgId: msgId || null }, { db: ctx.db });
+  ctx.json(200, { ok: true, cancelled: out.cancelled, msgs: out.msgs });
 }
 
 // ==========================================================================

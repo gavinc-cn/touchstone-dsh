@@ -248,9 +248,47 @@ test('board/session/messages：load 未 found ⇒ 200 + found:false + 派生字�
     assert.equal(payload.card_column, 'todo');
     assert.equal(payload.card_worktree, '/tmp/wt', '两侧 strip 后再下发');
     assert.equal(payload.answer_pending, false);
-    assert.equal(payload.interaction, null, 'M3 口径：调和器缓存未搬 ⇒ null（键仍在）');
+    assert.equal(payload.interaction, null, '调和器缓存为空 ⇒ null（键仍在）');
     assert.equal(payload.owned, null, 'dshevents 未连接 ⇒ 归属未知（三态里的 null）');
     assert.equal(payload.queue_state, board.QS_IDLE);
+  });
+});
+
+test('board/session/messages：interaction 取调和器缓存（会话窗问答对话框的数据源）', async () => {
+  await withFixture('sess-route-interaction', async (fx) => {
+    const pid = insertProject(fx.db, { projectDir: PROJECT_DIR });
+    const sid = makeSession('session-cccc1111-2222-4333-8444-555555555555');
+    insertCard(fx.db, pid, {
+      sessionId: sid, columnKey: 'blocked', blockKind: 'interaction', blockText: '等你答',
+    });
+    // 调和器（`board.iwOnce`）写进 `_IW_CACHE` 的就是这份形状；测试缝直接灌一条等价条目
+    board.setIwCacheForTest(sid, {
+      pending: true, busy: true, kind: 'question', qid: 'call_1', wire: 'q_0',
+      question: '用哪种颜色形态标识？', header: '颜色方案', body: '',
+      options: [{ id: 'A', label: 'A', description: '' }],
+      questions: [{
+        id: 'q_0', question: '用哪种颜色形态标识？', header: '颜色方案', body: '',
+        options: [{ id: 'A', label: 'A', description: '' }], multi_select: false,
+        allow_other: true, other_label: '其他', other_description: '',
+      }],
+      answerable: true, text: '用哪种颜色形态标识？', ts: 1,
+    });
+    try {
+      const { ctx, res } = mkCtx(fx, { search: `sid=${sid}` });
+      await boardSessionMessages(ctx, pid);
+      assert.equal(res.status, 200);
+      const payload = bodyJson(res);
+      assert.equal(payload.found, true);
+      // pending=true ⇒ 前端 SessionView 渲染 InteractionCard
+      assert.equal(payload.interaction.pending, true);
+      assert.equal(payload.interaction.qid, 'call_1');
+      assert.equal(payload.interaction.questions[0].question, '用哪种颜色形态标识？');
+      assert.equal(payload.interaction.questions[0].options[0].label, 'A');
+      // 卡片交互阻塞 ⇒ 队列态仍是 interaction_pending（两者互不替代）
+      assert.equal(payload.queue_state, board.QS_INTERACTION);
+    } finally {
+      board.resetIwState();          // 模块级缓存：用完清干净，不污染其他用例
+    }
   });
 });
 

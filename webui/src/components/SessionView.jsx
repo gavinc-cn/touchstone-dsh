@@ -14,7 +14,7 @@ import { taskApi, boardApi, projectApi } from '../api'
 import { useAppStore } from '../stores/app'
 import { toast } from '../utils/toast'
 import { renderMd } from '../utils/renderMd'
-import { absToMedia, mediaDisplayUrl } from '../utils/mediaText'
+import { absToMedia, mediaDisplayUrl, projectRoots } from '../utils/mediaText'
 import { isPlaceholderImage } from '../utils/media'
 import ComposerBar, { PERM_OPTS } from './ComposerBar'
 import { effortChoices, effortText } from '../utils/sessionEffort'
@@ -24,6 +24,7 @@ import { Button } from '@/components/ui/button'
 import { findSlashToken } from '../utils/slashToken'
 // 会话归属（C 批 T8）：外部会话提示条文案与「停止」可用性判定（纯函数层，有单测）
 import { canStop, ownedHint } from '../utils/sessionOwned'
+import { cancellableRow, cancelQueueToast, mergeRestoreText } from '../utils/queueRestore'
 // 提问索引侧栏的纯派生（用户提问 + agent 问答混排 / 回答文本解析 / 占位与悬浮文案）
 import { buildQuestionIndex, questionLabel, questionTitle } from '../utils/sessionQa'
 // 过程条目整组折叠的纯派生（分组 / seq→行映射 / 组摘要文案）
@@ -93,8 +94,8 @@ function rowAt(off, y) {
     - 无可见内容（空正文 think / 空 usage / 未知 kind）时**整体返回 null**——与改造前逐字一致，
       否则会留下只有 margin 的幽灵行（真机数据里空正文 think 占 think 的 41%）
     entries 为 append-only 不可变数据, memo 后历史消息不随新消息重渲染(避免 O(n²) renderMd) */
-const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, boardPid, boardSid,
-                                            expand, rwState, copied,
+const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, roots, boardPid,
+                                            boardSid, expand, rwState, copied,
                                             onCopy, onRewind, onOpenPath }) {
   // 回答正文里的路径链接（.md-path）：点击开文件预览弹窗。内容由
   // dangerouslySetInnerHTML 生成，故用事件委托——只拦 .md-path，普通外链保持默认跳转
@@ -114,7 +115,7 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
   const body = (() => {
   if (e.kind === 'user') {
     // 附件引用改写: 本平台上传产物 abs 路径 → 项目媒体端点 URL(气泡渲染缩略图/文件链接)
-    const text = absToMedia(e.text, pid)
+    const text = absToMedia(e.text, pid, { roots })
     const hasText = !!(e.text || '').trim()
     return (
       <>
@@ -165,10 +166,15 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
     )
   }
   if (e.kind === 'assistant') {
+    // 图片/附件引用改写（2026-10-16 修「agent 发的图都不显示」）：正文里的落盘绝对路径
+    // （agent 写的截图：`<工作目录>/board_media/…`、项目内任意位置的位图）先经 absToMedia
+    // 换成平台可访问 URL，否则 `<img src="/opt/…">` 会被浏览器按同源根拼成 `http://<宿主>/opt/…`
+    // ⇒ 404。**用户气泡一直有这一步、助手气泡漏了**，这正是卡 #980 报障的直接原因。
+    const text = absToMedia(e.text, pid, { roots })
     return (
       <div className="sess-msg assistant">
         <div className="md-body" onClick={onBodyClick}
-          dangerouslySetInnerHTML={{ __html: renderMd(e.text, { pathLinks: true }) }}></div>
+          dangerouslySetInnerHTML={{ __html: renderMd(text, { pathLinks: true }) }}></div>
       </div>
     )
   }
@@ -241,7 +247,7 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
 /** 过程组行(2026-10-10): 连续 ≥2 条过程条目收成一行摘要, 默认折起; 展开后组内条目仍各自
     折叠。row = utils/sessionGroups.buildRows 产出的 proc 行({key,seq,proc,items}); data-seq
     取组内首条 seq —— 跳转落在组内任一条目时, 定位与闪烁都落在这一行上(见 MessageList) */
-const ProcRow = memo(function ProcRow({ row, flash, expandSeqs, taskId, agent, pid,
+const ProcRow = memo(function ProcRow({ row, flash, expandSeqs, taskId, agent, pid, roots,
                                         boardPid, boardSid, onOpenPath }) {
   const ref = useRef(null)
   // 跳转落点在组内(提问索引的 agent 问答项) → 自动展开该组; 非受控写法: 只在 false→true
@@ -255,7 +261,7 @@ const ProcRow = memo(function ProcRow({ row, flash, expandSeqs, taskId, agent, p
         <summary><Wrench className="inline h-3 w-3" /> {s.text}</summary>
         <div className="sess-proc-body">
           {row.items.map((it) => (
-            <EntryBody key={it.seq} e={it} taskId={taskId} agent={agent} pid={pid}
+            <EntryBody key={it.seq} e={it} taskId={taskId} agent={agent} pid={pid} roots={roots}
               boardPid={boardPid} boardSid={boardSid} onOpenPath={onOpenPath}
               expand={!!expandSeqs && expandSeqs.has(it.seq)} />
           ))}
@@ -278,8 +284,8 @@ const ProcRow = memo(function ProcRow({ row, flash, expandSeqs, taskId, agent, p
      (贴底分支保持 state 引用) —— 否则用户小幅上滑会被任何一次重渲染拉回底部
    - props 全传原始值/稳定引用: 击键时(entries 引用不变)整棵子树被 memo 跳过 */
 const MessageList = memo(function MessageList({ entries, metaNull, found, reason,
-    taskId, agent, pid, boardPid, boardSid, flashSeq, expandSeqs, chatRunning, exitCode, boxRef,
-    atBottomRef, onScroll,
+    taskId, agent, pid, roots, boardPid, boardSid, flashSeq, expandSeqs, chatRunning, exitCode,
+    boxRef, atBottomRef, onScroll,
     jumpSeq, onJumpHandled, rwEnabled, rwBusy, rewindingMid, copiedSeq, onCopy, onRewind,
     onSwitchSession,
     onOpenPath }) {
@@ -486,8 +492,8 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
             const flash = flashSeq != null && row.items.some((it) => it.seq === flashSeq)
             if (row.proc) {
               return <ProcRow key={row.key} row={row} flash={flash} expandSeqs={expandSeqs}
-                taskId={taskId} agent={agent} pid={pid} boardPid={boardPid}
-                boardSid={boardSid} onOpenPath={onOpenPath} />
+                taskId={taskId} agent={agent} pid={pid} roots={roots}
+                boardPid={boardPid} boardSid={boardSid} onOpenPath={onOpenPath} />
             }
             const e = row.items[0]
             // 每条提问的回退按钮态：族无 rewind 能力或无 anchor 消息 id → 不渲染；
@@ -495,7 +501,7 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
             const rw = (!rwEnabled || !e.mid) ? ''
               : (rewindingMid === e.mid ? 'running' : (rwBusy ? 'busy' : 'on'))
             return <EntryBody key={row.key} e={e} wrap taskId={taskId} agent={agent}
-              pid={pid} boardPid={boardPid} boardSid={boardSid}
+              pid={pid} roots={roots} boardPid={boardPid} boardSid={boardSid}
               flash={flash} expand={!!expandSeqs && expandSeqs.has(e.seq)} rwState={rw}
               copied={copiedSeq === e.seq} onCopy={onCopy} onRewind={onRewind}
               onOpenPath={onOpenPath} />
@@ -514,8 +520,9 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
 })
 
 /* 提问索引侧边栏: 同上抽 memo,  questions 引用(useMemo 依赖 entries)不变时整棵跳过。
-   2026-10-09 起列表=用户提问 + agent 问答(ask_user_question)混排：后者以 🤔 前缀与
-   .ask 配色区分，文字取用户回答（未答/被中断为占位文案），未答的整条压暗 */
+   2026-10-09 起列表=用户提问 + agent 问答(ask_user_question)混排，文字取用户回答
+   （未答/被中断为占位文案）。2026-10-16 起去掉 🤔 表情前缀，改为纯颜色标识：
+   ask 项＝琥珀色文字 + 左侧色条（见 components.css 的 .sess-qitem.ask），未答整条压淡 */
 const QuestionBar = memo(function QuestionBar({ withQBar, qbarOpen, questions, flashSeq, onJump }) {
   if (!withQBar || !qbarOpen) return null
   return (
@@ -535,7 +542,6 @@ const QuestionBar = memo(function QuestionBar({ withQBar, qbarOpen, questions, f
               onClick={() => onJump(q)} title={questionTitle(q)}>
               <span className="sess-qitem-i">{i + 1}</span>
               <span className="sess-qitem-t">
-                {ask && <span className="sess-qitem-ask">🤔</span>}
                 {label.slice(0, 60)}{label.length > 60 ? '…' : ''}
               </span>
             </button>
@@ -792,6 +798,12 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   const [uploading, setUploading] = useState(false)    // 附件上传中（+按钮/粘贴/拖入共用）
   const [atts, setAtts] = useState([])               // 附件登记(渲染 chips 用, 元素 {md,url,abs,name,mime})
   const [pendingMsgs, setPendingMsgs] = useState([])   // 排队中的插话(乐观显示, 被会话收录后清除)
+  // 「取消排队」（2026-10-17）两件本地态：
+  //   cancelling = 正在取消的行 key（`__all__` = 底部批量；防连点）
+  //   cancelledIds = 本端刚取消的 msg_id 集合（展示掩码）——服务端行要等下一轮轮询才消失，
+  //     掩一下才「点了立刻见效」；服务端行真消失后由 useEffect 回收（只留仍在面里的）
+  const [cancelling, setCancelling] = useState('')
+  const [cancelledIds, setCancelledIds] = useState(() => new Set())
   // 会话级配置(Task 4): permMode=权限档(manual/yolo/auto；null=meta 未回读前置灰);
   // modelSel=模型乐观选择(未选时以 meta.sessionModel/项目默认兜底);
   // modelOpts=项目 agent 模型列表(模型下拉选项);
@@ -897,6 +909,10 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   // 项目行(app store): 定位当前会话所属项目的 agent_path/project_dir, 用于扫描 skill
   const pid = board ? board.projectId : task?.project_id
   const proj = appStoreProjects.find((p) => p.id === pid)
+  // markdown 正文里的本地图片引用改写用（absToMedia 形态③，2026-10-16）：项目行里的
+  // project_dir/work_dir = agent 的落盘根。useMemo 保引用稳定——EntryBody/MessageList 是
+  // memo 组件，props 引用一变整棵消息子树就会重渲染（长会话下 renderMd 是 O(n²) 级开销）。
+  const mdRoots = useMemo(() => projectRoots(appStoreProjects, pid), [appStoreProjects, pid])
 
   // skills 数据: 项目 agent 能力扫描（接口已存在; 项目级 skill 目录在 project_dir 下,
   // 与 AppShell 项目弹窗同参: project_dir 优先, 无则回落 work_dir）
@@ -1192,17 +1208,43 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     }
     for (const m of (chatState?.msgs || [])) {
       if (m.state === 'error' || !m.text || dup(m.text)) continue
+      // 已被本端取消的消息立刻从展示面摘掉（cancelledIds）：服务端行要等下一轮轮询
+      // 才消失（终态 cancelled 不在 chat.msgs 的面里），不掩就会「点了取消还在」
+      if (cancelledIds.has(m.id)) continue
       out.push({ key: 'm' + m.id, text: m.text, msgId: m.id, state: m.state })
       taken.push(m.text)
     }
     for (const p of pendingMsgs) {
       if (!p.text || dup(p.text)) continue
+      if (p.id && cancelledIds.has(p.id)) continue
       out.push({ key: 'p' + (p.id || p.ts), text: p.text,
                  msgId: p.id || '', state: 'pending' })
       taken.push(p.text)
     }
     return out
-  }, [meta?.queue, chatState, pendingMsgs])
+  }, [meta?.queue, chatState, pendingMsgs, cancelledIds])
+
+  /* ---------- 乐观 chip 与展示掩码的收口（2026-10-17） ---------- */
+  // 乐观 chip（pendingMsgs）原先只靠「三路来源按文本前 40 字去重」隐式隐藏：服务端行在场
+  // 时 chip 被去重吃掉、看着没问题；那条行一消失（取消/完成/失败回收），chip 就**重新露出**
+  // 并永久停在「排队中」——用户报障「点了取消，消息还显示在排队中」的直接成因（服务器其实
+  // 已把行置为 cancelled）。这里给 chip 一个显式收口：凡在 chat.msgs 里**出现过又消失**的
+  // id（终态 done/cancelled 不下发），说明它已有结局，chip 随之作废。
+  // 同一次轮询里回收展示掩码 cancelledIds：服务端行真的不在面里了，掩码就没用了。
+  const seenMsgIdsRef = useRef(new Set())
+  useEffect(() => {
+    const ids = new Set((chatState?.msgs || []).map((m) => m.id).filter(Boolean))
+    for (const id of ids) seenMsgIdsRef.current.add(id)
+    setPendingMsgs((arr) => {
+      const next = arr.filter((p) => !(p.id && seenMsgIdsRef.current.has(p.id) && !ids.has(p.id)))
+      return next.length === arr.length ? arr : next          // 引用不变 ⇒ React 跳过重渲染
+    })
+    setCancelledIds((prev) => {
+      if (!prev.size) return prev
+      const next = new Set([...prev].filter((id) => ids.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [chatState])
 
   /* ---------- 提问索引侧边栏 ---------- */
   // 本会话索引：用户提问（kind='user'）+ agent 问答（kind='ask'，锚定 ask_user_question
@@ -1437,6 +1479,39 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       setPendingMsgs((arr) => arr.filter((p) => p.id !== row.msgId))
     } catch (e) { toast(e.message) } finally { setInjecting('') }
   }
+  // 排队消息「取消」（2026-10-17）：**平台侧动作**——撤销平台统一队列的排队行与 m: 等待
+  // 项行，不碰会话轮次（对外部会话同样有效；这正是旧实现修不好的那一档：借用停止链路时
+  // 没有在跑的轮次必被驱动 404 判成 stopped=false，用户看到「该会话未在运行或无法停止」，
+  // 而排队消息其实已被取消）。rows 给定时只取消这些行（排队行行内「取消」），缺省取消
+  // 本会话全部平台排队行（底部「取消排队」）。成功后三件事：
+  //   ① 服务端回带的**全文**放回输入框（用户报障的预期：取消的消息重新显示在输入框中；
+  //      排队行展示文本被截 120 字，只能拿回带的全文回填）；
+  //   ② 立刻从展示面摘掉（cancelledIds）并清对应乐观 chip——服务端行要等下一轮轮询才消失；
+  //   ③ cancelled=0 如实提示「已不在排队中」（消息可能已被 worker 抢走执行），不假装成功。
+  async function cancelQueue(rows) {
+    const list = (rows && rows.length ? rows : queueRows).filter(cancellableRow)
+    if (!list.length) { toast('没有可取消的排队消息'); return }
+    const single = !!(rows && rows.length === 1)
+    const key = single ? list[0].key : '__all__'
+    setCancelling(key)
+    try {
+      const only = single ? list[0].msgId : ''
+      const r = board
+        ? await boardApi.cancelQueue(boardPid, boardCid, only)
+        : await taskApi.sessionChatCancelQueue(taskId, only)
+      const msgs = (r && r.msgs) || []
+      const ids = msgs.map((m) => m.id).filter(Boolean)
+      if (ids.length) {
+        setCancelledIds((prev) => new Set([...prev, ...ids]))
+        setPendingMsgs((arr) => arr.filter((p) => !ids.includes(p.id)))
+        setInput((prev) => mergeRestoreText(prev, msgs.map((m) => m.text)))
+        setCaretPos(-1)              // 光标未知：按输入末尾处理（/ 菜单 token 探测）
+        setSlashDismissed(true)      // 程序化回填不该把 / 菜单顶出来（用户一敲键即恢复）
+        requestAnimationFrame(() => { autoGrow(); taRef.current?.focus() })
+      }
+      toast(cancelQueueToast(msgs.length, single))
+    } catch (e) { toast(e.message) } finally { setCancelling('') }
+  }
   // 「立即送达」：已作答·待送达的答案不等项目空闲，直接交给等待中的会话
   // （board 卡片端点；送达成功后卡片解除排队占位，下轮轮询 answer_pending 归 False）
   async function deliverAnswer() {
@@ -1662,6 +1737,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       {/* 消息流(窗口化虚拟滚动: 只渲染视口附近条目) */}
       <MessageList entries={entries} metaNull={!meta} found={!!meta?.found} reason={meta?.reason}
         taskId={taskId} agent={meta?.agent || agent} pid={board ? boardPid : pid}
+        roots={mdRoots}
         boardPid={board ? boardPid : ''} boardSid={board ? boardSid : ''}
         flashSeq={flashSeq} expandSeqs={expandSeqs} chatRunning={chatRunning} exitCode={chatState?.exit_code}
         boxRef={boxRef} atBottomRef={atBottomRef} onScroll={onScroll}
@@ -1707,6 +1783,9 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
           queueRows={queueRows}
           injecting={injecting}
           onInject={injectQueued}
+          cancelling={cancelling}
+          onCancelQueuedRow={(q) => cancelQueue([q])}
+          onCancelQueue={() => cancelQueue([])}
           answerPending={answerPending}
           deliveringAnswer={deliveringAnswer}
           onDeliverAnswer={deliverAnswer}
@@ -1726,7 +1805,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       </div>{/* /sess-wrap */}
       {/* 文件预览弹窗（回答里的路径链接点击打开） */}
       {previewPath && (board ? boardPid : pid) && (
-        <FilePreview pid={board ? boardPid : pid} path={previewPath}
+        <FilePreview pid={board ? boardPid : pid} path={previewPath} roots={mdRoots}
           onClose={() => setPreviewPath('')} />
       )}
       {/* 通过前的 worktree 合并交接（2026-10-07 批次，与看板卡片同款弹框）：

@@ -399,6 +399,39 @@ def cancel_queued(sid=None, card_id=None):
     return sum(1 for r in rows if cancel(r["id"]))
 
 
+def cancel_queued_detail(sid=None, card_id=None, msg_id=None):
+    """取消排队中的消息**并回带原文**（`mode=cancel_queue` 端点的实现；用户点「取消排队」）。
+
+    与 `cancel_queued` 的差别只有「回带」：后者是停止入口共用的计数壳。用户显式取消排队时，
+    前端要把消息原文放回输入框，而 `msgs_of_sid` 下发给前端的展示文本被截到 120 字——
+    回填必须由服务端给**全量原文**，否则长消息被静默截断。
+
+    逐行只在 `cancel()` 真命中（chat_msgs 的 queued→cancelled 原子守卫是仲裁点，R12）
+    时才收进结果：与 worker claim 竞态下已被抢走执行的消息既不会被取消、也不会回带，
+    前端不会把仍在执行的消息错放回输入框。返回按入队顺序（msg_rows 的 created_at,id）。
+
+    `msg_id` 非空 ⇒ 只取消该条（归属校验由端点层做，本函数只管状态）。
+    返回 `{"cancelled": n, "msgs": [{"id", "text"}]}`；空过滤返回空（不误伤全库）。
+    """
+    if not sid and not card_id and not msg_id:
+        return {"cancelled": 0, "msgs": []}
+    if msg_id:
+        row = waitq.msg_get(msg_id)
+        if row is None or row["state"] != STATE_QUEUED:
+            return {"cancelled": 0, "msgs": []}
+        rows = [row]
+    else:
+        rows = waitq.msg_rows(sid=sid, card_id=card_id, states=(STATE_QUEUED,))
+    msgs = []
+    for r in rows:
+        # 先取原文再取消：取消是终态迁移，但仍按「命中才回带」的次序写，读一次即用一次
+        text = r["message"] if r["message"] is not None else ""
+        if not cancel(r["id"]):
+            continue
+        msgs.append({"id": r["id"], "text": str(text)})
+    return {"cancelled": len(msgs), "msgs": msgs}
+
+
 def msgs_of_sid(sid):
     """本会话消息的展示视图（排队/执行中 + 近期失败）：{id,text,state,error,created_at}。
 
