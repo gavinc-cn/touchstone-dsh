@@ -223,8 +223,8 @@ def test_slash_alias_intents_match_chinese():
     assert feishu.parse_intent("/bind AB12CD") == {"action": "bind", "groups": ["AB12CD"]}
     assert feishu.parse_intent("/project demo_proj")["groups"] == ["demo_proj"]
     assert feishu.parse_intent("/status")["groups"] == [None]
-    assert feishu.parse_intent("/status cpp_try")["groups"] == ["cpp_try"]
-    assert feishu.parse_intent("状态 cpp_try")["groups"] == ["cpp_try"]
+    assert feishu.parse_intent("/status demo_proj")["groups"] == ["demo_proj"]
+    assert feishu.parse_intent("状态 demo_proj")["groups"] == ["demo_proj"]
     assert feishu.parse_intent("/cards 42")["groups"] == ["42"]
     assert feishu.parse_intent("/card 42")["groups"] == ["42"]     # 单复数都认
     assert feishu.parse_intent("/approve 42")["groups"] == ["42"]

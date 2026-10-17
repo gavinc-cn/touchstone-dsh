@@ -235,7 +235,7 @@ def test_parse_intent_rules():
     assert feishu.parse_intent("默认项目 demo_proj") == {"action": "default_project",
                                                          "groups": ["demo_proj"]}
     assert feishu.parse_intent("状态")["groups"] == [None]
-    assert feishu.parse_intent("状态 cpp_try")["groups"] == ["cpp_try"]
+    assert feishu.parse_intent("状态 demo_proj")["groups"] == ["demo_proj"]
     assert feishu.parse_intent("通过 42")["groups"] == ["42"]
     assert feishu.parse_intent("驳回 42 登录还是失败")["groups"] == ["42", "登录还是失败"]
     assert feishu.parse_intent("作答 7 2")["groups"] == ["7", "2"]

@@ -674,7 +674,7 @@ def test_build_card_multi_question_shows_all_questions():
              "question": "第三方与系统约定的变量如何处理？",
              "options": [{"id": "l1", "label": "保持原名（推荐）",
                           "description": "容器与工具链消费，改名会破坏启动"},
-                         {"id": "l2", "label": "全部强改为 GTRADE_ 前缀"}],
+                         {"id": "l2", "label": "全部强改为 DEMO_ 前缀"}],
              "multi_select": False, "allow_other": True, "other_label": "其他"},
             {"id": "credentials", "header": "外部凭据变量",
              "question": "ANTHROPIC_API_KEY 与 GITHUB_TOKEN 是否改名？",
