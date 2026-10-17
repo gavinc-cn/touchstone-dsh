@@ -5,6 +5,8 @@
 口令，改为随机生成 16 位一次性初始口令（必须首次登录改密），随机口令只在横幅打印一次。
 2026-10-08 增：插件形态（薄壳下发 `TS_ADMIN_PASSWORDLESS=1`）种子为空口令 admin、
 不强制改密——面板本来就是免登 admin，口令只用于独立形态/直连登录。
+2026-10-16 修：横幅的第三档（空口令）文案此前落错分支，现单列并在此钉住（Node 侧同档
+见 `backend/lib/seed_hint.js`，两版逐字节相同）。
 conftest 已置套件级临时库并建表，但 admin 在套件级 init_db 时已被种子——
 各用例先清空 users 复原「空库」前提（users 无外键引用，直接 DELETE 即可）。
 """
@@ -102,11 +104,21 @@ def test_seed_hint_env_password_not_echoed(monkeypatch):
     assert "123456" not in hint
 
 
-def test_seed_hint_no_pw_after_taken(monkeypatch):
-    """随机口令已被取走（如重启后再次调用）：横幅不再重复任何口令明文。"""
+def test_seed_hint_passwordless_mode(monkeypatch):
+    """空口令档（插件形态）：说「空口令」并指路设置页，不冒充另两档话术。
+
+    2026-10-16 修：这一档此前落进第二档文案（凭空指向没设的 `TS_ADMIN_PASSWORD`），
+    或旧文案「其一次性口令已在上一次启动时打印」——该分支结构上只可能由空口令种子到达
+    （`seeded=False` 直接返回空串；`seeded=True` 且 `initial_pw` 为空 ⇔ 空口令种子），
+    两种说法都对不上。Node 侧同一档见 `backend/lib/seed_hint.js`（逐字节相同）。
+    """
     monkeypatch.delenv("TS_ADMIN_PASSWORD", raising=False)
     hint = _seed_hint(True)
-    assert "口令" in hint
+    assert "空口令（插件形态免登）" in hint
+    assert "设置页设置密码" in hint
+    for wrong in ("初始口令取自", "一次性初始口令", "上一次启动时打印"):
+        assert wrong not in hint, f"空口令档不得出现「{wrong}」：{hint}"
+    assert "口令" in hint, "文案仍需可被 `grep 口令` 捞到"
     for token in ("123456", "token_urlsafe"):
         assert token not in hint
 

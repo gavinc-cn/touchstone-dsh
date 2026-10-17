@@ -53,6 +53,7 @@ import { setMediaFetcher } from './lib/sessparse.js';
 import { pidAlive } from './lib/proc.js';
 import { respondError, respondUnsupportedMethod, sendRedirect } from './lib/http.js';
 import { acquireSingleInstance, resolveDbPath } from './lib/lock.js';
+import { seedHint } from './lib/seed_hint.js';
 import {
   Runner, reconcileUnits, setBoardFinishHook, setBoardSelfcheckHooks, setInstance,
   setLivenessProbe, setUnitHandlers, startUnitSelfcheck,
@@ -272,11 +273,9 @@ async function main() {
     const executedSteps = boot.executed.length + (again ? again.executed.length : 0);
     db = openDb(dbPath);
     purgeExpiredSessions(db);
-    const hint = !boot.seeded ? ''
-      : boot.seedPassword
-        ? `  （首次启动已创建默认账号 admin，一次性初始口令：${boot.seedPassword}`
-          + '，首次登录须修改；仅本次显示，请立即记录）'
-        : '  （首次启动已创建默认账号 admin，初始口令取自 TS_ADMIN_PASSWORD，请尽快登录修改）';
+    // 横幅文案：三档与 seedAdmin 的口令来源一一对应（见 lib/seed_hint.js；
+    // 2026-10-16 前空口令档误落「初始口令取自 TS_ADMIN_PASSWORD」文案）
+    const hint = seedHint(boot);
     // 文案只报「检查了几步」而不说「执行了几步」（M3 评审 D5）：声明式迁移在**已迁移完**的库上
     // 逐步 no-op（实测同一份快照库起停两次，表行数与文件 sha256 完全不变），旧文案
     // 「本次执行迁移 N 步」读起来像「又迁移了一遍」，排障时会误导。
@@ -312,20 +311,28 @@ async function main() {
   setBoardSelfcheckHooks({ unitManaged: board.unitManaged, refreshExtRows: board.refreshExtRows });
   const runnerInstance = new Runner(true, { dbPath });
   setInstance(runnerInstance);
-  // ---- M6.5 接线：单元执行体（`setUnitHandlers`）-----------------------------------
-  // `t:` 与 `c:` 两路**接真**：`processTask`（轮次执行体：script_retest / 复压 / retest_bug /
-  // fix / pipeline / 轮次循环）与 `processCard`（看板卡片起跑）。接线前这两路一律抛具名错误
-  // `UNIT_HANDLER_MISSING`（「任务单元轮次执行体未移植（M6）」）⇒ 实例级判据
+  // ---- M6.5/M10 接线：单元执行体（`setUnitHandlers`）--------------------------------
+  // 三路**接真**：`t:` → `processTask`（轮次执行体：script_retest / 复压 / retest_bug /
+  // fix / pipeline / 轮次循环）、`c:` → `processCard`（看板卡片起跑）、
+  // `a:` → `board.deliverAnswerUnit`（答案送达；`runner.py:1087` → `board._deliver_answer_unit`）。
+  // 接线前三路一律抛具名错误 `UNIT_HANDLER_MISSING` ⇒ 实例级判据
   // `cases-http/m6_5_runner.json` 接线前是**红**的（rounds 缺行 + error 文案不同），接线后才绿。
   //
-  // **只接两路**：`a:`（答案送达，`board._deliver_answer_unit`）仍留空缝 ⇒ 命中即抛
-  // `UnitHandlerMissing`（响亮，不静默）。这是 M5-2 划归「作答/归档族」的口，属 M7。
+  // **`a:` 是 2026-10-16 补接的（M10）**：M6.5 只接了 `t:`/`c:` 并把 `a:` 注明「属 M7」，
+  // 但 M7/M7.5/M8/M9 都没接 ⇒ 平台侧作答（TS 会话窗 / 飞书入站；「立即送达」以外的自动路径）
+  // 一律「入队成功、永远送不出去」：`runPickedUnit` 的 a: except 分支是「放回等待重投」，
+  // 于是**热旋**——真机实测后端 50% CPU、日志 5.5KB/s 涨到 3.9MB（几十万行同一句
+  // 「答案送达体未移植（M5）」，而实现体 M5 就在 `board.js` 里，缺的只是这张注册表）。
+  // 用户可见现象：在 TS 里答了没反应、答案永远停在「排队中」。与 `routes/sessions.js`
+  // 误用 M3 占位桩同属「已实现但没接线」类缺陷（判据缺口也相同：函数级单测照不到接线）。
   //
   // 位置：`setInstance` 之后、`recover()` 之前 —— 执行体在闸后（`releaseBootGate`）才可能被
   // 调用，此处注册只保证「任何一条被拾取的单元都有执行体」，不引入新的启动序。
   setUnitHandlers({
     processTask: (taskId) => runnerInstance.processTask(taskId),
     processCard: (cardId) => runnerInstance.processCard(cardId),
+    // `options` 与同段其它 board 口同款：显式传本轮解析出的 `dbPath`（缺省库口径见 db.js）
+    deliverAnswerUnit: (cardId) => board.deliverAnswerUnit(cardId, { dbPath }),
   });
   await runnerInstance.recover();
   await board.recover({ dbPath });        // ③ 硬顺序：runner.recover → board.recover → 对账
