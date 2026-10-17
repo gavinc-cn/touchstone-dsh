@@ -159,8 +159,3 @@ test('taskSince：started_at 优先、created_at 回退、格式异常给 0（�
   assert.equal(st.taskSince({}), 0);
   assert.equal(st.taskSince(null), 0);
 });
-
-test('interactionOfSid：M3 口径恒 null（调和器缓存属 M5）', () => {
-  assert.equal(st.interactionOfSid('session-x'), null);
-  assert.equal(st.interactionOfSid(''), null);
-});

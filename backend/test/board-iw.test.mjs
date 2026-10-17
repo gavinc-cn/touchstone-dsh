@@ -1126,3 +1126,55 @@ test('renameCardSession：成功回 accepted；池外 404 ⇒ 补看管后重试
     [false, '缺少会话或标题，未同步 DSH 会话名', '']);
   s.close();
 });
+
+// ==========================================================================
+// ⑪ 调和器与中枢的接线（`start_interaction_watcher` 的事件驱动面）
+// ==========================================================================
+
+/**
+ * 2026-10-16 生产实障：Node 侧调和器**只跑 60s 兜底拍**，状态帧到达不唤醒——
+ * `startInteractionWatcher` 里写的是 `dshMod.subscribe(...)`，而 `dshMod = ./dshdriver.js`
+ * 没有该导出 ⇒ `TypeError` 被空 catch 吞掉；正确别名 `eventSubscribe`（`./dshevents.js`）
+ * 成了死导入。用户可见形态：**待审核卡的追问要等 ~60s 才进「正在开发」**
+ * （生产实测：评论 23:04:51 → 卡 23:05:51 落 doing，正好一拍；调和轮间隔实测 64s）。
+ *
+ * 判据按**行为**写（不查「调了哪个函数」）：订阅者 +1，且灌一帧后 ≤1s 内
+ * 「待审核 + 本会话有排队消息」的卡被调和进 `doing`（`_reconcile_action_for` 的
+ * `review + liveMsg ⇒ to_doing`）。Python 侧同语义（`dshevents.wait` 唤醒 + 兜底）。
+ */
+test('startInteractionWatcher：订阅中枢；帧到达即调和（待审核卡 + 排队追问 ⇒ 入开发列）', async () => {
+  const s = setup('iw-kick');
+  const sid = 'session-kick-1';
+  const cid = insertCard(s.fx.db, s.pid, {
+    title: '待审核卡', columnKey: 'review', sessionId: sid,
+  });
+  // 追问已入队（`m:` 行为 `liveMsg` 判据：本卡消息在排队/在跑）
+  insertMsg(s.fx.db, { id: 'm-kick-1', projectId: s.pid, sid, cardId: cid, state: 'queued' });
+  // 中枢注册表走生产帧路径（`_onFrame`）：会话可见 + 空闲
+  dshevents.HUB._onFrame({ type: 'session/created', session_id: sid,
+    data: { cwd: s.fx.dir, owned: false } });
+  dshevents.HUB._onFrame({ type: 'agent/status', session_id: sid, data: { status: 'idle' } });
+
+  const before = [...dshevents.HUB._subscribers];
+  // 单测无真连接：`get(sid)` 在 `_connected=false` 时恒 null（`dshevents.js:get`），
+  // 实况读不到就轮不到列判定。用生产方法把链路标成在线（同 dshevents.test.mjs 的先例）。
+  const wasConnected = dshevents.HUB._connected;
+  dshevents.HUB._setConnected(true);
+  try {
+    assert.equal(board.startInteractionWatcher(), true);
+    const added = dshevents.HUB._subscribers.filter((cb) => !before.includes(cb));
+    assert.equal(added.length, 1,
+      '调和器必须订阅 dshevents 中枢（事件驱动面；未订阅＝退化 60s 兜底轮询）');
+
+    // 任一状态帧到达 ⇒ kick（`IW_MIN_INTERVAL` 0.5s 限速）⇒ 跑一轮调和
+    dshevents.HUB._onFrame({ type: 'agent/status', session_id: sid, data: { status: 'idle' } });
+    await new Promise((r) => setTimeout(r, 900));
+    assert.equal(cardRow(s.fx, cid).column_key, 'doing',
+      '帧到达后 ≤1s：待审核卡（本会话有排队追问）应被调和进「正在开发」');
+  } finally {
+    // 摘掉本用例加的订阅者（中枢是进程单例，防串味到后续用例）
+    dshevents.HUB._subscribers = dshevents.HUB._subscribers.filter((cb) => before.includes(cb));
+    dshevents.HUB._setConnected(wasConnected);
+    s.close();
+  }
+});

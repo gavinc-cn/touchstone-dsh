@@ -9,17 +9,18 @@
  *   - `boardOwnsSid`          （`_board_owns_sid`:2765）
  *   - `boardOwned`            （`_board_owned`:2748 的只读版）
  *   - `taskSince`             （`_task_since`:4747）
- *   - `interactionOfSid`      （`board.interaction_of_sid`:4688 的 M3 空实例口径）
  *
  * 命名口径：**函数 camelCase、返回字段沿用 Python 的 snake_case**（字段直接进 JSON
  * 响应，改名就是改契约）。`{state,pos,total}` / `{pending,kind,…}` 这类形状逐字同 Python。
  *
- * ## M3 的两条边界（方案 §四，逐条在这里落地并注明）
+ * ## M3 的边界（方案 §四，逐条在这里落地并注明）
  * ① `board.runningMap()` / `chat.state` 的进程内登记表在 M3 恒空 ⇒ `boardSessionRunning`
  *    的「平台在管」分支恒 false（与「刚起的 Python 实例」等价），实况 busy 分支照常走
  *    `dshevents`；真驱动下的非空分支由 M4/M5 接线后自然生效。
- * ② `board.interaction_of_sid` 读调和器缓存 `_IW_CACHE`（属 M5）⇒ 本文件按**空缓存**
- *    返回 `null`（`interaction: null` 仍在 payload 里，键集合与 Python 一致）。
+ * ② 原先这里还有一个 `interactionOfSid` 占位（「调和器缓存属 M5 ⇒ 恒 null」）——M5 已把
+ *    调和器搬进 `board.js`，该占位成了**同名的错误实现**：路由误 import 它 ⇒ Node 后端下
+ *    会话窗永远拿不到待答提问/审批（用户报障卡 980）。2026-10-16 删除，读口只用
+ *    `board.interactionOfSid`（缓存为空/无等待时自然为 null，键仍在 payload 里）。
  *
  * 数据层调用口径：M3 约定「自由函数 + 末位可选 `{db, dbPath, env}`」，本文件一律把
  * `options` 原样透传给 `runner`/`board`/`db` 的读口（路由层传 `{db: ctx.db}`）。
@@ -194,17 +195,6 @@ export function boardOwned(projectId, cardId = null, options = {}) {
     return { project, card: null };
   }
   return { project, card };
-}
-
-/**
- * `board.interaction_of_sid(sid)` 的 M3 口径：调和器缓存 `_IW_CACHE` 属 M5 ⇒ **恒 null**
- * （＝「刚起的 Python 实例」）。
- *
- * 为什么仍然发这个键：Python payload 里 `interaction` 一定在场（值可能是 null），
- * 少发键会被对拍器按「键集合差异」抓到，也会让前端多一处 `undefined` 分支。
- */
-export function interactionOfSid(sid) {
-  return sid ? null : null;   // 保留 sid 形参只为与 Python 同名同签名
 }
 
 /**

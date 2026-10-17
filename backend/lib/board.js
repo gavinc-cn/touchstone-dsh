@@ -2630,7 +2630,7 @@ export function buildTaskPrompt(project, card, extra = '') {
   const desc = String(card.description || '').trim();
   const body = [title, desc].filter((seg) => seg).join('\n\n') || '（无）';
   const workspace = cardWorkspace(project, card);
-  let p = `【任务描述】${body}\n【工作目录】${workspace}`;
+  let p = `${TASK_PROMPT_TAG}${body}\n【工作目录】${workspace}`;
   const wt = String(cardOpt(card, 'worktree') || '').trim();
   if (wt) {
     p += `\n（本任务运行在独立 git worktree 中：分支 ${branchFor(card.id)}，`
@@ -3125,6 +3125,15 @@ function requireCardSession(card, sid) {
  * 的卡会话在驱动里只剩观察 ⇒ 首跳 404 时经 `ensureWatch` 钩子（`force=true`）补看管声明后
  * 重试一次。未接线（M5-3）⇒ 不补声明、直接按失败抛（与 Python「声明失败」同一分支）。
  *
+ * **会话存活前置（2026-10-17 修卡 907「TS 侧 /compact 对已结束会话必失败」）**：上面那条
+ * 「池外回落」只对宿主里**仍活着**的会话成立；对宿主里根本没有活 agent 的会话（dsh web
+ * 重启、插件重载、久未接续的旧卡），驱动 `/compact` 必 404「会话已结束（宿主无活动 agent）」
+ * ——补看管声明也救不回来。而 dsh GUI 自己的 `/compact` 对冷会话是按需 resume 再执行命令
+ * （`dsh-api-session-controller.resolve` → `agents.resume`），故这里与投递腿 `deliverNow`
+ * 同款：先 `ensureCardSession` 接回（判据/边界同它——中枢未对齐按「未知」不动、sync 卡不
+ * 收养、回滚阀 `TS_HOST_SESSION_REVIVE=0` 时不动，均为零请求），再走下面的两跳。接不回
+ * **不在此收口**：照旧走两跳，由驱动 404 文案兜底（与修复前完全一致）。
+ *
  * `sid` 必须属于该卡片；不支持的族抛 `Error`（server 转 400）。**async**。
  * @returns {Promise<void>}
  */
@@ -3132,6 +3141,8 @@ export async function compactSession(project, card, sid, options = {}) {
   requireCardSession(card, sid);
   const family = agentFamily(project.agent_path || '');
   if (family !== 'dsh_plugin') throw new Error(RETIRED_MSG);
+  // 会话存活前置：宿主已失去该会话 ⇒ 先按 resume 语义接回，再压缩（与投递同款）
+  await ensureCardSession(project, card, sid, options);
   let last = '';
   for (const attempt of [1, 2]) {
     try {
@@ -3910,6 +3921,12 @@ export const SYNC_BUSY_MTIME_S = 120;
 export const SYNC_TITLE_MAX = 200;
 /** sync 卡描述上限（Python `SYNC_DESC_MAX`） */
 export const SYNC_DESC_MAX = 2000;
+/**
+ * 平台任务提示词的段标（Python `TASK_PROMPT_TAG`）：`buildTaskPrompt` 的首段。
+ * 除拼提示词外还用作**判据**——会话首问以它开头 ⇒ 这个会话是平台按某张卡片的内容拼
+ * 提示词启动的（2026-10-16 起这类卡的标题/描述也跟随 DSH，见 `isPlatformTaskSession`）。
+ */
+export const TASK_PROMPT_TAG = '【任务描述】';
 
 /** 已跑过「存量子代理卡软删收口」的项目 id（Python `_SYNC_SUBAGENT_SWEPT`，每项目一轮） */
 const SYNC_SUBAGENT_SWEPT = new Set();
@@ -4092,24 +4109,67 @@ export function autoTitleForms(item, sid) {
 export const _auto_title_forms = autoTitleForms;
 
 /**
- * 存量 sync 卡按「DSH 当前标题 + 首问全文」补齐的字段 dict（Python `_sync_card_follow`；
+ * 卡面字段是否仍是「平台按卡片内容拼进首问」的**原文形态**（Python `_in_first_prompt`；
+ * 判自动写入用）。
+ *
+ * 平台起会话时把卡片标题/描述原样拼进首问（`buildTaskPrompt`：标题并入【任务描述】段、
+ * 与描述空行分隔）⇒ 卡面字段只要没被用户改过，就必然能在首问原文里原样找到；用户后来
+ * 改写过的文本通常不在（⇒ 不覆盖，尊重用户编辑）。空/纯空白一律 false（空标题由
+ * `autoTitleForms` 那一档负责）。
+ * @param {string} text
+ * @param {object} item
+ * @returns {boolean}
+ */
+export function inFirstPrompt(text, item) {
+  const t = String(text === null || text === undefined ? '' : text).trim();
+  return Boolean(t) && String(item.first_prompt || '').includes(t);
+}
+
+/** `_in_first_prompt` 的 Python 名别名。 */
+export const _in_first_prompt = inFirstPrompt;
+
+/**
+ * 该会话是否「平台按某张卡片的内容拼提示词启动的」（Python `_is_platform_task_session`；
+ * 判据 = 首问以段标开头）。
+ *
+ * 卡片启动腿（`enterDoing` → `buildTaskPrompt`）拼的首问以 `TASK_PROMPT_TAG` 开头；
+ * 用户在 dsh GUI 里直跑的会话首问是用户原文、续跑腿是「继续」，都不会命中。用于把正向
+ * 同步（DSH 标题/首问 → 卡面）从 sync 卡扩到**平台从看板启动过会话的卡**（2026-10-16
+ * 用户诉求：卡面标题/正文与 DSH 保持一致；见 spec/board §48）。
+ * @param {object} item
+ * @returns {boolean}
+ */
+export function isPlatformTaskSession(item) {
+  return String(item.first_prompt || '').replace(/^\s+/, '').startsWith(TASK_PROMPT_TAG);
+}
+
+/** `_is_platform_task_session` 的 Python 名别名。 */
+export const _is_platform_task_session = isPlatformTaskSession;
+
+/**
+ * 卡面按「DSH 当前标题 + 首问全文」补齐的字段 dict（Python `_sync_card_follow`；
  * 无变化返回 `{}`）。
  *
  * 只认「主会话」：遍历到的会话不是卡的主会话（多会话并集里的子会话）时不动。
- * 只在卡仍由平台自动写入时动——用户在卡面行内改过标题就整张卡不再自动覆盖（描述也不动）；
- * 描述仅在为空、或仍是**旧口径自动写入**（首问除首行）时改成首问全文。
+ * 只在卡仍由平台自动写入时动——卡标题 ∈ `autoTitleForms`（空 / sid 短码 / 任一枚会话
+ * 标题事件 / 旧口径的首问首行）**或**仍是平台拼进首问的原文（`inFirstPrompt`，
+ * 2026-10-16 增：服务「平台从看板启动过会话的卡」——它的标题是用户在卡里敲的原文，
+ * 不在任何标题事件里）；用户在卡面行内改过标题就整张卡不再自动覆盖（描述也不动）。
+ * 描述仅在为空、仍是**旧口径自动写入**（首问除首行）、或仍是平台拼进首问的原文时改成
+ * 首问全文；用户写过的描述不覆盖。
  * @returns {object}
  */
 export function syncCardFollow(card, item, sid) {
   if (String(card.session_id || sid) !== String(sid)) return {};
   const curTitle = String(card.title || '').trim();
-  if (!autoTitleForms(item, sid).has(curTitle)) return {};
+  if (!autoTitleForms(item, sid).has(curTitle) && !inFirstPrompt(curTitle, item)) return {};
   const [title, desc] = syncCardFields(item, sid);
   const out = {};
   if (curTitle !== title) out.title = title;
   const curDesc = String(card.description || '').trim();
   const legacyDesc = splitFirstPrompt(item.first_prompt || '')[1];
-  if (desc && curDesc !== desc && (curDesc === '' || curDesc === legacyDesc)) {
+  if (desc && curDesc !== desc
+      && (curDesc === '' || curDesc === legacyDesc || inFirstPrompt(curDesc, item))) {
     out.description = desc;
   }
   return out;
@@ -4126,6 +4186,10 @@ export const _sync_card_follow = syncCardFollow;
  * busy→doing / 空闲→review；存量 sync 卡按同口径补齐 + 归档→done；会话存储被删的 sync 卡
  * 自动进 done；绑子代理会话的存量 sync 卡收口进回收站（每项目一轮）；两类误建卡的存量也按
  * 同款口径收口（每项目一轮）。sync 卡不占 runner 项目占用（外部会话平台控制不了）。
+ * **平台从看板启动过会话的卡**（用户建卡 → 开始/回车启动，首问 = 平台拼的任务提示词，
+ * 见 `isPlatformTaskSession`）同样按上面同一口径补齐卡面——但**列语义不动**：归档/取消
+ * 归档的列映射与各类存量收口仍只服务 `origin='sync'` 卡（用户自己的卡，平台只同步
+ * 标题/描述，不替用户搬列、不软删）。用户改过卡名 ⇒ 整卡不动（含描述）。
  *
  * **async**：本函数自身不打驱动，但 `setCardPlaceholder`→无；`webBusy` 走 `dshevents` 内存读。
  * 除 `subagentSession`（注入缝）外全同步——保持 `async` 只为「调用方统一 await」的形态一致。
@@ -4164,11 +4228,14 @@ export async function syncSessions(project, options = {}) {
         { session_id: sid, sessions: pyJsonDumps([sid]), column_key: col, origin: 'sync' },
         options);
       created.push(cid);
-    } else if (c.origin === 'sync') {
-      // 首问补齐（2026-10-07）：标题/描述仍是平台自动写入形态时按首问覆盖
+    } else if (c.origin === 'sync' || isPlatformTaskSession(it)) {
+      // 卡面补齐（2026-10-07 起服务 sync 卡；2026-10-16 起扩到「平台从看板启动过会话的卡」，
+      // 见 `syncCardFollow`）：标题/描述仍是平台自动写入形态时按 DSH 当前标题 + 首问全文
+      // 覆盖（用户改过名整卡不动）
       const fields = syncCardFollow(c, it, sid);
       if (Object.keys(fields).length) dbmod.updateBoardCard(c.id, true, fields, options);
-      if ((c.column_key === 'doing' || c.column_key === 'review')
+      if (c.origin === 'sync'
+          && (c.column_key === 'doing' || c.column_key === 'review')
           && !hasActiveRun(c.id)) {
         // dsh 的 busy/空闲 列映射已移交调和器；此处保留归档→done（archived 来源=
         // list_sessions 的宿主归档集文件读，与调和器读驱动帧是两条独立通道）
@@ -5070,8 +5137,14 @@ export function startInteractionWatcher() {
     }, delay).unref?.();
   };
   try {
-    dshMod.subscribe(() => kick());
-  } catch { /* 订阅面不可用（未连接）：兜底拍照常 */ }
+    eventSubscribe(() => kick());
+  } catch (e) {
+    // 留痕（2026-10-16 实障）：这里原本写的是 `dshMod.subscribe(...)`——`dshMod` 是
+    // `./dshdriver.js`（无该导出），TypeError 被空 catch 吞掉 ⇒ 事件面从没接上，调和器
+    // 退化成只有 `IW_SAFETY_SECONDS` 兜底拍（生产实测：待审核卡追问后 ~60s 才进开发列）。
+    // 事件面若真的不可用，必须能定位（不再是静默降级）。
+    console.log(`[board] 调和器事件订阅失败（退化为 ${IW_SAFETY_SECONDS}s 兜底轮询）: ${errText(e)}`);
+  }
   IW_TIMER = setInterval(() => {
     IW_LAST = nowSec();
     void iwTick();                     // 兜底对账（60s）；事件面未接时的唯一驱动

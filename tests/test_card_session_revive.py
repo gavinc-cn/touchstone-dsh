@@ -1,4 +1,4 @@
-# 卡片会话「宿主已失去」时的投递自愈单测（修卡 934，2026-10-10）：
+# 卡片会话「宿主已失去」时的自愈单测（修卡 934 / 卡 907）：
 #   ① 报障现场——卡 934 的会话在 2026-10-10 01:06:48 被插件热重载 dispose
 #      （`turn/end {kind:aborted, reason:{kind:disposed}}`），宿主里从此没有活 agent；
 #      用户再发评论 / 点「立即注入」时，驱动回 404「会话不在驱动池中」，
@@ -8,7 +8,13 @@
 #      同源的 resume 语义接回宿主再投递；sync 卡（用户在 dsh 直跑的会话）维持
 #      C 批「只投递不接管」，不 resume、给明确文案；
 #   ③ 不变量——会话在场（owned=true）、中枢未对齐/未知一律**零 `/session` 请求**，
-#      pool 内外既有行为一个字节不变。
+#      pool 内外既有行为一个字节不变；
+#   ④ 同一判据的**第二条动作腿**（2026-10-17 修卡 907「TS 侧 /compact 对已结束会话
+#      必失败」）：卡片 compact 也走「先接回再动作」——宿主里没有活 agent 的会话
+#      （dsh web 重启 / 插件重载 / 久未接续的旧卡）在驱动 `/compact` 上必 404
+#      「会话已结束（宿主无活动 agent）」，而 dsh GUI 自己的 `/compact` 是按需
+#      resume（`dsh-api-session-controller.resolve` → `agents.resume`）后再执行命令。
+#      sync 卡与中枢未对齐两档不接回，行为与文案一字不变。
 #
 # 姿势沿用 tests/test_external_channel.py：真客户端 dshdriver 打真 HTTP 替身
 # （tests/fakedriver.py），全程零真实网络、零 LLM、零子进程。
@@ -300,5 +306,99 @@ def test_revive_valve_off_keeps_old_behaviour(monkeypatch):
         stats = drv.stats()
         assert stats.get("/session", 0) == 0                   # 阀关：不接回
         assert stats.get("/steer", 0) == 1                     # 退回修复前行为
+    finally:
+        drv.stop()
+
+
+# ---------- ④ 卡片 compact：宿主已失去会话 ⇒ 先接回再压缩（修卡 907，2026-10-17）----------
+
+def test_compact_revives_lost_session_then_compacts(monkeypatch):
+    """冷会话（宿主里已没有活 agent）⇒ 先 `/session` 接回，再 `/compact`。
+
+    报障现场（卡 907，项目 126，平台自建卡）：卡在 review、会话是 9 天前跑完的，
+    宿主里没有活 agent ⇒ 会话窗 `/compact` 与卡详情「compact」按钮一律 toast
+    `compact 失败: 会话已结束（宿主无活动 agent）: session-4e00af1c-…`。
+    dsh GUI 的 `/compact` 对冷会话是「按需 resume 再执行命令」，平台这里对齐它。
+    """
+    mark = os.path.join(tempfile.mkdtemp(prefix="ts-revive-mk-"), "calls.log")
+    drv = _real_driver(monkeypatch, mark=mark)
+    try:
+        _hub(monkeypatch, {})                       # 可信快照：宿主里已经没有这个会话
+        proj = _proj()
+        sid = "session-cold-compact"
+        card = _card(proj, sid)
+        board.compact_session(proj, card, sid)      # 不抛 = 成功
+        assert _call_names(drv) == ["/session", "/compact"]   # 先接回、再压缩
+        assert _calls(drv)[0]["resume"] is True               # 是 resume 不是新建
+        assert sid in drv.sessions                            # 已接回驱动池
+    finally:
+        drv.stop()
+
+
+def test_compact_live_session_sends_no_resume(monkeypatch):
+    """会话在场（中枢可信 ∧ 有该 sid）⇒ 零接回请求，直接压缩——既有路径一字未动。"""
+    mark = os.path.join(tempfile.mkdtemp(prefix="ts-revive-mk-"), "calls.log")
+    drv = _real_driver(monkeypatch, mark=mark)
+    try:
+        proj = _proj()
+        sid = "session-warm-compact"
+        card = _card(proj, sid)
+        drv.create(sid, cwd=proj["project_dir"])               # 驱动池里已有它
+        _hub(monkeypatch, {sid: {"owned": True, "status": "idle"}})
+        board.compact_session(proj, card, sid)
+        assert _call_names(drv) == ["/compact"]
+        assert drv.stats().get("/session", 0) == 0             # 零接回请求
+    finally:
+        drv.stop()
+
+
+def test_compact_unaligned_hub_never_revives(monkeypatch):
+    """中枢未对齐（快照不可信）⇒ 未知 ≠ 已失去：不接回，压缩照旧按驱动 404 收口。"""
+    mark = os.path.join(tempfile.mkdtemp(prefix="ts-revive-mk-"), "calls.log")
+    drv = _real_driver(monkeypatch, mark=mark)
+    try:
+        _hub(monkeypatch, {}, aligned=False)
+        proj = _proj()
+        sid = "session-unaligned-compact"
+        card = _card(proj, sid)
+        with pytest.raises(RuntimeError) as ei:
+            board.compact_session(proj, card, sid)
+        assert "compact 失败" in str(ei.value)
+        assert drv.stats().get("/session", 0) == 0             # 未知态绝不乱 resume
+    finally:
+        drv.stop()
+
+
+def test_compact_sync_card_lost_not_adopted(monkeypatch):
+    """sync 卡（用户在 dsh 直跑的外部会话）冷会话 ⇒ 不接管：零 `/session` 请求。"""
+    mark = os.path.join(tempfile.mkdtemp(prefix="ts-revive-mk-"), "calls.log")
+    drv = _real_driver(monkeypatch, mark=mark)
+    try:
+        _hub(monkeypatch, {})
+        proj = _proj()
+        sid = "session-sync-cold-compact"
+        card = _card(proj, sid, origin="sync")
+        with pytest.raises(RuntimeError) as ei:
+            board.compact_session(proj, card, sid)
+        assert "compact 失败" in str(ei.value)
+        assert drv.stats().get("/session", 0) == 0             # C 批：不收养外部会话
+    finally:
+        drv.stop()
+
+
+def test_compact_revive_failure_keeps_driver_text(monkeypatch):
+    """接不回（会话文件缺失 / 驱动不可达）⇒ 不吞错：仍按驱动 404 文案收口，只试一次接回。"""
+    mark = os.path.join(tempfile.mkdtemp(prefix="ts-revive-mk-"), "calls.log")
+    drv = _real_driver(monkeypatch, mark=mark)
+    try:
+        drv.session_fail = "会话恢复失败: 会话不存在"
+        _hub(monkeypatch, {})
+        proj = _proj()
+        sid = "session-cold-unrevivable"
+        card = _card(proj, sid)
+        with pytest.raises(RuntimeError) as ei:
+            board.compact_session(proj, card, sid)
+        assert "compact 失败" in str(ei.value)
+        assert drv.stats().get("/session", 0) == 1             # 只接一次，不重试刷请求
     finally:
         drv.stop()

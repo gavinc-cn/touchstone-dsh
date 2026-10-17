@@ -1557,6 +1557,11 @@ _runs_lock = threading.Lock()
 # 单卡片 prompt 长度上限（与 chat.MESSAGE_MAX 对齐）
 PROMPT_MAX = 20000
 
+# 平台任务提示词的段标（`build_task_prompt` 的首段）。除拼提示词外还用作**判据**：
+# 会话首问以它开头 ⇒ 这个会话是平台按某张卡片的内容拼提示词启动的（2026-10-16 起，
+# 这类卡的标题/描述也跟随 DSH，见 `_is_platform_task_session`）。
+TASK_PROMPT_TAG = "【任务描述】"
+
 
 def build_task_prompt(project, card, extra=""):
     """全量任务提示词：任务描述（卡片标题并入描述）+ 工作目录 + 附加段。
@@ -1580,7 +1585,7 @@ def build_task_prompt(project, card, extra=""):
     desc = (card["description"] or "").strip()
     body = "\n\n".join(seg for seg in (title, desc) if seg) or "（无）"
     workspace = card_workspace(project, card)
-    p = (f"【任务描述】{body}\n"
+    p = (f"{TASK_PROMPT_TAG}{body}\n"
          f"【工作目录】{workspace}")
     wt = (_card_opt(card, "worktree") or "").strip()
     if wt:
@@ -2304,6 +2309,17 @@ def compact_session(project, card, sid):
     外部会话的 agent 已在宿主 store 注册，`/session` resume 必撞
     `agent "…" is already registered` ⇒ 500（C 批 T1 实测）。
 
+    **会话存活前置（2026-10-17 修卡 907「TS 侧 /compact 对已结束会话必失败」）**：
+    上面那条「不能先接管」只对**宿主里仍活着**的会话成立；对宿主里**根本没有活 agent**
+    的会话（dsh web 重启、插件重载、久未接续的旧卡——用户报障卡 907 就是 9 天前的
+    平台自建卡），驱动 `/compact` 必 404「会话已结束（宿主无活动 agent）」，上面两跳
+    再怎么补声明也救不回来。而 dsh GUI 自己的 `/compact` 对冷会话是**按需 resume 再执行
+    命令**（`dsh-api-session-controller.resolve` → `agents.resume`），故这里与投递腿
+    `_deliver_now` 同款：先 `_ensure_card_session` 接回（判据/边界同它——中枢未对齐按
+    「未知」不动、sync 卡不收养、回滚阀 `TS_HOST_SESSION_REVIVE=0` 时不动，均为零请求），
+    再走下面的压缩两跳。接不回**不在此收口**：照旧走两跳，由驱动 404 文案兜底（与修复前
+    完全一致）。
+
     sid 必须属于该卡片（sessions 清单或主 session_id），不支持的族抛
     RuntimeError（server 转 400）。
     """
@@ -2314,6 +2330,8 @@ def compact_session(project, card, sid):
         # 单族化：非 dsh 即退场族项目（migrate_p7b 改写后不再出现），
         # 给「改绑 dsh 插件」的明确提示（B0 防呆口径）
         raise RuntimeError(agents.RETIRED_MSG)
+    # 会话存活前置：宿主已失去该会话 ⇒ 先按 resume 语义接回，再压缩（与投递同款）
+    _ensure_card_session(project, card, sid)
     # 路线 A P3（2026-10-03）：走驱动 `/compact`（插件侧执行宿主 `/compact`
     # 命令；`ctx.compaction` 服务在插件 ctx 不可注入，命令路径是 P0 探针的结论）。
     # 触发即返回——压缩在 dsh 进程内异步进行（要过一次模型），失败落宿主日志。
@@ -3450,6 +3468,9 @@ SYNC_BUSY_MTIME_S = 120
 # 用户改名后，同步节拍跟着改卡标题）、描述 = 主会话第一次用户提问**全文**。
 # 旧口径（2026-10-07~10-10：「首问首行进标题、其余行进描述」）已退场，存量卡由
 # `_sync_card_follow` 在首个同步拍回填（详见 board spec §48）。
+# 2026-10-16 扩面（用户诉求「卡面标题/正文与 DSH 保持一致」）：同一口径从
+# `origin='sync'` 卡扩到**平台从看板启动过会话的卡**（判据 = 会话首问是平台拼的
+# 任务提示词，见 `_is_platform_task_session`）；列语义与存量收口仍只服务 sync 卡。
 SYNC_TITLE_MAX = 200   # 标题上限（沿用建卡既有截断：insert_board_card 调用处 [:200]）
 SYNC_DESC_MAX = 2000   # 描述上限（防一次长提问把看板负载撑大）
 
@@ -3611,19 +3632,45 @@ def _auto_title_forms(item, sid):
     return forms
 
 
+def _in_first_prompt(text, item):
+    """卡面字段是否仍是「平台按卡片内容拼进首问」的**原文形态**（判自动写入用）。
+
+    平台起会话时把卡片标题/描述原样拼进首问（`build_task_prompt`：标题并入
+    【任务描述】段、与描述空行分隔）⇒ 卡面字段只要没被用户改过，就必然能在首问
+    原文里原样找到。用户后来改写过的文本通常不在（⇒ 不覆盖，尊重用户编辑）。
+    空/纯空白一律 False（空标题由 `_auto_title_forms` 那一档负责）。
+    """
+    t = (text or "").strip()
+    return bool(t) and t in (item.get("first_prompt") or "")
+
+
+def _is_platform_task_session(item):
+    """该会话是否「平台按某张卡片的内容拼提示词启动的」（判据 = 首问以段标开头）。
+
+    卡片启动腿（`enter_doing` → `build_task_prompt`）拼的首问以 `TASK_PROMPT_TAG`
+    开头；用户在 dsh GUI 里直跑的会话首问是用户原文、续跑腿是「继续」，都不会命中。
+    用于把正向同步（DSH 标题/首问 → 卡面）从 sync 卡扩到**平台从看板启动过会话的卡**
+    （2026-10-16 用户诉求：卡面标题/正文与 DSH 保持一致；见 spec/board §48）。
+    """
+    return (item.get("first_prompt") or "").lstrip().startswith(TASK_PROMPT_TAG)
+
+
 def _sync_card_follow(card, item, sid):
-    """存量 sync 卡按「DSH 当前标题 + 首问全文」补齐的字段 dict（无变化返回 {}）。
+    """卡面按「DSH 当前标题 + 首问全文」补齐的字段 dict（无变化返回 {}）。
 
     只认「主会话」：遍历到的会话不是卡的主会话（多会话并集里的子会话）时不动。
-    只在卡仍由平台自动写入时动（卡标题 ∈ `_auto_title_forms`：空 / sid 短码 / 任一枚
-    会话标题事件 / 旧口径的首问首行）——用户在卡面行内改过标题就整张卡不再自动覆盖
-    （描述也不动）。描述仅在为空、或仍是**旧口径自动写入**（首问除首行）时改成首问
-    全文；用户写过的描述不覆盖。
+    只在卡仍由平台自动写入时动——卡标题 ∈ `_auto_title_forms`（空 / sid 短码 / 任一枚
+    会话标题事件 / 旧口径的首问首行）**或** 仍是平台拼进首问的原文（`_in_first_prompt`，
+    2026-10-16 增：服务「平台从看板启动过会话的卡」——它的标题是用户在卡里敲的原文，
+    不在任何标题事件里）；用户在卡面行内改过标题就整张卡不再自动覆盖（描述也不动）。
+    描述仅在为空、仍是**旧口径自动写入**（首问除首行）、或仍是平台拼进首问的原文时
+    改成首问全文；用户写过的描述不覆盖。
     """
     if (card["session_id"] or sid) != sid:
         return {}
     cur_title = (card["title"] or "").strip()
-    if cur_title not in _auto_title_forms(item, sid):
+    if (cur_title not in _auto_title_forms(item, sid)
+            and not _in_first_prompt(cur_title, item)):
         return {}
     title, desc = _sync_card_fields(item, sid)
     out = {}
@@ -3631,7 +3678,8 @@ def _sync_card_follow(card, item, sid):
         out["title"] = title
     cur_desc = (card["description"] or "").strip()
     legacy_desc = _split_first_prompt(item.get("first_prompt") or "")[1]
-    if desc and cur_desc != desc and cur_desc in ("", legacy_desc):
+    if (desc and cur_desc != desc
+            and (cur_desc in ("", legacy_desc) or _in_first_prompt(cur_desc, item))):
         out["description"] = desc
     return out
 
@@ -3653,6 +3701,10 @@ def sync_sessions(project):
     todo/blocked/done 后不再自动搬）；会话存储被删的 sync 卡自动进 done；绑子代理
     会话的存量 sync 卡收口进回收站（每项目一轮）；上述两类误建卡的存量也按同款
     口径收口（每项目一轮，见函数尾注释）。
+    **平台从看板启动过会话的卡**（用户建卡 → 开始/回车启动，首问 = 平台拼的任务提示词，
+    见 `_is_platform_task_session`）同样按上面同一口径补齐卡面——但**列语义不动**：
+    归档/取消归档的列映射与各类存量收口仍只服务 `origin='sync'` 卡（用户自己的卡，
+    平台只同步标题/描述，不替用户搬列、不软删）。用户改过卡名 ⇒ 整卡不动（含描述）。
     sync 卡不占 runner 项目占用（外部会话平台控制不了，防堵死统一队列）。
     """
     if not settings_of(project["id"]).get("sync_sessions", True):
@@ -3699,13 +3751,15 @@ def sync_sessions(project):
             db.update_board_card(cid, session_id=sid, sessions=json.dumps([sid]),
                                  column_key=col, origin="sync")
             created.append(cid)
-        elif c["origin"] == "sync":
-            # 首问补齐（2026-10-07）：标题/描述仍是平台自动写入形态时按首问覆盖
-            # （覆盖「建卡时提问还没到」的竞态与旧口径的存量卡；用户改过名不动）
+        elif c["origin"] == "sync" or _is_platform_task_session(it):
+            # 卡面补齐（2026-10-07 起服务 sync 卡；2026-10-16 起扩到「平台从看板启动过
+            # 会话的卡」，见 `_sync_card_follow`）：标题/描述仍是平台自动写入形态时按
+            # DSH 当前标题 + 首问全文覆盖（用户改过名整卡不动）
             fields = _sync_card_follow(c, it, sid)
             if fields:
                 db.update_board_card(c["id"], **fields)
-            if c["column_key"] in ("doing", "review") and not _has_active_run(c["id"]):
+            if (c["origin"] == "sync" and c["column_key"] in ("doing", "review")
+                    and not _has_active_run(c["id"])):
                 # dsh 的 busy/空闲 列映射已移交调和器（事件驱动，异常不搬列）；
                 # 此处保留归档→done（archived 来源=list_sessions 的宿主归档集文件读，
                 # 与调和器读驱动帧是两条独立通道：文件读不依赖驱动链路，重启/断连时

@@ -2,7 +2,8 @@
 # session/title 事件，与 dsh GUI 侧栏 last-wins 一致）、描述 = 主会话第一次用户
 # 提问**全文**。本文件钉：建卡口径、DSH 标题自动更新（LLM 标题落盘）后的同步、
 # 旧口径存量卡回填、用户手工改名/描述不被覆盖、非主会话不参与、回落链
-# （无标题事件→首问首行→sid 短码）、截断上限、幂等。
+# （无标题事件→首问首行→sid 短码）、截断上限、幂等；以及 2026-10-16 扩面——
+# **平台从看板启动过会话的卡**（origin 空）同样跟随 DSH，但列语义仍只服务 sync 卡。
 # 会话枚举一律打桩（不读真实 ~/.dsh/sessions），DB 走 conftest 的临时库。
 import json
 import os
@@ -148,7 +149,7 @@ def test_title_only_session_still_projected(monkeypatch):
 
 def test_platform_owned_task_session_not_projected(monkeypatch):
     """B 类闸（2026-10-09）：平台自己的任务会话（`tasks.session_id`）不再被当成
-    「外部直跑会话」重复投影成卡——实测 gtrade 项目 7 张压测/任务会话卡即此，
+    「外部直跑会话」重复投影成卡——实测某项目 7 张压测/任务会话卡即此，
     任务侧本就有入口（任务详情/日志）。"""
     proj = _mk_project()
     tid = db.insert_task(proj["id"], "压测任务", 0, "不复测", "rounds", "1")
@@ -319,14 +320,150 @@ def test_single_line_prompt_description_is_whole_prompt(monkeypatch):
     assert c["title"] == "单行标题" and c["description"] == "只有一行的首问"
 
 
-def test_platform_card_untouched(monkeypatch):
-    """非 sync 卡（人工卡 / 平台任务卡）一律不动标题——本口径只服务 sync 卡。"""
+def test_foreign_session_card_untouched(monkeypatch):
+    """非 sync 卡绑定**别人启动的**会话时一律不动标题/描述（2026-10-16 口径）。
+
+    本口径只服务两类卡：① `origin='sync'` 自动卡；② **平台从看板启动过会话的卡**
+    （判据 = 会话首问是平台拼的任务提示词）。手工绑定到 dsh GUI 直跑会话的卡两者
+    都不属——把无关会话的标题/首问扣到用户自己的卡上是越权，故照旧一字不动。"""
     proj = _mk_project()
     cid = _mk_card(proj["id"], title="人工卡标题", sid=SID, origin="")
     _patch(monkeypatch, [{"sid": SID, "title": "会话标题", "titles": ["会话标题"],
                           "mtime": 0, "first_prompt": "首行\n其余"}])
     board.sync_sessions(proj)
-    assert db.get_board_card(cid)["title"] == "人工卡标题"
+    c = db.get_board_card(cid)
+    assert c["title"] == "人工卡标题" and c["description"] == ""
+
+
+# --------------------------- 平台从看板启动过会话的卡（2026-10-16 扩面）
+
+# 平台任务提示词样本（`build_task_prompt`：标题并入【任务描述】段 + 工作目录段）。
+PLATFORM_FP = "【任务描述】帮我看下这个报错\n【工作目录】/tmp/proj"
+PLATFORM_TITLE = "帮我看下这个报错"
+
+
+def test_is_platform_task_session_predicate():
+    """判据：会话首问是否平台拼的任务提示词形态（段标开头；允许前置空白）。"""
+    assert board._is_platform_task_session({"first_prompt": PLATFORM_FP})
+    assert board._is_platform_task_session({"first_prompt": "  【任务描述】x"})
+    assert not board._is_platform_task_session({"first_prompt": "用户在 dsh GUI 里问的话"})
+    assert not board._is_platform_task_session({"first_prompt": "继续"})
+    assert not board._is_platform_task_session({"first_prompt": ""})
+    assert not board._is_platform_task_session({})
+
+
+def test_in_first_prompt_ignores_blank():
+    """「平台原文形态」判据：空/纯空白一律 False（空标题归 `_auto_title_forms` 那档）。"""
+    item = {"first_prompt": "帮我看看报错"}
+    assert board._in_first_prompt("报错", item)
+    assert not board._in_first_prompt("", item)
+    assert not board._in_first_prompt("   ", item)
+    assert not board._in_first_prompt("用户另写的", item)
+    assert not board._in_first_prompt("报错", {})          # 老桩缺 first_prompt 键
+
+
+def test_platform_started_card_follows_dsh_title_and_full_prompt(monkeypatch):
+    """**本需求的钉子**（2026-10-16）：看板建的卡（origin 空）由平台起会话时，平台把
+    卡片标题/描述原样拼成首问 ⇒ 卡面也跟随 DSH：标题 = DSH 当前标题、描述 = 首问全文。
+
+    卡标题「帮我看下这个报错」不在任何标题事件里（dsh 兜底标题是首问的截断句
+    「【任务描述】帮我看下这个报错」，与卡标题不同字），故只有「标题出现在首问里」
+    这条新形态认得出来——这正是真机卡 986 的形态。"""
+    proj = _mk_project()
+    cid = _mk_card(proj["id"], title=PLATFORM_TITLE, column="review", sid=SID, origin="")
+    _patch(monkeypatch, [{"sid": SID, "title": "报错排查", "mtime": 0,
+                          "titles": ["【任务描述】帮我看下这个报错", "报错排查"],
+                          "first_prompt": PLATFORM_FP}])
+    board.sync_sessions(proj)
+    c = db.get_board_card(cid)
+    assert c["title"] == "报错排查"
+    assert c["description"] == PLATFORM_FP
+    assert c["origin"] == ""                     # 卡还是用户那张（不改成 sync 卡）
+    assert c["column_key"] == "review"           # 列不动
+
+
+def test_platform_started_card_keeps_following_later_renames(monkeypatch):
+    """跟随是持续的：第一拍写入后卡标题 = DSH 当前标题（属标题事件形态）⇒ DSH 侧再
+    改名仍跟随；两拍之后不再产生写（幂等）。"""
+    proj = _mk_project()
+    cid = _mk_card(proj["id"], title=PLATFORM_TITLE, sid=SID, origin="")
+    _patch(monkeypatch, [{"sid": SID, "title": "报错排查", "mtime": 0,
+                          "titles": ["【任务描述】帮我看下这个报错", "报错排查"],
+                          "first_prompt": PLATFORM_FP}])
+    board.sync_sessions(proj)
+    assert db.get_board_card(cid)["title"] == "报错排查"
+    _patch(monkeypatch, [{"sid": SID, "title": "二次改名", "mtime": 0,
+                          "titles": ["【任务描述】帮我看下这个报错", "报错排查", "二次改名"],
+                          "first_prompt": PLATFORM_FP}])
+    board.sync_sessions(proj)
+    second = db.get_board_card(cid)
+    assert second["title"] == "二次改名" and second["description"] == PLATFORM_FP
+    board.sync_sessions(proj)                    # 第三拍：无变化
+    assert db.get_board_card(cid) == second
+
+
+def test_platform_started_card_manual_rename_protected(monkeypatch):
+    """用户在看板改过卡名（不属任何自动形态、也不在首问里）⇒ 标题与描述都不动。"""
+    proj = _mk_project()
+    cid = _mk_card(proj["id"], title="我改的名字", description="我写的备注",
+                   sid=SID, origin="")
+    _patch(monkeypatch, [{"sid": SID, "title": "报错排查", "mtime": 0,
+                          "titles": ["报错排查"], "first_prompt": PLATFORM_FP}])
+    board.sync_sessions(proj)
+    c = db.get_board_card(cid)
+    assert c["title"] == "我改的名字" and c["description"] == "我写的备注"
+
+
+def test_platform_started_card_user_description_protected(monkeypatch):
+    """标题仍是平台原文形态（跟随），但描述是用户后来写的（不在首问里）⇒ 只改标题。"""
+    proj = _mk_project()
+    cid = _mk_card(proj["id"], title=PLATFORM_TITLE, description="我补充的备注",
+                   sid=SID, origin="")
+    _patch(monkeypatch, [{"sid": SID, "title": "报错排查", "mtime": 0,
+                          "titles": ["报错排查"], "first_prompt": PLATFORM_FP}])
+    board.sync_sessions(proj)
+    c = db.get_board_card(cid)
+    assert c["title"] == "报错排查" and c["description"] == "我补充的备注"
+
+
+def test_platform_started_card_description_refreshed_to_full_prompt(monkeypatch):
+    """描述仍是平台拼进首问的原文（如卡里贴的图片 markdown）⇒ 刷成首问全文（口径 A：
+    卡正文 = DSH 首问原文，与 sync 卡同一口径，内容不丢）。"""
+    proj = _mk_project()
+    img = "![image.png](/tmp/x.png)"
+    cid = _mk_card(proj["id"], title="图片显示不出来", description=img, sid=SID, origin="")
+    fp = f"【任务描述】图片显示不出来\n\n{img}\n【工作目录】/tmp/proj"
+    _patch(monkeypatch, [{"sid": SID, "title": "图片显示", "mtime": 0,
+                          "titles": ["图片显示"], "first_prompt": fp}])
+    board.sync_sessions(proj)
+    c = db.get_board_card(cid)
+    assert c["title"] == "图片显示" and c["description"] == fp
+
+
+def test_platform_started_card_empty_title_takes_dsh_title(monkeypatch):
+    """空标题卡（用户先建空卡再启动）同样取 DSH 当前标题；描述 = 首问全文。"""
+    proj = _mk_project()
+    cid = _mk_card(proj["id"], title="", sid=SID, origin="")
+    _patch(monkeypatch, [{"sid": SID, "title": "会话标题", "mtime": 0,
+                          "titles": ["会话标题"],
+                          "first_prompt": "【任务描述】（无）\n【工作目录】/tmp/proj"}])
+    board.sync_sessions(proj)
+    c = db.get_board_card(cid)
+    assert c["title"] == "会话标题"
+    assert c["description"] == "【任务描述】（无）\n【工作目录】/tmp/proj"
+
+
+def test_platform_started_card_column_not_moved(monkeypatch):
+    """列语义不变：归档 → done 仍只服务 sync 卡——平台启动的用户卡归档后列不动。"""
+    proj = _mk_project()
+    cid = _mk_card(proj["id"], title=PLATFORM_TITLE, column="review", sid=SID, origin="")
+    _patch(monkeypatch, [{"sid": SID, "title": "报错排查", "mtime": 0,
+                          "titles": ["报错排查"], "first_prompt": PLATFORM_FP,
+                          "archived": True}])
+    board.sync_sessions(proj)
+    c = db.get_board_card(cid)
+    assert c["column_key"] == "review"           # 用户自己拖的列不被自动搬走
+    assert c["title"] == "报错排查"               # 标题照常跟随
 
 
 def test_list_sessions_item_without_prompt_and_titles_keys(monkeypatch):
