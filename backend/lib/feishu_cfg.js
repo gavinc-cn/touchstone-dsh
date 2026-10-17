@@ -50,6 +50,12 @@ export const FEISHU_DEFAULT_EVENTS = Object.freeze(['blocked_interaction', 'task
 
 /** 入站线程注册表（`user_id` → 线程形对象；对齐 `feishu._WS_THREADS`，见文件头 M7.5 接缝） */
 const INBOUND_THREADS = new Map();
+/**
+ * `user_id` → **拉起该线程时**用的 app_id（对齐 `feishu._WS_APP_ID`，M10 2026-10-17）。
+ * 为什么需要：lark SDK 无干净停止 ⇒ 换凭据后旧连接仍在跑、只有重启站点才换；
+ * doctor 靠它判「线程绑的应用 ≠ 配置里的应用」，否则那一项会一直假绿。
+ */
+const INBOUND_APP_IDS = new Map();
 
 /**
  * Python 真值口径（`""`/`0`/`None`/`False`/空容器为假）。
@@ -193,7 +199,8 @@ export function hookOf(projectId, options = {}) {
  * `configured` = 应用凭据齐全（`appConfig` 非 null）；`thread` = 注册表里的线程还活着。
  *
  * `thread: true` 只代表线程还在 `client.start()` 内（SDK 内置重连），连接失败细节看 server.log。
- * **当前恒为 false**——注册方是 M7.5（见文件头接缝），这不是占位假值而是今天的正确状态。
+ * **形状是 `GET /api/me/feishu-cfg` 响应的子对象 ⇒ 只许这两键**（「线程绑的哪个应用」
+ * 不放进这里，见 `inboundThreadAppId`；加键会改对外契约，node 的形状判据当场会红）。
  * @param {number} userId
  * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
  * @returns {{configured: boolean, thread: boolean}}
@@ -208,13 +215,27 @@ export function inboundStatus(userId, options = {}) {
 }
 
 /**
+ * **拉起入站线程时**用的 app_id（对齐 `feishu.inbound_thread_app_id`，M10 2026-10-17）：
+ * 换凭据后旧连接仍在跑、只有重启站点才换 ⇒ doctor 靠它判「线程绑的应用 ≠ 配置里的应用」
+ * 的假绿。空串 = 本进程没为该用户拉过线程 ⇒ 调用方不许据此告警。
+ * 刻意**不并进 `inboundStatus`**：那是 `GET /api/me/feishu-cfg` 的响应子对象。
+ * @param {number} userId
+ * @returns {string}
+ */
+export function inboundThreadAppId(userId) {
+  return INBOUND_APP_IDS.get(userId) || '';
+}
+
+/**
  * 【M7.5 接缝】登记某用户的入站线程（对齐 `feishu._WS_THREADS[user_id] = t`，feishu.py:1643）。
  * 值的契约：`{ isAlive(): boolean }`（与 `threading.Thread` 同形）。幂等覆盖，不校验重复。
  * @param {number} userId
  * @param {{isAlive: () => boolean}} thread
+ * @param {string} [appId] 拉起该线程时用的 app_id（对齐 `feishu._WS_APP_ID[user_id]`）
  */
-export function setInboundThread(userId, thread) {
+export function setInboundThread(userId, thread, appId = '') {
   INBOUND_THREADS.set(userId, thread);
+  INBOUND_APP_IDS.set(userId, appId || '');
 }
 
 /**
@@ -225,4 +246,17 @@ export function setInboundThread(userId, thread) {
  */
 export function clearInboundThread(userId) {
   INBOUND_THREADS.delete(userId);
+  INBOUND_APP_IDS.delete(userId);
+}
+
+/**
+ * 【M11 接缝】取某用户当前登记的入站 runner（**内部用**：M11 起要在进程内停连接，
+ * `isAlive()` 不够——得拿到 runner 背后的 ws 客户端，见 `feishu_inbound.js:stopInboundFor`）。
+ * Python 侧没有对应函数：那边直接读模块级 `_WS_THREADS`/`_WS_CLIENTS` 两个字典。
+ * **不并进 `inboundStatus`**（那是 `GET /api/me/feishu-cfg` 的响应子对象，形状只许两键）。
+ * @param {number} userId
+ * @returns {{isAlive: () => boolean}|null}
+ */
+export function inboundRunner(userId) {
+  return INBOUND_THREADS.get(userId) || null;
 }

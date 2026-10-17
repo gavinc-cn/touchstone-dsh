@@ -62,11 +62,14 @@
  *   `resetInboundState()` / `msgSeenSize()` / `evtSeenSize()` / `mqStageSize()` —— 只为单测
  *   能确定地构造与观察进程内态；产品路径不调用。
  */
+import crypto from 'node:crypto';
 import {
   MQ_MAX_BUCKETS, MQ_TTL, NO_REMOTE_ANSWER_HINT,
 } from './feishu.js';
-import { appConfig, inboundStatus, setInboundThread } from './feishu_cfg.js';
-import { _LAST_EVENT_TS } from './feishu_provision.js';
+import { appConfig, inboundRunner, inboundStatus, inboundThreadAppId,
+  setInboundThread } from './feishu_cfg.js';
+import { _LAST_EVENT_TS, doctor, provisionApply,
+  provisionPublish } from './feishu_provision.js';
 import { FeishuRestError } from './feishu_rest.js';
 import { PY_WS } from './lib.js';
 import { FeishuWsClient } from './feishu_ws.js';
@@ -75,6 +78,9 @@ import * as dbMod from './db.js';
 import * as feishuMod from './feishu.js';
 import * as restMod from './feishu_rest.js';
 import * as slashMod from './feishu_slash.js';
+
+/** M11 慢动作依赖（自检/补齐配置/提交发布）：**可注入**以便单测隔离网络 */
+const PROVISION_MOD = Object.freeze({ doctor, provisionApply, provisionPublish });
 
 /** Python `\s` 的字符类**内部**源码（从 `lib.js:PY_WS` 反解，保证与 `lib.js` 同表） */
 const PY_SPACE_SRC = PY_WS.slice(1, -1);
@@ -421,6 +427,9 @@ function dep(options = {}) {
     conv: options.conv || lazyConv(),
     slash: options.slash || slashMod,
     feishu: options.feishu || feishuMod,
+    provision: options.provision || PROVISION_MOD,
+    // M11：卡片动作里的「停旧起新」可在单测里替换（默认 = 本文件真实现）
+    restart: options.restart || restartInboundFor,
     now: options.now || (() => Date.now() / 1000),
     log: options.log || defaultLog,
     env: options.env || process.env,
@@ -433,12 +442,14 @@ function dep(options = {}) {
 
 /**
  * 未识别文本 / `help` 意图 / 未知看板动作的兜底回复。
- * **源码 28 行、求值后 21 行**（1596+1597+1598 / 1600+1601 / 1604+1605 三处相邻字面量隐式
- * 拼接）——本常量按**求值后**形态书写，单测用 oracle 现算的 utf-8 sha256 锚住。
+ * **源码 29 行、求值后 22 行**（1596+1597+1598 / 1600+1601 / 1604+1605 三处相邻字面量隐式
+ * 拼接；M11 增「· 接入」一行）——本常量按**求值后**形态书写，单测用 oracle 现算的
+ * utf-8 sha256 锚住。
  */
 export const HELP_TEXT = 'Touchstone 指令（单聊可用）：\n'
   + '直接发普通文字 = 与当前会话对话（未绑定会在默认项目自动新建）。\n'
   + '· 帮助 — 本说明\n'
+  + '· 接入 — 飞书接入操作卡片（换应用/重连/绑定码/自检/补齐/发布）\n'
   + '· 绑定 <码> — 绑定站点账号（绑定码在站点侧栏「设置」→ 飞书设置 生成）\n'
   + '· 解绑 — 解除绑定\n'
   + '· 当前 — 查看默认项目与当前会话\n'
@@ -469,6 +480,7 @@ export const HELP_TEXT = 'Touchstone 指令（单聊可用）：\n'
  */
 export const INTENT_RULES = Object.freeze([
   Object.freeze(['help', '^(?:帮助|help|/help)$']),
+  Object.freeze(['setup', '^(?:接入)$']),
   Object.freeze(['bind', '^(?:绑定|/bind)\\s*([A-Za-z0-9]{4,8})$']),
   Object.freeze(['unbind', '^(?:解绑|/unbind)$']),
   Object.freeze(['default_project', '^(?:默认项目|/project)\\s+(\\S+)$']),
@@ -520,6 +532,38 @@ const MSG_SEEN_MAX = 512;
 const EVT_SEEN_MAX = 512;
 /** `_MQ_STAGE`（2109）：`(卡号:int, qid:str) -> {n, vals:Map<no,val>, at}`（桶键见 `mqKey`） */
 const MQ_STAGE = new Map();
+
+// ---- M11（2026-10-17）：可停长连接 + 接入卡片 nonce（对齐 feishu.py 的 `_WS_CLIENTS`/`_SETUP_NONCES`）
+
+/** `_WS_CLIENTS`（M11）：`user_id -> FeishuWsClient`，停连接要拿到客户端本体（停完即摘） */
+export const _WS_CLIENTS = new Map();
+/** 停连接时等 runner 收口的步长/上限（毫秒）；实测 close() 在毫秒级返回 */
+const WS_STOP_POLL_MS = 20;
+export const WS_STOP_TIMEOUT_MS = 8000;
+/** `_SETUP_NONCES`（M11）：`nonce -> [user_id, expires(秒)]`；进程内存态、10 分钟、绑定用户 */
+export const _SETUP_NONCES = new Map();
+export const SETUP_NONCE_TTL = 600;
+
+/** `feishu._setup_nonce`（M11）：登记一个按钮 nonce（顺带清过期项）。 */
+export function setupNonce(userId) {
+  const now = Date.now() / 1000;
+  for (const [key, item] of [..._SETUP_NONCES]) {
+    if (now > item[1]) _SETUP_NONCES.delete(key);
+  }
+  const nonce = crypto.randomBytes(8).toString('hex');   // Python secrets.token_hex(8)
+  _SETUP_NONCES.set(nonce, [pyInt(userId), now + SETUP_NONCE_TTL]);
+  return nonce;
+}
+
+/** Node 专有测试缝：清空 M11 进程内态（产品路径不调用；对齐 oracle「重启即丢」） */
+export function resetSetupState() {
+  _SETUP_NONCES.clear();
+}
+
+/** Python `time.sleep(s)` 的异步等价（只用于停连接的有界等待/测试） */
+function sleepMs(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
 
 /** LRU 记一条：命中 ⇒ true（**方向与直觉相反**：oracle 的调用点写作 `if ..._seen(x): return`） */
 function seenPush(table, max, key) {
@@ -1321,6 +1365,15 @@ export async function handleMessageEvent(evt, cfg = null, options = {}) {
       await d.rest.restReply(mid, UNBOUND_DM_MSG, cfg);
       return;
     }
+    // M11「接入」：发一张可点的飞书接入操作卡片（换应用/重连/绑定码/自检/补齐/发布），
+    // 用**当前这条连接**的应用凭据发——卡片按钮回调会回到同一条连接
+    if (pyTruthy(intent) && dget(intent, 'action') === 'setup') {
+      const [ok, err] = await sendSetupCard(requireKey(binding, 'user_id'), cfg, options);
+      await d.rest.restReply(mid, pyTruthy(ok)
+        ? '🛠 已发送「飞书接入操作卡片」，请在卡片上操作。'
+        : `卡片发送失败：${pyStr(err)}`, cfg);
+      return;
+    }
     if (intent === null) {
       let reply;
       if (dget(evt, 'chat_type') !== 'group' && pyTruthy(await d.conv.enabled(options))) {
@@ -1389,6 +1442,9 @@ export async function onCardAction(data, cfg, options = {}) {
     const t = pyStr(pyOr(dget(value, 't'), ''));
     const key = pyStr(pyOr(dget(value, 'c'), ''));
     if (t === 'sc') return await onSlashPermAction(sender, value, cfg, options);
+    // M11 接入操作卡片（t=fs）：独立于看板/通用对话卡片流；身份 + nonce 双复核在
+    // onSetupCardAction 里（与 oracle 的 `_on_card_action` 1909 附近同构）
+    if (t === 'fs') return await onSetupCardAction(sender, value, cfg, options);
     if (t === 'dp' || t === 'ss') {
       const binding = d.db.getFeishuBindingByOpen(sender, options);
       if (binding === null || binding === undefined) {
@@ -1514,7 +1570,9 @@ export function startInboundFor(userId, options = {}) {
     return false;
   }
   const runner = makeInboundRunner(userId, cfg, options);        // ④
-  setInboundThread(userId, runner);                              // ⑤（在 start 之前）
+  // ⑤（在 start 之前）——第三个参数记「这条线程绑的是哪个应用」（对齐 `feishu._WS_APP_ID`，
+  // M10：换凭据后线程仍在跑，doctor 靠它识别「线程 app ≠ 配置 app」的假绿）
+  setInboundThread(userId, runner, cfg.app_id);
   runner.start();                                                // ⑥
   return true;
 }
@@ -1624,13 +1682,348 @@ export async function wsRun(userId, cfg, options = {}) {
   const wsDebug = pyTruthy(dget(d.env, 'TS_FEISHU_WS_DEBUG'));   // 非空即真（连 "0" 也算）
   const client = makeWsClient(cfg, onEventPayload, onCardPayload,
     wsDebug ? 'debug' : 'error', options);
+  _WS_CLIENTS.set(userId, client);        // M11：停连接要拿到客户端本体
   d.log(`feishu inbound: 用户 ${userId} 连接长连接网关（app_id=${requireKey(cfg, 'app_id')}）…`);
   try {
-    await client.start();
+    await client.start();                 // M11：close() ⇒ 这里 resolve（不再是永不返回）
   } catch (e) {
     d.log(`feishu inbound: 用户 ${userId} 长连接异常退出: ${errorRepr(e)}（重启站点重试）`);
+  } finally {
+    _WS_CLIENTS.delete(userId);
   }
 }
+
+/**
+ * `feishu.stop_inbound_for`（M11）：停掉该用户的入站长连接，返回是否真的停了一条在跑的。
+ * 与 oracle 的差异在**机制**不在语义：Python 侧要收口 SDK 的模块级 event loop（见
+ * `feishu.py:_ws_run` 的 per-run loop 说明），Node 侧 R1 的 `FeishuWsClient` 自带干净
+ * `close()`（`feishu_ws.js` 文件头「追加能力 close()」）⇒ 直接 close 再等 runner 收口。
+ * 幂等：没在跑 ⇒ `false`、零副作用。
+ * @param {number} userId
+ * @param {{dbmod?: object, rest?: object, log?: Function, env?: NodeJS.ProcessEnv}} [options]
+ * @returns {Promise<boolean>}
+ */
+export async function stopInboundFor(userId, options = {}) {
+  const d = dep(options);
+  const runner = inboundRunner(userId);
+  if (runner === null || runner === undefined || !pyTruthy(runner.isAlive())) return false;
+  const client = _WS_CLIENTS.get(userId);
+  if (client === null || client === undefined) {
+    // runner 已登记但 wsRun 还没走到 makeWsClient：有界等一小段（正常路径是同步建好的）
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline && !_WS_CLIENTS.has(userId)) {
+      await sleepMs(WS_STOP_POLL_MS);
+    }
+  }
+  const live = _WS_CLIENTS.get(userId);
+  if (live !== null && live !== undefined && typeof live.close === 'function') {
+    try {
+      await live.close();                 // close() 会 resolve start() 的 promise ⇒ runner 收口
+    } catch (e) {
+      d.log(`feishu inbound: 用户 ${userId} 停止长连接异常: ${errorRepr(e)}`);
+    }
+  }
+  const deadline = Date.now() + WS_STOP_TIMEOUT_MS;
+  while (pyTruthy(runner.isAlive()) && Date.now() < deadline) {
+    await sleepMs(WS_STOP_POLL_MS);
+  }
+  return !pyTruthy(runner.isAlive());
+}
+
+/**
+ * `feishu.restart_inbound_for`（M11）：停旧 → 用**当前库里**的凭据起新。
+ * 返回是否起了新连接（旧线程没停下来时 `startInboundFor` 会短路 ⇒ false，不会并存两条）。
+ * @param {number} userId
+ * @param {object} [options]
+ * @returns {Promise<boolean>}
+ */
+export async function restartInboundFor(userId, options = {}) {
+  await stopInboundFor(userId, options);
+  return startInboundFor(userId, options);
+}
+
+// ==========================================================================
+// M11 接入操作卡片（`feishu.py` 同名节）：换凭据免重启的 DM 按钮面
+// ==========================================================================
+
+/** Python `_button` 闭包的等价物：六个按钮共用同一个 value 形状 `{t=fs, a=动作, u, n}` */
+function setupButton(uid, nonce, label, action, style = 'default') {
+  return {
+    tag: 'button',
+    type: style,
+    text: { tag: 'plain_text', content: label },
+    behaviors: [{ type: 'callback', value: { t: 'fs', a: action, u: uid, n: nonce } }],
+  };
+}
+
+/**
+ * `feishu.setup_card`（M11）：飞书接入操作卡片（schema 2.0，DM 单聊）。
+ * **纯函数**：给定入参 ⇒ 确定 JSON（两侧后端逐字节对拍，见
+ * `tools/parity/cases-mod/feishu_setup_card.json`）。键序照 Python dict 插入序。
+ * @param {number|string} userId 站点用户 id
+ * @param {string} appId 配置里的应用（空=未配置）
+ * @param {string} threadApp 入站长连接**当前绑的**应用（空=连接未运行）
+ * @param {string} nonce 按钮防伪令牌（回调时校验 uid+nonce）
+ */
+export function setupCard(userId, appId, threadApp, nonce) {
+  const app = pyStr(pyOr(appId, ''));
+  const thread = pyStr(pyOr(threadApp, ''));
+  const switching = pyTruthy(app) && pyTruthy(thread) && app !== thread;
+  const uid = pyInt(userId);
+  const elements = [{
+    tag: 'markdown',
+    content: '**当前应用**：' + (pyTruthy(app) ? '`' + app + '`' : '（未配置）') + '\n'
+      + '**入站长连接**：' + (pyTruthy(thread) ? '运行中 · 绑在 `' + thread + '`' : '未运行'),
+  }];
+  if (switching) {
+    elements.push({
+      tag: 'markdown',
+      content: `检测到应用凭据已换为 \`${app}\`，但长连接还绑在旧应用 `
+        + `\`${thread}\` 上。点「换用新应用」：我会先把新绑定码发到本会话，`
+        + '再用新应用重连——之后在新机器人单聊里回复「绑定 <码>」即可。',
+    });
+    elements.push(setupButton(uid, nonce, '🔁 换用新应用', 'switch', 'primary'));
+  } else {
+    elements.push({
+      tag: 'markdown',
+      content: '需要时点下面的按钮；换应用后我会自动发一张新的确认卡片。',
+    });
+    elements.push(setupButton(uid, nonce, '🔄 重连入站', 'restart', 'primary'));
+  }
+  elements.push(setupButton(uid, nonce, '🔑 生成绑定码', 'bindcode'));
+  elements.push(setupButton(uid, nonce, '🩺 配置自检', 'doctor'));
+  elements.push(setupButton(uid, nonce, '🧩 补齐配置', 'apply'));
+  elements.push(setupButton(uid, nonce, '🚀 提交发布', 'publish'));
+  elements.push({ tag: 'markdown', content: '卡片 10 分钟内有效；过期后发「接入」重新获取。' });
+  return {
+    schema: '2.0',
+    header: {
+      title: {
+        tag: 'plain_text',
+        content: switching ? '🔁 飞书应用已变更' : '🛠 飞书接入操作',
+      },
+      template: switching ? 'orange' : 'blue',
+    },
+    body: { elements },
+  };
+}
+
+/**
+ * `feishu.send_setup_card`（M11）：给该用户 DM 发接入卡片。返回 `[ok, err]`。
+ * `cfg` 缺省=当前配置；**换应用自动发送时必须传旧应用的 cfg**（绑定行的 open_id
+ * 属于旧应用，新凭据发不进这个单聊）。
+ */
+export async function sendSetupCard(userId, cfg = null, options = {}) {
+  const d = dep(options);
+  const sendCfg = (cfg === null || cfg === undefined) ? appConfig(userId, options) : cfg;
+  if (sendCfg === null || sendCfg === undefined) {
+    return [false, '未配置应用凭据（App ID / App Secret），先保存配置再发卡片'];
+  }
+  const binding = d.db.getFeishuBindingByUser(userId, options);
+  if (binding === null || binding === undefined) {
+    return [false, '尚未绑定飞书账号：设置页生成绑定码后在机器人单聊回复「绑定 <码>」'];
+  }
+  const cur = appConfig(userId, options) || {};
+  const threadApp = pyTruthy(inboundStatus(userId, options).thread)
+    ? inboundThreadAppId(userId) : '';
+  const card = setupCard(userId, pyOr(dget(cur, 'app_id'), ''), threadApp, setupNonce(userId));
+  try {
+    await d.rest.restSendCard(binding.open_id, card, sendCfg);
+    return [true, ''];
+  } catch (e) {
+    if (!(e instanceof FeishuRestError)) throw e;
+    return [false, `卡片发送失败：${pyStr(e.message)}`];
+  }
+}
+
+/**
+ * `feishu.maybe_send_switch_card`（M11）：换应用凭据后自动发「确认切换」卡片。
+ * 用**旧凭据**发（绑定 open_id 是旧应用下的标识）。条件：旧连接在跑 + 配置应用与旧
+ * 连接不同 + 有绑定行。绝不抛出（worker/保存后后台调用），失败只打一行日志。
+ * @returns {Promise<boolean>} 是否真的发出
+ */
+export async function maybeSendSwitchCard(userId, oldCfg, options = {}) {
+  const d = dep(options);
+  try {
+    const oldApp = pyStr(pyOr(dget(oldCfg, 'app_id'), ''));
+    const newApp = pyStr(pyOr(dget(appConfig(userId, options) || {}, 'app_id'), ''));
+    if (!pyTruthy(oldApp) || !pyTruthy(newApp) || oldApp === newApp) return false;
+    if (!pyTruthy(inboundStatus(userId, options).thread)) return false;
+    if (inboundThreadAppId(userId) === newApp) return false;
+    const binding = d.db.getFeishuBindingByUser(userId, options);
+    if (binding === null || binding === undefined) return false;
+    const card = setupCard(userId, newApp, oldApp, setupNonce(userId));
+    await d.rest.restSendCard(binding.open_id, card, oldCfg);
+    return true;
+  } catch (e) {
+    d.log(`feishu provision: 用户 ${userId} 换应用确认卡片发送失败: ${errorRepr(e)}`);
+    return false;
+  }
+}
+
+/**
+ * `feishu._setup_switch`（M11）：「换用新应用」——生成新绑定码 → 用**旧应用** DM 发出
+ * → 停旧连接、用新凭据重连。顺序是设计要点：码必须先到用户手上（旧应用通道），
+ * 再断旧连接（断完就发不出了）。返回 `[toast, dmText]`；dmText 空=不再重复发。
+ */
+async function setupSwitchAction(userId, sender, cfg, options = {}) {
+  const d = dep(options);
+  const cur = appConfig(userId, options);
+  const newApp = pyStr(pyOr(dget(cur, 'app_id'), ''));
+  const oldApp = pyStr(pyOr(dget(cfg, 'app_id'), ''));
+  if (cur === null || cur === undefined || !pyTruthy(newApp)) {
+    return [toast('error', '新应用凭据不完整'),
+      '❌ 应用凭据不完整：先在设置页保存新应用的 App ID / App Secret，再点本按钮。'];
+  }
+  if (oldApp === newApp) {                 // 同应用（只换了 secret）：直接重连，绑定关系不变
+    if (await d.restart(userId, options)) {
+      return [toast('success', '已重连'),
+        `🔄 已用当前应用 \`${newApp}\` 重新建立长连接，绑定关系不变。`];
+    }
+    return [toast('error', '重连失败，看私聊'),
+      '❌ 重连失败：旧连接未在超时内退出；稍后再点一次，仍不行请重启站点。'];
+  }
+  const code = d.feishu.makeBindCode(userId);
+  const text = `🔁 已切换到新应用 \`${newApp}\`。\n`
+    + `**新的绑定码：${code}**（10 分钟内有效）\n`
+    + '本（旧）机器人的连接马上断开；请到新机器人单聊里回复：\n'
+    + `绑定 ${code}`;
+  try {
+    await d.rest.restSendText(sender, text, cfg);
+  } catch (e) {
+    if (!(e instanceof FeishuRestError)) throw e;
+    // 码没送到就不动连接（否则用户既进不去新机器人、旧机器人也断了）
+    return [toast('error', '绑定码发送失败'),
+      `❌ 绑定码没能发进本会话（${pyStr(e.message)}）；重连未执行，可重试本按钮。`];
+  }
+  if (await d.restart(userId, options)) {
+    return [toast('success', '已切换，去新机器人绑定'), ''];
+  }
+  return [toast('error', '已换应用但重连失败，看私聊'),
+    `⚠️ 新应用 \`${newApp}\` 重连失败（旧连接未退出）；绑定码 ${code} 仍有效，`
+    + '可稍后再点本按钮，或重启站点。'];
+}
+
+/** `feishu._setup_restart`（M11）：「重连入站」——停旧连接、用当前凭据重连。 */
+async function setupRestartAction(userId, options = {}) {
+  const cur = appConfig(userId, options);
+  if (cur === null || cur === undefined) {
+    return [toast('error', '应用凭据未配置'),
+      '❌ 应用凭据未配置（App ID / App Secret）：先在设置页保存，再点本按钮。'];
+  }
+  const appId = pyStr(pyOr(dget(cur, 'app_id'), ''));
+  if (await dep(options).restart(userId, options)) {
+    return [toast('success', '已重连'),
+      `🔄 已用当前应用 \`${appId}\` 重新建立长连接。`];
+  }
+  return [toast('error', '重连失败，看私聊'),
+    '❌ 重连失败：旧连接未在超时内退出，稍后再点一次；仍不行请重启站点。'];
+}
+
+/** `feishu._setup_bindcode`（M11）：「生成绑定码」——发新码 + 两条使用指引。 */
+function setupBindcodeAction(userId, options = {}) {
+  const code = dep(options).feishu.makeBindCode(userId);
+  return [toast('success', '绑定码已私聊发你'),
+    `🔑 新的绑定码：${code}（10 分钟内有效）\n`
+    + '· 未绑定：在本机器人单聊回复「绑定 <码>」\n'
+    + '· 已绑定换号：先发「解绑」，再发「绑定 <码>」'];
+}
+
+/**
+ * `feishu._setup_slow_action`（M11）：慢动作（自检/补齐配置/提交发布）后台执行，
+ * 结果 DM 回执。卡片回调要尽快 ACK，这几项是多次 REST（2~5s）⇒ 不占回调。
+ */
+export async function setupSlowAction(userId, sender, action, cfg, options = {}) {
+  const d = dep(options);
+  try {
+    let text;
+    if (action === 'doctor') {
+      const out = await d.provision.doctor(userId, false, options);
+      const summary = pyOr(dget(out, 'summary'), {});
+      const bad = pyOr(dget(out, 'items'), []).filter((it) => {
+        const state = dget(it, 'state');
+        return state === 'fail' || state === 'warn';
+      });
+      const lines = [`🩺 配置自检：ok ${pyOr(dget(summary, 'ok'), 0)} / `
+        + `fail ${pyOr(dget(summary, 'fail'), 0)} / `
+        + `warn ${pyOr(dget(summary, 'warn'), 0)} / `
+        + `skip ${pyOr(dget(summary, 'skip'), 0)}`];
+      for (const it of bad) {
+        const hint = dget(it, 'hint');
+        lines.push(`· ${pyStr(pyOr(dget(it, 'label'), ''))}：`
+          + `${pyStr(pyOr(dget(it, 'detail'), ''))}`
+          + (pyTruthy(hint) ? `（${pyStr(hint)}）` : ''));
+      }
+      text = lines.join('\n');
+    } else if (action === 'apply') {
+      const out = await d.provision.provisionApply(userId, options);
+      text = pyTruthy(dget(out, 'ok'))
+        ? '🧩 配置补齐成功：机器人能力 / 权限 / 长连接订阅 / 事件 / 回调已写入（需发布新版本生效）。'
+        : `❌ 配置补齐失败：${pyStr(pyOr(dget(out, 'error'), '未知错误'))}`;
+    } else {
+      const out = await d.provision.provisionPublish(userId, options);
+      text = pyTruthy(dget(out, 'ok'))
+        ? `🚀 已提交发布版本 ${pyStr(pyOr(dget(out, 'version'), ''))}；仍需租户管理员审批后线上生效。`
+        : `❌ 提交发布失败：${pyStr(pyOr(dget(out, 'error'), '未知错误'))}`;
+    }
+    await dmText(sender, text, cfg, options);
+  } catch (e) {
+    d.log(`feishu inbound: 接入卡片后台动作异常: ${errorRepr(e)}`);
+  }
+}
+
+/**
+ * `feishu._on_setup_card_action`（M11）：接入卡片按钮回调——
+ * open_id→binding + nonce 双重复核 → 动作分发。`cfg` = 点击到达那条连接的应用凭据。
+ */
+export async function onSetupCardAction(sender, value, cfg, options = {}) {
+  const d = dep(options);
+  const binding = d.db.getFeishuBindingByOpen(sender, options);
+  if (binding === null || binding === undefined) {
+    await dmText(sender, UNBOUND_DM_CARD, cfg, options);
+    return toast('error', '尚未绑定站点账号');
+  }
+  const userId = requireKey(binding, 'user_id');
+  const uid = pyInt(pyOr(dget(value, 'u'), 0));
+  if (pyTruthy(uid) && uid !== pyInt(userId)) {
+    return toast('error', '该卡片不属于当前账号');       // 防串号
+  }
+  const nonce = pyStr(pyOr(dget(value, 'n'), ''));
+  const item = _SETUP_NONCES.get(nonce);
+  if (item === undefined || item === null || item[0] !== pyInt(userId)) {
+    return toast('error', '卡片已失效，发「接入」重新获取');
+  }
+  if (Date.now() / 1000 > item[1]) {
+    _SETUP_NONCES.delete(nonce);
+    return toast('error', '卡片已过期，发「接入」重新获取');
+  }
+  const action = pyStr(pyOr(dget(value, 'a'), ''));
+  try {
+    let out;
+    if (action === 'switch') {
+      out = await setupSwitchAction(userId, sender, cfg, options);
+    } else if (action === 'restart') {
+      out = await setupRestartAction(userId, options);
+    } else if (action === 'bindcode') {
+      out = setupBindcodeAction(userId, options);
+    } else if (action === 'doctor' || action === 'apply' || action === 'publish') {
+      // 慢动作：后台执行 + 立即 toast（避免卡片回调 ACK 超时）
+      void setupSlowAction(userId, sender, action, cfg, options).catch((e) => {
+        d.log(`feishu inbound: 接入卡片后台动作异常: ${errorRepr(e)}`);
+      });
+      return toast('success', '已收到，结果稍后私聊发你');
+    } else {
+      return null;
+    }
+    const [toastOut, text] = out;
+    if (pyTruthy(text)) await dmText(sender, text, cfg, options);
+    return toastOut;
+  } catch (e) {
+    d.log(`feishu inbound: 接入卡片动作异常: ${errorRepr(e)}`);
+    return toast('error', '操作失败，详情看站点日志');
+  }
+}
+
 
 // --------------------------------------------------------------------------
 // snake_case 别名（照 `board.js` 的 Python 名别名先例：零成本、便于对拍量具按 oracle 名发现）
@@ -1672,3 +2065,13 @@ export const _make_ws_client = makeWsClient;
 export const _ws_run = wsRun;
 export const _start_inbound_for = startInboundFor;
 export const _start_inbound_all = startInboundAll;
+// ---- M11：换凭据免重启 + 接入操作卡片（snake_case 别名照既有先例，便于按 oracle 名对拍）
+export const _stop_inbound_for = stopInboundFor;
+export const _restart_inbound_for = restartInboundFor;
+export const _setup_nonce = setupNonce;
+export const _setup_card = setupCard;
+export const _send_setup_card = sendSetupCard;
+export const _maybe_send_switch_card = maybeSendSwitchCard;
+export const _setup_slow_action = setupSlowAction;
+export const _on_setup_card_action = onSetupCardAction;
+export const _setup_bindcode = setupBindcodeAction;

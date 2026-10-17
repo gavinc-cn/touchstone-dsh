@@ -1684,6 +1684,8 @@ function requireCfgDict(cfg) {
  */
 export async function saveUserConfig(userId, body, options = {}) {
   const cfg = requireCfgDict(userConfig(userId, options));
+  // M11：换应用前后的凭据快照（自动「确认切换」卡片用旧应用凭据发，见函数尾）
+  const oldCfg = { app_id: cfg.app_id || '', app_secret: cfg.app_secret || '' };
   // 推送总控（2026-10-10）：与旧 `enabled` 是两个独立开关，缺省=不改（不在 body 里就不动）
   if (Object.hasOwn(body, 'push_enabled')) cfg.push_enabled = pyTruthy(body.push_enabled) ? 1 : 0;
   if (Object.hasOwn(body, 'enabled')) cfg.enabled = pyTruthy(body.enabled) ? 1 : 0;
@@ -1693,6 +1695,12 @@ export async function saveUserConfig(userId, body, options = {}) {
   setFeishuUserCfg(userId, cfg, options);
   const started = startInboundFor(userId, options);
   const verify = appConfig(userId, options) ? await verifyCredentials(userId, options) : null;
+  // M11：手工换应用（非扫码路径）同样发「确认切换」卡片——旧连接还活着时用旧应用通道
+  // 通知用户点确认。后台发（不阻塞保存响应）；条件在 maybeSendSwitchCard 里复核，
+  // 凭据没变/线程没跑时是零请求空转；自动卡片故障绝不反噬保存主流程。
+  if (Object.hasOwn(body, 'app_id') || Object.hasOwn(body, 'app_secret')) {
+    void maybeSendSwitchCard(userId, oldCfg, options).catch(() => {});
+  }
   return { inbound_started: Boolean(started), verify };
 }
 
@@ -1733,6 +1741,7 @@ export function startInboundAll(options = {}) {
 // 本节新增的依赖（ESM import 声明提升，等价于置顶；放末尾以严守「只追加」的写作用域）
 import { setFeishuBinding, setFeishuUserCfg } from './db.js';
 import { inboundStatus, userConfig } from './feishu_cfg.js';
-import { startInboundAll as inboundStartAll, startInboundFor as inboundStartFor } from './feishu_inbound.js';
+import { startInboundAll as inboundStartAll, maybeSendSwitchCard,
+  startInboundFor as inboundStartFor } from './feishu_inbound.js';
 import * as feishuConv from './feishu_conv.js';
 import { verifyCredentials } from './feishu_provision.js';

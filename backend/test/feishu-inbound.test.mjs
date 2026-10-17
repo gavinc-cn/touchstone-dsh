@@ -42,11 +42,12 @@ import { freshDb, insertCard, insertProject, insertTask } from './m3fixture.mjs'
 // oracle 现算的锚（见文件头①）
 // ==========================================================================
 
-/** `feishu.py:1579-1606` 求值后的 `HELP_TEXT`（**21 行**，源码 28 行有 3 处隐式拼接） */
+/** `feishu.py:1579-1607` 求值后的 `HELP_TEXT`（**22 行**，源码 29 行有 3 处隐式拼接；M11 增「· 接入」） */
 const ORACLE_HELP_TEXT = [
   'Touchstone 指令（单聊可用）：',
   '直接发普通文字 = 与当前会话对话（未绑定会在默认项目自动新建）。',
   '· 帮助 — 本说明',
+  '· 接入 — 飞书接入操作卡片（换应用/重连/绑定码/自检/补齐/发布）',
   '· 绑定 <码> — 绑定站点账号（绑定码在站点侧栏「设置」→ 飞书设置 生成）',
   '· 解绑 — 解除绑定',
   '· 当前 — 查看默认项目与当前会话',
@@ -70,11 +71,12 @@ const ORACLE_HELP_TEXT = [
 ].join('\n');
 
 /** oracle `HELP_TEXT` 的 utf-8 sha256（`python3` 现算；转抄错误的照妖镜） */
-const ORACLE_HELP_SHA256 = 'ec7621e4cc6b156fada6bf68ce797b52f3205c2a08775bd4117ef86b90ae098b';
+const ORACLE_HELP_SHA256 = '8ce024e221ea301186e6f718dd0a1402c007c829090ae136feedab4ba5a585bc';
 
-/** `feishu.py:1985-2003` 的 `_INTENT_RULES`（17 条，顺序即优先级） */
+/** `feishu.py:1985-2004` 的 `_INTENT_RULES`（18 条，顺序即优先级；M11 增 setup） */
 const ORACLE_RULES = [
   ['help', '^(?:帮助|help|/help)$'],
+  ['setup', '^(?:接入)$'],
   ['bind', '^(?:绑定|/bind)\\s*([A-Za-z0-9]{4,8})$'],
   ['unbind', '^(?:解绑|/unbind)$'],
   ['default_project', '^(?:默认项目|/project)\\s+(\\S+)$'],
@@ -94,11 +96,12 @@ const ORACLE_RULES = [
 ];
 
 /** `ORACLE_RULES` 的规范 JSON 文本 sha256（同上，转抄锚） */
-const ORACLE_RULES_SHA256 = '2d3520a4727f0ca1a6731b7afe3b84a0af8efabbbe4de72f8457b6044b29e3fd';
+const ORACLE_RULES_SHA256 = 'ad2f857197158458a2979c544d68222ec1437e273448806794dc778f1ce950fa';
 
 /** oracle `parse_intent` 对 54 条探针的**原样**输出（`null` = 未识别） */
 const ORACLE_PARSE = {
   '帮助': { action: 'help', groups: [] },
+  '接入': { action: 'setup', groups: [] },
   'help': { action: 'help', groups: [] },
   '/help': { action: 'help', groups: [] },
   '帮助\n': { action: 'help', groups: [] },
@@ -158,7 +161,7 @@ const ORACLE_PARSE = {
 
 /** 17 条规则各一条**命中样例**（表驱动，一条一例；样例取自 `ORACLE_PARSE` 的实算结果） */
 const RULE_SAMPLES = [
-  ['help', '帮助'], ['bind', '绑定 abcd'], ['unbind', '解绑'],
+  ['help', '帮助'], ['setup', '接入'], ['bind', '绑定 abcd'], ['unbind', '解绑'],
   ['default_project', '默认项目 demo'], ['current', '当前'], ['projects', '项目'],
   ['sessions', '会话'], ['new', '新建会话'], ['use', '绑定会话 12'], ['leave', '解绑会话'],
   ['status', '状态'], ['card', '卡片 x'], ['approve', '通过 12'],
@@ -298,10 +301,10 @@ function cardFixture(fx, over = {}) {
 // ① HELP_TEXT / 意图规则（oracle 现算）
 // ==========================================================================
 
-test('HELP_TEXT：21 行逐字节 + oracle sha256（源码 28 行有 3 处隐式拼接）', () => {
+test('HELP_TEXT：22 行逐字节 + oracle sha256（源码 29 行有 3 处隐式拼接）', () => {
   assert.equal(typeof inbound.HELP_TEXT, 'string');
-  assert.equal(Buffer.byteLength(inbound.HELP_TEXT, 'utf8'), 1672);   // oracle 现算
-  assert.equal(inbound.HELP_TEXT.split('\n').length, 21);             // 求值后 21 行
+  assert.equal(Buffer.byteLength(inbound.HELP_TEXT, 'utf8'), 1764);   // oracle 现算（M11）
+  assert.equal(inbound.HELP_TEXT.split('\n').length, 22);             // 求值后 22 行
   assert.equal(crypto.createHash('sha256').update(inbound.HELP_TEXT, 'utf8').digest('hex'),
     ORACLE_HELP_SHA256);
   assert.equal(inbound.HELP_TEXT, ORACLE_HELP_TEXT);                  // 逐行同源转抄
@@ -312,16 +315,16 @@ test('HELP_TEXT：21 行逐字节 + oracle sha256（源码 28 行有 3 处隐式
     + '（参数用法与上面对应中文指令一致）'));
 });
 
-test('INTENT_RULES：17 条逐条同句（顺序即优先级）+ oracle sha256', () => {
+test('INTENT_RULES：18 条逐条同句（顺序即优先级）+ oracle sha256', () => {
   const rows = inbound.INTENT_RULES.map(([a, p]) => [a, p instanceof RegExp ? p.source : p]);
   assert.deepEqual(rows, ORACLE_RULES);
   // 锚 = oracle 现算的**紧凑 JSON**（`json.dumps(..., separators=(",", ":"))`）sha256
   assert.equal(crypto.createHash('sha256')
     .update(JSON.stringify(ORACLE_RULES), 'utf8').digest('hex'), ORACLE_RULES_SHA256);
-  assert.equal(inbound.INTENT_RULES.length, 17);
+  assert.equal(inbound.INTENT_RULES.length, 18);
 });
 
-test('parseIntent：17 条规则表驱动一条一例（首命中即返回）', () => {
+test('parseIntent：18 条规则表驱动一条一例（首命中即返回）', () => {
   for (const [action, text] of RULE_SAMPLES) {
     const got = inbound.parseIntent(text);
     assert.notEqual(got, null, `「${text}」应命中 ${action}`);

@@ -157,12 +157,17 @@ def test_verify_credentials_failure_and_no_creds(monkeypatch):
 
 # ---------- Task 3：配置自检 doctor ----------
 
-def _doctor_stubs(monkeypatch, *, cfg=None, token=None, bot=None, ws=True,
+def _doctor_stubs(monkeypatch, *, cfg=None, token=None, bot=None, ws=True, ws_app_id=None,
                   event_age=None, slash=None, bound=None, send=None):
-    """doctor 各依赖的统一打桩：默认「全绿」，按需覆盖单项。"""
+    """doctor 各依赖的统一打桩：默认「全绿」，按需覆盖单项。
+
+    `ws_app_id` = **拉起入站线程时**用的应用（M10 起 doctor 走独立访问口
+    `inbound_thread_app_id`；缺省空串 ⇒ 不吃 warn 档，老用例行为不变）。
+    注意 `inbound_status` 的形状**不许加键**（它是 `/api/me/feishu-cfg` 的响应子对象）。"""
     _patch_creds(monkeypatch, cfg)
     monkeypatch.setattr(feishu, "inbound_status",
                         lambda uid: {"configured": cfg is not None, "thread": ws})
+    monkeypatch.setattr(feishu, "inbound_thread_app_id", lambda uid: ws_app_id or "")
     if token is None:
         monkeypatch.setattr(feishu, "_tenant_token", lambda c: "t-1")
     else:
@@ -234,6 +239,70 @@ def test_doctor_stale_event_warns(monkeypatch):
     out = feishu.doctor(1)
     assert _item(out, "inbound_event")["state"] == "warn"
     assert "发一条消息" in _item(out, "inbound_event")["hint"]
+
+
+# ---------- M10（2026-10-17）：inbound_ws 的「换凭据未重启」假绿 ----------
+# 真实踩过的坑：面板显示「已接入应用 X」、doctor 本项也绿，但消息仍打到旧机器人
+# （`start_inbound_for` 见线程活着就短路 + lark SDK 无干净停止）。
+
+def test_doctor_inbound_ws_warns_when_thread_still_on_previous_app(monkeypatch):
+    """线程绑的 app ≠ 配置里的 app ⇒ warn（不再假绿），并同时给出两个 app_id 与重启指引。"""
+    _doctor_stubs(monkeypatch,
+                  cfg={"app_id": "cli_new", "app_secret": "s"},
+                  bot={"bot": {"app_name": "T", "activate_status": 2}},
+                  ws=True, ws_app_id="cli_old", event_age=10)
+    it = _item(feishu.doctor(1), "inbound_ws")
+    assert it["state"] == "warn"
+    assert it["detail"] == "连接线程仍绑在 cli_old（配置已改为 cli_new）"
+    assert it["hint"] == "在机器人私聊发「接入」点「换用新应用」即可免重启切换；仍不生效再重启站点"
+    # summary 的计数跟着 warn 走（不再计入 ok）
+
+
+def test_doctor_inbound_ws_ok_when_thread_matches_config(monkeypatch):
+    """线程绑的就是配置里的应用 ⇒ 仍是 ok（新档不能伤到正常档）。"""
+    _doctor_stubs(monkeypatch,
+                  cfg={"app_id": "cli_same", "app_secret": "s"},
+                  bot={"bot": {"app_name": "T", "activate_status": 2}},
+                  ws=True, ws_app_id="cli_same", event_age=10)
+    it = _item(feishu.doctor(1), "inbound_ws")
+    assert it["state"] == "ok" and it["detail"] == "连接线程运行中" and it["hint"] == ""
+
+
+def test_doctor_inbound_ws_no_false_warn_without_recorded_app(monkeypatch):
+    """没记录到线程 app（空串）时不误报：仍是 ok —— 老替身/老进程都要兼容。"""
+    _doctor_stubs(monkeypatch,
+                  cfg={"app_id": "cli_new", "app_secret": "s"},
+                  bot={"bot": {"app_name": "T", "activate_status": 2}},
+                  ws=True, ws_app_id="", event_age=10)
+    assert _item(feishu.doctor(1), "inbound_ws")["state"] == "ok"
+
+
+def test_start_inbound_for_records_the_app_id_it_bound(monkeypatch):
+    """接线：`_WS_APP_ID` 记的是**拉起线程时**的 app_id（warn 档全靠它）。
+
+    换凭据之后再读 ⇒ 线程仍在跑（未重启）、记录仍是旧 app ⇒ doctor 能识别出不一致。
+    """
+    import threading
+
+    ev = threading.Event()
+    feishu._WS_THREADS.clear()
+    feishu._WS_APP_ID.clear()
+    monkeypatch.setattr(feishu, "_ws_run", lambda uid, cfg: ev.wait(5))   # 不真连
+    try:
+        _patch_creds(monkeypatch, {"app_id": "cli_old", "app_secret": "s"})
+        assert feishu.start_inbound_for(1) is True
+        st = feishu.inbound_status(1)
+        # 状态摘要**只有两键**（它是 `/api/me/feishu-cfg` 的响应子对象）；app 走独立访问口
+        assert st == {"configured": True, "thread": True}
+        assert feishu.inbound_thread_app_id(1) == "cli_old"
+        _patch_creds(monkeypatch, {"app_id": "cli_new", "app_secret": "s"})
+        st = feishu.inbound_status(1)           # 幂等：线程活着就不重启
+        assert st["thread"] is True and feishu.inbound_thread_app_id(1) == "cli_old"
+        assert feishu.start_inbound_for(1) is False
+    finally:
+        ev.set()
+        feishu._WS_THREADS.clear()
+        feishu._WS_APP_ID.clear()
 
 
 def test_doctor_slash_scope_fail_hint(monkeypatch):

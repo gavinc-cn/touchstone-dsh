@@ -145,7 +145,7 @@ export async function verifyCredentials(userId, options = {}) {
 // ══ 追加段的 import：**写在末尾**（文件开头那段 import 属「已冻结区」，一字不动）═════
 // ESM 的 `import` 声明在模块顶层**任意位置**都合法（模块求值前提升），所以这里再写同源 import
 // 既不碰冻结区、也不会产生第二份模块实例。
-import { inboundStatus, userConfig } from './feishu_cfg.js';
+import { inboundStatus, inboundThreadAppId, userConfig } from './feishu_cfg.js';
 import { restSendText } from './feishu_rest.js';
 import { _needScope, slashStatus } from './feishu_slash.js';
 import { getFeishuBindingByUser, setFeishuUserCfg } from './db.js';
@@ -154,7 +154,7 @@ import {
   _provisionAddons, createCancelEvent, makeDeviceFlow,
 } from './feishu_device.js';
 import { _TOKEN_CACHE } from './feishu_rest.js';
-import { startInboundFor as inboundStartFor } from './feishu_inbound.js';
+import { maybeSendSwitchCard, startInboundFor as inboundStartFor } from './feishu_inbound.js';
 // `provisionSupported()` 的能力判据之一（与 `feishu_device.js` 里做 addons 编码的是同一个
 // 内置模块；「本运行时能否跑 RFC 8628 客户端」= fetch + gzip 两件）。
 import { gzipSync } from 'node:zlib';
@@ -382,8 +382,10 @@ async function _provisionWorker(userId, cancel, options = {}) {
   if (!isCurrentFlow()) return;      // 旧流程：凭据不再落库（新流程会自己拿一份）
 
   // 合并写库：保留既有 enabled / webhook / base_url 等字段，只换应用凭据
+  let oldCfg;
   try {
     const cfg = { ...(userConfig(userId, options) || {}) };
+    oldCfg = { app_id: cfg.app_id || '', app_secret: cfg.app_secret || '' };  // M11 换应用卡片用
     cfg.app_id = appId;
     cfg.app_secret = secret;
     setFeishuUserCfg(userId, cfg, options);
@@ -395,6 +397,10 @@ async function _provisionWorker(userId, cancel, options = {}) {
     return;
   }
 
+  // M11：换应用后旧连接仍在跑（绑定关系也还是旧应用的 open_id）⇒ 用**旧应用**通道发
+  // 「确认切换」卡片；用户点按钮后由「先取码、再重连」顺序完成切换（无需重启站点）。
+  // 必须在 startInboundFor 之前发：那时旧 runner 还活着、旧 open_id 也还认得。
+  await maybeSendSwitchCard(userId, oldCfg, options);
   try {
     inboundStartFor(userId, options);    // 起长连接（失败只留痕，状态里如实呈现）
   } catch (error) {
@@ -505,6 +511,33 @@ export function _docItem(key, label, state, detail, hint = '') {
 }
 
 /**
+ * doctor 第三项 `inbound_ws`（M10，2026-10-17 新增一档 warn）：线程活着但**绑的不是配置里的
+ * 应用** ⇒ 换凭据后没重启站点。这是实测踩过的坑：面板显示「已接入应用 X」、本项也绿，
+ * 但消息仍打到旧机器人。文案与 oracle `feishu.doctor` 的同名分支**逐字一致**（两侧各有单测钉住）。
+ *
+ * 抽成纯函数只为可判：doctor 其余项依赖真网络，端到端测要打桩整套 REST；这一项只取决于
+ * 两个入参，纯函数就能把「warn / ok / fail 三档 + 文案」钉死。
+ * @param {{thread?: boolean, app_id?: string}} st `{thread: inboundStatus().thread,
+ *   app_id: inboundThreadAppId()}` —— 两者来自不同访问口，见 feishu_cfg.js 的形状说明
+ * @param {object} cfg 该用户的应用配置（读 `app_id`）
+ */
+export function inboundWsItem(st, cfg) {
+  const thread = pyTruthy(st && st.thread);
+  const cfgApp = (cfg && cfg.app_id) || '';
+  const threadApp = (st && st.app_id) || '';
+  if (thread && cfgApp && threadApp && threadApp !== cfgApp) {
+    return _docItem('inbound_ws', '入站长连接（长连接）', 'warn',
+      `连接线程仍绑在 ${threadApp}（配置已改为 ${cfgApp}）`,
+      '在机器人私聊发「接入」点「换用新应用」即可免重启切换；仍不生效再重启站点');
+  }
+  return _docItem('inbound_ws', '入站长连接（长连接）',
+    thread ? 'ok' : 'fail',
+    thread ? '连接线程运行中' : '未运行',
+    thread ? ''
+      : '凭据保存后自动连接；仍不启动看站点日志，并确认事件订阅方式为「长连接」');
+}
+
+/**
  * 逐项配置体检（`feishu.doctor`(feishu.py:2776-2925)）：八项 + summary 计数，**绝不抛出**。
  *
  * 项目顺序与文案逐字照抄 oracle：creds / token / bot / inbound_ws / inbound_event /
@@ -571,10 +604,8 @@ export async function doctor(userId, sendProbe = false, options = {}) {
   if (!hasCreds) {
     items.push(_docItem('inbound_ws', '入站长连接（长连接）', 'skip', '凭据未配置，跳过', ''));
   } else {
-    items.push(_docItem('inbound_ws', '入站长连接（长连接）', pyTruthy(st.thread) ? 'ok' : 'fail',
-      pyTruthy(st.thread) ? '连接线程运行中' : '未运行',
-      pyTruthy(st.thread) ? ''
-        : '凭据保存后自动连接；仍不启动看站点日志，并确认事件订阅方式为「长连接」'));
+    // 「线程绑的 app」走独立访问口（不进 `inboundStatus` 的形状，见 feishu_cfg.js 的说明）
+    items.push(inboundWsItem({ thread: st.thread, app_id: inboundThreadAppId(userId) }, cfg));
   }
 
   const lastEv = _LAST_EVENT_TS.get(userId);

@@ -10,6 +10,7 @@ webhook + 站点地址），入站长连接按用户各自拉起，推送回落�
 - 参考实现：同机另一飞书机器人项目（同机实证的签名/消息形态）
 """
 import argparse
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -1062,11 +1063,22 @@ def app_config(user_id):
 def inbound_status(user_id):
     """用户入站长连接状态摘要（设置页展示用）：configured=凭据齐全；thread=连接
     线程是否存活。thread 为 True 仅代表线程在 client.start() 内（SDK 内置重连）；
-    连接失败细节看 server.log。"""
+    连接失败细节看 server.log。**形状是 `/api/me/feishu-cfg` 响应的子对象 ⇒ 只许这两键**
+    （「线程绑的哪个应用」不放进这里，见 `inbound_thread_app_id`）。"""
     cfg = app_config(user_id)
     t = _WS_THREADS.get(user_id)
     return {"configured": cfg is not None,
             "thread": t is not None and t.is_alive()}
+
+
+def inbound_thread_app_id(user_id):
+    """**拉起入站线程时**用的 app_id（M10，2026-10-17）：换凭据后旧连接会一直在跑，
+    doctor 靠它判「线程绑的应用 ≠ 配置里的应用」的假绿；M11 起这个不一致可由
+    `restart_inbound_for` 在进程内收口（免重启站点）。
+    空串 = 当前进程没为该用户拉过线程（老进程/测试替身）⇒ 调用方不许据此告警。
+    刻意**不并进 `inbound_status`**：那是 `GET /api/me/feishu-cfg` 的响应子对象，
+    多一个键就是对外契约变更（node 侧 5 条形状判据当场抓过这个泄漏）。"""
+    return _WS_APP_ID.get(user_id) or ""
 
 
 def _tenant_token(cfg):
@@ -1580,6 +1592,7 @@ HELP_TEXT = (
     "Touchstone 指令（单聊可用）：\n"
     "直接发普通文字 = 与当前会话对话（未绑定会在默认项目自动新建）。\n"
     "· 帮助 — 本说明\n"
+    "· 接入 — 飞书接入操作卡片（换应用/重连/绑定码/自检/补齐/发布）\n"
     "· 绑定 <码> — 绑定站点账号（绑定码在站点侧栏「设置」→ 飞书设置 生成）\n"
     "· 解绑 — 解除绑定\n"
     "· 当前 — 查看默认项目与当前会话\n"
@@ -1606,6 +1619,14 @@ HELP_TEXT = (
 )
 
 _WS_THREADS = {}       # user_id -> 入站线程（已拉起且在 run 的；线程退出后残留引用）
+# user_id -> **拉起该线程时**用的 app_id（M10，2026-10-17）：换凭据后旧连接会一直在跑，
+# doctor 拿它判「线程绑的应用 ≠ 配置里的应用」（M11 起这种不一致可由 `restart_inbound_for`
+# 在进程内收口，不再只有「重启站点」一条路）。
+_WS_APP_ID = {}
+# user_id -> (client, loop)：M11 起每条长连接独立 event loop、可在进程内停止
+# （`stop_inbound_for`/`restart_inbound_for` 用；见 `_ws_run` 的 loop 说明）。
+_WS_CLIENTS = {}
+_WS_STOP_TIMEOUT = 8.0  # 停连接时等线程退出的上限（秒）；实测收口在毫秒级
 _MSG_SEEN = []         # message_id LRU（list 尾=最新）
 _MSG_SEEN_SET = set()
 _MSG_SEEN_MAX = 512
@@ -1628,7 +1649,7 @@ def _seen_event(eid):
 def start_inbound_for(user_id):
     """幂等启动指定用户的入站长连接线程（首次配置保存时即时拉起/服务启动遍历）；
     应用凭据缺失或线程已在运行时不启动。返回是否启动了新线程。
-    凭据变更后旧连接仍在跑（lark SDK 无干净停止）——变更提示需重启站点生效；
+    凭据变更后用 `restart_inbound_for` 停旧起新（M11 起免重启站点）；
     线程随进程 daemon 退出。生命周期日志走 stderr（server.log 可查）。"""
     cur = _WS_THREADS.get(user_id)
     if cur is not None and cur.is_alive():
@@ -1641,6 +1662,7 @@ def start_inbound_for(user_id):
     t = threading.Thread(target=_ws_run, args=(user_id, cfg), daemon=True,
                          name=f"feishu-inbound-{user_id}")
     _WS_THREADS[user_id] = t
+    _WS_APP_ID[user_id] = cfg.get("app_id") or ""     # 记「这条线程绑的是哪个应用」
     t.start()
     return True
 
@@ -1722,9 +1744,18 @@ def _make_ws_client(cfg, event_handler, card_handler, log_level=None):
 def _ws_run(user_id, cfg):
     """ws 客户端线程主体（按用户应用）：start() 阻塞，SDK 内置自动重连
     （同机实证；断连窗口的入站消息不补推=已知限制）。随进程 daemon 退出，
-    handler 内禁上抛。cfg 为进程级不可变更快照——凭据变更后旧连接持续到重启站点。"""
+    handler 内禁上抛。cfg 是**拉起时**的凭据快照——换凭据后由
+    `restart_inbound_for` 停旧起新（M11 起免重启站点）。
+
+    M11（2026-10-17）关键结构：每条连接**独立 event loop**（patch
+    `lark_oapi.ws.client.loop`）。SDK 的 `start()` 用模块级 loop 且 `_select()` 永不返回，
+    共享 loop 就无法只停一条连接；独立 loop 让 `stop_inbound_for` 只收口自己这条。
+    必须同时 `asyncio.set_event_loop(loop)`：SDK 的 `ExpiringCache.__init__` 用
+    `asyncio.get_event_loop()` 起清扫任务（`core/cache/expiring_cache.py:12-18`），
+    不设的话该任务会建在另一条永不运行的 loop 上，退出时报「Task was destroyed」。"""
     try:
         import lark_oapi as lark
+        from lark_oapi.ws import client as ws_sdk_client
     except ImportError:
         print("feishu inbound: lark-oapi 未安装，入站禁用",
               file=sys.stderr, flush=True)
@@ -1754,16 +1785,111 @@ def _ws_run(user_id, cfg):
         logging.basicConfig(level=logging.DEBUG,
                             format="%(asctime)s %(name)s %(levelname)s %(message)s")
         logging.getLogger("websockets").setLevel(logging.INFO)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)                 # SDK 内部 ExpiringCache 取的是它（见 docstring）
+    loop.set_exception_handler(lambda _loop, _ctx: None)   # 私有 loop：asyncio 层噪声不外溢
+    ws_sdk_client.loop = loop                    # SDK start() 读/写模块级 loop（client.py:164-179）
     client = _make_ws_client(cfg, handler, lambda data: _on_card_action(data, cfg),
                              log_level=lark.LogLevel.DEBUG if ws_debug
                              else lark.LogLevel.ERROR)
+    _WS_CLIENTS[user_id] = (client, loop)
     print(f"feishu inbound: 用户 {user_id} 连接长连接网关（app_id={cfg['app_id']}）…",
           file=sys.stderr, flush=True)
     try:
         client.start()
+    except asyncio.CancelledError:
+        pass              # 停止请求（M11 `stop_inbound_for`）：不是异常，不刷 ERROR 行
     except Exception as e:  # 连接建立失败/网关拒绝等：留痕后线程退出（不再自动重试）
         print(f"feishu inbound: 用户 {user_id} 长连接异常退出: {e!r}（重启站点重试）",
               file=sys.stderr, flush=True)
+    finally:
+        _WS_CLIENTS.pop(user_id, None)
+        _drain_ws_loop(loop)
+
+
+def _drain_ws_loop(loop):
+    """收口一条入站连接的 event loop（M11）：有界等待取消送达 → 关闭。
+    无界等会卡在 SDK 心跳的 120s sleep 上；1s 足够让任务取消收敛（实测毫秒级）。"""
+    try:
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        if pending:
+            loop.run_until_complete(asyncio.wait(pending, timeout=1.0))
+    except BaseException:     # noqa: BLE001 - 收口阶段吞掉一切（含已关闭/已停止）
+        pass
+    try:
+        loop.close()
+    except BaseException:     # noqa: BLE001
+        pass
+
+
+def stop_inbound_for(user_id):
+    """停掉该用户的入站长连接（M11：换应用凭据后免重启站点）。返回是否真的停了
+    一条在跑的连接——幂等：没在跑 ⇒ False、零副作用。
+
+    收口算法（实测见 plan 记录）：关闭 ws（SDK 的 `_disconnect`）→ 置
+    `_auto_reconnect=False`（否则 receive loop 会立刻重连）→ 取消该 loop 上全部任务 →
+    停 loop；线程退出后 `_ws_run` 的 finally 再关 loop。线程是 daemon：即使超时
+    未退也不会阻塞进程退出。"""
+    th = _WS_THREADS.get(user_id)
+    if th is None or not th.is_alive():
+        return False
+    ent = _WS_CLIENTS.get(user_id)
+    if ent is None:              # 线程已起、客户端还在构造/导入 SDK 中：有界等一小段
+        for _ in range(50):
+            if not th.is_alive():
+                return False
+            time.sleep(0.02)
+            ent = _WS_CLIENTS.get(user_id)
+            if ent is not None:
+                break
+    if ent is None:
+        return False
+    client, loop = ent
+    try:
+        from lark_oapi.core.log import logger as lark_logger
+    except Exception:            # noqa: BLE001 - 没有日志模块也不影响停止
+        lark_logger = None
+    try:
+        if lark_logger is not None:
+            # 主动停连接时 SDK 的 receive loop 会打一条 ERROR「receive message loop exit」——
+            # 那是预期内收口、不是故障；临时抬到 CRITICAL，停完复原（默认级别就是 ERROR）。
+            lark_logger.setLevel(logging.CRITICAL)
+        client._auto_reconnect = False
+        try:
+            asyncio.run_coroutine_threadsafe(client._disconnect(), loop).result(3.0)
+        except BaseException:    # noqa: BLE001 - 连接可能已断/loop 已停
+            pass
+
+        def _shutdown():
+            try:
+                for task in asyncio.all_tasks(loop):
+                    task.cancel()
+            except BaseException:    # noqa: BLE001
+                pass
+            loop.call_later(0.05, loop.stop)
+
+        try:
+            loop.call_soon_threadsafe(_shutdown)
+        except RuntimeError:     # loop 已关闭：线程自己会退
+            pass
+        th.join(_WS_STOP_TIMEOUT)
+    finally:
+        if lark_logger is not None:
+            try:
+                lark_logger.setLevel(logging.ERROR)
+            except Exception:    # noqa: BLE001
+                pass
+    return not th.is_alive()
+
+
+def restart_inbound_for(user_id):
+    """换掉该用户的入站长连接（M11）：停旧 → 用**当前库里**的凭据起新。
+    返回是否起了新连接（False = 旧线程没停下来导致新连接没起，或凭据不全）。
+    停超时也照常尝试起新——但 `start_inbound_for` 见线程还活着会短路，故不会并存两条。
+    M11.1 起由 `POST /api/me/feishu/reconnect`（设置页面板「重连入站」按钮）直接暴露。"""
+    stop_inbound_for(user_id)
+    return start_inbound_for(user_id)
+
 
 
 def _on_message_event(data, cfg):
@@ -1845,6 +1971,13 @@ def handle_message_event(evt, cfg=None):
             rest_reply(mid, "尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ 飞书设置，"
                             "生成绑定码后在这里回复「绑定 <码>」完成绑定", cfg)
             return
+        # M11「接入」：发一张可点的飞书接入操作卡片（换应用/重连/绑定码/自检/补齐/发布），
+        # 用**当前这条连接**的应用凭据发——卡片按钮回调会回到同一条连接
+        if intent is not None and intent["action"] == "setup":
+            ok, err = send_setup_card(binding["user_id"], cfg)
+            rest_reply(mid, "🛠 已发送「飞书接入操作卡片」，请在卡片上操作。"
+                            if ok else f"卡片发送失败：{err}", cfg)
+            return
         if intent is None:
             if evt.get("chat_type") != "group" and feishu_conv.enabled():
                 # 单聊未识别文本 → 通用对话路由（投递给当前会话；无会话按默认项目自动新建）
@@ -1908,6 +2041,10 @@ def _on_card_action(data, cfg):
         # M4 权限引导卡片（t=sc）独立于卡片交互流：不带卡号，回调里重跑斜杠指令同步
         if t == "sc":
             return _on_slash_perm_action(sender, value, cfg)
+        # M11 接入操作卡片（t=fs）：同样不带卡号，独立于看板/通用对话卡片流；
+        # 身份（open_id→binding）+ nonce 双复核在 _on_setup_card_action 里
+        if t == "fs":
+            return _on_setup_card_action(sender, value, cfg)
         # 通用对话卡片（t=dp 项目总览 / t=ss 会话列表）同样不带卡号：在既有看板
         # 卡片白名单**之前**分流，看板回调（a/mq/p/s/d）路径一个字节都不动
         if t in ("dp", "ss"):
@@ -1978,12 +2115,266 @@ def _card_sdk_to_dict(data):
     }
 
 
+# ---------- M11：换凭据免重启 + 飞书接入操作卡片（2026-10-17） ----------
+#
+# 用户痛点（M10 §五.1）：换应用后必须重启站点才换长连接，而绑定码是进程内存态
+# （10 分钟 TTL）⇒「先生成码再重启」的顺序必然踩「绑定码无效/已过期」。M11 把长连接
+# 做成可停可换（`stop_inbound_for`/`restart_inbound_for`），并把「换应用 → 取新绑定码
+# → 重连 → 去新机器人绑定」做成一张 DM 卡片的按钮，**顺序由代码保证**，不依赖用户记忆。
+#
+# 卡片安全：按钮 value 只带 {t=fs, a=动作, u=用户id, n=nonce}——回调按 open_id→binding
+# 复核身份，再按 nonce（进程内存态、10 分钟、绑定到该用户）复核新鲜度/归属；卡片本身
+# 无状态（动作全部在服务端重读配置与线程态），过期后发「接入」重新获取。
+#
+# 两条投递通道（都按「open_id 属于哪个应用」决定用谁的凭据发）：
+#   - 用户主动发「接入」→ 用**当前连接**的凭据（cfg 参数）发卡；
+#   - 换应用成功后自动发「确认切换」卡 → 必须用**旧应用**凭据（绑定行的 open_id 是旧
+#     应用下的标识，新应用还不认识它；见 `maybe_send_switch_card`）。
+
+_SETUP_NONCES = {}     # nonce -> (user_id, expires epoch)；内存态不入库
+_SETUP_NONCE_TTL = 600
+
+
+def _setup_nonce(user_id):
+    """发接入卡片时登记一个按钮 nonce（顺带清过期项；每张卡片一个，多按钮共用）。"""
+    now = time.time()
+    for key in [k for k, v in list(_SETUP_NONCES.items()) if now > v[1]]:
+        _SETUP_NONCES.pop(key, None)
+    nonce = secrets.token_hex(8)
+    _SETUP_NONCES[nonce] = (int(user_id), now + _SETUP_NONCE_TTL)
+    return nonce
+
+
+def setup_card(user_id, app_id, thread_app, nonce):
+    """「飞书接入操作卡片」（schema 2.0，DM 单聊）。**纯函数**：给定入参 ⇒ 确定 JSON
+    （两侧后端逐字节对拍用；node 侧 `feishu_inbound.js::setupCard`）。
+
+    入参：user_id=站点用户 id；app_id=配置里的应用；thread_app=入站长连接**当前绑的**
+    应用（空串=连接未运行）；nonce=按钮防伪令牌。两应用不同 ⇒ 卡片切到「换用新应用」
+    形态（换绑后自动发的那张：按钮会先取新绑定码，再用新应用重连）。"""
+    app_id = str(app_id or "")
+    thread_app = str(thread_app or "")
+    switching = bool(app_id) and bool(thread_app) and app_id != thread_app
+    uid = int(user_id)
+
+    def _button(label, action, style="default"):
+        return {"tag": "button", "type": style,
+                "text": {"tag": "plain_text", "content": label},
+                "behaviors": [{"type": "callback",
+                               "value": {"t": "fs", "a": action, "u": uid, "n": nonce}}]}
+
+    elements = [{"tag": "markdown", "content": "\n".join([
+        "**当前应用**：" + (("`" + app_id + "`") if app_id else "（未配置）"),
+        "**入站长连接**：" + (("运行中 · 绑在 `" + thread_app + "`") if thread_app else "未运行"),
+    ])}]
+    if switching:
+        elements.append({"tag": "markdown", "content":
+                         f"检测到应用凭据已换为 `{app_id}`，但长连接还绑在旧应用 "
+                         f"`{thread_app}` 上。点「换用新应用」：我会先把新绑定码发到本会话，"
+                         "再用新应用重连——之后在新机器人单聊里回复「绑定 <码>」即可。"})
+        elements.append(_button("🔁 换用新应用", "switch", "primary"))
+    else:
+        elements.append({"tag": "markdown", "content":
+                         "需要时点下面的按钮；换应用后我会自动发一张新的确认卡片。"})
+        elements.append(_button("🔄 重连入站", "restart", "primary"))
+    elements.append(_button("🔑 生成绑定码", "bindcode"))
+    elements.append(_button("🩺 配置自检", "doctor"))
+    elements.append(_button("🧩 补齐配置", "apply"))
+    elements.append(_button("🚀 提交发布", "publish"))
+    elements.append({"tag": "markdown",
+                     "content": "卡片 10 分钟内有效；过期后发「接入」重新获取。"})
+    return {"schema": "2.0",
+            "header": {"title": {"tag": "plain_text",
+                                 "content": "🔁 飞书应用已变更" if switching else "🛠 飞书接入操作"},
+                       "template": "orange" if switching else "blue"},
+            "body": {"elements": elements}}
+
+
+def send_setup_card(user_id, cfg=None):
+    """给该用户 DM 发「飞书接入操作卡片」。返回 (ok, err)。
+    `cfg` 缺省=当前配置；**换应用自动发送时调用方必须传旧应用的 cfg**（见模块段注释）。"""
+    if cfg is None:
+        cfg = app_config(user_id)
+    if cfg is None:
+        return False, "未配置应用凭据（App ID / App Secret），先保存配置再发卡片"
+    binding = db.get_feishu_binding_by_user(user_id)
+    if not binding:
+        return False, "尚未绑定飞书账号：设置页生成绑定码后在机器人单聊回复「绑定 <码>」"
+    cur = app_config(user_id) or {}
+    thread_app = (inbound_thread_app_id(user_id)
+                  if inbound_status(user_id).get("thread") else "")
+    card = setup_card(user_id, cur.get("app_id") or "", thread_app, _setup_nonce(user_id))
+    try:
+        rest_send_card(binding["open_id"], card, cfg)
+        return True, ""
+    except FeishuRestError as e:
+        return False, f"卡片发送失败：{e}"
+
+
+def maybe_send_switch_card(user_id, old_cfg):
+    """换应用凭据后自动发「确认切换」卡片（M11）：绑定行的 open_id 属于旧应用，故必须用
+    **旧凭据**发这条 DM（新凭据发不进这个单聊）。条件：① 旧连接还在跑；② 配置里的应用
+    与旧连接不同；③ 有绑定行。绝不抛出（后台线程/扫码 worker 调用），失败只留一行 stderr。
+    返回是否真的发出。"""
+    try:
+        old_app = str((old_cfg or {}).get("app_id") or "")
+        new_app = str((app_config(user_id) or {}).get("app_id") or "")
+        if not old_app or not new_app or old_app == new_app:
+            return False
+        if not inbound_status(user_id).get("thread"):
+            return False
+        if inbound_thread_app_id(user_id) == new_app:
+            return False
+        binding = db.get_feishu_binding_by_user(user_id)
+        if not binding:
+            return False
+        card = setup_card(user_id, new_app, old_app, _setup_nonce(user_id))
+        rest_send_card(binding["open_id"], card, old_cfg)
+        return True
+    except Exception as e:     # noqa: BLE001 - 自动卡片绝不反噬换凭据主流程
+        print(f"feishu provision: 用户 {user_id} 换应用确认卡片发送失败: {e!r}",
+              file=sys.stderr, flush=True)
+        return False
+
+
+def _setup_switch(user_id, sender, cfg):
+    """「换用新应用」：生成新绑定码 → 用**旧应用** DM 发出 → 停旧连接、用新凭据重连。
+    顺序是设计要点：码必须先到用户手上（旧应用通道），再断旧连接（断完就发不出了）。
+    返回 (toast, dm_text)；dm_text 为空表示已有独立 DM 说明（不再重复发）。"""
+    cur = app_config(user_id)
+    new_app = str((cur or {}).get("app_id") or "")
+    old_app = str((cfg or {}).get("app_id") or "")
+    if cur is None or not new_app:
+        return ({"toast": {"type": "error", "content": "新应用凭据不完整"}},
+                "❌ 应用凭据不完整：先在设置页保存新应用的 App ID / App Secret，再点本按钮。")
+    if old_app == new_app:     # 同应用（只换了 secret）：直接重连，绑定关系不变
+        if restart_inbound_for(user_id):
+            return ({"toast": {"type": "success", "content": "已重连"}},
+                    f"🔄 已用当前应用 `{new_app}` 重新建立长连接，绑定关系不变。")
+        return ({"toast": {"type": "error", "content": "重连失败，看私聊"}},
+                "❌ 重连失败：旧连接未在超时内退出；稍后再点一次，仍不行请重启站点。")
+    code = make_bind_code(user_id)
+    text = (f"🔁 已切换到新应用 `{new_app}`。\n"
+            f"**新的绑定码：{code}**（10 分钟内有效）\n"
+            "本（旧）机器人的连接马上断开；请到新机器人单聊里回复：\n"
+            f"绑定 {code}")
+    try:
+        rest_send_text(sender, text, cfg)
+    except FeishuRestError as e:
+        # 码没送到就不动连接（否则用户既进不去新机器人、旧机器人也断了）
+        return ({"toast": {"type": "error", "content": "绑定码发送失败"}},
+                f"❌ 绑定码没能发进本会话（{e}）；重连未执行，可重试本按钮。")
+    if restart_inbound_for(user_id):
+        return ({"toast": {"type": "success", "content": "已切换，去新机器人绑定"}}, "")
+    return ({"toast": {"type": "error", "content": "已换应用但重连失败，看私聊"}},
+            f"⚠️ 新应用 `{new_app}` 重连失败（旧连接未退出）；绑定码 {code} 仍有效，"
+            "可稍后再点本按钮，或重启站点。")
+
+
+def _setup_restart(user_id):
+    """「重连入站」：停旧连接、用当前库里的凭据重连（同应用换 secret 的主路径）。"""
+    cur = app_config(user_id)
+    if cur is None:
+        return ({"toast": {"type": "error", "content": "应用凭据未配置"}},
+                "❌ 应用凭据未配置（App ID / App Secret）：先在设置页保存，再点本按钮。")
+    app_id = str(cur.get("app_id") or "")
+    if restart_inbound_for(user_id):
+        return ({"toast": {"type": "success", "content": "已重连"}},
+                f"🔄 已用当前应用 `{app_id}` 重新建立长连接。")
+    return ({"toast": {"type": "error", "content": "重连失败，看私聊"}},
+            "❌ 重连失败：旧连接未在超时内退出，稍后再点一次；仍不行请重启站点。")
+
+
+def _setup_bindcode(user_id):
+    """「生成绑定码」：发一个新码（10 分钟、内存态；旧码不失效，码均可用一次）。"""
+    code = make_bind_code(user_id)
+    return ({"toast": {"type": "success", "content": "绑定码已私聊发你"}},
+            f"🔑 新的绑定码：{code}（10 分钟内有效）\n"
+            "· 未绑定：在本机器人单聊回复「绑定 <码>」\n"
+            "· 已绑定换号：先发「解绑」，再发「绑定 <码>」")
+
+
+def _setup_slow_action(user_id, sender, action, cfg):
+    """慢动作（自检/补齐配置/提交发布）后台执行，结果 DM 回执。绝不外抛。
+    走后台线程的理由：卡片回调要尽快返回 ACK，这几项是多次 REST（2~5s）。"""
+    try:
+        if action == "doctor":
+            out = doctor(user_id)
+            summary = out.get("summary") or {}
+            bad = [it for it in (out.get("items") or [])
+                   if it.get("state") in ("fail", "warn")]
+            lines = [f"🩺 配置自检：ok {summary.get('ok', 0)} / fail {summary.get('fail', 0)} / "
+                     f"warn {summary.get('warn', 0)} / skip {summary.get('skip', 0)}"]
+            for it in bad:
+                lines.append(f"· {it.get('label')}：{it.get('detail')}"
+                             + (f"（{it.get('hint')}）" if it.get("hint") else ""))
+            text = "\n".join(lines)
+        elif action == "apply":
+            out = provision_apply(user_id)
+            text = ("🧩 配置补齐成功：机器人能力 / 权限 / 长连接订阅 / 事件 / 回调已写入"
+                    "（需发布新版本生效）。" if out.get("ok")
+                    else f"❌ 配置补齐失败：{out.get('error') or '未知错误'}")
+        else:
+            out = provision_publish(user_id)
+            text = (f"🚀 已提交发布版本 {out.get('version') or ''}；"
+                    "仍需租户管理员审批后线上生效。" if out.get("ok")
+                    else f"❌ 提交发布失败：{out.get('error') or '未知错误'}")
+        _dm_text(sender, text, cfg)
+    except Exception as e:     # noqa: BLE001 - 后台线程兜底，绝不外抛
+        print(f"feishu inbound: 接入卡片后台动作异常: {e!r}", file=sys.stderr, flush=True)
+
+
+def _on_setup_card_action(sender, value, cfg):
+    """「飞书接入操作卡片」按钮回调（M11）：open_id→binding + nonce 双重复核 → 动作分发。
+    返回 toast dict（None=不更新卡片）。`cfg` = 点击到达那条连接的应用凭据——旧应用发的
+    卡片必须用旧应用凭据回 DM，否则发不进当前单聊。"""
+    binding = db.get_feishu_binding_by_open(sender)
+    if binding is None:
+        _dm_text(sender, "尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ "
+                         "飞书设置，生成绑定码后在单聊回复「绑定 <码>」完成绑定", cfg)
+        return {"toast": {"type": "error", "content": "尚未绑定站点账号"}}
+    user_id = int(binding["user_id"])
+    uid = int(value.get("u") or 0)
+    if uid and uid != user_id:
+        return {"toast": {"type": "error", "content": "该卡片不属于当前账号"}}
+    nonce = str(value.get("n") or "")
+    item = _SETUP_NONCES.get(nonce)
+    if item is None or item[0] != user_id:
+        return {"toast": {"type": "error", "content": "卡片已失效，发「接入」重新获取"}}
+    if time.time() > item[1]:
+        _SETUP_NONCES.pop(nonce, None)
+        return {"toast": {"type": "error", "content": "卡片已过期，发「接入」重新获取"}}
+    action = str(value.get("a") or "")
+    try:
+        if action == "switch":
+            toast, text = _setup_switch(user_id, sender, cfg)
+        elif action == "restart":
+            toast, text = _setup_restart(user_id)
+        elif action == "bindcode":
+            toast, text = _setup_bindcode(user_id)
+        elif action in ("doctor", "apply", "publish"):
+            # 慢动作：后台线程执行 + 立即 toast（避免卡片回调 ACK 超时）
+            threading.Thread(target=_setup_slow_action,
+                             args=(user_id, sender, action, cfg), daemon=True,
+                             name=f"feishu-setup-{action}-{user_id}").start()
+            return {"toast": {"type": "success", "content": "已收到，结果稍后私聊发你"}}
+        else:
+            return None
+    except Exception as e:     # noqa: BLE001 - 卡片回调绝不外抛
+        print(f"feishu inbound: 接入卡片动作异常: {e!r}", file=sys.stderr, flush=True)
+        return {"toast": {"type": "error", "content": "操作失败，详情看站点日志"}}
+    if text:
+        _dm_text(sender, text, cfg)
+    return toast
+
+
 # 规则意图表（M3：未命中且 nl_parse=agent 时走 agent headless 兜底解析）
 # 每条规则的「中文写法 | 斜杠别名」两分支共用同一组捕获组（组数必须一致，执行器按
 # groups 取值）：斜杠别名对应 SLASH_COMMANDS 注册的指令名，用户从飞书指令面板选中后
 # 投递过来的文本就是「/名称 [参数]」，与中文指令落到同一个 action。
 _INTENT_RULES = (
     ("help",            r"^(?:帮助|help|/help)$"),
+    ("setup",           r"^(?:接入)$"),
     ("bind",            r"^(?:绑定|/bind)\s*([A-Za-z0-9]{4,8})$"),
     ("unbind",          r"^(?:解绑|/unbind)$"),
     ("default_project", r"^(?:默认项目|/project)\s+(\S+)$"),
@@ -2831,9 +3222,18 @@ def doctor(user_id, send_probe=False):
                                    f"探测失败: {e!r}", "稍后重试"))
 
     st = inbound_status(user_id)
+    # M10（2026-10-17）：线程活着但**绑的不是配置里的应用** ⇒ 换凭据后没重启站点。
+    # 这是真实踩过的坑：面板显示「已接入应用 X」、本项也绿，但消息仍打到旧机器人。
+    # 「线程绑的 app」走独立访问口 `inbound_thread_app_id`，不动 `inbound_status` 的形状。
+    cfg_app, thread_app = (cfg.get("app_id") or ""), inbound_thread_app_id(user_id)
     if not has_creds:
         items.append(_doc_item("inbound_ws", "入站长连接（长连接）", "skip",
                                "凭据未配置，跳过", ""))
+    elif st.get("thread") and cfg_app and thread_app and thread_app != cfg_app:
+        items.append(_doc_item(
+            "inbound_ws", "入站长连接（长连接）", "warn",
+            f"连接线程仍绑在 {thread_app}（配置已改为 {cfg_app}）",
+            "在机器人私聊发「接入」点「换用新应用」即可免重启切换；仍不生效再重启站点"))
     else:
         items.append(_doc_item(
             "inbound_ws", "入站长连接（长连接）",
@@ -3073,11 +3473,17 @@ def _provision_worker(user_id, cancel):
         return
     # 合并写库：保留既有 enabled / webhook / base_url 等字段，只换应用凭据
     cfg = dict(user_config(user_id) or {})
+    old_cfg = {"app_id": str(cfg.get("app_id") or ""),
+               "app_secret": str(cfg.get("app_secret") or "")}
     cfg["app_id"] = app_id
     cfg["app_secret"] = secret
     db.set_feishu_user_cfg(user_id, cfg)
     _TOKEN_CACHE.pop(app_id, None)   # 新凭据：清同 app_id 的旧 token 缓存
     st["app_id"] = app_id
+    # M11：换应用后旧连接仍在跑（绑定关系也还是旧应用的 open_id）⇒ 用**旧应用**通道发
+    # 「确认切换」卡片；用户点按钮后由「先取码、再重连」顺序完成切换（无需重启站点）。
+    # 必须在 start_inbound_for 之前发：那时旧线程还活着、旧 open_id 也还认得。
+    maybe_send_switch_card(user_id, old_cfg)
     try:
         start_inbound_for(user_id)   # 起长连接（失败只留痕，状态里如实呈现）
     except Exception as e:
@@ -3157,6 +3563,8 @@ def save_user_config(user_id, body):
     填错只能翻日志；`verify` 随响应回给页面做即时提示（凭据不全时为 None，零请求）。
     返回 {"inbound_started": bool, "verify": {...}|None}。"""
     cfg = user_config(user_id)
+    old_cfg = {"app_id": str(cfg.get("app_id") or ""),
+               "app_secret": str(cfg.get("app_secret") or "")}
     # 推送总控（2026-10-10）：与旧 `enabled` 是两个独立开关——旧键只管「无绑定行回落
     # 默认 webhook」与入站，本键一票否决全部自动推送。缺省=不改（不在 body 里就不动）。
     if "push_enabled" in body:
@@ -3170,6 +3578,12 @@ def save_user_config(user_id, body):
     db.set_feishu_user_cfg(user_id, cfg)
     started = start_inbound_for(user_id)
     verify = verify_credentials(user_id) if app_config(user_id) else None
+    # M11：手工换应用（非扫码路径）同样发「确认切换」卡片——旧连接还活着时用旧应用通道
+    # 通知用户点确认（后台线程发，REST 不阻塞保存响应；条件在 maybe_send_switch_card 里
+    # 复核，凭据没变/线程没跑时是零请求空转）
+    if ("app_id" in body or "app_secret" in body):
+        threading.Thread(target=maybe_send_switch_card, args=(user_id, old_cfg),
+                         daemon=True, name=f"feishu-switch-card-{user_id}").start()
     return {"inbound_started": bool(started), "verify": verify}
 
 
