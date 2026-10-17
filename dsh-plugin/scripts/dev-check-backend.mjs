@@ -205,6 +205,12 @@ try {
     check('F 后端起来就崩 ⇒ 面板看到 503 提示页（不是通用 JSON）',
       page.status === 503 && String(page.contentType).startsWith('text/html')
       && page.text.includes('Node'), `status=${page.status} type=${page.contentType} body=${page.text.slice(0, 120)}`);
+    // 2026-10-17 桌面端真机事故教训：提示页原先只教用户自己去 tail 日志文件 —— Windows 用户
+    // 得先找到库目录、开终端。现改为把内存里收到的最后几行直接内联，提示页要能自解释。
+    check('F 提示页内联后端最后输出（免去手动 tail；真机失败原因就在这一行）',
+      page.text.includes('假后端: 起来就崩'), page.text.slice(0, 400));
+    check('F code=3 ⇒ 提示页给出「同库单实例锁」的专项说明（两版后端的 exit 3 同义）',
+      page.text.includes('单实例锁没拿到'), page.text.slice(0, 400));
     check('F 崩溃信息进日志（入口路径 + 退出码各一条，别写成一个断言——临时目录名随机，会假绿/假红）',
       s.logs.some((l) => l.includes('backend/server.js')) && s.logs.some((l) => /code=3\b/.test(l)),
       s.logs.slice(-4).join(' | '));

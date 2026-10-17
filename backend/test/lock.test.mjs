@@ -605,6 +605,47 @@ test('归属记录里已有活着的别家后端 ⇒ 拒绝启动（补 Node 看
   }
 });
 
+test('残留的 node 归属记录（pid 已被复用成「像后端」的活进程）⇒ 不得拒绝启动（Windows 升级卡死回归）', async () => {
+  // 真机事故（2026-10-17 桌面端 npm 0.3.0，Windows）：Node 后端被薄壳 SIGTERM 停掉时走的是
+  // TerminateProcess ⇒ 进程内优雅退出/`release()` 全跑不到 ⇒ `.pid` 留盘；随后那个 pid 被
+  // 无关进程（实测 OpenConsole.exe）复用。下次启动时新后端**已经拿到 SQLite 排它锁**（老进程
+  // 确实死了），却因为「记录里 pid 还活着 + looksLikeBackend 在非 Linux 无条件 true」判定
+  // 「同一数据库已有运行中的实例」⇒ exit 3，且此后每次启动都如此 ⇒ 插件面板永久打不开。
+  //
+  // 不变量：Node 版后端自己也持这把 SQLite 排它锁到进程退出 ⇒ 我们拿到锁时，一条
+  // `backend: "node"` 的记录**不可能**还属于活实例 ⇒ 一律按残留处理（覆写成自己的记录）。
+  // 这里故意用「命令行完全像 Node 后端」的活进程当复用对象——比真机场景更恶劣，
+  // 确保判据靠的是「已持锁」这个不变量，而不是「命令行不像后端」的偶然。
+  const dir = fs.mkdtempSync(path.join(WORK, 'db-stale-node-'));
+  const dbPath = path.join(dir, 'test.db');
+  const reused = spawn(NODE, [...NODE_OPTS, '-e', 'setTimeout(() => {}, 60000)', SERVER_JS],
+    { stdio: 'ignore' });
+  try {
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(pidAlive(reused.pid), true);
+    assert.equal(looksLikeBackend(reused.pid), true,
+      '夹具前提：这个「复用 pid」的活进程要被现有命令行判据认成后端，回归才有杀伤力');
+    fs.writeFileSync(`${dbPath}.pid`, JSON.stringify({
+      pid: reused.pid, ppid: IMPOSSIBLE_PID, repo_dir: '/old-install',
+      parent_watch: true, started_at: 0, backend: 'node',
+    }), 'utf8');
+    const { lines, log } = makeLogger();
+    const inst = acquireSingleInstance({ dbPath, repoDir: '/mine', logger: log });
+    try {
+      assert.equal(inst.ok, true, `自持 SQLite 排它锁 ⇒ node 残留记录不得拒绝启动：${inst.reason}`
+        + `（日志=${JSON.stringify(lines)}）`);
+      assert.equal(readPidRecord(`${dbPath}.pid`).pid, process.pid,
+        '残留的 node 记录必须被本进程的归属记录覆写（否则它永远是排障噪声）');
+      assert.equal(pidAlive(reused.pid), true, '绝不能把疑似 PID 复用的无关进程杀掉/收口');
+    } finally {
+      inst.release();
+    }
+  } finally {
+    reused.kill('SIGKILL');
+    reused.unref();
+  }
+});
+
 test('writePidRecord 不覆写活着的别家记录（对方排障凭据）', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-lock-pidwrite-'));
   const pidPath = path.join(dir, 't.db.pid');

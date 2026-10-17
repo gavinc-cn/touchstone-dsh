@@ -255,24 +255,107 @@ export function killTree(pid, { sig = 'SIGTERM', graceMs = KILL_GRACE_MS } = {})
   return result;
 }
 
+/** Windows 命令行查询缓存：同一次判定里同一 pid 可能被问两遍（liveForeignHolder + writePidRecord） */
+const WIN_CMDLINE_CACHE = new Map();
+const WIN_CMDLINE_CACHE_MAX = 32;
+
+/** 往缓存里记一条（超限丢最早的；数字键的插入序即写入序，够用） */
+function cacheWinCmdline(pid, value) {
+  if (WIN_CMDLINE_CACHE.size >= WIN_CMDLINE_CACHE_MAX) {
+    WIN_CMDLINE_CACHE.delete(WIN_CMDLINE_CACHE.keys().next().value);
+  }
+  WIN_CMDLINE_CACHE.set(pid, value);
+  return value;
+}
+
+/**
+ * Windows：用系统自带工具读 pid 的命令行。读不到返回 null。
+ *
+ * 为什么不是「读不到就算它是后端」：**判据会被用在两个方向**——
+ *   ① `liveForeignHolder` 用它决定「要不要拒绝启动」（exit 3）；
+ *   ② `reapStale` 用它决定「要不要 SIGTERM 掉这个 pid」。
+ * 2026-10-17 桌面端真机事故（npm 0.3.0 / Windows）就是①：Node 后端被 TerminateProcess 硬杀后
+ * `.pid` 残留、其 pid 被 OpenConsole.exe 复用，旧实现 `非 linux ⇒ return true` 让「没有活实例」
+ * 永久误判成「已有运行中的实例」⇒ 面板再也打不开。两个方向误判的代价都远大于「确认不了就放行」。
+ *
+ * 工具选择（零 npm 依赖红线）：PowerShell 的 CIM（Win7+ 自带，`-NoProfile -NonInteractive` 尽量快）
+ * 优先；`wmic` 兜底（Win10/11 仍可用，但已被微软标记弃用）。权限不足时输出为空，用 wmic 再试。
+ */
+function windowsProcessCmdline(pid) {
+  if (WIN_CMDLINE_CACHE.has(pid)) return WIN_CMDLINE_CACHE.get(pid);
+  const opts = { encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true };
+  let text = '';
+  try {
+    const script = '$p = Get-CimInstance Win32_Process -Filter "ProcessId=' + pid + '"; '
+      + 'if ($p -and $p.CommandLine) { [Console]::Out.Write($p.CommandLine) }';
+    text = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], opts);
+  } catch {
+    /* 没有 PowerShell / 超时 / 权限不足：退 wmic */
+  }
+  if (text && text.trim()) return cacheWinCmdline(pid, text.trim());
+  try {
+    const out = execFileSync('wmic',
+      ['process', 'where', `processid=${pid}`, 'get', 'commandline', '/value'], opts);
+    const line = String(out || '').split(/\r?\n/).find((l) => l.startsWith('CommandLine='));
+    if (line && line.length > 'CommandLine='.length) {
+      return cacheWinCmdline(pid, line.slice('CommandLine='.length).trim());
+    }
+  } catch {
+    /* 无 wmic（新系统可能已移除）/ 超时：确认不了 */
+  }
+  return cacheWinCmdline(pid, null);
+}
+
+/**
+ * 读 pid 的真实命令行（字符串；读不到 null，绝不抛）。
+ *
+ * `platform` 是显式形参而不是直接读 `process.platform`，为了单测能**在 Linux 上验 Windows
+ * 分支**（真机事故形态没法在 CI 复现，见 `backend/test/proc.test.mjs` 的注入用例）。
+ * macOS 等 POSIX：`ps -p <pid> -o command=`。
+ */
+function readProcessCmdline(pid, platform) {
+  if (platform === 'linux') {
+    try {
+      return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+    } catch {
+      return null;                                   // 进程刚消失/无权限：确认不了
+    }
+  }
+  if (platform === 'win32') return windowsProcessCmdline(pid);
+  try {
+    return execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
+      encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 命令行粗校验：这个 pid 是否**像**本平台后端（防 PID 复用误杀，对齐
  * `lifecycle.SingleInstance._looks_like_server`）。
  *
  * 与 Python 的差异：Python 只认 `server.py`；Node 侧**同时接受 `backend/server.js`**
  * ——两个版本互为孤儿时都要能收口（Python 杀 Node 孤儿、Node 杀 Python 孤儿）。
- * 读不到命令行（非 Linux 无 /proc、进程刚消失、权限不足）一律返回 **true**：
- * 调用点只在「pid 记录声明 parent_watch 且其父已死」时才走到这里，宁可不杀不误杀。
+ *
+ * **读不到命令行（含非 Linux 平台、进程刚消失、权限不足）一律返回 false**（2026-10-17 订正）：
+ * 旧实现返回 true，等于把「不知道」当成「像后端」，在 Windows 上造成两个方向的真机误判
+ * （见 `windowsProcessCmdline` 的注释）。宁可不拦/不杀，也不拿不确定当判据。
+ *
+ * @param {number} pid
+ * @param {{platform?: string, readCmdline?: (pid: number) => string|string[]|null}} [options]
+ *        测试缝：注入平台与命令行读取器（生产路径不传）。
  */
-export function looksLikeBackend(pid) {
+export function looksLikeBackend(pid, { platform = process.platform, readCmdline } = {}) {
   const n = Number(pid);
-  let raw = '';
-  if (process.platform !== 'linux') return true;      // 无 /proc：读不到命令行 ⇒ 宁可不杀
+  if (!Number.isInteger(n) || n <= 0) return false;
+  let raw;
   try {
-    raw = fs.readFileSync(`/proc/${n}/cmdline`, 'utf8');
+    raw = typeof readCmdline === 'function' ? readCmdline(n) : readProcessCmdline(n, platform);
   } catch {
-    return true;                                     // 读不到 ⇒ 宁可不杀（对齐 Python）
+    return false;                                    // 读取器抛错同样算「确认不了」
   }
-  const cmdline = raw.replace(/\\/g, '/');           // Windows 风格分隔符归一，便于同一判据
+  if (raw === null || raw === undefined || raw === '') return false;
+  const cmdline = (Array.isArray(raw) ? raw.join(' ') : String(raw)).replace(/\\/g, '/');
   return cmdline.includes('server.py') || cmdline.includes('backend/server.js');
 }

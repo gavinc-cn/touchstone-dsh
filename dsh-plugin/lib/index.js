@@ -480,9 +480,32 @@ function renderNodeRuntimeHint({ execPath, version, detail, logPath }) {
  * 为什么需要：「入口缺失」只是新开关失败的一种；更常见的是入口在、跑不起来
  * （宿主 Node 版本不认 `--disable-warning`、`dist-plugin` 缺失、被执行策略拦、脚本自身报错）。
  * 那时 `backendPort` 一直是 0，proxy 只会回通用 503 JSON —— 面板里显示一段 JSON 原文，
- * 用户既不知道发生了什么、也不知道去哪看。提示页给三件事：失败原因、日志路径、怎么回退。
+ * 用户既不知道发生了什么、也不知道去哪看。提示页给四件事：失败原因、**后端最后几行输出**、
+ * 日志路径、怎么回退。
+ *
+ * 2026-10-17 桌面端真机事故的教训：提示页原先只教用户自己 `tail` 日志文件（Windows 用户得先
+ * 找到库目录、开终端），而失败原因（「同一数据库已有运行中的实例：pid=…」）就一行字。现改为
+ * 把**内存里收到的最后几行**直接内联（见 apply 里的 `crashTail`），并对 `code=3` 给出单实例锁
+ * 的专项提示 —— 提示页要能自解释，而不是把排障转嫁给用户。
  */
-function renderBackendCrashHint({ entryPath, logPath, code, signal }) {
+function renderBackendCrashHint({ entryPath, logPath, code, signal, tailLines }) {
+  const logPathText = escapeHtml(logPath || '<库目录>/plugin-backend.log');
+  const tail = (Array.isArray(tailLines) ? tailLines : [])
+    .map((line) => String(line)).filter((line) => line.trim()).slice(-10);
+  const tailBlock = tail.length
+    ? '<p>后端进程最后输出（内存缓冲；启动失败原因通常就在最后几行）：</p>'
+      + '<pre style="background:#0d0f12;border:1px solid #2a2f36;border-radius:6px;'
+      + `padding:.8rem 1rem;overflow:auto">${escapeHtml(tail.join('\n'))}</pre>`
+    : '';
+  // code=3 在**两版后端**里都是「同库单实例锁没拿到」（server.py 与 backend/server.js 的
+  // exit 3 同义，见 spec §十九.7）。把排障动作写进页面，别让用户对着 generic 文案猜。
+  const lockHint = String(code) === '3'
+    ? '<p><b>code=3 = 同库单实例锁没拿到</b>：可能另有 Touchstone 后端占着同一个库，'
+      + '或锁文件/归属记录残留。先确认没有实例在跑（任务管理器里找带 '
+      + '<code>backend/server.js</code> / <code>server.py</code> 的 node/python 进程），'
+      + '再停用→启用本插件重试；仍失败再把库目录下的 '
+      + '<code>*.lock</code> / <code>*.pid</code> 移走后重试。</p>'
+    : '';
   return '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
     + '<title>Touchstone 后端未启动</title></head>'
     + '<body style="margin:0;padding:2rem;font:14px/1.75 ui-monospace,Menlo,Consolas,monospace;'
@@ -490,10 +513,13 @@ function renderBackendCrashHint({ entryPath, logPath, code, signal }) {
     + '<h2 style="color:#ffb454;margin:0 0 .9rem">Touchstone 后端未启动：Node 后端进程退出</h2>'
     + `<p>入口 <code>${escapeHtml(entryPath)}</code> 起来了但没有报出监听端口就退出`
     + `（code=${escapeHtml(String(code))}${signal ? `, signal=${escapeHtml(String(signal))}` : ''}）。</p>`
-    + '<p>下一步：看后端日志里的最后几行（启动失败原因就在那里）——</p>'
+    + tailBlock
+    + lockHint
+    + '<p>下一步：看完整后端日志里的最后几行（启动失败原因就在那里）——</p>'
     + `<pre style="background:#0d0f12;border:1px solid #2a2f36;border-radius:6px;padding:.8rem 1rem;`
-    + `overflow:auto">tail -n 40 ${escapeHtml(logPath || '<库目录>/plugin-backend.log')}</pre>`
-    + '<p>常见原因：<code>dist-plugin</code> 构建产物缺失、被执行策略拦下、入口脚本自身报错。'
+    + `overflow:auto">tail -n 40 ${logPathText}</pre>`
+    + '<p>常见原因：<code>dist-plugin</code> 构建产物缺失、被执行策略拦下、入口脚本自身报错、'
+    + '同库单实例锁被占/残留（<code>code=3</code>）。'
     + '若日志里是 <code>node:sqlite</code> / <code>ERR_UNKNOWN_BUILTIN_MODULE</code> 一类，'
     + '那是宿主 Node 太老 —— 升级到 22.19+ 或改回 <code>backend: python</code>。'
     + '改完把本插件<b>停用再启用</b>即会重试。</p>'
@@ -809,8 +835,18 @@ export async function apply(ctx, config = {}) {
       try { myLog.write(line + '\n'); } catch { /* 流已坏：忽略，绝不打断读取 */ }
     };
     let sawListen = false;   // 是否报出过监听端口（判「起来就崩」用，见 renderBackendCrashHint）
+    // 崩溃提示页要内联「最后几行输出」：从管道现收一份内存环形缓冲。为什么不读日志文件——
+    // 日志是 append 写流（异步落盘），退出的那一刻盘上可能还差最后几行；只有这里保存的是
+    // pumpLines **已经交付**的完整行（2026-10-17 桌面端真机事故：失败原因就一行，但用户拿不到）。
+    const CRASH_TAIL_LINES = 12;
+    const crashTail = [];
+    const keepLine = (line) => {
+      crashTail.push(line);
+      if (crashTail.length > CRASH_TAIL_LINES) crashTail.shift();
+    };
     pumpLines(myChild.stdout, (line) => {
       writeLog(line);
+      keepLine(line);
       const m = line.match(/^TOUCHSTONE_LISTEN (\d+)/);
       if (m) {
         sawListen = true;
@@ -820,6 +856,7 @@ export async function apply(ctx, config = {}) {
     });
     pumpLines(myChild.stderr, (line) => {
       writeLog(line);
+      keepLine(line);
       if (line.trim()) logger.warn(`touchstone[${backend === BACKEND_NODE ? 'node' : 'py'}]: ${line.trim()}`);
     });
     // 「起来就崩」不再只留一行 dsh 日志：Node 分支给面板一个可读提示页（Python 分支行为不动）。
@@ -827,6 +864,7 @@ export async function apply(ctx, config = {}) {
       if (sawListen || backend !== BACKEND_NODE) return;   // 只在 Node 分支、且从未就绪时给提示页
       backendHint = renderBackendCrashHint({
         entryPath, logPath: backendLogPath(extraEnv), code, signal: sig,
+        tailLines: crashTail.slice(),
       });
     };
     myChild.on('exit', (code, sig) => {
@@ -834,6 +872,9 @@ export async function apply(ctx, config = {}) {
       logger.warn(`touchstone: 后端退出 code=${code} sig=${sig}`);
       crashed(code, sig);
     });
+    // `exit` 可能先于 stdio 最后几个 chunk 交付（Node 文档：exit 后仍可能收到 data），
+    // `close` 才是「stdio 全部读空」。补渲染一次，让提示页里的最后几行是完整的。
+    myChild.on('close', (code, sig) => crashed(code, sig));
     myChild.on('error', (err) => {
       writeLog(`[touchstone] 后端拉起失败: ${err.message}`);
       logger.warn(`touchstone: 后端拉起失败: ${err.message}`);

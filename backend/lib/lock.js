@@ -95,6 +95,30 @@ export function readPidRecord(pidPath) {
 }
 
 /**
+ * 归属记录是否指向「可能活着的别家后端」。**唯一判据源**（writePidRecord 与
+ * liveForeignHolder 共用，别再各写一份——2026-10-17 的 Windows 事故就是两处各自判活）。
+ *
+ * 判据：
+ *   - 不是自己、pid 合法；
+ *   - **`backend: "node"` 的记录一律不算**（2026-10-17 真机事故新增）：Node 版后端自己也持
+ *     `<db>.lock` 上的 SQLite 排它锁，并一直持有到进程退出（`locking_mode=EXCLUSIVE`）。
+ *     所以**只要本进程已经拿到这把锁**（两个调用点的唯一生产前提），一条 node 记录就不可能
+ *     还属于活实例 ⇒ 必然是残留：典型成因是 Windows 上 SIGTERM=TerminateProcess，后端优雅
+ *     退出/`release()` 跑不到、`.pid` 不删；pid 随后被无关进程复用。
+ *     （M1 之前的 Python 实例只持 flock，SQLite 锁看不见它 ⇒ 无 `backend` 键的记录仍要判活。）
+ *   - 其余记录（Python 版）：pid 存活且命令行像本平台后端才算活着。
+ */
+export function recordIsLiveForeignHolder(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return false;
+  const pid = Number(record.pid);
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  if (record.backend === 'node') return false;       // 见上：已持 SQLite 锁 ⇒ 本版记录必为残留
+  if (!pidAlive(pid)) return false;
+  if (!looksLikeBackend(pid)) return false;
+  return true;
+}
+
+/**
  * 写 `.pid` 归属记录（临时文件 + rename 原子替换，对齐 Python `_write_record`）。
  * 写不进去**不影响运行**（只是失去存量孤儿识别能力）：记一条日志返回 false。
  */
@@ -102,12 +126,11 @@ export function writePidRecord(pidPath, record, logger) {
   const log = typeof logger === 'function' ? logger : () => {};
   // 绝不覆写「活着的别家后端」的归属记录（2026-10-11 评审 P1）：那是对方的排障凭据，
   // 实测被覆盖并删除过一次（Node 起在同一库上，旧版 Python 实例的 `.pid` 就消失了）。
-  // 自己写自己（同 pid）允许——重启/重入路径要用。判活 + 命令行像后端，扛 PID 复用。
+  // 自己写自己（同 pid）允许——重启/重入路径要用。判据统一走 recordIsLiveForeignHolder
+  // （node 记录按「已持锁 ⇒ 必为残留」处理，Windows PID 复用才不会把记录永久钉在原处）。
   const existing = readPidRecord(pidPath);
-  const existingPid = existing ? Number(existing.pid) : 0;
-  if (existingPid > 0 && existingPid !== Number(record.pid)
-      && pidAlive(existingPid) && looksLikeBackend(existingPid)) {
-    log(`[lock] 已有活着的后端归属记录 pid=${existingPid}，拒绝覆写 ${pidPath}`);
+  if (recordIsLiveForeignHolder(existing)) {
+    log(`[lock] 已有活着的后端归属记录 pid=${existing.pid}，拒绝覆写 ${pidPath}`);
     return false;
   }
   const tmp = `${pidPath}.tmp`;
@@ -216,17 +239,15 @@ export function reapStale({ record, staleWaitMs = STALE_WAIT_MS, logger } = {}) 
  * 为什么需要这道额外检查（2026-10-11 评审 P1，**已在生产上实际发生过一次**）：Node 只有
  * SQLite 那道锁，而 M1 之前的 Python 实例只持 flock（Node 看不见）⇒ Node 能起在同一库上，
  * 实测还覆写并删掉了生产实例的 `.pid`。`looksLikeBackend` 用来扛 PID 复用误判。
+ *
+ * **调用前提：本进程已拿到 SQLite 排它锁**（`backend:"node"` 记录不算活实例的判据靠它，见
+ * `recordIsLiveForeignHolder`；2026-10-17 桌面端 Windows 永久 exit 3 事故的修复点）。
  * @param {string} pidPath
  * @returns {object|null}
  */
 export function liveForeignHolder(pidPath) {
   const record = readPidRecord(pidPath);
-  if (!record) return null;
-  const pid = Number(record.pid);
-  if (!Number.isFinite(pid) || pid <= 0 || pid === process.pid) return null;
-  if (!pidAlive(pid)) return null;
-  if (!looksLikeBackend(pid)) return null;
-  return record;
+  return recordIsLiveForeignHolder(record) ? record : null;
 }
 
 /** 锁文件不可用（非「被占用」）的拒绝文案：说清现象、危害与两条可行修复路径 */

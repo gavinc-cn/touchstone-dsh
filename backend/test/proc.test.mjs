@@ -118,6 +118,40 @@ test('looksLikeBackend：同时接受 backend/server.js 与 server.py；普通�
   }
 });
 
+test('looksLikeBackend：非 Linux 走真实命令行（回归：Windows 无 /proc 时不许无条件返回 true）', () => {
+  // 真机事故（2026-10-17 桌面端 npm 0.3.0，Windows）：残留 `.pid` 里的 pid 被无关进程
+  // （OpenConsole.exe）复用后，旧实现 `process.platform !== 'linux' ⇒ return true` 让
+  // 「是否像本平台后端」恒真 ⇒ 既误拦启动（exit 3 永久卡死），又埋着 SIGTERM 误杀无关进程的风险
+  // （`reapStale` 收口存量孤儿时按这个判据决定杀不杀）。
+  //
+  // 现口径：从平台真实拿命令行（Windows: PowerShell Get-CimInstance / wmic；macOS: ps），
+  // 拿不到就返回 **false** ——「确认不了」不能当成「像后端」：它同时会触发启动拦截与进程终止，
+  // 两个方向的误判代价都远大于「对 M1 之前的 flock-only 旧实例少拦一次」。
+  const byOptions = (platform, readCmdline) =>
+    looksLikeBackend(424242, { platform, readCmdline: typeof readCmdline === 'function' ? readCmdline : () => readCmdline });
+
+  // Windows：读得到命令行 ⇒ 与 Linux 同一判据（反斜杠归一后比 substring）
+  assert.equal(byOptions('win32', [
+    '"C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.24.12741.0_x64__8wekyb3d8bbwe\\OpenConsole.exe"',
+    '--headless',
+  ]), false, '真机事故现场：pid 被复用成 OpenConsole.exe ⇒ 不许认成后端');
+  assert.equal(byOptions('win32', [
+    '"C:\\Program Files\\nodejs\\node.exe"',
+    '"C:\\Users\\user\\.dsh\\profiles\\desktop\\node_modules\\@gavinc-cn\\touchstone-dsh\\backend\\server.js"',
+    '--host', '127.0.0.1',
+  ]), true, 'Windows 后端命令行含 backend\\server.js ⇒ 必须认出');
+  assert.equal(byOptions('win32', ['"C:\\Python312\\python.exe"', '"C:\\x\\server.py"']), true,
+    'Python 后端命令行含 server.py ⇒ 必须认出');
+  assert.equal(byOptions('darwin', '/usr/local/bin/python3 /repo/server.py --host 127.0.0.1'), true,
+    'macOS 走 ps 拿到的命令行同样要能认出');
+  // 拿不到命令行（权限不足 / 进程刚消失 / PowerShell 不可用）⇒ false（不拦、不杀）
+  assert.equal(byOptions('win32', () => { throw new Error('拒绝访问'); }), false,
+    '读不到命令行必须返回 false，不许再恒真');
+  assert.equal(byOptions('darwin', () => null), false);
+  // Linux 缺省路径：/proc 读不到（不存在的 pid）同样是 false
+  assert.equal(looksLikeBackend(99999999), false, '不存在的 pid 读不到 /proc ⇒ 不能断言像后端');
+});
+
 test('collectDescendants：宽度优先收集全部后代（父先于子，不含自身）', async () => {
   const root = spawn(NODE, [...NODE_OPTS, '-e', TREE_ROOT], { stdio: ['ignore', 'pipe', 'pipe'] });
   try {
