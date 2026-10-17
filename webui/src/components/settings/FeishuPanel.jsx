@@ -29,6 +29,8 @@ export default function FeishuPanel() {
   const [cfg, setCfg] = useState(null)
   const [input, setInput] = useState({ webhook_url: '', secret: '', app_secret: '' })
   const [busy, setBusy] = useState(false)
+  // 入站重连按钮的进行中态（M11.1）：停旧连接最多要等一个收口超时，按钮期间防重复点
+  const [reconnecting, setReconnecting] = useState(false)
   // 飞书账号绑定状态（open_id 打码 + 默认项目）与本次生成的绑定码（code）
   const [bind, setBind] = useState(null)
   const [outbox, setOutbox] = useState([])
@@ -45,6 +47,22 @@ export default function FeishuPanel() {
     } catch (e) { toast(e.message) }
   }
 
+  // 入站重连（M11.1）：进程内「停旧长连接 → 用当前保存的凭据起新」。
+  // 为什么保存之外还要这个按钮：保存走的 `start_inbound_for` 在旧线程还活着时**幂等短路**
+  // （换应用后旧连接会一直绑着旧应用）；这个入口才真正换连接，等价于飞书卡片上的
+  // 「换用新应用」，但不必离开设置页。
+  async function reconnectInbound() {
+    setReconnecting(true)
+    try {
+      const r = await meApi.feishuReconnect()
+      if (r?.started) toast('入站消息长连接已重连（用当前保存的应用凭据）')
+      else if (!r?.inbound?.configured) toast('还没配置自建应用凭据：先填 App ID/App Secret 并保存')
+      else if (r?.inbound?.thread) toast('旧连接未能停下，本次没有重连：稍后重试或重启站点')
+      else toast('重连未能建立连接：点下方「配置自检」查看原因')
+      await load()
+    } catch (e) { toast(e.message) } finally { setReconnecting(false) }
+  }
+
   async function save() {
     setBusy(true)
     try {
@@ -56,10 +74,16 @@ export default function FeishuPanel() {
       if (input.app_secret) body.app_secret = input.app_secret
       const r = await meApi.feishuCfgSet(body)
       setInput({ webhook_url: '', secret: '', app_secret: '' })
-      // inbound_started=本用户入站长连接随之拉起（首次配置即时生效）；否则凭据变更需重启
+      // inbound_started=本用户入站长连接随之拉起（首次配置即时生效）；否则看是不是换了应用
+      // —— M11（2026-10-17）起换应用**不再需要重启站点**：旧机器人私聊会收到「确认换用
+      // 新应用」卡片，点一下由服务端「先发新绑定码、再用新应用重连」（见 feishu.py 的
+      // stop_inbound_for/restart_inbound_for）。卡片没收到时在旧机器人发「接入」可重发。
+      const switchedApp = Object.hasOwn(body, 'app_id') && body.app_id !== (cfg?.app_id || '')
       const base = r?.inbound_started
         ? '飞书配置已保存，入站消息长连接已启动'
-        : '飞书配置已保存（应用凭据变更需重启站点生效）'
+        : switchedApp
+          ? '飞书配置已保存；旧机器人私聊会收到「确认换用新应用」卡片，点一下完成切换（没收到就发「接入」重发）'
+          : '飞书配置已保存'
       // verify=服务端保存后立刻做的凭据快检（凭据不全时为 null，不探测）
       if (r?.verify && !r.verify.ok) toast(`${base}；但凭据快检未通过：${r.verify.detail}`)
       else if (r?.verify?.ok) toast(`${base}；${r.verify.detail}`)
@@ -172,16 +196,22 @@ export default function FeishuPanel() {
                 placeholder={cfg?.has_app_secret ? '已设置（留空保持不变）' : '凭证与基础信息页复制'} />
             </div>
           </div>
-          <div className="text-xs" title="凭据齐全且连接线程已启动时，机器人才能接收飞书消息；连接失败细节看 server.log">
-            入站长连接：{cfg?.inbound?.thread ? (
-              <span className="text-[var(--star-text)]">运行中</span>
-            ) : cfg?.inbound?.configured ? (
-              '已配置，待启动（重启站点生效）'
-            ) : (
-              '未配置（填写并保存后自动连接）'
-            )}
+          <div className="flex items-center gap-2 text-xs" title="凭据齐全且连接线程已启动时，机器人才能接收飞书消息；连接失败细节看 server.log">
+            <span>
+              入站长连接：{cfg?.inbound?.thread ? (
+                <span className="text-[var(--star-text)]">运行中</span>
+              ) : cfg?.inbound?.configured ? (
+                '已配置，待启动（保存后自动连接；仍不启动就点右侧「重连入站」）'
+              ) : (
+                '未配置（填写并保存后自动连接）'
+              )}
+            </span>
+            <Button variant="ghost" type="button" disabled={busy || reconnecting}
+              onClick={reconnectInbound}>
+              {reconnecting ? '重连中…' : '重连入站'}
+            </Button>
           </div>
-          <div className="hint">入站指令需：应用开通「机器人」能力 + 权限 im:message.p2p_msg:readonly / im:message.group_at_msg:readonly / im:message:send_as_bot（斜杠指令另需 application:app_slash_command:read|write）+ 事件订阅选「长连接」并添加 im.message.receive_v1、回调 card.action.trigger + 应用发布生效。**下方「飞书接入」卡可扫码建应用并自动配好这些**；Secret 保存后不回显（留空=保持现有值），首次配置保存后自动建立长连接，变更凭据需重启站点。</div>
+          <div className="hint">入站指令需：应用开通「机器人」能力 + 权限 im:message.p2p_msg:readonly / im:message.group_at_msg:readonly / im:message:send_as_bot（斜杠指令另需 application:app_slash_command:read|write）+ 事件订阅选「长连接」并添加 im.message.receive_v1、回调 card.action.trigger + 应用发布生效。**下方「飞书接入」卡可扫码建应用并自动配好这些**；Secret 保存后不回显（留空=保持现有值），首次配置保存后自动建立长连接；换应用后旧机器人私聊会收到「确认换用新应用」卡片（先发新绑定码再用新应用重连），没收到就在机器人发「接入」重新获取；也可以直接点上方「重连入站」（等价于卡片上的「换用新应用」，同样无需重启站点）。</div>
           <div className="grid gap-2">
             <Label className="text-xs text-muted-foreground">默认推送 Webhook（未绑定项目的回落目标）</Label>
             <Input value={input.webhook_url} onChange={(e) => setInput({ ...input, webhook_url: e.target.value })}

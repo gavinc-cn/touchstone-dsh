@@ -1,15 +1,17 @@
 /**
- * 路由族：飞书应用面（斜杠指令 + 扫码供给 + 配置自检）——M7-R4 尾/R5 车道，5 个端点。
+ * 路由族：飞书应用面（斜杠指令 + 扫码供给 + 配置自检 + 入站重连）——M7-R4 尾/R5 车道 + M11.1，6 个端点。
  *
- * 归属条目（`server.py` 行号 = 归属条目；顺序照 `_route_get`(1318/1320) 与 `do_POST`(1062-1068)）：
+ * 归属条目（`server.py` 行号 = 归属条目；顺序照 `_route_get`(1318/1320) 与 `do_POST`(1062-1085)）：
  *   - `GET    /api/me/feishu/slash-commands` → `_api_me_feishu_slash_get`(1818)  → `feishu.slash_status`
  *   - `POST   /api/me/feishu/slash-commands` → `_api_me_feishu_slash_set`(1826)  → sync/clear/notify
  *   - `GET    /api/me/feishu/provision`      → `_api_me_feishu_provision_get`(1767) → `provision_status`
  *   - `POST   /api/me/feishu/provision`      → `_api_me_feishu_provision_set`(1774) → start/cancel/apply/publish
  *   - `POST   /api/me/feishu/doctor`         → `_api_me_feishu_doctor`(1801)     → `doctor`
+ *   - `POST   /api/me/feishu/reconnect`      → `_api_me_feishu_reconnect`(1826)  → `restart_inbound_for`（M11.1）
  *
- * 本文件只做**接线**：业务在 `../lib/feishu_slash.js`（更早车道已落地）与
- * `../lib/feishu_provision.js`（R5 追加段）。路由层负责的判据只有四类，全部逐字照抄 oracle：
+ * 本文件只做**接线**：业务在 `../lib/feishu_slash.js`（更早车道已落地）、
+ * `../lib/feishu_provision.js`（R5 追加段）与 `../lib/feishu_inbound.js`（M11 可停长连接）。
+ * 路由层负责的判据只有四类，全部逐字照抄 oracle：
  *
  * ══ ① 缺 action 两族**相反**（本族最容易被写歪的一处）═══════════════════════════════
  *   - `/slash-commands`：`action = str(body.get("action") or "sync")` ⇒ **缺省 sync**（200）；
@@ -18,6 +20,8 @@
  *   - `/provision`：`action = str(body.get("action") or "")` ⇒ 缺省是**空串 ⇒ 400**；
  *     返回体是 `json.dumps({"error": ...})` ⇒ **冒号后带空格**（`ctx.errorSpaced`），
  *     与全站硬编码紧凑错误体（`ctx.error`）**不是一个字节形态**。
+ *   - `/reconnect`：**不读任何业务字段**（无 action/无参数）；响应固定三键
+ *     `{ok, started, inbound}`，`ok` 恒 true，连接成败走 `started`/`inbound`（见 handler 注释）。
  *
  * ══ ② 三个动作的返回体**键序**（Python dict 插入序，`json.dumps` 保持）════════════════
  *   - `notify`：`{ok, card_sent, card_error}`（字面量）。
@@ -29,8 +33,9 @@
  *     设置页的报错展示 ⇒ 失败**不**改 `error`）。
  *
  * ══ ③ 读体时机 ═══════════════════════════════════════════════════════════════════════
- *   `do_POST:1048` 在**分派之前**统一读体 ⇒ 三条 POST 一律先 `await ctx.readBody()`
- *   （400 档也要读掉），而两条 GET 全程**不读**（Python `do_GET` 没有 `_read_json`）。
+ *   `do_POST:1048` 在**分派之前**统一读体 ⇒ 四条 POST 一律先 `await ctx.readBody()`
+ *   （400 档也要读掉；`/reconnect` 不读业务字段也照样读掉），而两条 GET 全程**不读**
+ *   （Python `do_GET` 没有 `_read_json`）。
  *   这不是洁癖：没读掉的 body 会留在 keep-alive 连接上污染下一个请求。
  *
  * ══ ④ 真值口径 ═══════════════════════════════════════════════════════════════════════
@@ -42,6 +47,8 @@
  * 协议客户端在 `../lib/feishu_device.js`，`supported` 改为真能力探测；剩 `inbound_ws` 线程态）；
  * **本文件不重复实现任何业务逻辑**。
  */
+import { inboundStatus } from '../lib/feishu_cfg.js';
+import { restartInboundFor } from '../lib/feishu_inbound.js';
 import { doctor, provisionApply, provisionCancel, provisionPublish, provisionStart,
   provisionStatus } from '../lib/feishu_provision.js';
 import { clearSlashCommands, sendSlashPermCard, slashStatus,
@@ -177,8 +184,29 @@ async function apiDoctor(ctx) {
   ctx.json(200, await doctor(ctx.user.id, pyTruthy(body.send_probe), { db: ctx.db }));
 }
 
+/**
+ * `_api_me_feishu_reconnect`(1826)：设置页面板「重连入站」按钮的写口（M11.1）。
+ *
+ * 语义 = `feishu.restart_inbound_for`：停旧长连接 → 用**当前库里**的凭据起新。响应三键定序
+ * `{ok, started, inbound}`：`ok` 恒 true（动作已执行，不用 HTTP 错误码表达连接成败），
+ * `started` = 是否起了**新**连接，`inbound` = 与 `GET /api/me/feishu-cfg` 的 `inbound`
+ * **同形两键**（`configured`/`thread`）。
+ *
+ * 读体时机照文件头 ③：本端点**不读任何业务字段**，但 POST 必须把体读掉（Python
+ * `do_POST:1048` 在分派前统一读）；读在哪一步不重要，重要的是别把它留在 keep-alive 上。
+ */
+async function apiReconnect(ctx) {
+  await ctx.readBody();
+  const started = await restartInboundFor(ctx.user.id, { db: ctx.db });
+  ctx.json(200, {
+    ok: true,
+    started: Boolean(started),
+    inbound: inboundStatus(ctx.user.id, { db: ctx.db }),
+  });
+}
+
 // --------------------------------------------------------------------------
-// 路由表（5 条；前缀 `/api/me/feishu*` 与其它族互不重叠，挂表位置不影响分派，见 `./index.js`）
+// 路由表（6 条；前缀 `/api/me/feishu*` 与其它族互不重叠，挂表位置不影响分派，见 `./index.js`）
 // --------------------------------------------------------------------------
 
 export const routes = [
@@ -211,5 +239,11 @@ export const routes = [
     path: '/api/me/feishu/doctor',
     /** 配置自检八项（`send_probe=true` 时额外发一条测试消息，60s 频控）。 */
     handler: (ctx) => apiDoctor(ctx),
+  },
+  {
+    method: 'POST',
+    path: '/api/me/feishu/reconnect',
+    /** M11.1 面板「重连入站」：停旧 → 用当前库凭据起新；三键 `{ok, started, inbound}`。 */
+    handler: (ctx) => apiReconnect(ctx),
   },
 ];

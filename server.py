@@ -852,6 +852,20 @@ def fs_roots():
 FILE_PREVIEW_MAX = 256 * 1024
 FILE_RAW_MAX = 32 * 1024 * 1024
 
+# `file?inline=1` 的内联白名单（2026-10-16）：**只放行浏览器可直接渲染的位图**。
+# 与 raw=1「一律 text/plain 或附件下载」的红线配套——按扩展名把 agent 在工作区写的内容
+# 内联下发，等于让同源页面按该类型解释它；`html`/`svg`/`js` 这类可执行/可带脚本的类型
+# 一律不给，只给位图（`<img>` 里不会执行任何东西）。扩展名口径与 `os.path.splitext` 一致，
+# 大小写不敏感（见 `_send_project_file_inline`）。
+PROJECT_INLINE_IMAGE_TYPES = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "bmp": "image/bmp",
+}
+
 
 def _within_root(path, root):
     """path 是否等于 root 或位于 root 之内（调用前双方均须 realpath 规范化）。"""
@@ -1068,6 +1082,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/me/feishu/doctor":
             self._api_me_feishu_doctor(body)
             return
+        if path == "/api/me/feishu/reconnect":
+            # 设置页「重连入站」按钮（M11.1）：进程内停旧长连接 → 用当前库里凭据起新
+            self._api_me_feishu_reconnect()
+            return
         if path == "/api/me/feishu-hook/apply":
             # 项目推送绑定批量应用（设置页「同时应用到我的全部项目」，2026-10-10）
             self._api_me_feishu_hook_apply(body)
@@ -1220,7 +1238,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         m = re.match(r"^/api/tasks/(\d+)/session/chat/stop$", path)
         if m:
-            self._api_session_chat_stop(int(m.group(1)))
+            self._api_session_chat_stop(int(m.group(1)), body)
             return
         self._respond(404, b'{"error":"not found"}', "application/json; charset=utf-8")
 
@@ -1805,6 +1823,29 @@ class Handler(BaseHTTPRequestHandler):
         self._respond(200, json.dumps(out, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
 
+    def _api_me_feishu_reconnect(self):
+        """重连本人入站长连接（M11.1 设置页面板「重连入站」按钮的写口）。
+
+        停旧连接 → 用**当前库里**的凭据起新（`feishu.restart_inbound_for`，M11 已落地）。
+        响应 `{"ok": true, "started": bool, "inbound": {...}}`，键序与 `json.dumps` 分隔符是
+        对外契约（逐字节判据：`tests/test_feishu_reconnect_api.py` + 对拍
+        `cases-http/m11_feishu_reconnect.json`）：
+
+        - `ok` 恒 true：动作已执行，**不用 HTTP 错误码**表达连接成败（与 slash/provision
+          族「200 + ok/error 字段」同一口径；真正的故障原因看 `started`/`inbound`/日志）；
+        - `started` = 是否起了**新**连接（未配置凭据、旧线程没停下来 ⇒ false，语义照抄
+          `restart_inbound_for` 的返回值）——面板据此区分「没配置」「旧连接没停下」「起来了」；
+        - `inbound` = 与 `GET /api/me/feishu-cfg` 的 `inbound` **同形两键**
+          （`configured`/`thread`；`inbound_status` 的形状契约见其 docstring）。
+
+        不读体（`do_POST` 已在分派前统一读掉 body；本函数不碰它）。"""
+        user = self._current_user()
+        started = feishu.restart_inbound_for(user["id"])
+        self._respond(200, json.dumps(
+            {"ok": True, "started": bool(started),
+             "inbound": feishu.inbound_status(user["id"])},
+            ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
     def _api_me_feishu_outbox(self):
         """当前用户的最近投递记录（target 打码——URL 本身含 token 即凭据）。"""
         user = self._current_user()
@@ -2370,10 +2411,14 @@ class Handler(BaseHTTPRequestHandler):
         """读取项目范围内的文件内容供会话页预览（只读，多用户隔离）。
 
         query: path=相对/绝对路径（相对按 项目目录 → 工作目录 解析）；
-               raw=1 直接返回原文（前端「新标签打开」用）。
+               raw=1 直接返回原文（前端「新标签打开」用）；
+               inline=1 把项目范围内的**位图**按原图内联下发（会话页渲染 agent 写的
+               截图/示意图用，见 `_send_project_file_inline`；两参数都给时 inline 优先）。
         安全：路径须落在本项目「项目目录/工作目录」之内（realpath 包含判定，
         防目录穿越与越权读他人文件）；raw 一律 text/plain + nosniff——这些文件是
-        agent 在工作区写的内容，按扩展名猜类型内联下发会让同源页面执行其中脚本。
+        agent 在工作区写的内容，按扩展名猜类型内联下发会让同源页面执行其中脚本；
+        inline=1 是这条红线上的**收窄例外**：只放行 `PROJECT_INLINE_IMAGE_TYPES`
+        里的位图扩展名（附件目录里的 fid 文件同样适用，不必先上传成卡片附件）。
         """
         row = self._owned_project(project_id)
         if row is None:
@@ -2391,6 +2436,9 @@ class Handler(BaseHTTPRequestHandler):
             code, msg = messages[err]
             self._respond(code, json.dumps({"error": msg}, ensure_ascii=False).encode("utf-8"),
                           "application/json; charset=utf-8")
+            return
+        if parsed.get("inline", ["0"])[0] in ("1", "true", "yes"):
+            self._send_project_file_inline(path)
             return
         if parsed.get("raw", ["0"])[0] in ("1", "true", "yes"):
             self._send_project_file_raw(path)
@@ -2448,6 +2496,50 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Disposition",
                              'attachment; filename="%s"; filename*=UTF-8\'\'%s'
                              % (ascii_name, quote(name)))
+        self.end_headers()
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(64 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # 客户端提前断开属常态，静默处理
+
+    def _send_project_file_inline(self, path):
+        """`inline=1`：项目范围内的位图按原图内联下发（会话页渲染 agent 写的截图）。
+
+        与 `_send_project_file_raw` 只差两处：Content-Type 按扩展名给真图片类型、
+        不带 `Content-Disposition: attachment`（浏览器才肯在 `<img>` 里渲染）。
+        仍带 nosniff（不许嗅探成可执行类型）与 no-store（工作区文件随时被 agent 改写，
+        缓存住会看到旧图）。扩展名不在 `PROJECT_INLINE_IMAGE_TYPES` 里 ⇒ 400（白名单，
+        不是「不支持就按 raw 下发」——那正是 raw 红线要防的事）；超 FILE_RAW_MAX ⇒ 413。
+        """
+        ext = os.path.splitext(path)[1].lstrip(".").lower()
+        ctype = PROJECT_INLINE_IMAGE_TYPES.get(ext)
+        if ctype is None:
+            self._respond(400, json.dumps({"error": "该类型不支持内联显示"},
+                                          ensure_ascii=False).encode("utf-8"),
+                          "application/json; charset=utf-8")
+            return
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            self._respond(404, json.dumps({"error": "文件不存在或不可读"},
+                                          ensure_ascii=False).encode("utf-8"),
+                          "application/json; charset=utf-8")
+            return
+        if size > FILE_RAW_MAX:
+            self._respond(413, json.dumps({"error": "文件过大，无法内联显示"},
+                                          ensure_ascii=False).encode("utf-8"),
+                          "application/json; charset=utf-8")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         try:
             with open(path, "rb") as f:
@@ -3093,6 +3185,11 @@ class Handler(BaseHTTPRequestHandler):
         if row is None:
             return
         if action == "stop":
+            # mode=cancel_queue（2026-10-17）：会话窗「取消排队」——纯平台侧取消排队消息、
+            # 不碰轮次；缺省/其它值 ⇒ 原样停止（旧前端不带体，响应体一字不变）。
+            if (body.get("mode") or "") == "cancel_queue":
+                self._api_cancel_queue(body, card_id=card_id)
+                return
             hit = board.stop_card(card_id)
             self._respond(200, json.dumps({"ok": True, "stopped": hit}).encode("utf-8"),
                           "application/json; charset=utf-8")
@@ -4991,15 +5088,57 @@ class Handler(BaseHTTPRequestHandler):
              "prompt_id": rec.get("prompt_id") or ""},
             ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
-    def _api_session_chat_stop(self, task_id):
-        """停止进行中的对话进程（同时取消该会话排队中的消息）。"""
+    def _api_session_chat_stop(self, task_id, body=None):
+        """停止进行中的对话进程（同时取消该会话排队中的消息）。
+
+        `mode=cancel_queue`（2026-10-17）⇒ 只取消排队消息、**不碰轮次**（会话窗「取消排队」
+        按钮）；缺省/其它值 ⇒ 原样停止（旧前端不带体，行为与响应体一字不变）。
+        """
         task, _project, _family = self._session_context(task_id)
         if task is None:
             self._respond(404, b'{"error":"task not found"}',
                           "application/json; charset=utf-8")
             return
-        chat.stop(task["session_id"] or "")
+        sid = task["session_id"] or ""
+        if ((body or {}).get("mode") or "") == "cancel_queue":
+            self._api_cancel_queue(body or {}, sid=sid, task_id=task_id)
+            return
+        chat.stop(sid)
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
+
+    def _api_cancel_queue(self, body, sid="", card_id=None, task_id=None, project_id=None):
+        """`mode=cancel_queue` 的共用实现（任务/看板两路）：**只取消平台排队消息，不碰轮次**。
+
+        这是会话窗「取消排队」按钮的服务端落点，与「停止」是两件事（用户 2026-10-16 裁定
+        U4：停止只打断当前轮；取消排队是另一个显式动作）。**纯平台侧**：删的是 chat_msgs
+        排队行与 m: 等待项行，不经过驱动 ⇒ 池外会话（dsh GUI 直跑/看管未接回）同样有效。
+
+        响应回带被取消消息的 {id,text}（**全文**，见 chat.cancel_queued_detail）：前端要把
+        原文放回输入框，而下发给前端的排队行文本被截到 120 字。cancelled=0 不是错误（消息
+        可能已被 worker 抢走执行，或已被别的路径取消）。
+
+        body.msg_id 非空 ⇒ 只取消该条（排队行的行内「取消」按钮）；归属判定照 _inject_msg
+        的双/三重口径，不命中同一个 404 文案（不细分，避免暴露他人消息是否存在）。
+        与 Node 半 routes/sessions.js:cancelQueueAction 同形。
+        """
+        msg_id = str(body.get("msg_id") or "")
+        if msg_id:
+            info = chat.msg_info(msg_id)
+            if (info is None
+                    or (sid and info.get("sid") != sid)
+                    or (project_id is not None and info.get("project_id") != project_id)
+                    or (card_id is not None and info.get("card_id") != card_id)
+                    or (task_id is not None and info.get("task_id") != task_id)):
+                self._respond(404, json.dumps({"error": "消息不存在或不在该会话下"},
+                                              ensure_ascii=False).encode("utf-8"),
+                              "application/json; charset=utf-8")
+                return
+        out = chat.cancel_queued_detail(sid=sid or None, card_id=card_id,
+                                        msg_id=msg_id or None)
+        self._respond(200, json.dumps({"ok": True, "cancelled": out["cancelled"],
+                                       "msgs": out["msgs"]},
+                                      ensure_ascii=False).encode("utf-8"),
+                      "application/json; charset=utf-8")
 
     # ---------- 监控 state / stream ----------
 
@@ -5392,10 +5531,14 @@ def _build_arg_parser():
 def _seed_hint(seeded, initial_pw=""):
     """启动横幅的默认账号提示：仅本次实际种子时返回文案，日常启动为空串。
 
-    2026-10-02 起默认口令不再是固定值：未设 TS_ADMIN_PASSWORD 时随机生成一次性
-    初始口令（initial_pw，由 db.take_seed_password() 取走），横幅打印这一次即清，
-    且该账号带 must_change_pw=1，首次登录必须先改密；设了 TS_ADMIN_PASSWORD 时
-    只提示变量名、不回显口令值。
+    三档与 `db.seed_admin` 的口令来源一一对应：
+      - initial_pw 非空（随机一次性口令）：打印口令本身，首登须改密；
+      - `TS_ADMIN_PASSWORD` 非空：只提示变量名、不回显口令值；
+      - 都没有（`TS_ADMIN_PASSWORDLESS=1`，插件形态）：**空口令**——2026-10-16 起单列，
+        此前落进第二档文案（凭空指向一个没设的变量）或「已在上一次打印」文案（该分支
+        结构上不可达于那种情形：seeded=False 时直接返回空串，seeded=True 且 initial_pw
+        为空只可能是空口令种子）。两版后端的这一档文案逐字节相同，见
+        `backend/lib/seed_hint.js`。
     """
     if not seeded:
         return ""
@@ -5404,7 +5547,8 @@ def _seed_hint(seeded, initial_pw=""):
                 "，首次登录须修改；仅本次显示，请立即记录）")
     if os.environ.get("TS_ADMIN_PASSWORD"):
         return "  （首次启动已创建默认账号 admin，初始口令取自 TS_ADMIN_PASSWORD，请尽快登录修改）"
-    return "  （首次启动已创建默认账号 admin，其一次性口令已在上一次启动时打印，本次不再显示）"
+    return ("  （首次启动已创建默认账号 admin，空口令（插件形态免登）"
+            "；如需口令登录请在设置页设置密码）")
 
 
 def main():

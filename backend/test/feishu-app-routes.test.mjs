@@ -34,9 +34,11 @@ import { gzipSync } from 'node:zlib';
 
 import { SLASH_COMMANDS } from '../lib/feishu_slash.js';
 import { _PROVISION, _setRegisterAppImplForTest, _docItem, _nextVersion, doctor,
+  inboundWsItem,
   PROVISION_TTL, provisionApply, provisionCancel, provisionEnabled, provisionPublish,
   provisionStart, provisionStatus, provisionSupported } from '../lib/feishu_provision.js';
-import { clearInboundThread, inboundStatus } from '../lib/feishu_cfg.js';
+import { clearInboundThread, inboundStatus, inboundThreadAppId,
+  setInboundThread } from '../lib/feishu_cfg.js';
 import { AppAccessDeniedError, RegisterAppError } from '../lib/feishu_device.js';
 // worker 清的是 `feishu_rest.js` 的 token 缓存（`_TOKEN_CACHE.pop(app_id, None)`，feishu.py:3079）
 import { _TOKEN_CACHE } from '../lib/feishu_rest.js';
@@ -196,7 +198,7 @@ const SDK_MIN = '本机 lark-oapi 版本过低（register_app 需 ≥1.5.5），
 // ① 路由表形态
 // --------------------------------------------------------------------------
 
-test('路由表：五条端点的方法与字面路径（顺序即匹配顺序，与 server.py:1318/1320/1065/1068/1062 同序）', () => {
+test('路由表：六条端点的方法与字面路径（顺序即匹配顺序，与 server.py:1076/1079/1082/1085/1065/1068 同序）', () => {
   const shape = appRoutes.map((r) => [r.method || 'GET', r.path, typeof r.handler,
     r.re === undefined ? null : String(r.re)]);
   assert.deepEqual(shape, [
@@ -205,6 +207,8 @@ test('路由表：五条端点的方法与字面路径（顺序即匹配顺序�
     ['GET', '/api/me/feishu/provision', 'function', null],
     ['POST', '/api/me/feishu/provision', 'function', null],
     ['POST', '/api/me/feishu/doctor', 'function', null],
+    // M11.1：设置页「重连入站」按钮（oracle do_POST:1085 → `_api_me_feishu_reconnect`:1826）
+    ['POST', '/api/me/feishu/reconnect', 'function', null],
   ]);
 });
 
@@ -868,6 +872,49 @@ test('doctor lib 直调：与路由层同形（`options` 透传 db；无凭据�
 });
 
 // --------------------------------------------------------------------------
+// ④b doctor 的 `inbound_ws` 第三档（M10，2026-10-17）：线程绑的应用 ≠ 配置的应用 ⇒ warn
+//
+// 实测踩过的坑：面板显示「已接入应用 X」、本项也绿，但消息仍打到旧机器人（换凭据必须
+// 重启站点，而 `start_inbound_for` 见线程活着就短路、lark SDK 无干净停止）。
+// 纯函数测：文案与 oracle `feishu.doctor` 的同名分支**逐字一致**（pytest 侧钉同一组字面量）。
+// --------------------------------------------------------------------------
+
+test('inboundWsItem：换凭据未重启 ⇒ warn，文案与 oracle 逐字一致', () => {
+  assert.deepEqual(inboundWsItem({ thread: true, app_id: 'cli_old' }, { app_id: 'cli_new' }),
+    _docItem('inbound_ws', '入站长连接（长连接）', 'warn',
+      '连接线程仍绑在 cli_old（配置已改为 cli_new）',
+      '在机器人私聊发「接入」点「换用新应用」即可免重启切换；仍不生效再重启站点'));
+  // 正常档不受影响
+  assert.deepEqual(inboundWsItem({ thread: true, app_id: 'cli_x' }, { app_id: 'cli_x' }),
+    _docItem('inbound_ws', '入站长连接（长连接）', 'ok', '连接线程运行中', ''));
+  // 线程没跑 ⇒ 仍是 fail（新档只在「线程活着 + 两侧 app 都有值 + 不相等」时命中）
+  assert.equal(inboundWsItem({ thread: false, app_id: 'cli_old' }, { app_id: 'cli_new' }).state,
+    'fail');
+  // 空值不误报（老替身没有 app_id；也不能因为缺字段就报警）
+  assert.equal(inboundWsItem({ thread: true, app_id: '' }, { app_id: 'cli_new' }).state, 'ok');
+  assert.equal(inboundWsItem({ thread: true, app_id: 'cli_old' }, {}).state, 'ok');
+  // Python 真值口径：thread 用 pyTruthy 收口（`thread: 0/''` 都按没跑）
+  assert.equal(inboundWsItem({ thread: 0, app_id: 'cli_old' }, { app_id: 'cli_new' }).state,
+    'fail');
+});
+
+test('inboundThreadAppId：登记线程时带上的 app_id 可回读，注销后清空；inboundStatus 形状不变', () => {
+  const fx = setup('inbound-app-id');
+  try {
+    setInboundThread(7, { isAlive: () => true }, 'cli_old');
+    try {
+      const st = inboundStatus(7, { db: fx.db });
+      assert.equal(st.thread, true);
+      // **形状契约**：`inboundStatus` 是 `/api/me/feishu-cfg` 的响应子对象 ⇒ 只许两键。
+      // 「线程绑的 app」走独立访问口（加进这里就是改对外契约，本文件其余形状判据会红）。
+      assert.deepEqual(Object.keys(st), ['configured', 'thread']);
+      assert.equal(inboundThreadAppId(7), 'cli_old');
+    } finally { clearInboundThread(7); }
+    assert.equal(inboundThreadAppId(7), '');
+  } finally { fx.close(); }
+});
+
+// --------------------------------------------------------------------------
 // ⑤ slash-commands 族（路由层接线：缺省 action / 追加两键的键序 / 400 文案）
 // --------------------------------------------------------------------------
 
@@ -935,5 +982,43 @@ test('POST /api/me/feishu/slash-commands：非法 action ⇒ 400 带空格体（
       const r = await call(fx, 'POST', S, { body: { action: falsy } });
       assert.equal(r.status, 200, `action=${JSON.stringify(falsy)} 应走缺省 sync`);
     }
+  } finally { fx.close(); }
+});
+
+// --------------------------------------------------------------------------
+// ④ 重连入站（M11.1 设置页面板按钮）：`POST /api/me/feishu/reconnect`
+// --------------------------------------------------------------------------
+//
+// 本档只打**无凭据**的确定性路径：`restartInboundFor` = 停（注册表没有 runner ⇒ false）→
+// 起（`app_config` 为 None ⇒ 打一行 stderr 后 false）——零网络、零线程。**有凭据时真停旧连接
+// 再用新凭据起新**由 `backend/test/feishu-setup-card.test.mjs` 的 `restartInboundFor` 用例
+// （假 ws 客户端 + 真 stopInboundFor）与 `feishu-inbound.test.mjs` 的注册表用例覆盖；
+// 对拍侧见 `cases-http/m11_feishu_reconnect.json`（A/B 两实例都走无凭据档）。
+
+test('POST /api/me/feishu/reconnect：无凭据档**逐字节**（键序/空格/两键 inbound）+ POST 必读体', async () => {
+  const R = '/api/me/feishu/reconnect';
+  const fx = setup('reconnect');
+  try {
+    const r = await expectBody(fx, 'POST', R, { body: {} }, 200,
+      '{"ok": true, "started": false,'
+      + ' "inbound": {"configured": false, "thread": false}}');
+    // 两键形状契约（`inbound_status` 是 GET cfg 的响应子对象 ⇒ 加键就是对外契约变更）
+    assert.deepEqual(Object.keys(r.json()), ['ok', 'started', 'inbound']);
+    assert.deepEqual(Object.keys(r.json().inbound), ['configured', 'thread']);
+    // 读体时机照 Python `do_POST:1048`（分派前统一读）⇒ POST 必须把体读掉
+    assert.equal(r.readState.ended, true, 'POST 未读体 ⇒ 与 Python 读体时机分叉');
+  } finally { fx.close(); }
+});
+
+test('POST /api/me/feishu/reconnect：幂等（重复点按钮逐字节同体）且**不写库**', async () => {
+  const R = '/api/me/feishu/reconnect';
+  const expected = '{"ok": true, "started": false,'
+    + ' "inbound": {"configured": false, "thread": false}}';
+  const fx = setup('reconnect-idem');
+  try {
+    await expectBody(fx, 'POST', R, { body: {} }, 200, expected);
+    await expectBody(fx, 'POST', R, { body: { anything: 1 } }, 200, expected);
+    // 只读动作：不建用户配置行（配置写口只有 POST|PATCH /api/me/feishu-cfg）
+    assert.equal(fx.db.prepare('SELECT COUNT(*) AS n FROM feishu_user_cfgs').get().n, 0);
   } finally { fx.close(); }
 });

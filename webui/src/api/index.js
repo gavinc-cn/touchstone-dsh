@@ -66,6 +66,8 @@ export const meApi = {
   // 配置自检(八项); sendProbe=true 时额外发一条测试消息(服务端 60s 频控)
   feishuDoctor: (sendProbe = false) =>
     api.post('/api/me/feishu/doctor', { send_probe: !!sendProbe }),
+  // 入站重连(M11.1): 停旧长连接→用当前保存的应用凭据起新(换凭据免重启站点的面板入口)
+  feishuReconnect: () => api.post('/api/me/feishu/reconnect'),
 }
 
 // ---- 项目 ----
@@ -171,6 +173,12 @@ export const taskApi = {
   answerInteraction: (id, body) =>
     api.post(`/api/tasks/${id}/session/interaction/answer`, body),
   sessionChatStop: (id) => api.post(`/api/tasks/${id}/session/chat/stop`),
+  // 取消排队（2026-10-17）：平台侧动作——只撤销排队消息，**不碰会话轮次**（与「停止」
+  // 是两件事）。msgId 非空 ⇒ 只取消那一条（排队行行内的「取消」）；缺省 ⇒ 取消本会话
+  // 全部排队消息（底部「取消排队」）。响应回带被取消消息的**全文** {ok,cancelled,msgs}，
+  // 前端据此把原文放回输入框（排队行展示文本被截 120 字，不能用来回填）。
+  sessionChatCancelQueue: (id, msgId) => api.post(`/api/tasks/${id}/session/chat/stop`,
+    msgId ? { mode: 'cancel_queue', msg_id: msgId } : { mode: 'cancel_queue' }),
   // 任务会话级配置（2026-10-04）：body={reasoning_effort}——只开**思考等级**一项
   // （任务会话无权限档交互面、模型按任务/项目每轮下发，后端显式拒绝这两项）
   sessionProfile: (id, body) => api.post(`/api/tasks/${id}/session/profile`, body),
@@ -253,6 +261,11 @@ export const boardApi = {
   removeWorktree: (pid, cid) => api.del(`/api/projects/${pid}/board/cards/${cid}/worktree`),
   // 停止卡片运行中的会话（CLI 杀进程组；web 走 REST abort）
   stopCard: (pid, cid) => api.post(`/api/projects/${pid}/board/cards/${cid}/stop`),
+  // 取消排队（2026-10-17）：与「停止」拆开的平台侧动作——只撤销该卡会话的排队消息，
+  // 不打断轮次（没有在跑的轮次时也照常有效，这正是旧实现「借用停止链路被驱动 404 判失败」
+  // 修不好的那一档）。msgId 非空 ⇒ 只取消那一条；响应回带被取消消息**全文**（回填输入框）。
+  cancelQueue: (pid, cid, msgId) => api.post(`/api/projects/${pid}/board/cards/${cid}/stop`,
+    msgId ? { mode: 'cancel_queue', msg_id: msgId } : { mode: 'cancel_queue' }),
   // 标记卡片已查看（打开卡片详情 / 点卡面操作行上任意按钮时调用，清「状态有更新」未读标记；幂等）
   markViewed: (pid, cid) => api.post(`/api/projects/${pid}/board/cards/${cid}/viewed`),
   addComment: (pid, cid, text) =>

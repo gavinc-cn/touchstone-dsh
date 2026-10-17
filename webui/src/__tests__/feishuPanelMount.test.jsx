@@ -14,6 +14,9 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { meApi } from '../api'
+import { toast } from '../utils/toast'
+
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 vi.mock('../api', () => ({
@@ -22,6 +25,8 @@ vi.mock('../api', () => ({
     feishuCfgGet: vi.fn(async () => ({
       enabled: 1, push_enabled: 1, app_id: 'cli_x', app_secret_set: true,
       default_webhook: '', base_url: '',
+      // M11.1：入站状态两键（面板据此渲染运行中/待启动/未配置，并放「重连入站」按钮）
+      inbound: { configured: true, thread: false },
     })),
     feishuGet: vi.fn(async () => ({ open_id: 'ou_x', bound_at: '2026-10-11 00:00:00' })),
     feishuProvisionGet: vi.fn(async () => ({
@@ -31,6 +36,10 @@ vi.mock('../api', () => ({
     feishuOutbox: vi.fn(async () => []),
     feishuSlashGet: vi.fn(async () => ({ configured: false, desired: [], remote: [], extra: [], need_scope: false, error: '' })),
     feishuBindcode: vi.fn(async () => ({ code: 'ABC', expire_in: 600 })),
+    // M11.1 面板「重连入站」：默认走成功档（configured 且起了新连接）
+    feishuReconnect: vi.fn(async () => ({
+      ok: true, started: true, inbound: { configured: true, thread: true },
+    })),
   },
   projectApi: { list: vi.fn(async () => []) },
   builtinAssetApi: { list: vi.fn(async () => ({ assets: [] })) },
@@ -86,5 +95,47 @@ describe('设置页飞书分区：挂载冒烟（黑屏回归守卫）', () => {
     const calls = [...src.matchAll(/isPushEnabled\(/g)].length
     expect(calls).toBeGreaterThan(0)
     expect(src).toContain('isPushEnabled,')
+  })
+})
+
+// M11.1：设置页面板「重连入站」按钮（把飞书卡片上的「换用新应用」搬到页面里，免去跳飞书）。
+// 判据不是「按钮渲染出来了」而是**点了之后真的调端点、并按响应分支给出诚实的 toast**
+// ——面板最容易犯的错就是「没连上也说已重连」（M10 现场就有一次「界面说谎」）。
+describe('设置页飞书分区：重连入站按钮（M11.1）', () => {
+  /** 在容器里按文案找按钮（Button 组件会把文案放进子节点，textContent 恰好可比） */
+  function findButton(container, label) {
+    return [...container.querySelectorAll('button')]
+      .find((b) => (b.textContent || '').includes(label))
+  }
+
+  it('点击「重连入站」⇒ 调 feishuReconnect，成功档 toast「已重连」并回读配置', async () => {
+    const { container } = await mountSection('feishu')
+    const button = findButton(container, '重连入站')
+    expect(button, '面板必须有「重连入站」按钮').toBeTruthy()
+    meApi.feishuReconnect.mockClear()
+    toast.mockClear()
+    meApi.feishuCfgGet.mockClear()
+    await act(async () => {
+      button.click()
+      await new Promise((r) => setTimeout(r, 30))
+    })
+    expect(meApi.feishuReconnect).toHaveBeenCalledTimes(1)
+    expect(toast).toHaveBeenCalledWith('入站消息长连接已重连（用当前保存的应用凭据）')
+    // 按钮点完要回读 cfg（入站状态可能从「待启动」变「运行中」）
+    expect(meApi.feishuCfgGet).toHaveBeenCalled()
+  })
+
+  it('未配置凭据档：toast 如实说「还没配置」，**不许**谎报已重连', async () => {
+    const { container } = await mountSection('feishu')
+    const button = findButton(container, '重连入站')
+    meApi.feishuReconnect.mockResolvedValueOnce({
+      ok: true, started: false, inbound: { configured: false, thread: false },
+    })
+    toast.mockClear()
+    await act(async () => {
+      button.click()
+      await new Promise((r) => setTimeout(r, 30))
+    })
+    expect(toast).toHaveBeenCalledWith('还没配置自建应用凭据：先填 App ID/App Secret 并保存')
   })
 })

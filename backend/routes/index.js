@@ -78,10 +78,11 @@ export const ROUTES = [
   // 七族任何条目都不重叠（`^/api/projects/(\d+)$`、`/board/*`、`/bugs/*` 都吞不掉它），
   // 故挂表位置对分派结果无影响；放末尾是为了让既有条目的相对顺序一个字节都不动。
   ...feishuHookRoutes,
-  // M7 续追加（`feishu.js` 个人配置/绑定族 7 条 + `feishu_app.js` 应用面 5 条）——
+  // M7 续追加（`feishu.js` 个人配置/绑定族 7 条 + `feishu_app.js` 应用面 6 条）——
   // 同样**只追加、不重排**，两条新族与此前八族前缀互不重叠（`/api/me/feishu*` 三个前缀
   // 互不吞并：`-cfg`/`-bindcode` 是字面路径，`/api/me/feishu`、`/api/me/feishu/outbox`、
-  // `/api/me/feishu/slash-commands`、`/api/me/feishu/provision`、`/api/me/feishu/doctor`
+  // `/api/me/feishu/slash-commands`、`/api/me/feishu/provision`、`/api/me/feishu/doctor`、
+  // `/api/me/feishu/reconnect`（M11.1）
   // 各由自己的匹配条目收口），故挂表位置对分派结果无影响。
   // 注：车道施工期间这两条暂时是空表（占位文件），全部落地后由本表原样生效。
   ...feishuRoutes,
