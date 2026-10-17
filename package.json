@@ -1,6 +1,6 @@
 {
   "name": "@gavinc-cn/touchstone-dsh",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "AI-agent-driven automated testing platform for DeepSeek Harness (dsh): Markdown case library, bug reports, per-project serial queue, development board and built-in load testing.",
   "license": "MIT",
   "author": "Touchstone contributors",
