@@ -46,7 +46,7 @@ function makeWebDir() {
  * 建一个**预置好行**的临时库（先 `initDb` 真建表，再显式 SQL 插行——不手工 CREATE TABLE）。
  * @returns {{dbPath: string, dir: string, ids: object}}
  */
-function seedDb({ freeProject = false, extBlockedProject = false } = {}) {
+function seedDb({ freeProject = false, extBlockedProject = false, answerCard = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-wire-db-'));
   const dbPath = path.join(dir, 't.db');
   db.initDb({ dbPath, env: { TS_ADMIN_PASSWORDLESS: '1' } });
@@ -72,6 +72,23 @@ function seedDb({ freeProject = false, extBlockedProject = false } = {}) {
       ids.freeProject = pid;
       ids.freeTask = tid;
     }
+    if (answerCard) {
+      // 自由项目 + 一张等作答的卡 + 一条待送达答案行（`a:` 单元的载荷：重启后按表重建）
+      const pid = insertProject(handle, { userId: 1, name: 'P-answer', workDir });
+      const cid = insertCard(handle, pid, {
+        columnKey: 'blocked', blockKind: 'interaction', blockText: '等你答',
+        sessionId: 'session-11112222-3333-4444-8555-666677778888',
+      });
+      insertWait(handle, {
+        projectId: pid, kind: 'answer', targetId: cid, state: 'waiting', seq: 1,
+        meta: JSON.stringify({
+          sid: 'session-11112222-3333-4444-8555-666677778888', qid: 'call_wire_1',
+          answers: [{ wire: 'q_0', kind: 'single', option_id: 'o1', option_ids: [], text: '' }],
+        }),
+      });
+      ids.answerProject = pid;
+      ids.answerCard = cid;
+    }
   } finally {
     handle.close();
   }
@@ -90,12 +107,17 @@ async function startBackend({ webDir, dbPath, runDir }) {
     env: { ...process.env, TOUCHSTONE_DB: dbPath, TOUCHSTONE_RUN_DIR: runDir,
       TS_ADMIN_PASSWORDLESS: '1' },
   });
+  // 累积输出**封顶 2MiB**（保头部：断言看的都是启动段的行）。为什么必须封顶：本文件专门
+  // 覆盖「接线缺口 ⇒ 响亮失败」，而 `a:` 缺口恰好是**热旋**（实测 5MB/s、几十万行同一句）
+  // ⇒ 不封顶时失败态会把测试进程的内存吃干净、连 stop() 都拖住（2026-10-16 变异自证时实测）。
+  const OUT_CAP = 2 * 1024 * 1024;
   let stdout = '';
   let stderr = '';
+  const push = (cur, chunk) => (cur.length >= OUT_CAP ? cur : (cur + chunk).slice(0, OUT_CAP));
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
-  child.stdout.on('data', (c) => { stdout += c; });
-  child.stderr.on('data', (c) => { stderr += c; });
+  child.stdout.on('data', (c) => { stdout = push(stdout, c); });
+  child.stderr.on('data', (c) => { stderr = push(stderr, c); });
   const port = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(
       `10s 未见 TOUCHSTONE_LISTEN。stdout=${stdout} stderr=${stderr}`)), 10000);
@@ -107,9 +129,13 @@ async function startBackend({ webDir, dbPath, runDir }) {
     child.on('exit', (code) => { clearTimeout(timer); reject(new Error(`后端提前退出 code=${code} stderr=${stderr}`)); });
     tick();
   });
+  // SIGTERM → 3s 宽限 → SIGKILL 兜底（同 `dsh-plugin/lib/index.js:stopChild` 的进程契约）。
+  // 为什么需要兜底：`a:` 执行体缺口是**微任务级热旋**（`await` 全落已决 promise ⇒ 事件循环
+  // 的宏任务队列被饿死）⇒ 后端连 SIGTERM 都收不到，测试会永久挂在 stop() 上（2026-10-16 实测）。
   const stop = () => new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
-    child.once('exit', resolve);
+    const killTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* 已退出 */ } }, 3000);
+    child.once('exit', () => { clearTimeout(killTimer); resolve(); });
     child.kill('SIGTERM');
   });
   return { child, port, stdout: () => stdout, stderr: () => stderr, stop };
@@ -256,6 +282,42 @@ test('接线③：ext 行在场 ⇒ 该项目的 waiting t: 行**不被拾取**�
       // 因驱动未配置而 failed，属轮次内部收口，见「接线②」的完整断言）。
       assert.equal(picked.state, 'done',
         `free 项目应被正常拾取并执行完（正对照） stdout=${JSON.stringify(b.stdout())}`);
+    } finally {
+      await b.stop();
+    }
+  });
+
+test('接线④（M10）：`a:` 答案单元执行体已接线——送达体真被调用，不再「未接线」热旋', { timeout: 40000 },
+  async () => {
+    const webDir = makeWebDir();
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-wire-run-'));
+    const fx = seedDb({ answerCard: true });
+    const b = await startBackend({ webDir, dbPath: fx.dbPath, runDir });
+    try {
+      // ① **正证据**：答案行被 pick+claim，且 `board.deliverAnswerUnit` 真的跑了——
+      //    驱动未配置 ⇒ `answerDeliver` 抛「驱动地址不可用」⇒ `answerRetryOrFail` 记一次重试。
+      //    接线前这条路径**根本不进** `board`（`UnitHandlerMissing` 在 runner 内被 a: 分支
+      //    「放回等待重投」，`retries` 恒 0、行在 waiting/starting 之间热旋）。
+      const got = await waitFor(() => {
+        const row = readDb(fx.dbPath, (h) => h.prepare(
+          'SELECT state, retries FROM wait_items WHERE kind=? AND target_id=?')
+          .get('answer', String(fx.ids.answerCard)));
+        return row && Number(row.retries) >= 1 ? row : null;
+      }, { what: 'a: 行被真实送达体处理（retries ≥ 1）' });
+      assert.ok(got, 'a: 行没有被真实执行体处理 ⇒ 执行体没接线'
+        + `（stdout=${JSON.stringify(b.stdout())} stderr=${JSON.stringify(b.stderr())}）`);
+
+      // ② **负证据**：错误文本必须是「驱动不可用」这类真实失败，不能是未接线文案。
+      const out = b.stdout() + b.stderr();
+      assert.ok(!/答案送达体未接线|答案送达体未移植|UNIT_HANDLER_MISSING/.test(out),
+        `出现「执行体未接线」文案 ⇒ server.js 的 setUnitHandlers 漏了 deliverAnswerUnit：`
+        + ` out=${JSON.stringify(out.slice(-2000))}`);
+      assert.match(out, /\[board\] 答案送达失败（第 1 次，将重试）/, `out=${JSON.stringify(out.slice(-2000))}`);
+      // ③ 卡片行仍按「未送达」语义保留（送达失败不动列；成功后才会归位 doing + 清 block_kind）
+      const card = readDb(fx.dbPath, (h) => h.prepare(
+        'SELECT column_key, block_kind FROM board_cards WHERE id=?').get(fx.ids.answerCard));
+      assert.equal(card.column_key, 'blocked');
+      assert.equal(card.block_kind, 'interaction');
     } finally {
       await b.stop();
     }

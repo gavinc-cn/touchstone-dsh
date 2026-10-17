@@ -218,10 +218,12 @@ test('常量与静态口：WORKERS / LOAD_ROUND_NO / PARALLEL_PREFIX_N / 四个�
   assert.equal(runner.Runner.mkey('1700000000000-1'), 'm:1700000000000-1');
   assert.equal(runner.Runner.akey(7), 'a:7');
 
-  // 缝文案必须点明到期里程碑（M5 卡片/答案、M6 任务）
+  // 缝文案必须点明缺什么（M5 卡片、M6 任务）；`answer` 自 2026-10-16（M10）起改口径：
+  // 实现体 M5 就在 `board.deliverAnswerUnit`，曾经缺的只是 `server.js` 的注册 ⇒ 文案讲「未接线」，
+  // 不再写「未移植」（真机上那句「未移植」把人指向了错的排查方向）。
   assert.match(runner.UNIT_HANDLER_MISSING.task, /未移植（M6）/);
   assert.match(runner.UNIT_HANDLER_MISSING.card, /未移植（M5）/);
-  assert.match(runner.UNIT_HANDLER_MISSING.answer, /未移植（M5）/);
+  assert.match(runner.UNIT_HANDLER_MISSING.answer, /未接线.*deliverAnswerUnit/);
   const err = new runner.UnitHandlerMissing('x');
   assert.ok(err instanceof Error);
   assert.equal(err.name, 'UnitHandlerMissing');
@@ -957,6 +959,44 @@ test('⑮ 缝未接线：t:/c:/a: 三个口抛 UnitHandlerMissing，行按 Pytho
   } finally {
     runner.setUnitHandlers({});
     runner.setFailureNotifier(null);
+  }
+}));
+
+test('⑯ 缝：`a:` 异常兜底放回**带退避**（差异⑫②）——接线缺口不再零延迟热旋', () => withFixture('seamA', async (fx) => {
+  const o = { db: fx.db };
+  const r = parkedRunner(fx);
+  const p1 = insertProject(fx.db, { name: 'p1' });
+  runner.setUnitHandlers({});                       // 全注销 = 未接线（2026-10-16 真机事故态）
+  try {
+    const cid = insertCard(fx.db, p1, { title: 'ans' });
+    insertWait(fx.db, { projectId: p1, kind: 'answer', targetId: cid, state: 'waiting', seq: 1 });
+    assert.equal(r.claimAndStartLocked(`a:${cid}`, o), p1);
+    const res = await r.runPickedUnit(`a:${cid}`, o);
+    assert.ok(res.error instanceof runner.UnitHandlerMissing);
+
+    // ① **对齐面不动**（Python `runner.py:1110` 的语义）：仍落 waiting、claimed_by 清空、
+    //    retries 不涨（retries 只记业务重试额度）——既有断言 ⑮ 逐条继续成立。
+    assert.equal(rowState(fx, 'answer', cid), 'waiting');
+    assert.equal(waitRow(fx, 'answer', cid).claimed_by, null);
+    assert.equal(waitRow(fx, 'answer', cid).retries, 0);
+
+    // ② 新增判据：`not_before` 落在未来（退避档 = 常量；留 ±5s 容差只为避开调度抖动）
+    const nb = Number(waitRow(fx, 'answer', cid).not_before);
+    const nowSec = Date.now() / 1000;
+    assert.ok(nb > nowSec && nb >= nowSec + runner.ANSWER_EXC_BACKOFF_S - 5,
+      `放回必须带退避（not_before=${nb} now=${nowSec} 档=${runner.ANSWER_EXC_BACKOFF_S}）`);
+
+    // ③ **行为判据（本用例的真判据）**：当轮不可再拾取 ⇒ 「放回→立即重拾→再抛」热旋不成立。
+    //    热旋就是这条为 null 的断言在真机上的反面：50% CPU + 日志 5.5KB/s。
+    assert.equal(r.pickLocked(o), null, '退避窗口未到 ⇒ 不重拾（热旋的对立面）');
+
+    // ④ **自证（量具的量具）**：同一行把 not_before 拨回过去 ⇒ 立刻可拾。没有这一步，
+    //    ③ 的 null 也可能只是「a: 行本来就拾不到」的假绿。
+    fx.db.prepare('UPDATE wait_items SET not_before=0 WHERE kind=? AND target_id=?')
+      .run('answer', String(cid));
+    assert.equal(r.pickLocked(o), `a:${cid}`, '退避到点即恢复可拾（证明 ③ 的 null 确由退避造成）');
+  } finally {
+    runner.setUnitHandlers({});
   }
 }));
 

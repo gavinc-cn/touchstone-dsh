@@ -107,8 +107,19 @@
  *      执行体」段各自 `console.log` 一行后跳过本轮（「响亮 + 继续」），绝不让一行坏数据或
  *      一次收口写失败（`finally` 里的 DB 故障）带走服务。**单元分派/except/finally 本体照
  *      Python 逐条保留，不吞任何异常**——保底只在它们之外兜底。
- *   ⑫ **`runPickedUnit` 的 a: except 分支多一行日志**：Python 静默放回重投；Node 侧
- *      「answer 口未接线」时该路径会**热旋**（放回→立即重拾→再抛），日志是唯一可见性。
+ *   ⑫ **`runPickedUnit` 的 a: except 分支两处 Node 侧加固**（本分支在 Python 侧实际不可达：
+ *      `runner.py:1087` 直接 `import board` 调执行体，不存在「口没接线」这个态；Node 侧是
+ *      缝，未注册即抛 ⇒ 本分支的可达场景就是**接线缺口**，或有异常从执行体逃逸）：
+ *      ① **多一行日志**（Python 静默放回重投）——放回→立即重拾→再抛是热旋，日志是唯一可见性；
+ *      ② **放回带退避**（`not_before = now + ANSWER_EXC_BACKOFF_S`；Python `runner.py:1110`
+ *      传 `waitq.return_to_waiting` 的缺省 `0.0`）——2026-10-16 真机事故：接线缺口 + 零延迟
+ *      重投 ⇒ **微任务级热旋**（await 全落已决 promise）把事件循环的宏任务队列饿死：后端
+ *      50% CPU、日志 5.5KB/s 涨到 17MB、连 SIGTERM 都收不到（只能 SIGKILL），TS 会话详情
+ *      的读端点随事件循环一起卡死；毒行在 `wait_items` 里 ⇒ 重启后端立刻续旋
+ *      （用户观感「重启 DSH 也没用」）。**行态语义一字不改**：仍落 `waiting`、`retries`
+ *      不涨（`retries` 只记业务重试，判据见 `backend/test/runner-core.test.mjs` ⑮），只把
+ *      「立即重拾」改成「30s 后重拾」；退避档与 `board.ANSWER_BACKOFF_S` 同值
+ *      （不在本文件 import board：会成环，见差异㉘）。
  *   ⑬ **两处 board/db 口缺失，就地等价实现**（本文件私有、不导出成公开 API）：
  *      `board._card_unit_active`（`_answer_exempt_keys_locked` 用；board.js 的 M3 只读子集
  *      没有这个口，判据本身只是一次 waitq 行读）与 `db.update_board_card(last_error=…)`
@@ -758,7 +769,9 @@ function stageIndex(stage) {
 export const UNIT_HANDLER_MISSING = Object.freeze({
   task: '任务单元轮次执行体未移植（M6）',
   card: '卡片单元起跑体未移植（M5）',
-  answer: '答案送达体未移植（M5）',
+  // 2026-10-16：实现体 M5 就在 `board.deliverAnswerUnit`，缺的只是 server.js 的注册
+  // ⇒ 文案改成「未接线」（原「未移植」在真机上把人指向了错的排查方向）。
+  answer: '答案送达体未接线（setUnitHandlers 缺 deliverAnswerUnit）',
 });
 
 /** 单元执行体未接线（`setUnitHandlers` 的缺口）：具名错误，调用方可 `instanceof` 判定 */
@@ -769,6 +782,15 @@ export class UnitHandlerMissing extends Error {
     this.name = 'UnitHandlerMissing';
   }
 }
+
+/**
+ * `a:` 执行体**异常兜底**放回时的退避秒数（见文件头差异⑫②）。
+ *
+ * 为什么是 30.0：与业务退避 `board.ANSWER_BACKOFF_S`（`_answer_retry_or_fail`）同档——
+ * 「送达失败等一会儿再投」在两侧是同一个语义；**不 import board**（模块级 import 会成环，
+ * 见文件头差异㉘），故此处独立定义并在单测里钉住「放回后当轮不可再拾取」。
+ */
+export const ANSWER_EXC_BACKOFF_S = 30.0;
 
 /** 单元执行体注册表（`setUnitHandlers` 唯一写点；全 null = 未接线） */
 let UNIT_HANDLERS = Object.freeze({
@@ -790,6 +812,8 @@ let UNIT_HANDLERS = Object.freeze({
  *
  * ⚠ `a:` 口未接线时该单元会「放回 waiting → 立即被重拾 → 再抛」热旋（Python 同形：其
  * `board._deliver_answer_unit` 正常不抛）——运行日志里能直接看到，接线后消失。
+ * **2026-10-16（M10）`server.js` 已把三路口全部接真**（`a:` 那次是真机热旋被发现后补的：
+ * 50% CPU + 日志 5.5KB/s）；本文件不校验接线态，接线判据在 `server-wiring.test.mjs`「接线④」。
  *
  * 只传一个口即把其余口置空；传 `{}` / `null` 全注销（回到未接线态）。
  *
@@ -2280,11 +2304,13 @@ export class Runner {
         // 消息单元异常：状态落盘由 chat.runUnit 内部负责，此处不记任务行
       } else if (key.startsWith('a:')) {
         // 答案执行体异常兜底（业务失败已在执行体内部分流，此处只防未预期异常把行永久挂在
-        // starting）：放回 waiting 重入队，不计业务重试额度；放回失败（行已被取消）则不再重入队
-        console.log(`[runner] 答案单元异常（放回等待重投）: ${key}: ${err}`);   // 见文件头差异⑫
+        // starting）：放回 waiting 重入队（**带退避**，见文件头差异⑫②），不计业务重试额度；
+        // 放回失败（行已被取消）则不再重入队
+        console.log(`[runner] 答案单元异常（放回等待重投）: ${key}: ${err}`);   // 见文件头差异⑫①
         try {
           const arow = waitq.getActive(waitq.KIND_ANSWER, key.slice(2), opts);
-          if (arow !== null && waitq.returnToWaiting(arow.id, 0.0, false, opts)) {
+          const notBefore = Date.now() / 1000 + ANSWER_EXC_BACKOFF_S;
+          if (arow !== null && waitq.returnToWaiting(arow.id, notBefore, false, opts)) {
             this.submitAnswer(pyIntOr(key.slice(2), null), opts);
           }
         } catch {
