@@ -3,13 +3,16 @@
 //   ① `absToMedia`——markdown 引用里以 / 开头且尾段为 /board_media/<fid> 的落盘绝对路径
 //      改写为媒体端点 URL；已是端点裸路径（/api/projects/<pid>/board/media/<fid>，看板详情
 //      编辑框粘贴形态）也补上同源根前缀；其余引用原样保留。
+//   ③ 形态③（2026-10-16）——「项目根内 或 附件目录内」的**本地位图**（agent 自己写的截图/
+//      示意图，含 board_media 子目录 + 非 fid 文件名）改写为 `…/file?path=<abs>&inline=1`；
+//      根外路径、非位图扩展名、网页绝对路径（/assets/…）一律不动；roots 缺省只认 board_media。
 //   ② `mediaDisplayUrl`——端点裸路径补同源根前缀（chip 缩略图直接用 server 回包 url）。
 // 同源根（BASE）：独立形态=''（改写结果与旧行为逐字符一致）、dsh 插件形态='/touchstone'
 // ——插件下裸 /api/... 打到 dsh 宿主根 401，图片不显示（2026-10-04 用户报障）。
-// 安全红线：不以任意路径/URL 当媒体渲染——非本平台产物、fid 形态不符的都不动。
+// 安全红线：不以任意路径/URL 当媒体渲染——非本平台产物、fid 形态不符、项目根外的都不动。
 import { describe, expect, it } from 'vitest'
 
-import { absToMedia, mediaDisplayUrl } from '../utils/mediaText'
+import { absToMedia, mediaDisplayUrl, projectRoots } from '../utils/mediaText'
 
 const FID = 'm1757000000000_abcdef1234.png' // m<13 位毫秒>_<10 位 hex>.<ext>
 const PLUGIN_BASE = '/touchstone'           // dsh 插件形态同源根
@@ -24,10 +27,15 @@ describe('absToMedia', () => {
 
   it('非本平台产物路径与 fid 形态不符的引用原样保留', () => {
     expect(absToMedia('![a](/tmp/a.png)', 7)).toBe('![a](/tmp/a.png)')
+    // 附件目录里**不是 fid 形态**的位图（2026-10-16 起）：走形态③的 file?inline=1 ——
+    // 旧行为是「原样保留」（于是浏览器 404、图不显示），那正是卡 #980 报障的形态
     expect(absToMedia(`![a](/w/board_media/${FID.toUpperCase()})`, 7))
-      .toBe(`![a](/w/board_media/${FID.toUpperCase()})`) // 大写 hex 不符 fid 形态
+      .toBe(`![a](/api/projects/7/file?path=${encodeURIComponent('/w/board_media/' + FID.toUpperCase())}&inline=1)`)
     expect(absToMedia('![a](/w/board_media/m123_abcdef1234.png)', 7))
-      .toBe('![a](/w/board_media/m123_abcdef1234.png)') // 毫秒位数不足
+      .toBe(`![a](/api/projects/7/file?path=${encodeURIComponent('/w/board_media/m123_abcdef1234.png')}&inline=1)`)
+    // 非位图扩展名不进形态③（后端白名单也会 400）
+    expect(absToMedia('![a](/w/board_media/notes.txt)', 7))
+      .toBe('![a](/w/board_media/notes.txt)')
     expect(absToMedia(`见 /w/board_media/${FID}`, 7))
       .toBe(`见 /w/board_media/${FID}`) // 裸路径非 markdown 引用，不改写
     // 平台端点 URL 自身（独立形态 BASE=''）不动——改写幂等
@@ -58,6 +66,93 @@ describe('absToMedia', () => {
     // 非本平台端点（fid 形态不符）不动
     expect(absToMedia('![a](/api/projects/9/board/media/not-a-fid.png)', 9, PLUGIN_BASE))
       .toBe('![a](/api/projects/9/board/media/not-a-fid.png)')
+  })
+})
+
+describe('absToMedia 形态③：项目根内 / 附件目录内的本地位图（2026-10-16）', () => {
+  const WORK = '/srv/work/app'   // 项目行 work_dir
+  const PROJ = '/srv/repos/app'  // 项目行 project_dir
+  const ROOTS = [PROJ, WORK]
+  // 用户报障（卡 #980）里的真实引用：附件目录的子目录 + 非 fid 文件名
+  const SHOT = WORK + '/board_media/qa_index_color_20261016/qbar_dsh-dark_blue.png'
+  const enc = encodeURIComponent
+
+  it('项目根内的位图改写为 file?inline=1（子目录/任意文件名都认）', () => {
+    expect(absToMedia(`![提问索引](${SHOT})`, 126, { roots: ROOTS }))
+      .toBe(`![提问索引](/api/projects/126/file?path=${enc(SHOT)}&inline=1)`)
+    // project_dir 里的图（agent 在工作区根目录产图）同档
+    const run = PROJ + '/.run/qa_index_sidebar.png'
+    expect(absToMedia(`![改后效果](${run})`, 126, { roots: ROOTS }))
+      .toBe(`![改后效果](/api/projects/126/file?path=${enc(run)}&inline=1)`)
+    // 插件形态：同源根前缀照补（裸 /api/... 会打到 dsh 宿主根 401）
+    expect(absToMedia(`![图](${SHOT})`, 126, { base: PLUGIN_BASE, roots: ROOTS }))
+      .toBe(`![图](${PLUGIN_BASE}/api/projects/126/file?path=${enc(SHOT)}&inline=1)`)
+    // 扩展名大小写不敏感（后端同样 lower() 后查表）
+    expect(absToMedia(`![图](${PROJ}/shot.JPG)`, 126, { roots: ROOTS }))
+      .toBe(`![图](/api/projects/126/file?path=${enc(PROJ + '/shot.JPG')}&inline=1)`)
+  })
+
+  it('根外路径 / 非位图 / 网页绝对路径一律不动', () => {
+    // 根外（/tmp 不在任何项目根内，也不含 /board_media/）
+    expect(absToMedia('![a](/tmp/a.png)', 7, { roots: ROOTS })).toBe('![a](/tmp/a.png)')
+    // 根内但非位图：后端白名单会 400，前端不改（不给用户一个必然失败的 img）
+    expect(absToMedia(`![a](${PROJ}/doc_ai/plan.md)`, 126, { roots: ROOTS }))
+      .toBe(`![a](${PROJ}/doc_ai/plan.md)`)
+    expect(absToMedia(`![a](${PROJ}/pic.svg)`, 126, { roots: ROOTS }))
+      .toBe(`![a](${PROJ}/pic.svg)`)          // svg 刻意不在白名单（同源可执行）
+    // 站点自身的绝对 URL 不能被当成落盘路径
+    expect(absToMedia('![logo](/assets/logo.png)', 126, { roots: ROOTS }))
+      .toBe('![logo](/assets/logo.png)')
+    // 相对路径（不以 / 开头）不是落盘绝对路径，不动
+    expect(absToMedia('![a](board_media/batch/x.png)', 126, { roots: ROOTS }))
+      .toBe('![a](board_media/batch/x.png)')
+  })
+
+  it('roots 拿不到时回落「路径含 /board_media/」，其余不动', () => {
+    // 会话页首帧/项目列表未到：附件目录形态仍要能显示（越界与否由后端 403 兜底）
+    const p = '/srv/unknown-proj/board_media/batch/shot.png'
+    expect(absToMedia(`![图](${p})`, 7))
+      .toBe(`![图](/api/projects/7/file?path=${enc(p)}&inline=1)`)
+    expect(absToMedia('![图](/srv/unknown-proj/.run/shot.png)', 7))
+      .toBe('![图](/srv/unknown-proj/.run/shot.png)')
+  })
+
+  it('形态①（board_media 下的 fid）仍走媒体端点，优先级不变；改写幂等', () => {
+    expect(absToMedia(`![图](${WORK}/board_media/${FID})`, 126, { roots: ROOTS }))
+      .toBe(`![图](/api/projects/126/board/media/${FID})`)
+    const done = `/api/projects/126/file?path=${enc(SHOT)}&inline=1`
+    expect(absToMedia(`![图](${done})`, 126, { roots: ROOTS })).toBe(`![图](${done})`)
+    expect(absToMedia(`![图](${PLUGIN_BASE}${done})`, 126, { base: PLUGIN_BASE, roots: ROOTS }))
+      .toBe(`![图](${PLUGIN_BASE}${done})`)
+  })
+
+  it('旧签名（第三参传字符串=base 注入缝）行为不变', () => {
+    expect(absToMedia(`![图](${WORK}/board_media/${FID})`, 9, PLUGIN_BASE))
+      .toBe(`![图](${PLUGIN_BASE}/api/projects/9/board/media/${FID})`)
+    // 旧签名没有 roots ⇒ 只认 board_media 形态
+    expect(absToMedia(`![图](${PROJ}/.run/x.png)`, 9, PLUGIN_BASE))
+      .toBe(`![图](${PROJ}/.run/x.png)`)
+  })
+})
+
+describe('projectRoots', () => {
+  const rows = [
+    { id: 126, project_dir: '/srv/repos/app/', work_dir: '/srv/work/app' },
+    { id: 8, project_dir: '', work_dir: '/srv/work/other-app' },
+  ]
+
+  it('按 id 取项目根并去尾斜杠；缺项丢弃', () => {
+    expect(projectRoots(rows, 126))
+      .toEqual(['/srv/repos/app', '/srv/work/app'])
+    expect(projectRoots(rows, 8)).toEqual(['/srv/work/other-app'])
+    expect(projectRoots(rows, '126')).toEqual(projectRoots(rows, 126))   // 字符串 id 也认
+  })
+
+  it('未知项目 / 空列表 / 空 id ⇒ 空数组（调用方按回落档处理）', () => {
+    expect(projectRoots(rows, 999)).toEqual([])
+    expect(projectRoots(null, 126)).toEqual([])
+    expect(projectRoots(rows, null)).toEqual([])
+    expect(projectRoots(rows, '')).toEqual([])
   })
 })
 

@@ -9,8 +9,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { taskApi } from '../api'
 import { renderDoc } from '../utils/renderDoc'
+import { absToMedia, projectRoots } from '../utils/mediaText'
 import { toast } from '../utils/toast'
 import { runLabel } from '../utils/loadRuns'
+import { useAppStore } from '../stores/app'
 import LoadDashboard from './LoadDashboard'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -99,9 +101,15 @@ export default function LoadLogTab({ task }) {
   }, [taskId, selKey, live, endedAt, tick])
 
   const logLines = useMemo(() => (logText ? logText.split('\n') : []), [logText])
-  // 报告正文：文档级渲染（表格套横向滚动容器）；不摘抬头——报告页没有标题栏承接它
+  // 报告正文：文档级渲染（表格套横向滚动容器）；不摘抬头——报告页没有标题栏承接它。
+  // 正文里的本地图片引用先经 absToMedia 改写（2026-10-16，与会话气泡同一套）
+  const projects = useAppStore((s) => s.projects)
+  const pid = task?.project_id
+  const mdRoots = useMemo(() => projectRoots(projects, pid), [projects, pid])
   const reportHtml = useMemo(
-    () => (report?.found ? renderDoc(report.md).html : ''), [report])
+    () => (report?.found
+      ? renderDoc(absToMedia(report.md, pid, { roots: mdRoots })).html : ''),
+    [report, pid, mdRoots])
 
   return (
     <div className="lp-log">

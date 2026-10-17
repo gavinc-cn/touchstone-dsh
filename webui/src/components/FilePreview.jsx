@@ -3,9 +3,13 @@
 // - 二进制只提示不可预览（给下载入口）；超出后端 256KB 截断上限时提示并给全文入口
 // - 预览内容里的路径同样可点：压栈换文件，头部出现「返回」（栈深 >1 时）
 // - 文件读取限定在项目目录/工作目录之内（server 侧校验，越界/不存在在此展示错误）
+// - 预览的 md 里若有本地图片引用（agent 写的截图），与会话气泡同一套 absToMedia 改写
+//   （2026-10-16）：`roots` 由调用方（SessionView 从项目行取）透传，缺省 null 时只认
+//   board_media 形态
 import { useCallback, useEffect, useState } from 'react'
 import { projectApi } from '../api'
 import { renderMd } from '../utils/renderMd'
+import { absToMedia } from '../utils/mediaText'
 import { toast } from '../utils/toast'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -28,7 +32,7 @@ function fmtMtime(t) {
   return isNaN(d.getTime()) ? '' : d.toLocaleString()
 }
 
-export default function FilePreview({ pid, path, onClose }) {
+export default function FilePreview({ pid, path, roots = null, onClose }) {
   const [stack, setStack] = useState([path])      // 预览栈（预览内跳转让路径压栈）
   const cur = stack[stack.length - 1]
   const [state, setState] = useState({ loading: true })
@@ -111,9 +115,9 @@ export default function FilePreview({ pid, path, onClose }) {
               </span>
             </div>
           ) : MD_RE.test(cur) ? (
-            // markdown 按富文本渲染（与回答气泡同一渲染器 + 同样可点路径）
+            // markdown 按富文本渲染（与回答气泡同一渲染器 + 同样可点路径 + 同样做图片寻址改写）
             <div className="md-body" onClick={onBodyClick}
-              dangerouslySetInnerHTML={{ __html: renderMd(data.text, { pathLinks: true }) }}></div>
+              dangerouslySetInnerHTML={{ __html: renderMd(absToMedia(data.text, pid, { roots }), { pathLinks: true }) }}></div>
           ) : (
             <pre className="fv-pre">{data.text}</pre>
           )}

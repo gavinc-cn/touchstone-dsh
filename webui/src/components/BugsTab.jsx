@@ -3,6 +3,7 @@ import { useAppStore } from '../stores/app'
 import { bugApi, taskApi } from '../api'
 import { toast } from '../utils/toast'
 import { ST_LABEL, fmtTime, renderMd } from '../utils/renderMd'
+import { absToMedia, projectRoots } from '../utils/mediaText'
 import SessionView from './SessionView'
 import { Button } from '@/components/ui/button'
 import {
@@ -81,7 +82,13 @@ export default function BugsTab({ project }) {
   const fixTaskIdRef = useRef(null)
   const restoreTriedRef = useRef(false)
 
-  const mdHtml = useMemo(() => (detail ? { __html: renderMd(detail.content) } : null), [detail])
+  // bug 报告正文里的本地图片引用同样要改写（2026-10-16，与会话气泡同一套 absToMedia）：
+  // 报告里的 `![截图](/opt/…/board_media/xxx/shot.png)` 原先原样进 `<img src>` ⇒ 浏览器按
+  // 同源根拼成 http://<宿主>/opt/… ⇒ 404（复现截图看不见）
+  const mdRoots = useMemo(() => projectRoots([project], projectId), [project, projectId])
+  const mdHtml = useMemo(() => (detail
+    ? { __html: renderMd(absToMedia(detail.content, projectId, { roots: mdRoots })) }
+    : null), [detail, projectId, mdRoots])
   const fixRunning = fixTask?.status === 'running'
   const fixQueued = fixTask?.status === 'queued'
   const chatRunning = chatTask?.status === 'running'

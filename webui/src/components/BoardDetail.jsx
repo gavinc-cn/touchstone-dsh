@@ -7,7 +7,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { boardApi } from '../api'
 import { toast } from '../utils/toast'
 import { renderMd } from '../utils/renderMd'
-import { absToMedia } from '../utils/mediaText'
+import { absToMedia, projectRoots } from '../utils/mediaText'
 import { isPlaceholderImage } from '../utils/media'
 import { sessionRenameNotice } from '../utils/sessionRename'
 import { useResizable } from '../hooks/useResizable'
@@ -51,10 +51,13 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
   }, [card.id])
 
   // 描述渲染: 附件 abs 引用(如 ![名](/srv/proj/.../board_media/m...png))先经 absToMedia
-  // 改写为项目媒体端点 URL, 再由 renderMd 渲染缩略图/文件链接(与会话气泡同方案)
+  // 改写为项目媒体端点 URL, 再由 renderMd 渲染缩略图/文件链接(与会话气泡同方案)。
+  // roots=项目行的 project_dir/work_dir: agent 自己写的截图（附件目录子目录/项目内任意位图）
+  // 也走同一条改写（形态③ file?inline=1，2026-10-16）
+  const mdRoots = useMemo(() => projectRoots([project], projectId), [project, projectId])
   const descHtml = useMemo(() => ({
-    __html: renderMd(absToMedia(card.description || '*（无描述）*', projectId)),
-  }), [card.description, projectId])
+    __html: renderMd(absToMedia(card.description || '*（无描述）*', projectId, { roots: mdRoots })),
+  }), [card.description, projectId, mdRoots])
   // 父任务候选：排除自己（后代由后端 set_parent 拦截，前端仅做基本过滤）
   const [allCards, setAllCards] = useState([])
   const [boardCaps, setBoardCaps] = useState(null)   // 看板能力声明(按项目 agent 族, 后端下发)
@@ -364,7 +367,7 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
                 </div>
                 {/* 评论由纯文本改为 markdown 渲染(描述同方案): 附件 abs 引用经 absToMedia 改写
                     为项目媒体端点 URL, renderMd 渲染缩略图/文件链接; 多行段落语义与 pre-wrap 不同属预期 */}
-                <div className="md-body" dangerouslySetInnerHTML={{ __html: renderMd(absToMedia(m.text, projectId)) }}></div>
+                <div className="md-body" dangerouslySetInnerHTML={{ __html: renderMd(absToMedia(m.text, projectId, { roots: mdRoots })) }}></div>
               </div>
             ))}
             <Textarea rows={3} placeholder={isDsh ? '评论（dsh 不支持投递，仅保存）' : '评论（Ctrl+Enter 保存）'}

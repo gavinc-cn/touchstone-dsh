@@ -547,10 +547,79 @@ test('/api/projects/<id>/file?raw=1：文本 plain、二进制附件、超 32MiB
   }
 });
 
+test('/api/projects/<id>/file?inline=1：位图内联（无 attachment）、非位图 400、413、越界 403', async () => {
+  const fx = freshDb('route');
+  try {
+    const me = adminUser(fx.db);
+    const p = makeProject(fx);
+    // agent 产图的真实形态：工作区附件目录的子目录 + 任意文件名（不是 fid 形态）。
+    // 字节用 ASCII + 一个 NUL（含 NUL ⇒ 预览档判 binary=true）：`get()` 的正文是 utf8 字符串，
+    // 非 ASCII 二进制在这里不可逐字节断言（真 PNG 魔数的保真由 pytest 侧钉）。
+    const PNG_BYTES = Buffer.from('PNGBYTES\u0000END', 'utf8');
+    const png = write(path.join(p.workDir, 'board_media', 'batch', 'shot.png'), PNG_BYTES);
+    const jpg = write(path.join(p.projectDir, 'shot.JPG'), Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+
+    const img = await get(fx.db, me,
+      `/api/projects/${p.id}/file?path=${encodeURIComponent(png)}&inline=1`);
+    assert.equal(img.status, 200);
+    assert.equal(img.headers['Content-Type'], 'image/png');
+    assert.equal(img.headers['X-Content-Type-Options'], 'nosniff');
+    assert.equal(img.headers['Cache-Control'], 'no-store');
+    // 内联档**不能**带 attachment —— 带了浏览器就不在 <img> 里渲染（等于没修）
+    assert.equal(img.headers['Content-Disposition'], undefined);
+    assert.equal(img.headers['Content-Length'], String(fs.statSync(png).size));
+    assert.equal(img.body, PNG_BYTES.toString('utf8'));
+
+    // 大写扩展名同档（`fileExt` 的 lower()）；工作目录相对路径也可寻址
+    const upper = await get(fx.db, me, `/api/projects/${p.id}/file?path=shot.JPG&inline=1`);
+    assert.equal(upper.status, 200);
+    assert.equal(upper.headers['Content-Type'], 'image/jpeg');
+
+    // 白名单是**位图**：html/svg/txt 一律 400（文案逐字，与 Python json.dumps 同口径带空格）
+    write(path.join(p.projectDir, 'page.html'), '<script>alert(1)</script>');
+    write(path.join(p.projectDir, 'pic.svg'), '<svg/>');
+    for (const name of ['page.html', 'pic.svg', 'r.txt']) {
+      if (name === 'r.txt') write(path.join(p.projectDir, 'r.txt'), 'hello\n');
+      const bad = await get(fx.db, me, `/api/projects/${p.id}/file?path=${name}&inline=1`);
+      assert.equal(bad.status, 400, name);
+      assert.equal(bad.body, '{"error": "该类型不支持内联显示"}', name);
+    }
+
+    // 越界 403 / 缺失 404 / 目录 400：与预览档同一套 err 映射（inline 不改这三档）
+    const outside = await get(fx.db, me, `/api/projects/${p.id}/file?path=../nope.png&inline=1`);
+    assert.equal(outside.status, 403);
+    const missing = await get(fx.db, me, `/api/projects/${p.id}/file?path=none.png&inline=1`);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body, '{"error": "文件不存在或不可读"}');
+    fs.mkdirSync(path.join(p.projectDir, 'pics'), { recursive: true });
+    const dir = await get(fx.db, me, `/api/projects/${p.id}/file?path=pics&inline=1`);
+    assert.equal(dir.status, 400);
+    assert.equal(dir.json.error, '该路径是目录，暂不支持预览');
+
+    // 超 FILE_RAW_MAX(32MiB) ⇒ 413（稀疏文件）
+    const huge = path.join(p.projectDir, 'huge.png');
+    fs.writeFileSync(huge, '');
+    fs.truncateSync(huge, 33 * 1024 * 1024);
+    const tooBig = await get(fx.db, me, `/api/projects/${p.id}/file?path=huge.png&inline=1`);
+    assert.equal(tooBig.status, 413);
+    assert.equal(tooBig.body, '{"error": "文件过大，无法内联显示"}');
+
+    // 回归：不传 inline 时同一张图仍走 JSON 预览（binary=true），raw=1 仍是附件下载
+    const preview = await get(fx.db, me, `/api/projects/${p.id}/file?path=${encodeURIComponent(png)}`);
+    assert.equal(preview.status, 200);
+    assert.equal(preview.json.binary, true);
+    const raw = await get(fx.db, me, `/api/projects/${p.id}/file?path=${encodeURIComponent(png)}&raw=1`);
+    assert.equal(raw.headers['Content-Type'], 'application/octet-stream');
+    assert.equal(raw.headers['Content-Disposition'].startsWith('attachment;'), true);
+    void jpg;
+  } finally {
+    fx.close();
+  }
+});
+
 // --------------------------------------------------------------------------
 // bug 列表 / 详情
 // --------------------------------------------------------------------------
-
 test('/api/projects/<id>/bugs：扫描聚合 + 关联任务；详情含全文/关联用例/标题', async () => {
   const fx = freshDb('route');
   try {

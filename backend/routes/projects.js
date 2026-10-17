@@ -289,6 +289,22 @@ function resolveProject(ctx) {
 }
 
 /**
+ * `file?inline=1` 的内联白名单（2026-10-16，`server.py:PROJECT_INLINE_IMAGE_TYPES` 同表）：
+ * **只放行浏览器可直接渲染的位图**。与 `raw=1`「一律 text/plain 或附件下载」的红线配套——
+ * 按扩展名把 agent 在工作区写的内容内联下发，等于让同源页面按该类型解释它；`html`/`svg`/`js`
+ * 这类可执行/可带脚本的类型一律不给，只给位图（`<img>` 里不会执行任何东西）。
+ * 扩展名口径同 `fileExt()`（`os.path.splitext(...)[1].lstrip('.').lower()`，大小写不敏感）。
+ */
+const PROJECT_FILE_INLINE_TYPES = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+};
+
+/**
  * `_send_project_file_raw`：原文（新标签打开/二进制下载）：文本按 text/plain，二进制按附件下载。
  *
  * 为什么不用 `ctx.file()`：`sendFile` 缺三样 Python 侧有的东西 —— `X-Content-Type-Options:
@@ -335,6 +351,62 @@ function sendProjectFileRaw(ctx, filePath) {
       `attachment; filename="${asciiName}"; filename*=UTF-8''${quote(name)}`;
   }
   ctx.res.writeHead(200, headers);
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const buf = Buffer.allocUnsafe(64 * 1024);
+      for (;;) {
+        const n = fs.readSync(fd, buf, 0, buf.length, null);
+        if (!n) break;
+        ctx.res.write(buf.subarray(0, n));
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    // 客户端提前断开属常态（对齐 Python 的 `except (BrokenPipeError, ConnectionResetError, OSError)`）
+  }
+  try {
+    ctx.res.end();
+  } catch {
+    // 已断开：忽略
+  }
+}
+
+/**
+ * `_send_project_file_inline`：`inline=1` 的项目内位图原图内联下发。
+ *
+ * 与 `sendProjectFileRaw` 只差两处：Content-Type 按扩展名给真图片类型、不带
+ * `Content-Disposition: attachment`（浏览器才肯在 `<img>` 里渲染）。仍带 nosniff 与
+ * no-store。扩展名不在白名单 ⇒ 400（不是「不支持就按 raw 下发」——那正是 raw 红线要防的）；
+ * 超 `FILE_RAW_MAX` ⇒ 413。三条错误体的 JSON 口径与 Python `json.dumps(..., ensure_ascii=False)`
+ * 逐字节相同，故一律走 `ctx.errorSpaced`（`{"error": "…"}` 带空格）。
+ * @param {object} ctx
+ * @param {string} filePath
+ */
+function sendProjectFileInline(ctx, filePath) {
+  const ctype = PROJECT_FILE_INLINE_TYPES[fileExt(filePath)];
+  if (ctype === undefined) {
+    ctx.errorSpaced(400, '该类型不支持内联显示');
+    return;
+  }
+  let size;
+  try {
+    size = fs.statSync(filePath).size;
+  } catch {
+    ctx.errorSpaced(404, '文件不存在或不可读');
+    return;
+  }
+  if (size > FILE_RAW_MAX) {
+    ctx.errorSpaced(413, '文件过大，无法内联显示');
+    return;
+  }
+  ctx.res.writeHead(200, {
+    'Content-Type': ctype,
+    'Content-Length': String(size),
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
   try {
     const fd = fs.openSync(filePath, 'r');
     try {
@@ -917,10 +989,13 @@ export const routes = [
     /**
      * 读取项目范围内的文件内容供会话页预览（只读，多用户隔离）。
      *
-     * query: `path=`相对/绝对路径（相对按 项目目录 → 工作目录 解析）；`raw=1` 直接返回原文。
+     * query: `path=`相对/绝对路径（相对按 项目目录 → 工作目录 解析）；`raw=1` 直接返回原文；
+     * `inline=1` 把项目范围内的**位图**按原图内联下发（会话页渲染 agent 写的截图用，
+     * 见 `sendProjectFileInline`；两参数都给时 inline 优先）。
      * 安全：路径须落在本项目「项目目录/工作目录」之内（realpath 包含判定，防目录穿越与越权
      * 读他人文件）；raw 一律 text/plain + nosniff —— 这些文件是 agent 在工作区写的内容，
-     * 按扩展名猜类型内联下发会让同源页面执行其中脚本。
+     * 按扩展名猜类型内联下发会让同源页面执行其中脚本；`inline=1` 是这条红线上的**收窄例外**：
+     * 只放行 `PROJECT_FILE_INLINE_TYPES` 里的位图扩展名。
      */
     handler: (ctx, m) => {
       const row = ctx.ownedProject(Number(m[1]));
@@ -929,6 +1004,10 @@ export const routes = [
       const mapped = projectFileError(resolved.err);
       if (mapped) {
         ctx.errorSpaced(mapped[0], mapped[1]);
+        return;
+      }
+      if (['1', 'true', 'yes'].includes(ctx.q('inline', '0'))) {
+        sendProjectFileInline(ctx, resolved.path);
         return;
       }
       if (['1', 'true', 'yes'].includes(ctx.q('raw', '0'))) {

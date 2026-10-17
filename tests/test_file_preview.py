@@ -5,9 +5,13 @@
 - 只读；路径必须落在本项目「项目目录 / 工作目录」两个根内（realpath 包含判定，防穿越）
 - 多用户隔离：非本人项目一律 404（_owned_project 红线）
 - 文本预览 256KB 截断；二进制只标记不返回内容；raw=1 返回原文（text/plain + nosniff）
+- inline=1（2026-10-16）把项目内的**位图**按原图内联下发：会话页渲染 agent 写的截图用
+  （raw 档的 octet-stream + attachment 浏览器不肯在 <img> 里渲染）；白名单只含位图，
+  html/svg/脚本类一律 400 —— 与 raw「按扩展名猜类型会让同源页面执行其中脚本」的红线配套。
 """
 
 import os
+from urllib.parse import quote
 
 from serverfixture import isolated_server
 
@@ -134,3 +138,75 @@ def test_preview_isolation_and_auth(isolated_server):
     anon = srv.client()
     code, d = anon.json(f"/api/projects/{pid}/file?path=docs/a.md")
     assert code == 401, d
+
+
+def test_preview_inline_image_headers(isolated_server):
+    """inline=1（2026-10-16）：项目内位图按真图片类型**原图内联**下发。
+
+    会话页要把 agent 写在「项目目录/工作目录」里的截图渲出来（`<img src>`）：raw=1 那种
+    `octet-stream + attachment` 浏览器不肯渲染，故新增这一档。判据三条：
+    ① Content-Type 按扩展名给真图片类型；② **不能**带 Content-Disposition: attachment；
+    ③ 带 nosniff + no-store 且字节逐字节保真（真 PNG 魔数含非 ASCII）。
+    """
+    srv = isolated_server
+    pid = srv.create_project(srv.admin, "preview-inline")
+    # agent 产图的真实形态：附件目录的**子目录** + 任意文件名（不是 fid 形态）
+    rel = os.path.join("board_media", "batch", "shot.png")
+    write(os.path.join(srv.work_dir, rel), PNG_1PX)
+    for path in (rel, os.path.realpath(os.path.join(srv.work_dir, rel))):
+        url = f"{srv.base}/api/projects/{pid}/file?path={quote(path)}&inline=1"
+        with srv.admin.opener.open(url, timeout=30) as r:
+            assert r.status == 200
+            assert r.headers.get("Content-Type") == "image/png"
+            assert r.headers.get("X-Content-Type-Options") == "nosniff"
+            assert r.headers.get("Cache-Control") == "no-store"
+            assert r.headers.get("Content-Disposition") is None
+            assert r.headers.get("Content-Length") == str(len(PNG_1PX))
+            assert r.read() == PNG_1PX
+    # 大写扩展名同档（splitext 后 lower）；项目目录里的图同样可内联
+    write(os.path.join(srv.proj_dir, "shot.JPG"), b"\xff\xd8\xff\xe0jpeg")
+    url = f"{srv.base}/api/projects/{pid}/file?path=shot.JPG&inline=1"
+    with srv.admin.opener.open(url, timeout=30) as r:
+        assert r.headers.get("Content-Type") == "image/jpeg"
+        assert r.read() == b"\xff\xd8\xff\xe0jpeg"
+
+
+def test_preview_inline_gate_and_other_modes(isolated_server):
+    """inline=1 只放行位图：html/svg/txt 一律 400；越界/缺失/目录三档与预览同；raw 档不变。"""
+    srv = isolated_server
+    pid = srv.create_project(srv.admin, "preview-inline-gate")
+    write(os.path.join(srv.proj_dir, "page.html"), "<script>alert(1)</script>\n")
+    write(os.path.join(srv.proj_dir, "pic.svg"), "<svg/>\n")
+    write(os.path.join(srv.proj_dir, "note.txt"), "hi\n")
+    for name in ("page.html", "pic.svg", "note.txt"):
+        code, d = srv.admin.json(f"/api/projects/{pid}/file?path={name}&inline=1")
+        assert code == 400, (name, code, d)
+        assert d["error"] == "该类型不支持内联显示", (name, d)
+    # 三档与预览一致：越界 403 / 缺失 404 / 目录 400
+    code, d = srv.admin.json(f"/api/projects/{pid}/file?path=../nope.png&inline=1")
+    assert code == 403, d
+    code, d = srv.admin.json(f"/api/projects/{pid}/file?path=none.png&inline=1")
+    assert code == 404 and d["error"] == "文件不存在或不可读", d
+    os.makedirs(os.path.join(srv.proj_dir, "pics"), exist_ok=True)
+    code, d = srv.admin.json(f"/api/projects/{pid}/file?path=pics&inline=1")
+    assert code == 400 and "目录" in d["error"], d
+    # inline 只认 1/true/yes：给 0 时回落 JSON 预览（同一张图 binary=true、不给正文）
+    write(os.path.join(srv.proj_dir, "img.png"), PNG_1PX)
+    code, d = srv.admin.json(f"/api/projects/{pid}/file?path=img.png&inline=0")
+    assert code == 200 and d["binary"] is True and d["text"] == "", d
+    # raw=1 的红线不受影响：同一张图仍是附件下载
+    url = f"{srv.base}/api/projects/{pid}/file?path=img.png&raw=1"
+    with srv.admin.opener.open(url, timeout=30) as r:
+        assert r.headers.get("Content-Type") == "application/octet-stream"
+        assert "attachment" in r.headers.get("Content-Disposition")
+
+
+def test_preview_inline_too_big_413(isolated_server):
+    """超 FILE_RAW_MAX 的位图 ⇒ 413（稀疏文件，秒级造出来）。"""
+    srv = isolated_server
+    pid = srv.create_project(srv.admin, "preview-inline-big")
+    big = os.path.join(srv.proj_dir, "huge.png")
+    with open(big, "wb") as f:
+        f.truncate(33 * 1024 * 1024)
+    code, d = srv.admin.json(f"/api/projects/{pid}/file?path=huge.png&inline=1")
+    assert code == 413 and d["error"] == "文件过大，无法内联显示", d

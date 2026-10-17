@@ -14,6 +14,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { taskApi } from '../api'
 import { renderDoc } from '../utils/renderDoc'
+import { absToMedia, projectRoots } from '../utils/mediaText'
+import { useAppStore } from '../stores/app'
 
 // 驱动类型 → 展示文案（与 loadcase.DRIVER_* 对齐）
 const DRIVER_LABEL = {
@@ -52,8 +54,15 @@ export default function LoadPlanTab({ task }) {
     return () => { dead = true }
   }, [task?.id, task?.status])
 
-  // 文档级渲染：标题/抬头/目录/表格滚动容器（plan_md 不变时结果稳定，不做重复解析）
-  const doc = useMemo(() => renderDoc(d?.plan_md || '', { extractHeader: true }), [d?.plan_md])
+  // 文档级渲染：标题/抬头/目录/表格滚动容器（plan_md 不变时结果稳定，不做重复解析）。
+  // 方案正文里的本地图片引用先经 absToMedia 改写（2026-10-16）：agent 写的截图落在项目根内
+  // 时走 `file?inline=1`，否则浏览器会把 `/opt/…` 当同源路径请求（404、图不显示）
+  const projects = useAppStore((s) => s.projects)
+  const pid = task?.project_id
+  const mdRoots = useMemo(() => projectRoots(projects, pid), [projects, pid])
+  const doc = useMemo(
+    () => renderDoc(absToMedia(d?.plan_md || '', pid, { roots: mdRoots }), { extractHeader: true }),
+    [d?.plan_md, pid, mdRoots])
 
   // 导引轨高亮：取「已滚过阅读线」的最后一个章节（滚动容器顶部 + 120px 为阅读线）。
   // 不用 IntersectionObserver：正文在页内滚动容器里、抬头又占去一屏上沿，观察带很难同时
