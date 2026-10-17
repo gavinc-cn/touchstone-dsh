@@ -10,6 +10,10 @@
  *   ⑤ 保活：关闭只把浮层 display:none，iframe 与内嵌 SPA 常驻（重开不重新加载）；
  *   ⑥ 入口路径：iframe src 取内嵌 SPA 记下的「上次页面」（ts.last_route），脏值回落 /touchstone/app；
  *   ⑦ 焦点交还：关闭时把焦点从 iframe 交回宿主页（隐藏的 iframe 仍会独吞键盘事件）。
+ * 再钉 2026-10-17 的「窗口装饰区让位」（⑧，卡 987 方案 A）：
+ *   ⑧ 浮层顶边 = 桌面壳发布的窗口 chrome 顶带高 —— dsh 的 --dsh-frame-chrome-top /
+ *      --dsh-frame-top-clearance（取大）→ WCO 原生接口 → env() 探针三级兜底；全读不到 = 0
+ *      （普通浏览器/独立形态行为不变）；resize 后重算；卸载不留监听、不留 env 探针节点。
  * 协议常量与 SPA 半 webui/src/lib/dshHost.js 逐字一致（那边由
  * webui/src/__tests__/dshHost.test.js 覆盖）。
  *
@@ -66,23 +70,65 @@ function makeTarget(name) {
 
 /** 给事件目标补上「document」面（2026-10-09）：侧栏入口的交互态样式表经
  *  `createElement('style')` + `head.appendChild` + `querySelector` 幂等注入 —— 桩里也得真跑
- *  这条路径（否则插件只能静默降级，注入逻辑等于没被测到）。只实现这三处用到的面。 */
-function asDocument(target) {
+ *  这条路径（否则插件只能静默降级，注入逻辑等于没被测到）。
+ *  2026-10-17 起还兜「env(titlebar-area-height) 探针」：createElement('div') + body.appendChild +
+ *  getBoundingClientRect + remove；envHeight 为探针量到的高度（0 = 壳不支持）。
+ * @returns 同 target，另带 documentElement / body(appendChild·removeChild·children) / orphans。 */
+function asDocument(target, { envHeight = 0 } = {}) {
   const styles = [];
+  const orphans = []; // 探针这类临时节点: 用例据此断言「用完就摘」
   target.styles = styles;
+  target.orphans = orphans;
   target.querySelector = (sel) => {
     const m = /^style\[data-plugin-css="(.*)"\]$/.exec(String(sel));
     return m ? (styles.find((s) => s.dataset.pluginCss === m[1]) || null) : null;
   };
-  target.createElement = () => {
-    const node = { tagName: 'STYLE', dataset: {}, textContent: '' };
-    node.remove = () => {
-      const i = styles.indexOf(node);
-      if (i >= 0) styles.splice(i, 1);
-    };
+  const makeNode = (tagName) => ({
+    tagName,
+    style: {},
+    dataset: {},
+    textContent: '',
+    parentNode: null,
+    getBoundingClientRect: () => ({ width: 0, height: envHeight }),
+    remove() {
+      const body = target.body;
+      if (body && body.children) {
+        const i = body.children.indexOf(this);
+        if (i >= 0) body.children.splice(i, 1);
+      }
+      this.parentNode = null;
+      const j = orphans.indexOf(this);
+      if (j >= 0) orphans.splice(j, 1);
+    },
+  });
+  target.createElement = (tag) => {
+    if (String(tag).toLowerCase() === 'style') {
+      const node = { tagName: 'STYLE', dataset: {}, textContent: '' };
+      node.remove = () => {
+        const i = styles.indexOf(node);
+        if (i >= 0) styles.splice(i, 1);
+      };
+      return node;
+    }
+    return makeNode(String(tag || '').toUpperCase());
+  };
+  target.documentElement = makeTarget('documentElement');
+  target.head = { appendChild: (node) => { styles.push(node); return node; } };
+  target.body = makeTarget('body');
+  target.body.children = [];
+  target.body.appendChild = (node) => {
+    target.body.children.push(node);
+    node.parentNode = target.body;
+    orphans.push(node);
     return node;
   };
-  target.head = { appendChild: (node) => { styles.push(node); return node; } };
+  target.body.removeChild = (node) => {
+    const i = target.body.children.indexOf(node);
+    if (i >= 0) target.body.children.splice(i, 1);
+    node.parentNode = null;
+    const j = orphans.indexOf(node);
+    if (j >= 0) orphans.splice(j, 1);
+  };
   return target;
 }
 
@@ -175,22 +221,34 @@ function makeMiniReact(hostDoc) {
  * @param openSessionError - 传 Error 时 openSession 抛该错（覆盖失败路径）。
  * @param open - 面板初始开合状态（缺省 true：与「上次会话开着面板」的常见态一致）。
  * @param lastRoute - 预置的「上次页面」记忆（ts.last_route）；不传=没有记忆。
- * @returns 该环境下所有可观测面。
+ * @param chrome - 桌面壳环境桩（2026-10-17 ⑧）:
+ *   vars=<CSS 变量名→值> 让 getComputedStyle 返回它; wco=<windowControlsOverlay 桩>;
+ *   envHeight=<env() 探针量到的高度>。不传=普通浏览器（三者都读不到）。
+ * @returns 该环境下所有可观测面（chromeVars 供 resize 重算用例现场改值）。
  */
-function setup({ uiWorkspace, openSessionError = null, open: openInitial = true, lastRoute } = {}) {
+function setup({ uiWorkspace, openSessionError = null, open: openInitial = true, lastRoute, chrome } = {}) {
   const src = fs.readFileSync(bundlePath, 'utf8');
   // 预置面板开合状态：Panel 在挂载时才挂 iframe/消息桥，开合状态本来就是记忆值
   const initial = openInitial ? { 'ts.plugin.open': '1' } : {};
   if (lastRoute !== undefined) initial['ts.last_route'] = lastRoute;
   const storage = makeStorage(initial);
-  const hostDoc = asDocument(makeTarget('host-document'));
+  const hostDoc = asDocument(makeTarget('host-document'), {
+    envHeight: chrome ? chrome.envHeight : 0,
+  });
   hostDoc.activeElement = null;
-  hostDoc.body = makeTarget('body');
   hostDoc.body.focused = false;
   hostDoc.body.focus = () => { hostDoc.body.focused = true; };
   const fakeWindow = makeTarget('host-window');
   fakeWindow.location = { origin: ORIGIN };
   fakeWindow.parent = fakeWindow; // 插件在宿主页顶层跑，无父窗口
+  const chromeVars = (chrome && chrome.vars) || null;
+  if (chromeVars) {
+    // 模拟 dsh 桌面壳发布在 <html> 上的 CSS 自定义属性(读不到=空串, 与真机一致)
+    fakeWindow.getComputedStyle = () => ({
+      getPropertyValue: (name) => (name in chromeVars ? String(chromeVars[name]) : ''),
+    });
+  }
+  if (chrome && chrome.wco) fakeWindow.navigator = { windowControlsOverlay: chrome.wco };
   let factory = null;
   fakeWindow.__ModuleLoader__ = { load: (mod) => { factory = mod.factory; } };
   // 产物是浏览器脚本：`window.__ModuleLoader__.load(...)` 在 Function 作用域里求值
@@ -226,7 +284,7 @@ function setup({ uiWorkspace, openSessionError = null, open: openInitial = true,
     },
   };
   ex.apply(ctx);
-  return { ex, rec, mini, storage, hostDoc, fakeWindow, service };
+  return { ex, rec, mini, storage, hostDoc, fakeWindow, service, chromeVars };
 }
 
 /** 取出某 slot 的组件树（slot 注册的是包装组件，需再求值一层拿到 Panel 树）。
@@ -367,6 +425,92 @@ function caseFocusHandoff() {
     `blurred=${iframeEl.blurred} bodyFocused=${env.hostDoc.body.focused}`);
 }
 
+// ── ⑧ 窗口装饰区让位：浮层顶边 = 壳发布的窗口 chrome 顶带高 ──────────────────────
+function caseWindowChrome() {
+  console.log('== ⑧ 窗口装饰区让位：浮层顶边跟着窗口 chrome 顶带走 ==');
+
+  /** 渲染一次面板并取浮层容器(树根)的 style 快照。 */
+  const panelStyle = (env) => {
+    const { tree } = renderPanel(env);
+    return (tree && tree.props && tree.props.style) || {};
+  };
+
+  // 普通浏览器/独立形态：没有任何壳标记 ⇒ 顶边 0（与旧版 inset:0 完全等价，行为不变）
+  const browser = panelStyle(setup({ uiWorkspace: {} }));
+  check('普通浏览器 → 顶边 0（行为不变）', browser.top === 0
+    && browser.left === 0 && browser.right === 0 && browser.bottom === 0,
+  JSON.stringify(browser));
+
+  // Windows 桌面（非全屏）：dsh 壳把标题栏高同时发布成 chrome-top 与 top-clearance
+  const win = panelStyle(setup({
+    uiWorkspace: {},
+    chrome: { vars: { '--dsh-frame-chrome-top': '40px', '--dsh-frame-top-clearance': '40px' } },
+  }));
+  check('Windows 桌面 → 顶边 40px（窗口控制按钮整条让出来）', win.top === 40, JSON.stringify(win));
+
+  // macOS 桌面：只发布 top-clearance=48px（红绿灯在左上; chrome-top 仅全屏态才定义）
+  const mac = panelStyle(setup({
+    uiWorkspace: {},
+    chrome: { vars: { '--dsh-frame-top-clearance': '48px' } },
+  }));
+  check('macOS 桌面 → 顶边 48px（红绿灯让出来）', mac.top === 48, JSON.stringify(mac));
+
+  // Windows 全屏：chrome-top=0 但 Frame 仍按 titlebar 高让位 ⇒ 取 max=40（与主面板同口径）
+  const fullscreen = panelStyle(setup({
+    uiWorkspace: {},
+    chrome: { vars: { '--dsh-frame-chrome-top': '0px', '--dsh-frame-top-clearance': '40px' } },
+  }));
+  check('Windows 全屏（chrome-top=0）→ 仍取 top-clearance 40px', fullscreen.top === 40,
+    JSON.stringify(fullscreen));
+
+  // 旧桌面壳兜底 ②：只开了 WCO、没发布 dsh 变量 ⇒ navigator.windowControlsOverlay 量
+  const wco = Object.assign(makeTarget('windowControlsOverlay'), {
+    visible: true,
+    getTitlebarAreaRect: () => ({ x: 0, y: 0, width: 2400, height: 32 }),
+  });
+  const byWco = panelStyle(setup({ uiWorkspace: {}, chrome: { wco } }));
+  check('只有 WCO 接口（旧壳）→ 顶边 32px', byWco.top === 32, JSON.stringify(byWco));
+
+  // 更老的壳兜底 ③：只支持 env(titlebar-area-*) ⇒ 用探针量到的高度
+  const env = setup({ uiWorkspace: {}, chrome: { envHeight: 36 } });
+  const byEnv = panelStyle(env);
+  check('只有 env() 探针 → 顶边 36px', byEnv.top === 36, JSON.stringify(byEnv));
+  check('env 探针用完即摘（宿主 DOM 不留垃圾）', env.hostDoc.body.children.length === 0
+    && env.hostDoc.orphans.length === 0,
+  `children=${env.hostDoc.body.children.length} orphans=${env.hostDoc.orphans.length}`);
+
+  // 脏值/越界：一律按 0（面板绝不能被一个脏 CSS 变量顶出屏幕）
+  const dirty = panelStyle(setup({
+    uiWorkspace: {},
+    chrome: { vars: { '--dsh-frame-chrome-top': 'not-a-px', '--dsh-frame-top-clearance': '9999px' } },
+  }));
+  check('脏值/越界 → 顶边 0', dirty.top === 0, JSON.stringify(dirty));
+
+  // 壳换档（resize/全屏/几何变化）后重算：监听在挂、值跟着走、卸载即解绑
+  const resizeEnv = setup({
+    uiWorkspace: {},
+    chrome: { vars: { '--dsh-frame-chrome-top': '40px', '--dsh-frame-top-clearance': '40px' } },
+  });
+  const { wrapped } = renderPanel(resizeEnv);
+  check('挂了 resize/fullscreenchange 重算监听',
+    resizeEnv.fakeWindow.listenerCount('resize') === 1
+    && resizeEnv.hostDoc.listenerCount('fullscreenchange') === 1,
+    `resize=${resizeEnv.fakeWindow.listenerCount('resize')}`
+    + ` fs=${resizeEnv.hostDoc.listenerCount('fullscreenchange')}`);
+  resizeEnv.chromeVars['--dsh-frame-chrome-top'] = '48px'; // 壳把标题栏调高了
+  resizeEnv.chromeVars['--dsh-frame-top-clearance'] = '48px';
+  resizeEnv.fakeWindow.dispatch({ type: 'resize' });
+  const afterResize = resizeEnv.mini.render(wrapped.type, wrapped.props);
+  check('resize 后重新量 → 顶边 48px', afterResize.props.style.top === 48,
+    JSON.stringify(afterResize.props.style));
+  resizeEnv.mini.unmount();
+  check('卸载后重算监听全部解绑',
+    resizeEnv.fakeWindow.listenerCount('resize') === 0
+    && resizeEnv.hostDoc.listenerCount('fullscreenchange') === 0,
+    `resize=${resizeEnv.fakeWindow.listenerCount('resize')}`
+    + ` fs=${resizeEnv.hostDoc.listenerCount('fullscreenchange')}`);
+}
+
 function caseReject() {
   console.log('== ③ 拒绝面：来源/异源/sid/异常都不动作 ==');
   // 来源不是本面板 iframe（宿主页里别的插件窗口、或父页自身）
@@ -435,6 +579,7 @@ caseLifecycle();
 caseKeepAlive();
 caseEntry();
 caseFocusHandoff();
+caseWindowChrome();
 
 console.log(failures ? `\nOVERALL: FAIL (${failures} 项失败)` : '\nOVERALL: PASS');
 process.exit(failures ? 1 : 0);

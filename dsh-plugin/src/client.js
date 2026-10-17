@@ -272,10 +272,117 @@ function panelEntry() {
   return '/touchstone/app';
 }
 
-// 全屏面板: 无顶栏(iframe 吃满全屏) + 关闭按钮悬浮在左下角(位置与 dsh 侧栏入口一致)
+// ── 窗口装饰区让位(2026-10-17, 卡 987 方案 A) ─────────────────────────────────
+// 血案: 面板是全窗口浮层(position:fixed; inset:0), 而桌面版窗口的顶带(Windows 的最小化/
+// 最大化/关闭、macOS 的红绿灯)由桌面壳画在网页之上 —— 浮层顶部那行按钮正好落在它底下,
+// 在 dsh desktop 里整块被盖住、点不到(现象与取证见
+// doc_ai/debug_runtime/202610/20261017_0600_零项目首屏无可点建项目入口… .md)。
+// 修法: 让整个浮层从窗口顶边**下移**「壳实际绘制的窗口 chrome 高度」—— 顶带完整露给壳
+// (标题文字/拖拽区/窗口按钮都还在原位), 面板内容从它下面开始。等价于 dsh 自己主面板与
+// 弹窗的处理口径(layout 发布 --dsh-frame-top-clearance / --dsh-frame-chrome-top),
+// 而且**不需要 SPA 侧改任何代码**: iframe 拿到的视口自己就变矮了。
+// 高度来源(优先级从高到低; 全部读不到 ⇒ 0 ⇒ 独立浏览器形态, 行为与今天完全一致):
+//   ① dsh 桌面壳发布在 <html> 上的约定量(见 @deepseek-ai/dsh-client-ui-layout 的
+//      README「窗口 chrome 顶带」; 普通浏览器文档不发布这些值):
+//        --dsh-frame-chrome-top     壳当前**实际绘制**的顶带高(全屏时归 0)
+//        --dsh-frame-top-clearance  顶带之下的固定下沉量(Windows = 标题栏高, macOS = 48px)
+//      **取两者较大**: 全屏时 chrome-top 归零, 但 dsh 的 Frame 仍按 titlebar 高度让位,
+//      取 max 才能和主面板同口径、不会在全屏时又把窗口按钮盖回去。
+//   ② WCO 原生接口 navigator.windowControlsOverlay(Chromium/Electron; 旧桌面壳只开了
+//      overlay 但没发布 ① 的量时兜底): getTitlebarAreaRect() 的 y + height = 顶带高。
+//   ③ CSS env(titlebar-area-height) 探针(同一能力的老式访问面, 只支持 env 的壳兜底)。
+// 仍读不到(普通浏览器/不支持窗口浮层的壳) ⇒ 0 ⇒ 现状(独立形态本来就没有窗口装饰)。
+const CHROME_MAX_PX = 200; // 合法上限: 再大必然是脏值(标题栏不可能 200px), 一口拒绝
+
+/** 读 <html> 上某个 CSS 自定义属性的像素值。空串/无法解析/越界 ⇒ null（0px 是合法值）。 */
+function readChromePx(name) {
+  try {
+    if (typeof document === 'undefined' || !document.documentElement) return null;
+    const cs = window.getComputedStyle ? window.getComputedStyle(document.documentElement) : null;
+    if (!cs) return null;
+    const raw = cs.getPropertyValue(name);
+    if (!raw) return null;
+    const n = parseFloat(raw);
+    if (!Number.isFinite(n) || n < 0 || n > CHROME_MAX_PX) return null;
+    return n;
+  } catch { return null; } // 读样式异常绝不能拖垮面板本体
+}
+
+/** WCO 原生接口量顶带高(标题栏区域 rect 的 y + height); 不可见/不可用 ⇒ null。 */
+function wcoChromePx() {
+  try {
+    const nav = window.navigator;
+    const wco = nav && nav.windowControlsOverlay;
+    if (!wco || !wco.visible) return null;
+    const rect = wco.getTitlebarAreaRect ? wco.getTitlebarAreaRect() : null;
+    if (!rect) return null;
+    const n = (rect.y || 0) + rect.height;
+    if (!Number.isFinite(n) || n <= 0 || n > CHROME_MAX_PX) return null;
+    return n;
+  } catch { return null; }
+}
+
+/** env(titlebar-area-height) 探针: 挂一个 0 宽、高度取 env 的隐形探针量出来; 不支持 ⇒ null。
+ *  探针始终会被摘掉(成功/失败都摘), 不往宿主 DOM 里留垃圾。 */
+function envChromePx() {
+  try {
+    if (typeof document === 'undefined' || !document.body
+        || typeof document.createElement !== 'function'
+        || typeof document.body.appendChild !== 'function') return null;
+    const probe = document.createElement('div');
+    probe.style.cssText = 'position:fixed;left:0;top:0;width:0;'
+      + 'height:env(titlebar-area-height,0px);visibility:hidden;pointer-events:none';
+    document.body.appendChild(probe);
+    let h = 0;
+    try {
+      h = probe.getBoundingClientRect ? probe.getBoundingClientRect().height : 0;
+    } finally {
+      if (typeof probe.remove === 'function') probe.remove();
+      else if (typeof document.body.removeChild === 'function') document.body.removeChild(probe);
+    }
+    if (!Number.isFinite(h) || h <= 0 || h > CHROME_MAX_PX) return null;
+    return h;
+  } catch { return null; }
+}
+
+/** 窗口 chrome 顶带高(px): 面板浮层从窗口顶边下移这么多。0 = 没有桌面窗口装饰。 */
+function windowChromeTop() {
+  // ① dsh 桌面壳的约定量(两者取大, 口径见本节头注释)
+  const chrome = readChromePx('--dsh-frame-chrome-top');
+  const clearance = readChromePx('--dsh-frame-top-clearance');
+  if (chrome !== null || clearance !== null) {
+    return Math.max(chrome || 0, clearance || 0);
+  }
+  // ②③ 旧壳/其它壳兜底: WCO 原生接口 → env() 探针
+  return wcoChromePx() || envChromePx() || 0;
+}
+
+/** chrome 顶带高的响应式读取: 渲染期现读(首帧就带真值, 不闪一帧顶格),
+ *  壳换档(resize/进出全屏/窗口几何变化)时自增重渲染。 */
+function useWindowChromeTop() {
+  const [, setRevision] = React.useState(0);
+  React.useEffect(() => {
+    const bump = () => setRevision((n) => n + 1);
+    window.addEventListener('resize', bump);
+    document.addEventListener('fullscreenchange', bump);
+    // WCO 几何变化不是 DOM 事件(壳侧全屏/标题栏变高/贴边), 只能由原生接口通知
+    const wco = window.navigator && window.navigator.windowControlsOverlay;
+    if (wco && typeof wco.addEventListener === 'function') wco.addEventListener('geometrychange', bump);
+    return () => {
+      window.removeEventListener('resize', bump);
+      document.removeEventListener('fullscreenchange', bump);
+      if (wco && typeof wco.removeEventListener === 'function') wco.removeEventListener('geometrychange', bump);
+    };
+  }, []);
+  return windowChromeTop();
+}
+
+// 全屏面板: 浮层从窗口 chrome 顶带之下开始(没有桌面壳时 = 0 = 吃满全屏) +
+// 关闭按钮悬浮在左下角(位置与 dsh 侧栏入口一致)
 // iframe 同源, /touchstone/app 经薄壳反代到 server.py 的插件版 SPA
 function Panel() {
   const isOpen = useOpen();
+  const chromeTop = useWindowChromeTop(); // 窗口装饰顶带高: Windows 标题栏/macOS 红绿灯
   // 保活(2026-10-07): 打开过就在 DOM 里常驻, 关闭只把容器 display:none —— iframe 一旦
   // 从 DOM 摘掉, 内嵌 SPA 整篇文档就没了, 再打开是全新加载(路由/弹窗/滚动/未提交输入全丢)。
   // mounted 由「打开过」与「当前打开」合成: 首次打开的那一次渲染就带上 iframe(不等 effect
@@ -382,7 +489,9 @@ function Panel() {
   const visible = !zoneOk || shown; // 自动隐藏不可用时(zoneOk=false)保持常显
   return h('div', {
     style: {
-      position: 'fixed', inset: 0, zIndex: 9999,
+      // 顶边让出窗口装饰带(见 useWindowChromeTop): 桌面壳里 = 标题栏/红绿灯的高度,
+      // 普通浏览器里 = 0(与旧版 inset:0 完全一致)。其余三边照旧贴边。
+      position: 'fixed', top: chromeTop, left: 0, right: 0, bottom: 0, zIndex: 9999,
       background: 'var(--dsw-alias-bg-base, #161617)',
       display: isOpen ? 'block' : 'none', // 关闭 = 只隐藏: iframe 与内嵌 SPA 常驻(保活)
     },
