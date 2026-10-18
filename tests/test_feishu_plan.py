@@ -5,6 +5,11 @@
 # 122–18965 字）一个字都不发 ⇒ 用户"仅凭选项无法决策"。本批把方案送进飞书：
 # 卡内折叠面板给摘要、完整方案建飞书云文档并把链接放卡上。
 #
+# 2026-10-18 用户裁定（缩小范围）：**「思考摘录」不再进入任何飞书产物**——卡内折叠
+# 摘要与完整方案云文档都只带 assistant 回答与提问全文，think（内部思考）一律不渲染。
+# 取数层 `_plan_session_texts` 仍返回 assistant/think 两项（转录读取契约不变），
+# 但两个渲染函数的输出里不许出现 think 或其「思考摘录」标题。
+#
 # 本文件全部不触网：sessparse.load 与 feishu._rest 都是桩。
 import json
 
@@ -114,19 +119,27 @@ def test_session_texts_empty_on_missing_or_error(monkeypatch):
 # ---------- ② 卡内摘要 ----------
 
 def test_inline_prefers_assistant(monkeypatch):
-    """assistant 够长（≥ _PLAN_THINK_MIN）：只给回答，不掺思考。"""
+    """assistant 有内容：只给回答，思考不进卡。"""
     md = feishu._plan_inline_markdown(_plan_ctx(), {
         "assistant": "方案：改 board.py 的 deliver_comment。" * 20, "think": "内心戏"})
     assert "方案：改 board.py" in md and "内心戏" not in md
 
 
-def test_inline_falls_back_to_think_when_assistant_short():
-    """assistant 过短（实测常见：只有一句"我给一份方案"）⇒ 补 think 摘录，
-    否则卡上等于没有方案（卡 949 就是这形态：assistant=100 字、think=3513 字）。"""
+def test_inline_never_includes_think():
+    """2026-10-18 用户裁定：卡片上不要「思考摘录」——assistant 过短也只给回答本身
+    （旧行为是短于 200 字时补 think；卡 949 那种 assistant=100/think=3513 的形态，
+    现在卡上只有那 100 字回答，方案细节看下方文档链接）。"""
     md = feishu._plan_inline_markdown(_plan_ctx(), {
         "assistant": "我给一份简短方案，你确认后再动手。",
         "think": "现状取证：前缀唯一构造点在 board.py:2029 ……"})
-    assert "我给一份简短方案" in md and "现状取证" in md
+    assert "我给一份简短方案" in md
+    assert "现状取证" not in md and "思考摘录" not in md
+
+
+def test_inline_think_only_returns_empty():
+    """只有 think、没有 assistant ⇒ 空串（调用方据此不挂面板；文档链接仍会发）。"""
+    assert feishu._plan_inline_markdown(
+        _plan_ctx(), {"assistant": "", "think": "只有思考" * 400}) == ""
 
 
 def test_inline_capped_and_empty_when_no_plan():
@@ -158,13 +171,16 @@ def test_doc_markdown_keeps_full_question_and_options():
     assert "## agent 的思考摘录" not in md                  # 回答够长 ⇒ 不附思考
 
 
-def test_doc_markdown_appends_think_excerpt_when_assistant_short():
+def test_doc_markdown_never_includes_think():
+    """2026-10-18 用户裁定：方案云文档同样不带 `## agent 的思考摘录`
+    （assistant 过短时也不补 think；文档只承载回答与提问全文）。"""
     ctx = _plan_ctx(questions=[{"id": "q_0", "question": "选哪个？",
                                 "options": [{"id": "a", "label": "A"}],
                                 "multi_select": False, "allow_other": False}])
     md = feishu._plan_doc_markdown(ctx, {"assistant": "见上", "think": "详细推理"},
                                    "p")
-    assert "## agent 的思考摘录" in md and "详细推理" in md
+    assert "见上" in md
+    assert "## agent 的思考摘录" not in md and "详细推理" not in md
 
 
 def test_doc_markdown_flat_fallback():
@@ -263,7 +279,8 @@ def test_docx_create_tolerates_member_grant_failure(monkeypatch):
 # ---------- ⑥ 接线：_dm_interaction_card ----------
 
 def test_dm_card_attaches_plan_and_doc(monkeypatch):
-    """提问卡：转录里的方案进卡内摘要，完整方案建文档、链接进卡。"""
+    """提问卡：转录里的回答进卡内摘要，完整方案建文档、链接进卡；
+    卡上不出现 think（「思考摘录」）。"""
     _stub_session(monkeypatch, _entries(
         ("user", "任务"), ("assistant", "我给一份方案"), ("think", "现状取证与取舍"),
         ("tool_call", "", "ask_user_question")))
@@ -272,13 +289,36 @@ def test_dm_card_attaches_plan_and_doc(monkeypatch):
     sent = _stub_dm(monkeypatch)
     ctx = _plan_ctx()
     feishu._dm_interaction_card(9, ctx)
-    assert ctx["plan_inline"] and "现状取证" in ctx["plan_inline"]
+    assert ctx["plan_inline"] == "我给一份方案"
+    assert "现状取证" not in ctx["plan_inline"]
     assert ctx["plan_doc_url"] == "https://my.feishu.cn/docx/DOC1"
     assert len(sent) == 1
     panel = sent[0]["body"]["elements"][0]
     assert panel["tag"] == "collapsible_panel"
     assert any("DOC1" in json.dumps(e, ensure_ascii=False)
                for e in sent[0]["body"]["elements"])
+    # 整张卡（含面板）都不许出现思考内容
+    card_json = json.dumps(sent[0], ensure_ascii=False)
+    assert "思考摘录" not in card_json and "现状取证" not in card_json
+
+
+def test_dm_card_think_only_no_panel_but_doc_link(monkeypatch):
+    """只有 think、没有 assistant ⇒ 卡上不挂面板（也就没有「思考摘录」），
+    完整方案文档链接照发（文档里同样不含 think）。"""
+    _stub_session(monkeypatch, _entries(
+        ("user", "任务"), ("think", "只有思考"),
+        ("tool_call", "", "ask_user_question")))
+    calls = []
+    _stub_rest(monkeypatch, calls)
+    sent = _stub_dm(monkeypatch)
+    ctx = _plan_ctx()
+    feishu._dm_interaction_card(9, ctx)
+    assert ctx.get("plan_inline") is None
+    assert ctx.get("plan_doc_url") == "https://my.feishu.cn/docx/DOC1"
+    els = sent[0]["body"]["elements"]
+    assert not any(e.get("tag") == "collapsible_panel" for e in els)
+    assert "思考摘录" not in json.dumps(sent[0], ensure_ascii=False)
+    assert any("DOC1" in json.dumps(e, ensure_ascii=False) for e in els)
 
 
 def test_dm_card_dedups_doc_per_question(monkeypatch):

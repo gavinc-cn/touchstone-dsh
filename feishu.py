@@ -593,8 +593,13 @@ def _build_interaction_card(ctx, project_name):
 # （think，实测 122–18965 字）**一个字都不发** ⇒ 用户"仅凭选项无法决策"。
 # 本批把方案送进飞书，两条腿：
 #   ① 卡内折叠面板（`collapsible_panel`，Card 2.0）给摘要——不用跳转就能决策；
-#   ② 完整方案建飞书云文档（提问**全文** + 全部子题/选项/描述 + 回答 (+思考摘录)），
+#   ② 完整方案建飞书云文档（提问**全文** + 全部子题/选项/描述 + 回答），
 #      链接放卡上——卡片放不下的部分在这里补全。
+#
+# 2026-10-18 用户裁定（缩小思考暴露面）：**「思考摘录」不再进入任何飞书产物**——
+# 卡内摘要与方案文档都只带 assistant 回答（及提问全文），think 的内部推理一律不渲染。
+# 取数层 `_plan_session_texts` 仍返回 assistant/think（转录读取契约不变、便于将来
+# 其他通路复用），但两个渲染函数不再消费 think；原 `_PLAN_THINK_MIN/_MAX` 随之退场。
 #
 # 为什么不在文档里直接放选项让人点（2026-10-10 取证结论）：docx 块类型清单里没有
 # 投票/单选交互块（`lark-oapi` 生成的 `Block` 模型 63 个块字段无 poll/vote）；
@@ -606,8 +611,6 @@ def _build_interaction_card(ctx, project_name):
 PLAN_ENV = "TS_FEISHU_PLAN"        # =0 关闭本批全部新行为（回滚阀，回到只有题面+选项）
 _PLAN_INLINE_MAX = 1500            # 卡内折叠摘要上限（字符）
 _PLAN_DOC_MAX = 20000              # 文档正文上限（字符）
-_PLAN_THINK_MIN = 200              # assistant 回答短于该值 ⇒ 补 think 摘录
-_PLAN_THINK_MAX = 8000             # think 摘录上限（字符）
 _PLAN_DOC_TTL = 1800               # 建文档去重记录存活（秒）
 _PLAN_DOCS = {}                    # (card_id, qid) -> {"url": str, "at": float}
 _MD_BLOCK_MAX = 1800               # 文档单块文本上限（字符，超长块会被接口拒收）
@@ -666,22 +669,16 @@ def _plan_session_texts(sid):
 
 
 def _plan_inline_markdown(ctx, texts):
-    """卡内折叠摘要（上限 `_PLAN_INLINE_MAX`）：以末条 assistant 回答为主。
+    """卡内折叠摘要（上限 `_PLAN_INLINE_MAX`）：只取末条 assistant 回答。
 
-    assistant 过短（< `_PLAN_THINK_MIN`）时补 think 摘录——实测这是常见形态：
-    回答只有一句"我给一份方案，你确认后再动手"、方案本体在 think 里（卡 949：
-    assistant 100 字 vs think 3513 字），不补的话卡上仍等于没有方案。
+    2026-10-18 用户裁定：卡上不要「思考摘录」——think 不进卡（此前 assistant
+    短于 200 字时会补 think 摘录，该行为已退场）。assistant 为空 ⇒ 返回空串，
+    调用方不挂面板（完整方案文档链接仍会发）。
     """
     a = str((texts or {}).get("assistant") or "").strip()
-    t = str((texts or {}).get("think") or "").strip()
-    parts = []
-    if a:
-        parts.append(a)
-    if len(a) < _PLAN_THINK_MIN and t:
-        parts.append("**（思考摘录）**\n" + t)
-    if not parts:
+    if not a:
         return ""
-    md = "\n\n".join(parts)
+    md = a
     if len(md) > _PLAN_INLINE_MAX:
         md = md[:_PLAN_INLINE_MAX].rstrip() + "\n\n…（摘要已截断，完整内容见下方飞书文档）"
     return md
@@ -738,11 +735,11 @@ def _plan_doc_markdown(ctx, texts, project_name=""):
     """完整方案文档正文（markdown，经 `_md_blocks` 转飞书块）。
 
     含：提问**全文**（卡片截断的部分在此补全）+ 末条 assistant 回答 + 作答指引
-    （文档内也能凭"回复序号"作答）+ 必要时的 think 摘录；整体按 `_PLAN_DOC_MAX` 截断。
+    （文档内也能凭"回复序号"作答）；2026-10-18 起**不含 think 摘录**（用户裁定
+    思考内容不进任何飞书产物）；整体按 `_PLAN_DOC_MAX` 截断。
     """
     cid = ctx.get("card_id")
     a = str((texts or {}).get("assistant") or "").strip()
-    t = str((texts or {}).get("think") or "").strip()
     lines = [f"# 卡 {cid} · agent 的方案与提问", "",
              f"- 项目：{project_name or '—'}",
              f"- 卡片：{str(ctx.get('title') or '')[:60]}",
@@ -758,8 +755,6 @@ def _plan_doc_markdown(ctx, texts, project_name=""):
               f"- 也可以直接回复：「作答 {cid} <序号>」（多选逗号分隔，如 `作答 {cid} 1,3`），"
               f"或「作答 {cid} <自定义文字>」写自由文本；",
               "- 点选与文本作答可混用，已点选的题不必重复给。"]
-    if len(a) < _PLAN_THINK_MIN and t:
-        lines += ["", "## agent 的思考摘录", "", t[:_PLAN_THINK_MAX]]
     md = "\n".join(lines)
     if len(md) > _PLAN_DOC_MAX:
         md = md[:_PLAN_DOC_MAX] + "\n\n…（正文已截断）"

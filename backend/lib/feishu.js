@@ -97,12 +97,10 @@ export const MQ_FORM_MAX_BYTES = 950;   // 飞书 form 元素硬限 1000
 export const NO_REMOTE_ANSWER_HINT = '该等待不支持远程作答（提问由 dsh 直跑会话发起），'
   + '请在 dsh 会话窗口作答';
 
-/** plan 方案增强族常量，feishu.py:605-614 */
+/** plan 方案增强族常量，feishu.py:611-614 */
 export const PLAN_ENV = 'TS_FEISHU_PLAN';
 export const PLAN_INLINE_MAX = 1500;
 export const PLAN_DOC_MAX = 20000;
-export const PLAN_THINK_MIN = 200;
-export const PLAN_THINK_MAX = 8000;
 export const PLAN_DOC_TTL = 1800;
 export const MD_BLOCK_MAX = 1800;
 export const ASK_TOOL = 'ask_user_question';
@@ -877,20 +875,20 @@ export function planSessionTexts(sid) {
 }
 
 /**
- * 卡内折叠摘要（上限 `PLAN_INLINE_MAX`），对齐 `feishu._plan_inline_markdown`(feishu.py:667)：
- * 以末条 assistant 回答为主；assistant 过短（< `PLAN_THINK_MIN`）时补 think 摘录。
+ * 卡内折叠摘要（上限 `PLAN_INLINE_MAX`）：只取末条 assistant 回答，对齐
+ * `feishu._plan_inline_markdown`(feishu.py:671)。
+ *
+ * 2026-10-18 用户裁定：卡上不要「思考摘录」——think 不进卡（此前 assistant 短于
+ * 200 字时会补 think 摘录，该行为已退场）。assistant 为空 ⇒ 返回空串，调用方不挂
+ * 面板（完整方案文档链接仍会发）。
  * @param {object} ctx
  * @param {{assistant?: string, think?: string}} texts
  * @returns {string}
  */
 export function planInlineMarkdown(ctx, texts) {
   const a = pyStrip(pyStrOrEmpty((texts || {}).assistant));
-  const t = pyStrip(pyStrOrEmpty((texts || {}).think));
-  const parts = [];
-  if (a) parts.push(a);
-  if (cpLen(a) < PLAN_THINK_MIN && t) parts.push(`**（思考摘录）**\n${t}`);
-  if (!parts.length) return '';
-  let md = parts.join('\n\n');
+  if (!a) return '';
+  let md = a;
   if (cpLen(md) > PLAN_INLINE_MAX) {
     md = `${pyRstrip(cpSlice(md, PLAN_INLINE_MAX))}\n\n…（摘要已截断，完整内容见下方飞书文档）`;
   }
@@ -953,8 +951,9 @@ export function planDocTitle(ctx) {
 
 /**
  * 完整方案文档正文（markdown，经 `mdBlocks` 转飞书块），对齐
- * `feishu._plan_doc_markdown`(feishu.py:736)：提问**全文** + 末条 assistant 回答 +
- * 作答指引 + 必要时的 think 摘录；整体按 `PLAN_DOC_MAX` 截断（码点）。
+ * `feishu._plan_doc_markdown`(feishu.py:734)：提问**全文** + 末条 assistant 回答 +
+ * 作答指引；2026-10-18 起**不含 think 摘录**（用户裁定思考内容不进任何飞书产物）；
+ * 整体按 `PLAN_DOC_MAX` 截断（码点）。
  * @param {object} ctx
  * @param {{assistant?: string, think?: string}} texts
  * @param {string} [projectName]
@@ -963,7 +962,6 @@ export function planDocTitle(ctx) {
 export function planDocMarkdown(ctx, texts, projectName = '') {
   const cid = ctx.card_id;
   const a = pyStrip(pyStrOrEmpty((texts || {}).assistant));
-  const t = pyStrip(pyStrOrEmpty((texts || {}).think));
   const lines = [
     `# 卡 ${pyStr(cid)} · agent 的方案与提问`, '',
     `- 项目：${pyStr(pyTruthy(projectName) ? projectName : '—')}`,
@@ -979,9 +977,6 @@ export function planDocMarkdown(ctx, texts, projectName = '') {
     `- 也可以直接回复：「作答 ${pyStr(cid)} <序号>」（多选逗号分隔，如 \`作答 ${pyStr(cid)} 1,3\`），`
     + `或「作答 ${pyStr(cid)} <自定义文字>」写自由文本；`,
     '- 点选与文本作答可混用，已点选的题不必重复给。');
-  if (cpLen(a) < PLAN_THINK_MIN && t) {
-    lines.push('', '## agent 的思考摘录', '', cpSlice(t, PLAN_THINK_MAX));
-  }
   let md = lines.join('\n');
   if (cpLen(md) > PLAN_DOC_MAX) md = `${cpSlice(md, PLAN_DOC_MAX)}\n\n…（正文已截断）`;
   return md;
