@@ -56,9 +56,13 @@ def free_port():
 
 
 def wait_port(port, timeout=30):
-    """等待端口进入监听（隔离实例启动探活）。"""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    """等待端口进入监听（隔离实例启动探活）。
+
+    截止用**单调钟**（2026-10-17 M13）：宿主 `CLOCK_REALTIME` 会周期性前跳
+    （本机实测 ~+2.9s/30s），墙钟截止会把真实等待窗口缩短。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=1):
                 return True
@@ -280,9 +284,12 @@ class IsolatedServer:
 
     @staticmethod
     def wait_until(fn, timeout=60, interval=0.5):
-        """轮询等待条件成立（真实异步链路断言用）。"""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        """轮询等待条件成立（真实异步链路断言用）。
+
+        截止用**单调钟**（2026-10-17 M13）：见 `wait_port`——墙钟前跳会缩短真实等待窗口。
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             if fn():
                 return True
             time.sleep(interval)

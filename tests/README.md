@@ -60,6 +60,12 @@ pytest 配置在仓库根 `pytest.ini`（`testpaths = tests`）。`e2e_*.py` 不
   （随机端口 + `TOUCHSTONE_DB`/`TOUCHSTONE_RUN_DIR` 沙箱 + 假 driver（`tests/fakedriver.py`）记录调用）。
 - 单测原则：零外部依赖（网络/agent CLI/真实会话存储全部打桩）、真实临时库
   （`conftest.py` 把 `TOUCHSTONE_DB` 指到临时文件，勿绕开）。
+- **等待截止一律用单调钟**（2026-10-17 M13）：本机宿主 `CLOCK_REALTIME` 会周期性前跳
+  （实测 ~+2.9s/30s），任何用 `time.time()` / `Date.now()` 量截止的等待，其**真实等待窗口**
+  都会被缩短 ⇒ 异步断言假红（已实测：`dev-check-shell.mjs` 的掉线自检、压测诊断用例）。
+  测试/自检脚本的 `wait_until` / `waitFor` 截止统一用 `time.monotonic()`（Python）/
+  `performance.now()`（Node）；等待窗口按「目标行为 + 可能前跳」留裕量。环境事实与
+  裕量口径见 `tools/parity/README.md`「已知环境事实：宿主墙钟周期性前跳」。
 - 提交门禁（可选安装）：`git config core.hooksPath githooks` 启用 `githooks/pre-commit`
   （跑快层；`SKIP_TS_TESTS=1` 可单次跳过；环境缺 pytest 时警告放行不阻塞）。
 

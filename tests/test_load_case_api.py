@@ -39,15 +39,17 @@ def _drop_runner_load_runs(srv, tid, quiet=0.6, timeout=10.0):
     与复压的 `round_no`（= 已有发压行最大轮次 + 1）不再可控。本文件只测读侧与复压端点，
     故把运行集合收敛成用例自造的那几条；库里只有隔离实例的临时数据，删除无副作用。
     """
-    deadline, last_hit = time.time() + timeout, 0.0
+    # 等待截止用**单调钟**（2026-10-17 M13）：墙钟前跳会缩短真实等待窗口（本机实测
+    # 宿主 CLOCK_REALTIME ~+2.9s/30s），而这里等的是 runner 线程的异步落库。
+    deadline, last_hit = time.monotonic() + timeout, 0.0
     conn = sqlite3.connect(srv.db_path)
     try:
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             cur = conn.execute("DELETE FROM rounds WHERE task_id=? AND kind='load'", (tid,))
             conn.commit()
             if cur.rowcount:
-                last_hit = time.time()
-            elif time.time() - last_hit >= quiet:
+                last_hit = time.monotonic()
+            elif time.monotonic() - last_hit >= quiet:
                 return
             time.sleep(0.2)
     finally:
@@ -67,6 +69,32 @@ def _terminal_stress(srv, name):
                              {"task_type": "stress", "brief": "压测 http://127.0.0.1:1"})
     assert code == 200, d
     tid = d["id"]
+    srv.admin.json(f"/api/tasks/{tid}/stop", "POST")
+    assert srv.wait_until(
+        lambda: srv.admin.json(f"/api/tasks/{tid}")[1].get("status")
+        in ("stopped", "failed", "done"), timeout=60), "压测任务未收敛到终态"
+    _drop_runner_load_runs(srv, tid)
+    return pid, tid
+
+
+def _stress_with_session(srv, name):
+    """建项目 + 压测任务，**等到首轮把会话落库**（`session_id`）后再停止，返回 (pid, tid)。
+
+    与 `_terminal_stress` 的唯一差别是停止时机：那条只借任务 id，建完**立刻**停——
+    「立刻停止」可能早于补位器捡起任务，首轮从未开始 ⇒ `session_id` 永远为空
+    （2026-10-17 实测：6 个忙循环压着跑 8 次，5 次红在 `assert task.get("session_id")`）。
+    本文件里只有诊断端点用例需要「有会话」这个前提，故单独给它一条等待路径：
+    轮次开始时 `runner._run_round_dshplugin` 就把精确 sid 写库（不等轮末），
+    假 driver 一轮 1s ⇒ 等到即停，通常停在首轮进行中，不会进发压轮。
+    """
+    pid = srv.create_project(srv.admin, name)
+    code, d = srv.admin.json(f"/api/projects/{pid}/tasks", "POST",
+                             {"task_type": "stress", "brief": "压测 http://127.0.0.1:1"})
+    assert code == 200, d
+    tid = d["id"]
+    assert srv.wait_until(
+        lambda: srv.admin.json(f"/api/tasks/{tid}")[1].get("session_id"),
+        timeout=60), "压测任务首轮未产出会话（session_id 未落库）"
     srv.admin.json(f"/api/tasks/{tid}/stop", "POST")
     assert srv.wait_until(
         lambda: srv.admin.json(f"/api/tasks/{tid}")[1].get("status")
@@ -323,7 +351,9 @@ def test_load_rerun_gating_and_run(isolated_server):
 def test_load_diagnose_requires_session(isolated_server):
     """诊断：把现场发给任务会话；无会话时 409；非本人任务 404。"""
     srv = isolated_server
-    pid, tid = _terminal_stress(srv, "loaddiag")
+    # 需要「有会话」这一前提：必须等首轮把 session_id 落库再停（`_terminal_stress` 的
+    # 建完立刻停不保证会话存在——那正是本用例 2026-10-17 高负载下 8 跑 5 红的根因）
+    pid, tid = _stress_with_session(srv, "loaddiag")
     # 有会话：现场文本组装 + 走既有会话消息通道投递（假 driver 会收下）
     code, task = srv.admin.json(f"/api/tasks/{tid}")
     assert task.get("session_id"), "压测任务首轮后应产出会话"

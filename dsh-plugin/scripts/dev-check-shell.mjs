@@ -98,8 +98,12 @@ const alive = (pid) => {
 };
 
 async function waitFor(predicate, ms = 4000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
+  // **截止时间必须用单调钟**（2026-10-17 M13）：`Date.now()` 是墙钟，宿主 `CLOCK_REALTIME`
+  // 发生前跳时（本机实测 ~+2.9s/30s）等待窗口会被瞬间耗尽 ⇒ 掉线自检那条 2s 节拍还没触发
+  // 就判红（已用注入 +5s 跳变的负对照实测复现：**只有这一条红**）。`performance.now()` 同进程
+  // 单调、与 `setTimeout` 同源，不受墙钟步进影响。
+  const deadline = performance.now() + ms;
+  while (performance.now() < deadline) {
     if (predicate()) return true;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
