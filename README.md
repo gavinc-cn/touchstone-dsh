@@ -19,7 +19,7 @@ English | [中文](README.zh.md)
 ## What is Touchstone?
 
 Touchstone turns "we really should test more" into a running loop. You register a project — its source
-directory, a working directory, an environment label, and the house rules the agent must follow — and
+directory, a working directory, and the house rules the agent must follow — and
 Touchstone drives an AI agent through [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 (`dsh`) to **generate test cases, execute them, report failures as bug reports, fix the code, and
 re-verify the fix**. Every artifact lands on disk in a reviewable form: a case library of Markdown case
@@ -122,7 +122,7 @@ flowchart LR
 
 | Concept | Meaning |
 |---------|---------|
-| Project | A repository plus its work directory, agent binding, environment label, and guidance |
+| Project | A repository plus its work directory, agent binding, and guidance |
 | Task | One queued unit of work: a task type, a stage range, a stop condition, and a round history |
 | Round | One prompt/response cycle in the task's agent session |
 | Case library | `<work_dir>/free_style/` — Markdown cases, status files, and per-directory indexes |
