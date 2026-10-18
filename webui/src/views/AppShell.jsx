@@ -1051,8 +1051,6 @@ export default function AppShell() {
               <Button variant="outline" size="sm" onClick={() => openDirModal('work_dir')} title="浏览服务端目录并选择">
                 <FolderOpen /> 浏览
               </Button></div>
-            <div className="form-row"><label>环境标签</label>
-              <Input value={pf.env_label} onChange={(e) => setPf({ ...pf, env_label: e.target.value.trim() })} placeholder="如 test4 / sitA1，测试、修复、部署针对的环境" /></div>
             <div className="form-col">
               <Label className="text-xs text-muted-foreground">项目附加提示词</Label>
               <Textarea value={pf.guide_text} onChange={(e) => setPf({ ...pf, guide_text: e.target.value })} rows={3} className="min-h-0"
