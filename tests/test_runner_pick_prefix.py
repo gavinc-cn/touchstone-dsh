@@ -406,8 +406,8 @@ def test_worker_wakes_on_periodic_tick_without_notify(monkeypatch):
     t = threading.Thread(target=r._worker, daemon=True)  # 真实 worker 循环，全程不 notify
     t.start()
     try:
-        deadline = time.time() + 8
-        while time.time() < deadline and not delivered:
+        deadline = time.monotonic() + 8      # 截止用单调钟（M13 约定：墙钟前跳会截短窗口）
+        while time.monotonic() < deadline and not delivered:
             time.sleep(0.05)
         assert delivered == [5]      # 无 notify 静场下节拍兜底拾起（修复前永不拾）
     finally:
@@ -435,12 +435,23 @@ def test_leaked_runner_workers_cannot_steal_rows(monkeypatch, _leaked_runner):
     其结果为 None（空转不扫行）。本用例**不靠 sleep 赌运气**：显式唤醒遗留 worker
     并轮询等待「它真的拾取过一次」（spy 记录该次返回），再断言行完好、且那次拾取
     结果恒 None——消除时序依赖后，静音一旦失效（修复前形态）该断言必挂：
-    实测临时禁用静音 → 本用例 2/2 FAILED（`seen` 出现 'c:1' 且行被抢）。"""
+    实测临时禁用静音 → 本用例 FAILED（`seen` 出现非 None 键且行被抢）；2026-10-17 M14 换唯一键后
+    复测仍 FAILED（`seen` 出现 `'c:8802'`），静音判据未因换键而失活。"""
+    # 种子行用**全仓唯一**卡号（2026-10-17 M14）：本用例要等最多 5s 看遗留 worker 是否
+    # 拾取，这个窗口也给了「跨用例 mute 空窗里捡到前一文件残留键」的同族污染机会——遗留
+    # worker 拿着旧键 `c:1` 在本用例 `claim_by_target` 抢新行、`_process_card` 撞本用例
+    # 的 `runner.db` 桩后 `finish_by_target` 把行终态化 ⇒ `get_active` 拿到 None（全量跑
+    # 偶发；P7b 记录 B6-8 同签名）。改唯一键后，残留键与种子键**结构上不可能撞车**，
+    # 而静音若失效，遗留 worker 照样会扫到这两个键 ⇒ 回归判据不变。
+    # 根因家族＝「Runner 无 stop/join 通道」（遗留 worker 只能靠 conftest 静音兜底，
+    # 见 `bug_report/20260924_0345_Runner无stop_join通道/`），产品级根治未做。
+    CARD_A, CARD_B = 8801, 8802
     _stub_data(monkeypatch,
-               cards={1: _card(id=1, sort_order=1), 2: _card(id=2, sort_order=2)})
+               cards={CARD_A: _card(id=CARD_A, sort_order=1),
+                      CARD_B: _card(id=CARD_B, sort_order=2)})
     r = _bare_runner()
-    waitq.enqueue(waitq.KIND_CARD, 1, 9)
-    waitq.enqueue(waitq.KIND_CARD, 2, 9)
+    waitq.enqueue(waitq.KIND_CARD, CARD_A, 9)
+    waitq.enqueue(waitq.KIND_CARD, CARD_B, 9)
     seen = []                              # 遗留实例 worker 的拾取结果（恒 None）
     orig_pick = runner.Runner._pick_locked   # 已是 conftest 的静音包装
     def _spy(self):
@@ -449,18 +460,18 @@ def test_leaked_runner_workers_cannot_steal_rows(monkeypatch, _leaked_runner):
             seen.append(got)
         return got
     monkeypatch.setattr(runner.Runner, "_pick_locked", _spy)
-    deadline = time.time() + 5
-    while not seen and time.time() < deadline:   # 唤醒直至证实其真的拾取过
+    deadline = time.monotonic() + 5       # 截止用单调钟（M13 约定）
+    while not seen and time.monotonic() < deadline:   # 唤醒直至证实其真的拾取过
         with _leaked_runner._cond:
             _leaked_runner._cond.notify_all()
         time.sleep(0.05)
     assert seen, "遗留 worker 5s 内未拾取（夹具/线程异常，非本回归目标）"
     assert all(got is None for got in seen), \
         f"遗留 worker 拾取结果应恒 None（静音），实际 {seen}"   # 6 worker ⇒ 多条 None
-    assert waitq.get_active(waitq.KIND_CARD, 1)["state"] == "waiting"   # 未被抢
-    assert waitq.get_active(waitq.KIND_CARD, 2)["state"] == "waiting"
-    assert r._pick_locked() == "c:1"       # 本用例自己的裸实例照常
-    assert _claim_and_start(r, "c:1") == 9
+    assert waitq.get_active(waitq.KIND_CARD, CARD_A)["state"] == "waiting"   # 未被抢
+    assert waitq.get_active(waitq.KIND_CARD, CARD_B)["state"] == "waiting"
+    assert r._pick_locked() == f"c:{CARD_A}"       # 本用例自己的裸实例照常
+    assert _claim_and_start(r, f"c:{CARD_A}") == 9
     with db.connect() as conn:             # 遗留 worker 未留下任何残留行
         assert conn.execute("SELECT COUNT(*) n FROM wait_items WHERE state IN"
                             " ('starting','running','finishing')").fetchone()["n"] == 1
