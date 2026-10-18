@@ -476,6 +476,87 @@ function renderNodeRuntimeHint({ execPath, version, detail, logPath }) {
 }
 
 /**
+ * 「同库单实例锁被另一个**活着的**宿主占用」的提示（2026-10-18 真机事故收口）。
+ *
+ * 真机形态（Windows，npm 安装）：DSH 桌面端（desktop profile）开着，它的 Touchstone 后端
+ * 占着 `~/.touchstone/touchstone.db`；另一个 `dsh web`（web profile）再起后端就 exit 3。
+ * 旧提示页只说「可能另有实例，或锁文件/归属记录残留 → 仍失败把 *.lock / *.pid 移走」：
+ *   - 明明归属记录就在盘上（pid/ppid/repo_dir），却不点名是谁，用户得自己翻任务管理器；
+ *   - 「移走锁文件」与项目红线矛盾（新实例会在新 inode 上取锁、与占用者双写）。
+ * 所以这里按档给确切事实 + 只给安全出路（退出那个宿主 / 换独立库），并明确不许动锁文件。
+ */
+function renderLiveHolderHint(holder, dbPath) {
+  // 独立库示例路径：与当前库同目录，改一个文件名即可（extraEnv.TOUCHSTONE_DB 接受绝对路径）
+  const altDb = join(dirname(dbPath), 'touchstone-alt.db');
+  const started = holder.startedAt
+    ? new Date(holder.startedAt * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC')
+    : '';
+  return '<p><b>同库单实例锁被占用</b>：占着这个库的是另一个<b>正在运行</b>的 Touchstone 后端 —— '
+    + `<b>${escapeHtml(holder.host)}</b>（pid=<code>${holder.pid}</code>，`
+    + `ppid=<code>${holder.ppid || '?'}</code>，父进程也存活）。`
+    + '同一个库同一时刻只允许一个后端（防双写、防重复调度），所以本宿主退出码 <code>3</code>；'
+    + '这不是「锁文件残留」。</p>'
+    + '<ul style="margin:.2rem 0 .9rem 1.2rem;padding:0">'
+    + `<li>占用者安装目录：<code>${escapeHtml(holder.repo || '（记录里没有 repo_dir）')}</code></li>`
+    + `<li>归属记录：<code>${escapeHtml(holder.recordPath)}</code>`
+    + `${started ? `（启动于 ${escapeHtml(started)}）` : ''}</li></ul>`
+    + '<p>两条出路（任选一条）：</p>'
+    + '<p>① <b>只用当前宿主</b>：把上面那个宿主退出（DSH 桌面端要从托盘彻底退出；'
+    + '或直接在它的 Plugins 面板里停用 Touchstone —— 停用会回收它的后端），'
+    + '然后在本面板把本插件<b>停用再启用</b>，即会重试。<br>'
+    + '② <b>两个宿主都要用</b>：给本宿主换一个<b>独立库</b>（数据会分成两份）——在 profile 的 '
+    + '<code>touchstone-dsh</code> 条目里加 <code>extraEnv.TOUCHSTONE_DB</code>，例如：</p>'
+    + '<pre style="background:#0d0f12;border:1px solid #2a2f36;border-radius:6px;padding:.8rem 1rem;'
+    + `overflow:auto">extraEnv:\n  TOUCHSTONE_DB: ${escapeHtml(altDb)}</pre>`
+    + '<p>改完重启 dsh（config 值不热生效）。</p>'
+    + '<p style="color:#ff6b6b"><b>不要删除或移动 <code>*.lock</code> / <code>*.pid</code></b>：'
+    + '占用者还活着时移走锁文件，新实例会在新 inode 上取锁 ⇒ 两个后端同时写同一个库，可能损坏数据。'
+    + '<code>--allow-shared-db</code> 同理，是自担双写风险的逃生口，不建议。</p>';
+}
+
+/** 归属记录已过期（pid 已退出）的提示：教「停用再启用」而不是教删锁文件 */
+function renderStaleHolderHint(holder) {
+  return '<p><b>同库单实例锁被占用</b>，但归属记录里的进程已经退出'
+    + `（pid=<code>${holder.pid || '?'}</code>，ppid=<code>${holder.ppid || '?'}</code>；`
+    + `记录文件 <code>${escapeHtml(holder.recordPath)}</code>）：这是上次进程被强杀留下的`
+    + '<b>残留记录</b>（Windows 上 SIGTERM=TerminateProcess，退出清理跑不到）。</p>'
+    + '<p>停用→启用本插件即会重试 —— 新版后端会自动接管失效的 <code>.pid</code> 记录并取锁；'
+    + '<b>不需要</b>手动删除 <code>*.lock</code> / <code>*.pid</code>（删锁文件会在新 inode 上取锁，'
+    + '有双写风险）。</p>';
+}
+
+/**
+ * pid 存活但父进程已死的存疑档（2026-10-17 Windows 事故家族：pid 会被无关进程复用）。
+ * 这一档**绝不能**说「另一个宿主正在运行」——把用户引去关一个并不存在的窗口是最好的误导。
+ */
+function renderAmbiguousHolderHint(holder) {
+  return '<p><b>同库单实例锁被占用</b>，归属记录里的 pid 仍存在，但它的父进程已退出'
+    + `（pid=<code>${holder.pid}</code>，ppid=<code>${holder.ppid || '?'}</code>；`
+    + `记录文件 <code>${escapeHtml(holder.recordPath)}</code>）—— 可能是父死残留的孤儿后端，`
+    + '也可能是 <b>PID 复用</b>（Windows 上同号进程被无关程序复用，2026-10-17 真机事故同型）⇒ '
+    + '不能据此断定「另一个宿主还开着」。</p>'
+    + '<p>先确认没有实例在跑（任务管理器里找带 <code>backend/server.js</code> / <code>server.py</code> '
+    + '的 node/python 进程），再停用→启用本插件重试。<b>不要删除或移动 <code>*.lock</code> / '
+    + '<code>*.pid</code></b>：占用者若还活着，删锁文件会造成双写；新版后端会自动接管失效记录。'
+    + '确需并行请给本宿主配置独立库（<code>extraEnv.TOUCHSTONE_DB</code>）。</p>';
+}
+
+/** code=3 的锁冲突提示：有归属记录按三档分派，没有记录走通用安全文案（一律不教删锁文件） */
+function renderLockConflictHint(occupant, dbPath) {
+  if (!occupant) {
+    return '<p><b>同库单实例锁被占用</b>，但读不到 <code>*.pid</code> 归属记录：'
+      + '可能是另一版后端的异常窗口（取锁后、写记录前被杀）或第三方进程占着这把锁。</p>'
+      + '<p>先确认没有其它 Touchstone 后端在跑（任务管理器里找带 <code>backend/server.js</code> / '
+      + '<code>server.py</code> 的 node/python 进程），再停用→启用本插件重试。'
+      + '<b>不要删除仍可能被占用的 <code>*.lock</code> / <code>*.pid</code></b>（新实例会在新 inode '
+      + '上取锁 ⇒ 双写风险）；确需并行请给本宿主配置独立库（<code>extraEnv.TOUCHSTONE_DB</code>）。</p>';
+  }
+  if (occupant.status === 'live') return renderLiveHolderHint(occupant, dbPath);
+  if (occupant.status === 'ambiguous') return renderAmbiguousHolderHint(occupant);
+  return renderStaleHolderHint(occupant);
+}
+
+/**
  * `backend: node` 且进程**起来就崩**时的提示页（M0 评审 I3）。
  * 为什么需要：「入口缺失」只是新开关失败的一种；更常见的是入口在、跑不起来
  * （宿主 Node 版本不认 `--disable-warning`、`dist-plugin` 缺失、被执行策略拦、脚本自身报错）。
@@ -485,10 +566,13 @@ function renderNodeRuntimeHint({ execPath, version, detail, logPath }) {
  *
  * 2026-10-17 桌面端真机事故的教训：提示页原先只教用户自己 `tail` 日志文件（Windows 用户得先
  * 找到库目录、开终端），而失败原因（「同一数据库已有运行中的实例：pid=…」）就一行字。现改为
- * 把**内存里收到的最后几行**直接内联（见 apply 里的 `crashTail`），并对 `code=3` 给出单实例锁
- * 的专项提示 —— 提示页要能自解释，而不是把排障转嫁给用户。
+ * 把**内存里收到的最后几行**直接内联（见 apply 里的 `crashTail`）。
+ * 2026-10-18 真机事故再补：`code=3` 的专项提示按 `<db>.pid` 归属记录分「活占用 / 存疑 / 残留」
+ * 三档，活占用档点名是哪个宿主并给两条安全出路，全部档位都明确**不许删锁文件**（见上）。
  */
-function renderBackendCrashHint({ entryPath, logPath, code, signal, tailLines }) {
+function renderBackendCrashHint({
+  entryPath, logPath, code, signal, tailLines, occupant = null, dbPath = '',
+}) {
   const logPathText = escapeHtml(logPath || '<库目录>/plugin-backend.log');
   const tail = (Array.isArray(tailLines) ? tailLines : [])
     .map((line) => String(line)).filter((line) => line.trim()).slice(-10);
@@ -498,23 +582,21 @@ function renderBackendCrashHint({ entryPath, logPath, code, signal, tailLines })
       + `padding:.8rem 1rem;overflow:auto">${escapeHtml(tail.join('\n'))}</pre>`
     : '';
   // code=3 在**两版后端**里都是「同库单实例锁没拿到」（server.py 与 backend/server.js 的
-  // exit 3 同义，见 spec §十九.7）。把排障动作写进页面，别让用户对着 generic 文案猜。
-  const lockHint = String(code) === '3'
-    ? '<p><b>code=3 = 同库单实例锁没拿到</b>：可能另有 Touchstone 后端占着同一个库，'
-      + '或锁文件/归属记录残留。先确认没有实例在跑（任务管理器里找带 '
-      + '<code>backend/server.js</code> / <code>server.py</code> 的 node/python 进程），'
-      + '再停用→启用本插件重试；仍失败再把库目录下的 '
-      + '<code>*.lock</code> / <code>*.pid</code> 移走后重试。</p>'
-    : '';
+  // exit 3 同义，见 spec §十九）。按归属记录分档，别让用户对着 generic 文案猜。
+  const isLockConflict = String(code) === '3';
+  const liveHolder = isLockConflict && occupant && occupant.status === 'live' ? occupant : null;
+  const heading = liveHolder
+    ? `Touchstone 后端未启动：同一个库正被 ${liveHolder.host} 使用`
+    : 'Touchstone 后端未启动：Node 后端进程退出';
   return '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
     + '<title>Touchstone 后端未启动</title></head>'
     + '<body style="margin:0;padding:2rem;font:14px/1.75 ui-monospace,Menlo,Consolas,monospace;'
     + 'background:#14161a;color:#e6e6e6">'
-    + '<h2 style="color:#ffb454;margin:0 0 .9rem">Touchstone 后端未启动：Node 后端进程退出</h2>'
+    + `<h2 style="color:#ffb454;margin:0 0 .9rem">${escapeHtml(heading)}</h2>`
     + `<p>入口 <code>${escapeHtml(entryPath)}</code> 起来了但没有报出监听端口就退出`
     + `（code=${escapeHtml(String(code))}${signal ? `, signal=${escapeHtml(String(signal))}` : ''}）。</p>`
     + tailBlock
-    + lockHint
+    + (isLockConflict ? renderLockConflictHint(occupant, dbPath) : '')
     + '<p>下一步：看完整后端日志里的最后几行（启动失败原因就在那里）——</p>'
     + `<pre style="background:#0d0f12;border:1px solid #2a2f36;border-radius:6px;padding:.8rem 1rem;`
     + `overflow:auto">tail -n 40 ${logPathText}</pre>`
@@ -536,9 +618,94 @@ function renderBackendCrashHint({ entryPath, logPath, code, signal, tailLines })
  * > 宿主环境 > 缺省 `~/.touchstone/touchstone.db`。
  */
 function backendLogPath(extraEnv) {
-  const dbPath = resolve(extraEnv.TOUCHSTONE_DB || process.env.TOUCHSTONE_DB
+  return join(dirname(resolveDbPath(extraEnv)), BACKEND_LOG_NAME);
+}
+
+/**
+ * 库路径解析（日志与 `<db>.pid` 记录共用）：`extraEnv.TOUCHSTONE_DB` > 宿主环境 `TOUCHSTONE_DB`
+ * > 缺省 `~/.touchstone/touchstone.db`。与 server.py / backend/lib/lock.js 的 `resolveDbPath`
+ * 同源，仅用来把日志与归属记录定位到「同库同目录」——薄壳自己不打开库文件。
+ */
+function resolveDbPath(extraEnv = {}) {
+  return resolve(extraEnv.TOUCHSTONE_DB || process.env.TOUCHSTONE_DB
     || join(homedir(), '.touchstone', 'touchstone.db'));
-  return join(dirname(dbPath), BACKEND_LOG_NAME);
+}
+
+/** 读 `<db>.pid` 归属记录（不存在/坏 JSON/不是对象 ⇒ null）。字段与两版后端的 writePidRecord 同源 */
+function readPidRecord(pidPath) {
+  try {
+    const record = JSON.parse(readFileSync(pidPath, 'utf8'));
+    if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+    return record;
+  } catch {
+    return null;
+  }
+}
+
+/** 进程探活（与 backend/lib/proc.js 的 pidAlive 同口径：ESRCH 不存在，EPERM 视为存活） */
+function pidAlive(pid) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (error) {
+    return Boolean(error) && error.code === 'EPERM';
+  }
+}
+
+/**
+ * 从归属记录的 `repo_dir` 认出占用者属于哪个 DSH 宿主。
+ * 为什么靠路径认：`desktop` profile 是 Electron 桌面端独占（CLI 拒绝管理），而 npm 安装副本
+ * 都落在 `<home>/.dsh/profiles/<profile>/node_modules/@gavinc-cn/touchstone-dsh` ——
+ * 把 profile 名翻译成人话，用户才知道该去哪个窗口里关它（真机事故里就是这个信息缺失）。
+ */
+function describeHolderHost(repoDir) {
+  const text = String(repoDir || '');
+  const match = text.match(/[\\/]profiles[\\/]([^\\/]+)[\\/]/i);
+  if (!match) return '另一个 DSH 宿主/检出';
+  const profile = match[1];
+  if (profile.toLowerCase() === 'desktop') return 'DSH 桌面端（desktop profile）';
+  if (profile.toLowerCase() === 'web') return 'dsh web（web profile）';
+  return `DSH 宿主（${profile} profile）`;
+}
+
+/**
+ * 读 `<db>.pid` 并判「占用者是否真的还活着」（2026-10-18 真机事故收口）。
+ *
+ * code=3 的提示页此前只会让用户猜「可能另有实例，或锁文件/归属记录残留」——而归属记录就在
+ * 盘上，里面的 pid/ppid/repo_dir 足够点名「是哪个宿主占着」，也足够区分三档：
+ *   - `live`      ：pid 存活，且（非父死感知托管 ‖ 其父进程也存活）⇒ 另一个真开着的宿主；
+ *   - `ambiguous` ：pid 存活但 `parent_watch=true` 且父进程已死 ⇒ 父死残留/PID 复用，**不能**
+ *                   断言「另一个宿主还开着」（2026-10-17 Windows 事故家族：pid 会被无关进程复用）；
+ *   - `stale`     ：pid 已不存在 ⇒ 记录过期。
+ * 与 backend/lib/lock.js 的 `reapStale` 同思路，但**只读不杀**（薄壳不处置别的宿主进程）。
+ *
+ * @returns {null | {pid,ppid,repo,host,backend,startedAt,parentWatch,recordPath,status:'live'|'ambiguous'|'stale'}}
+ */
+function inspectLockHolder(extraEnv) {
+  const recordPath = `${resolveDbPath(extraEnv)}.pid`;
+  const record = readPidRecord(recordPath);
+  if (!record) return null;
+  const pid = Number(record.pid);
+  const ppid = Number(record.ppid);
+  const pidOk = Number.isInteger(pid) && pid > 0;
+  const ppidOk = Number.isInteger(ppid) && ppid > 1;
+  const alive = pidOk && pidAlive(pid);
+  const parentAlive = ppidOk && pidAlive(ppid);
+  let status = 'stale';
+  if (alive) status = (!record.parent_watch || parentAlive) ? 'live' : 'ambiguous';
+  return {
+    pid: pidOk ? pid : 0,
+    ppid: ppidOk ? ppid : 0,
+    repo: typeof record.repo_dir === 'string' ? record.repo_dir : '',
+    host: describeHolderHost(record.repo_dir),
+    backend: typeof record.backend === 'string' ? record.backend : '',
+    startedAt: Number(record.started_at) > 0 ? Number(record.started_at) : 0,
+    parentWatch: Boolean(record.parent_watch),
+    recordPath,
+    status,
+  };
 }
 
 /**
@@ -860,11 +1027,22 @@ export async function apply(ctx, config = {}) {
       if (line.trim()) logger.warn(`touchstone[${backend === BACKEND_NODE ? 'node' : 'py'}]: ${line.trim()}`);
     });
     // 「起来就崩」不再只留一行 dsh 日志：Node 分支给面板一个可读提示页（Python 分支行为不动）。
+    // 2026-10-18：code=3 时把 `<db>.pid` 归属记录读出来一起渲染（谁占着、是否真活着），
+    // 并往宿主日志打一行摘要 —— 真机上用户拿不到面板时，dsh 日志就是唯一线索。
+    let crashNoted = false;
     const crashed = (code, sig) => {
       if (sawListen || backend !== BACKEND_NODE) return;   // 只在 Node 分支、且从未就绪时给提示页
+      const occupant = inspectLockHolder(extraEnv);
+      if (!crashNoted && occupant) {
+        crashNoted = true;
+        const holderState = occupant.status === 'live' ? '仍在运行'
+          : occupant.status === 'ambiguous' ? '父进程已死（疑似残留/PID 复用）' : '已退出（残留记录）';
+        logger.warn(`touchstone: 同库单实例锁被占 —— ${occupant.host} pid=${occupant.pid} `
+          + `ppid=${occupant.ppid || '?'} repo=${occupant.repo || '-'}（占用者进程${holderState}）`);
+      }
       backendHint = renderBackendCrashHint({
         entryPath, logPath: backendLogPath(extraEnv), code, signal: sig,
-        tailLines: crashTail.slice(),
+        tailLines: crashTail.slice(), occupant, dbPath: resolveDbPath(extraEnv),
       });
     };
     myChild.on('exit', (code, sig) => {

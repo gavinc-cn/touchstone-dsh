@@ -14,10 +14,13 @@
  *   C backend: node 但入口缺失 ⇒ 不抛异常、路由仍在、面板看到可读提示页
  *   D backend: python 显式     ⇒ 走 Python 探测链（**Python 版未退役，这是一行回滚**）
  *   E backend: 未知值          ⇒ 回落 **node** 并 warn（不静默）
- *   F backend: node 且入口在、但进程起来就崩 ⇒ 面板拿到可读提示页
+ *   F backend: node 且入口在、但进程起来就崩 ⇒ 面板拿到可读提示页；按 `<db>.pid` 归属记录分档：
+ *     F0 无记录（通用锁冲突文案）/ F2 有活占用者（点名另一个宿主 + 两条出路 + 不许删锁文件）/
+ *     F3 记录已过期（残留）/ F4 pid 存活但父进程已死（PID 复用/父死残留，不断言活宿主）
  *   G 能力探测失败（宿主 Node 无 node:sqlite）⇒ **不 spawn** + 提示页 + 两条出路
  *     （G 靠 `_setNodeRuntimeProbeForTest` 注入，真机上造不出「能力不足的宿主 Node」）
  */
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -118,6 +121,62 @@ async function probe(port, urlPath, withTrust = true) {
   return { status: res.status, text, json, contentType: res.headers.get('content-type') };
 }
 
+/**
+ * 等「Node 后端起来就崩」提示页替换掉通用 503 JSON：崩之前 proxy 回 JSON、崩之后才渲染提示页。
+ * F 系四个崩溃子场景共用（墙钟截止这里只影响交互式自检的等待上限，不改变任何产品判据）。
+ */
+async function waitForCrashHint(s, ms = 6000) {
+  let page = await probe(s.port, '/app');
+  const deadline = performance.now() + ms;   // 单调钟：墙钟前跳不改变等待上限（M13 约定）
+  while (!String(page.contentType || '').startsWith('text/html') && performance.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 150));
+    page = await probe(s.port, '/app');
+  }
+  return page;
+}
+
+/** 造一个「起来就崩」的假后端仓库（F 系子场景各占一份临时目录；stderr 文案由调用方给） */
+function makeCrashRepo(tag, stderrText) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `ts-node-crash-${tag}-`));
+  fs.mkdirSync(path.join(dir, 'backend'));
+  fs.writeFileSync(path.join(dir, 'backend', 'server.js'),
+    `process.stderr.write(${JSON.stringify(stderrText)} + "\\n");\nprocess.exit(3);\n`);
+  return dir;
+}
+
+/** 往隔离库写一条 `<db>.pid` 归属记录（形状与 backend/lib/lock.js:writePidRecord 同源） */
+function writePidRecord(record) {
+  fs.writeFileSync(tmpDb + '.pid', JSON.stringify(record));
+}
+
+/** 清掉隔离库的归属记录（F0 的「无记录」语义必须显式归零，不能依赖前面场景是否残留） */
+function clearPidRecord() {
+  fs.rmSync(tmpDb + '.pid', { force: true });
+}
+
+/** 等一个 pid 真的「探不到」（子进程 exit 后可能短暂是僵尸：pidAlive 会误判成活着） */
+async function waitPidGone(pid, ms = 2000) {
+  const deadline = performance.now() + ms;   // 单调钟（M13 约定）
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    if (performance.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+/** 造一个「确定已经退出」的 pid（F3 当残留记录、F4 当死掉的父进程用） */
+async function retirePid() {
+  const child = spawn(process.execPath, ['-e', 'process.exit(0)']);
+  const pid = child.pid;
+  await new Promise((r) => child.on('exit', r));
+  await waitPidGone(pid);
+  return pid;
+}
+
 /** 本次自检的隔离库（Node 骨架 M0 不读库，仅防 Python 侧污染生产库） */
 const tmpDb = path.join(os.tmpdir(), `ts-backend-check-${process.pid}.db`);
 const baseConfig = { repoDir: REPO_DIR, extraEnv: { TOUCHSTONE_DB: tmpDb, TS_ADMIN_PASSWORD: 'check' } };
@@ -187,35 +246,124 @@ try {
       s.logs.filter((l) => l.includes('启动后端')).join(' | '));
   });
 
-  // ---- F backend: node 且入口在、但进程起来就崩：面板必须拿到可读提示页 ----
+  // ---- F 系 backend: node 且入口在、但进程起来就崩：面板必须拿到可读提示页 ----
   // 这是「新开关最常见的失败」：宿主 Node 版本不认、dist-plugin 缺失、被策略拦……
   // 若只回通用 503 JSON，用户在面板里看到的是一段 JSON 原文，不知道发生了什么。
-  const crashRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-node-crash-'));
-  fs.mkdirSync(path.join(crashRepo, 'backend'));
-  fs.writeFileSync(path.join(crashRepo, 'backend', 'server.js'),
-    'process.stderr.write("假后端: 起来就崩\\n");\nprocess.exit(3);\n');
+  // 2026-10-18 真机事故的形态：退出码 3 = 同库单实例锁被**另一个活着的 DSH 宿主**占着，
+  // 而提示页还让用户猜「可能残留」并建议移走 `.lock`/`.pid`（与项目红线矛盾：删锁文件会在
+  // 新 inode 上取锁 ⇒ 双写）。现在按 `<db>.pid` 归属记录分三档，判据见 F0/F2/F3/F4。
+  clearPidRecord();   // A/B 的真后端退出时会删记录；这里显式归零，F0 才有「无记录」语义
+  const crashRepo = makeCrashRepo('plain', '假后端: 起来就崩');
   await withShell({ ...baseConfig, repoDir: crashRepo, backend: 'node' }, async (s) => {
-    // 等子进程崩掉（假后端立即 exit 3）：崩之前是通用 503 JSON，崩之后才该换成提示页
-    let page = await probe(s.port, '/app');
-    const deadline = Date.now() + 6000;
-    while (!String(page.contentType || '').startsWith('text/html') && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 150));
-      page = await probe(s.port, '/app');
-    }
-    check('F 后端起来就崩 ⇒ 面板看到 503 提示页（不是通用 JSON）',
+    const page = await waitForCrashHint(s);
+    check('F0 后端起来就崩 ⇒ 面板看到 503 提示页（不是通用 JSON）',
       page.status === 503 && String(page.contentType).startsWith('text/html')
       && page.text.includes('Node'), `status=${page.status} type=${page.contentType} body=${page.text.slice(0, 120)}`);
     // 2026-10-17 桌面端真机事故教训：提示页原先只教用户自己去 tail 日志文件 —— Windows 用户
     // 得先找到库目录、开终端。现改为把内存里收到的最后几行直接内联，提示页要能自解释。
-    check('F 提示页内联后端最后输出（免去手动 tail；真机失败原因就在这一行）',
+    check('F0 提示页内联后端最后输出（免去手动 tail；真机失败原因就在这一行）',
       page.text.includes('假后端: 起来就崩'), page.text.slice(0, 400));
-    check('F code=3 ⇒ 提示页给出「同库单实例锁」的专项说明（两版后端的 exit 3 同义）',
-      page.text.includes('单实例锁没拿到'), page.text.slice(0, 400));
-    check('F 崩溃信息进日志（入口路径 + 退出码各一条，别写成一个断言——临时目录名随机，会假绿/假红）',
+    check('F0 code=3 且无归属记录 ⇒ 提示页给同库单实例锁说明（两版后端的 exit 3 同义）',
+      page.text.includes('同库单实例锁') && page.text.includes('读不到'),
+      page.text.slice(0, 400));
+    check('F0 无记录分支 ⇒ 不教用户「移走 *.lock / *.pid」（防双写红线），而是明确不要删除',
+      !page.text.includes('移走后重试') && !page.text.includes('把库目录下的')
+      && page.text.includes('不要删除'), page.text.slice(0, 500));
+    check('F0 崩溃信息进日志（入口路径 + 退出码各一条，别写成一个断言——临时目录名随机，会假绿/假红）',
       s.logs.some((l) => l.includes('backend/server.js')) && s.logs.some((l) => /code=3\b/.test(l)),
       s.logs.slice(-4).join(' | '));
   });
   fs.rmSync(crashRepo, { recursive: true, force: true });
+
+  // ---- F2 活占用者：`.pid` 指向一个**真活着**的进程（真 spawn 一个 dummy，不用 mock pid） ----
+  // 真机形态：另一个 DSH 宿主（desktop profile）开着，它的 Touchstone 后端占着同一个库。
+  const liveCrashRepo = makeCrashRepo('live', '假后端: 同库锁被占');
+  const liveHolder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']);
+  try {
+    writePidRecord({
+      pid: liveHolder.pid,
+      ppid: process.pid,                       // 父进程（= 宿主替身）也活着 ⇒ 判定「宿主正开着」
+      repo_dir: 'C:\\Users\\dev\\.dsh\\profiles\\desktop\\node_modules\\@gavinc-cn\\touchstone-dsh',
+      parent_watch: true,
+      started_at: Math.floor(Date.now() / 1000),
+      backend: 'node',
+    });
+    await withShell({ ...baseConfig, repoDir: liveCrashRepo, backend: 'node' }, async (s) => {
+      const page = await waitForCrashHint(s);
+      check('F2 活占用者 ⇒ 面板点名「另一个正在运行的宿主」（repo 路径认出 desktop profile）',
+        page.text.includes('正在运行') && page.text.includes('DSH 桌面端'), page.text.slice(0, 500));
+      check('F2 活占用者 ⇒ 给出占用者 pid 与两条正确出路（退出那个宿主 / 独立库 TOUCHSTONE_DB）',
+        page.text.includes(String(liveHolder.pid)) && page.text.includes('TOUCHSTONE_DB')
+        && page.text.includes('停用再启用'), page.text.slice(0, 600));
+      check('F2 活占用者 ⇒ 明确警告「不要删除或移动 *.lock / *.pid」（防双写）',
+        page.text.includes('不要删除') && page.text.includes('.lock'), page.text.slice(0, 600));
+      check('F2 活占用者 ⇒ 不再出现「移走锁文件后重试」这种危险建议',
+        !page.text.includes('移走后重试') && !page.text.includes('把库目录下的'),
+        page.text.slice(0, 600));
+      check('F2 活占用者 ⇒ dsh 日志留一行占用者摘要（排障从宿主日志即可看到是谁占着）',
+        s.logs.some((l) => l.includes('DSH 桌面端') && l.includes(String(liveHolder.pid))),
+        s.logs.slice(-6).join(' | '));
+    });
+  } finally {
+    try { liveHolder.kill('SIGKILL'); } catch { /* 已退：忽略 */ }
+    clearPidRecord();
+    fs.rmSync(liveCrashRepo, { recursive: true, force: true });
+  }
+
+  // ---- F3 残留记录：`.pid` 指向一个**已经退出**的进程 ⇒ 归「残留」，不许断言另一宿主在跑 ----
+  const staleCrashRepo = makeCrashRepo('stale', '假后端: 记录残留');
+  const deadPid = await retirePid();
+  try {
+    writePidRecord({
+      pid: deadPid,
+      ppid: deadPid,                           // 父进程同样不存在
+      repo_dir: '/home/dev/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh',
+      parent_watch: true,
+      started_at: 1,
+      backend: 'node',
+    });
+    await withShell({ ...baseConfig, repoDir: staleCrashRepo, backend: 'node' }, async (s) => {
+      const page = await waitForCrashHint(s);
+      check('F3 记录已过期 ⇒ 提示页判「残留记录」（不说另一个宿主正在运行）',
+        page.text.includes('残留') && !page.text.includes('正在运行'), page.text.slice(0, 500));
+      check('F3 残留分支 ⇒ 教「停用→启用即会重试」，并明确不需要手动删 `.lock`/`.pid`',
+        page.text.includes('停用→启用') && page.text.includes('不需要')
+        && page.text.includes('.lock'), page.text.slice(0, 600));
+      check('F3 残留分支 ⇒ 不出现「移走锁文件后重试」危险建议',
+        !page.text.includes('移走后重试') && !page.text.includes('把库目录下的'),
+        page.text.slice(0, 600));
+    });
+  } finally {
+    clearPidRecord();
+    fs.rmSync(staleCrashRepo, { recursive: true, force: true });
+  }
+
+  // ---- F4 pid 存活但父进程已死（parent_watch=true）⇒ PID 复用/父死残留，不能断言活宿主 ----
+  // 2026-10-17 真机事故家族：Windows 上 pid 会被复用，只看「pid 存活」会把残留记录误判成活实例。
+  const orphanCrashRepo = makeCrashRepo('orphan', '假后端: pid 残留');
+  const orphanChild = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']);
+  try {
+    writePidRecord({
+      pid: orphanChild.pid,
+      ppid: deadPid,                           // 父进程已死 ⇒ 无法证明「那个宿主还开着」
+      repo_dir: 'C:\\Users\\dev\\.dsh\\profiles\\web\\node_modules\\@gavinc-cn\\touchstone-dsh',
+      parent_watch: true,
+      started_at: Math.floor(Date.now() / 1000),
+      backend: 'node',
+    });
+    await withShell({ ...baseConfig, repoDir: orphanCrashRepo, backend: 'node' }, async (s) => {
+      const page = await waitForCrashHint(s);
+      check('F4 pid 活着但父进程已死 ⇒ 判「疑似残留/PID 复用」而不是「另一个宿主正在运行」',
+        page.text.includes('PID 复用') && !page.text.includes('正在运行'), page.text.slice(0, 600));
+      check('F4 存疑分支同样不教「移走锁文件后重试」，且明确不要删除',
+        !page.text.includes('移走后重试') && !page.text.includes('把库目录下的')
+        && page.text.includes('不要删除'), page.text.slice(0, 600));
+    });
+  } finally {
+    try { orphanChild.kill('SIGKILL'); } catch { /* 已退：忽略 */ }
+    clearPidRecord();
+    fs.rmSync(orphanCrashRepo, { recursive: true, force: true });
+  }
 
   // ---- G 能力探测失败（宿主 Node 没有 node:sqlite）：不许 spawn，且必须给两条出路 ----
   // 真机上造不出「能力不足的宿主 Node」（本机是能力齐备的 Node 24），所以走测试缝注入。
