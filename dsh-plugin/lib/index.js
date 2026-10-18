@@ -579,14 +579,16 @@ function renderBackendCrashHint({
   const tailBlock = tail.length
     ? '<p>后端进程最后输出（内存缓冲；启动失败原因通常就在最后几行）：</p>'
       + '<pre style="background:#0d0f12;border:1px solid #2a2f36;border-radius:6px;'
-      + `padding:.8rem 1rem;overflow:auto">${escapeHtml(tail.join('\n'))}</pre>`
+      // 失败原因那行很长（占用者 pid/ppid/repo 全在一行），必须换行显示，别让用户横向滚动找证据
+      + 'padding:.8rem 1rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere">'
+      + `${escapeHtml(tail.join('\n'))}</pre>`
     : '';
   // code=3 在**两版后端**里都是「同库单实例锁没拿到」（server.py 与 backend/server.js 的
   // exit 3 同义，见 spec §十九）。按归属记录分档，别让用户对着 generic 文案猜。
   const isLockConflict = String(code) === '3';
   const liveHolder = isLockConflict && occupant && occupant.status === 'live' ? occupant : null;
   const heading = liveHolder
-    ? `Touchstone 后端未启动：同一个库正被 ${liveHolder.host} 使用`
+    ? `Touchstone 后端未启动：同一个库正被 ${liveHolder.host}使用`
     : 'Touchstone 后端未启动：Node 后端进程退出';
   return '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
     + '<title>Touchstone 后端未启动</title></head>'
