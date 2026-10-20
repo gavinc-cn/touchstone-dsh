@@ -94,8 +94,8 @@ flowchart LR
   S --- B
 ```
 
-1. **You create a project.** Touchstone stores the repository path, a work directory, the environment
-   label, optional project skills, and free-form guidance that is injected into every first-round prompt.
+1. **You create a project.** Touchstone stores the repository path, a work directory, optional project
+   skills, and free-form guidance that is injected into every first-round prompt.
 2. **You create a task.** Pick a type (say, *Exploration*) and an end stage (say, *report*), and Touchstone
    queues it for that project.
 3. **Rounds run in a resident agent session.** Touchstone asks the `dsh` plugin to create or resume a
@@ -249,9 +249,9 @@ python touchstone.py start | stop | restart | status | build | test
 ### First steps in the UI
 
 1. Sign in and open **Settings → Change password** if you used the one-time password.
-2. **Add project** — source directory, work directory (defaults to `<project>/.touchstone`), environment
-   label, and the guidance the agent should follow. The case library and bug report directories are
-   derived and created for you.
+2. **Add project** — source directory, work directory (defaults to `<project>/.touchstone`), and the
+   guidance the agent should follow. The case library and bug report directories are derived and
+   created for you.
 3. Create a task (or a board card) and let the queue pick it up. Round logs stream live; the session window
    shows the transcript as it grows.
 
