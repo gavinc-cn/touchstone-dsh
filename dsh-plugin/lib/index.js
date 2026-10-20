@@ -116,6 +116,9 @@ const BACKEND_NODE = 'node';
 
 /** Node 后端入口（相对 repoDir）。进程契约见方案 §3.2，两版 argv 只差入口路径与 node 选项。 */
 const NODE_ENTRY_REL = 'backend/server.js';
+/** Python 后端入口与运行依赖清单（相对 repoDir）；源码在 backend_py/（2026-10-19 起）。 */
+const PYTHON_ENTRY_REL = 'backend_py/server.py';
+const PYTHON_REQUIREMENTS_REL = 'backend_py/requirements.txt';
 
 /**
  * 只给 Node 后端的进程选项：`node:sqlite` 在 22.x 是实验特性，每次启动往 stderr 打
@@ -216,7 +219,7 @@ async function resolveDefaultPython(env = process.env) {
  */
 function readRequirementNames(repoDir) {
   try {
-    return readFileSync(join(repoDir, 'requirements.txt'), 'utf8')
+    return readFileSync(join(repoDir, PYTHON_REQUIREMENTS_REL), 'utf8')
       .split('\n')
       .map((line) => line.split('#')[0].trim())
       .filter((line) => line && !line.startsWith('-'))
@@ -379,7 +382,7 @@ export function _setNodeRuntimeProbeForTest(fn) {
  * 否则用户修完命令仍可能指错解释器, 且不知道该往哪里配。
  */
 function renderDepHint(pythonPath, repoDir, missing, viaDefault) {
-  const cmd = `${pythonPath} -m pip install -r ${join(repoDir, 'requirements.txt')}`;
+  const cmd = `${pythonPath} -m pip install -r ${join(repoDir, PYTHON_REQUIREMENTS_REL)}`;
   return '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
     + '<title>Touchstone 后端未启动</title></head>'
     + '<body style="margin:0;padding:2rem;font:14px/1.75 ui-monospace,Menlo,Consolas,monospace;'
@@ -440,7 +443,7 @@ function renderNoNodeBackendHint(repoDir) {
     + '<code>backend/server.js</code> 的那个目录，或删掉该项用缺省（包自身目录）。</p>'
     + '<p style="color:#8b949e">改完把本插件<b>停用再启用</b>即会重试，不必重启 dsh web。'
     + '要退回 Python 后端：把 <code>backend</code> <b>显式写成</b> <code>python</code>'
-    + '（包里的 <code>server.py</code> 仍在，Python 版未退役；注意<b>删掉该键现在等于 node</b>，'
+    + '（包里的 <code>backend_py/server.py</code> 仍在，Python 版未退役；注意<b>删掉该键现在等于 node</b>，'
     + '不能靠删键回退）。</p>'
     + '</body></html>';
 }
@@ -535,7 +538,7 @@ function renderAmbiguousHolderHint(holder) {
     + `记录文件 <code>${escapeHtml(holder.recordPath)}</code>）—— 可能是父死残留的孤儿后端，`
     + '也可能是 <b>PID 复用</b>（Windows 上同号进程被无关程序复用，2026-10-17 真机事故同型）⇒ '
     + '不能据此断定「另一个宿主还开着」。</p>'
-    + '<p>先确认没有实例在跑（任务管理器里找带 <code>backend/server.js</code> / <code>server.py</code> '
+    + '<p>先确认没有实例在跑（任务管理器里找带 <code>backend/server.js</code> / <code>backend_py/server.py</code> '
     + '的 node/python 进程），再停用→启用本插件重试。<b>不要删除或移动 <code>*.lock</code> / '
     + '<code>*.pid</code></b>：占用者若还活着，删锁文件会造成双写；新版后端会自动接管失效记录。'
     + '确需并行请给本宿主配置独立库（<code>extraEnv.TOUCHSTONE_DB</code>）。</p>';
@@ -547,7 +550,7 @@ function renderLockConflictHint(occupant, dbPath) {
     return '<p><b>同库单实例锁被占用</b>，但读不到 <code>*.pid</code> 归属记录：'
       + '可能是另一版后端的异常窗口（取锁后、写记录前被杀）或第三方进程占着这把锁。</p>'
       + '<p>先确认没有其它 Touchstone 后端在跑（任务管理器里找带 <code>backend/server.js</code> / '
-      + '<code>server.py</code> 的 node/python 进程），再停用→启用本插件重试。'
+      + '<code>backend_py/server.py</code> 的 node/python 进程），再停用→启用本插件重试。'
       + '<b>不要删除仍可能被占用的 <code>*.lock</code> / <code>*.pid</code></b>（新实例会在新 inode '
       + '上取锁 ⇒ 双写风险）；确需并行请给本宿主配置独立库（<code>extraEnv.TOUCHSTONE_DB</code>）。</p>';
   }
@@ -845,11 +848,12 @@ function stopChild(proc, logger, why) {
  */
 export async function apply(ctx, config = {}) {
   const logger = ctx.logger ? ctx.logger('touchstone') : console;
-  // repoDir 缺省 = 包自身目录（自包含包: 包里就有 server.py 与 webui/dist-plugin）, 用户零配置即可跑;
+  // repoDir 缺省 = 包自身目录（自包含包: 包里就有 backend/server.js、backend_py/server.py 与
+  // webui/dist-plugin）, 用户零配置即可跑;
   // 显式 config.repoDir 仍优先 —— 要指向开发中的工作副本、或包被拆开放置时才需要写。
   const repoDir = config.repoDir || PACKAGE_DIR;
   const backend = resolveBackend(config, logger);
-  const entryRel = backend === BACKEND_NODE ? NODE_ENTRY_REL : 'server.py';
+  const entryRel = backend === BACKEND_NODE ? NODE_ENTRY_REL : PYTHON_ENTRY_REL;
   const entryPath = join(repoDir, entryRel);
   const entryMissing = !existsSync(entryPath);
   if (entryMissing) {
@@ -972,7 +976,7 @@ export async function apply(ctx, config = {}) {
     if (deps.fatal.length) {
       backendHint = renderDepHint(pythonPath, repoDir, deps.fatal, viaDefault);
       logger.warn(`touchstone: 后端未启动 —— Python 运行依赖缺失: ${deps.fatal.join(', ')}`);
-      logger.warn(`touchstone: 修复: ${pythonPath} -m pip install -r ${join(repoDir, 'requirements.txt')}`);
+      logger.warn(`touchstone: 修复: ${pythonPath} -m pip install -r ${join(repoDir, PYTHON_REQUIREMENTS_REL)}`);
       logger.warn('touchstone: 装完把本插件停用再启用即会重试（不必重启 dsh web）');
     } else {
       backendHint = '';

@@ -49,8 +49,10 @@ import tempfile
 
 import agents  # 复用 agent 族的 skill 目录约定（SKILL_DIRS_BY_FAMILY）
 
-# 清单根：平台仓库 extensions/；TS_EXT_DIR 覆盖（测试与自定义部署）
-DEFAULT_EXT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "extensions")
+# 清单根：平台仓库根 extensions/（Python 源码在 backend_py/，Node 后端读同一份）；
+# TS_EXT_DIR 覆盖（测试与自定义部署）
+DEFAULT_EXT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "extensions")
 MANIFEST_NAME = "asset.json"
 
 # manifest 允许的资产类型与安装目标

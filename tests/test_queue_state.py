@@ -267,5 +267,5 @@ def test_board_session_meta_project_busy_whitelist():
     root = pathlib.Path(__file__).resolve().parent.parent
     sv = (root / "webui/src/components/SessionView.jsx").read_text(encoding="utf-8")
     assert "project_busy: d.project_busy" in sv   # 前端轮询白名单（本任务补）
-    srv = (root / "server.py").read_text(encoding="utf-8")
+    srv = (root / "backend_py" / "server.py").read_text(encoding="utf-8")
     assert 'data["project_busy"]' in srv          # 服务端下发（存量已在案）

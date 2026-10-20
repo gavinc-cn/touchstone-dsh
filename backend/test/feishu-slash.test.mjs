@@ -34,7 +34,8 @@ import { freshDb } from './m3fixture.mjs';
 // oracle 源码抽取（期望值真源）
 // --------------------------------------------------------------------------
 
-const FEISHU_PY = path.resolve(import.meta.dirname, '..', '..', 'feishu.py');
+// Python 后端源码在 backend_py/（2026-10-19 起）
+const FEISHU_PY = path.resolve(import.meta.dirname, '..', '..', 'backend_py', 'feishu.py');
 const TOKEN_URL = `${FEISHU_HOST}/open-apis/auth/v3/tenant_access_token/internal`;
 const SLASH_URL = `${FEISHU_HOST}${slash.SLASH_API}`;
 

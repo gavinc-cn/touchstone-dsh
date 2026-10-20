@@ -21,6 +21,8 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+# Python 后端源码在 backend_py/（2026-10-19 起）；导出器本身也按此目录 import 后端模块
+sys.path.insert(0, os.path.join(ROOT, "backend_py"))
 
 import db                                                            # noqa: E402
 

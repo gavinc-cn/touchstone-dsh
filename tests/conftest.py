@@ -3,7 +3,16 @@
 # 模块顶 setenv，字母序在其前的测试模块会把整套件拖到真实库上跑（曾发生
 # 真实库写入，幸为 no-op update）。conftest 先行 setenv 一并根治。
 import os
+import sys
 import tempfile
+
+# Python 后端源码在 <仓库>/backend_py/（2026-10-19 起）：测试模块照旧扁平 `import db`
+# 等，靠这里把该目录放进 sys.path（pytest.ini 的 pythonpath 已声明同一目录，这里显式
+# 兜一次，避免直接 import conftest 或插件差异时依赖 ini 生效顺序）。
+_BACKEND_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "backend_py")
+if _BACKEND_PY not in sys.path:
+    sys.path.insert(0, _BACKEND_PY)
 
 if not os.environ.get("TOUCHSTONE_DB"):
     fd, _path = tempfile.mkstemp(suffix=".db")

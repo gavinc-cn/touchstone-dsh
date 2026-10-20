@@ -62,11 +62,12 @@ function makeWebServer() {
   };
 }
 
-/** 假仓库：有 server.py（存在性检查过）与 requirements.txt（供预检装配可选依赖名）。 */
+/** 假仓库：有 backend_py/server.py（存在性检查过）与 backend_py/requirements.txt（供预检装配可选依赖名）。 */
 function makeFakeRepo() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-deps-check-'));
-  fs.writeFileSync(path.join(dir, 'server.py'), '# 假后端: 本 harness 不真跑 Python\n');
-  fs.writeFileSync(path.join(dir, 'requirements.txt'), [
+  fs.mkdirSync(path.join(dir, 'backend_py'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'backend_py', 'server.py'), '# 假后端: 本 harness 不真跑 Python\n');
+  fs.writeFileSync(path.join(dir, 'backend_py', 'requirements.txt'), [
     '# 注释行应被跳过',
     'zstandard>=0.25.0',
     'requests>=2.31',

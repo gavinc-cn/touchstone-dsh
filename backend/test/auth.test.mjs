@@ -24,8 +24,10 @@ import {
   verifyPassword,
 } from '../lib/auth.js';
 
-/** 仓库根（<根>/backend/test/auth.test.mjs 上溯两级）——Python 侧要 sys.path 到这里才能 import auth */
+/** 仓库根（<根>/backend/test/auth.test.mjs 上溯两级） */
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
+/** Python 后端源码在 backend_py/（2026-10-19 起）——Python 侧要 sys.path 到这里才能 import auth */
+const BACKEND_PY = path.join(REPO_ROOT, 'backend_py');
 
 /** Python 解释器（与项目其它 Node 侧自检同口径：TS_PYTHON 可覆盖） */
 const PYTHON = process.env.TS_PYTHON || 'python3';
@@ -101,7 +103,7 @@ const PYTHON_SKIP = PYTHON_READY ? false : `未找到可用的 Python 解释器:
  */
 function runPython(mode, payload) {
   const result = spawnSync(
-    PYTHON, ['-c', PY_HELPER, REPO_ROOT, mode, JSON.stringify(payload)], { encoding: 'utf8' });
+    PYTHON, ['-c', PY_HELPER, BACKEND_PY, mode, JSON.stringify(payload)], { encoding: 'utf8' });
   assert.equal(result.status, 0, `python 调用失败(status=${result.status}): ${result.stderr}`);
   return JSON.parse(result.stdout);
 }

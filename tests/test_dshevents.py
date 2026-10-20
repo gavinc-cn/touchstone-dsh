@@ -322,7 +322,7 @@ def test_board_has_no_driver_state_reads():
     import io
     import os
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    src = io.open(os.path.join(root, "board.py"), encoding="utf-8").read()
+    src = io.open(os.path.join(root, "backend_py", "board.py"), encoding="utf-8").read()
     assert "dshdriver.status(" not in src, "board 又出现了逐会话 /status 读口（P4 红线）"
     assert "dshdriver.live(" not in src, "board 又出现了周期 /live 读口（P4 红线）"
 

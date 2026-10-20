@@ -31,8 +31,9 @@ const PKG_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 /** 发到 npm 后用户装完必须存在的相对路径（缺一即坏包） */
 const REQUIRED = [
   'package.json',
-  'server.py',
-  'requirements.txt',
+  // Python 后端（2026-10-19 起源码在 backend_py/）：`backend: python` 时薄壳拉起的就是它
+  'backend_py/server.py',
+  'backend_py/requirements.txt',
   // Node 后端骨架（2026-10-11 M0）：profile 里配 `backend: node` 时薄壳拉起的就是它，
   // 缺了等于「开关一打开就起不来」——必须在发包自检里挡住。
   'backend/server.js',

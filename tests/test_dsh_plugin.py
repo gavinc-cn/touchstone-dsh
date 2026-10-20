@@ -713,7 +713,7 @@ def test_chat_wait_web_busy_routes_to_dsh(monkeypatch):
 def test_chat_inject_supported_families():
     """「立即注入」白名单只剩 dsh_plugin（走 steer）——单族化后不再按族枚举。"""
     src = open(os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "chat.py"), encoding="utf-8").read()
+        os.path.abspath(__file__))), "backend_py", "chat.py"), encoding="utf-8").read()
     assert 'meta.get("family") != "dsh_plugin"' in src
 
 

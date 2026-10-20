@@ -33,12 +33,16 @@ import platcompat
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
+# Python 后端源码在 backend_py/（2026-10-19 起）：本文件多处用 `python -c` 起子进程
+# 直接 import lifecycle，子进程脚本里要把该目录一起塞进 sys.path
+BACKEND_PY = os.path.join(ROOT, "backend_py")
 
 # 子进程脚本：武装父死感知后长睡（on_exit 用 os._exit —— 回调跑在看门狗线程里，
 # sys.exit 只会结束该线程，进程照旧活着；server.py 的真实回调同款）
 CHILD_WATCH_SRC = """
 import os, sys, time
 sys.path.insert(0, {root!r})
+sys.path.insert(0, {backend_py!r})
 import lifecycle
 lifecycle.arm_parent_watch(lambda: os._exit(0), pdeathsig={pdeathsig},
                            logger=lambda m: None)
@@ -74,6 +78,7 @@ time.sleep(60)
 ORPHAN_HOLD_SRC = """
 import os, sys, time
 sys.path.insert(0, {root!r})
+sys.path.insert(0, {backend_py!r})
 import lifecycle
 inst = lifecycle.SingleInstance({db!r}, repo_dir="/repo", parent_watch=True,
                                 logger=lambda m: None)
@@ -93,7 +98,7 @@ time.sleep(60)
 
 def _spawn_middle(devnull, pdeathsig, middle_src=None):
     """起中间进程：返回 (Popen, 子进程 pid)。子进程 pid 由中间进程 stdout 首行给出。"""
-    child = CHILD_WATCH_SRC.format(root=ROOT, pdeathsig=pdeathsig)
+    child = CHILD_WATCH_SRC.format(root=ROOT, backend_py=BACKEND_PY, pdeathsig=pdeathsig)
     src = (middle_src or MIDDLE_SRC).format(py=PY, child=child, devnull=devnull)
     proc = subprocess.Popen([PY, "-c", src], stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, text=True)
@@ -210,7 +215,7 @@ def test_single_instance_reaps_stale_orphan(tmp_path):
     """
     db = str(tmp_path / "t.db")
     logs = []
-    child_src = ORPHAN_HOLD_SRC.format(root=ROOT, db=db)
+    child_src = ORPHAN_HOLD_SRC.format(root=ROOT, backend_py=BACKEND_PY, db=db)
     middle_src = MIDDLE_ORPHAN_SRC.format(py=PY, child=child_src)
     middle = subprocess.Popen([PY, "-c", middle_src], stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True)
@@ -363,14 +368,14 @@ def _read_until(proc, marker, timeout=30.0):
 def test_server_second_instance_same_db_refused(tmp_path):
     """同库第二实例被拒（exit 3 + 明确文案），第一实例正常启动；SIGTERM 可正常收尾。"""
     db = str(tmp_path / "t.db")
-    a = subprocess.Popen([PY, "server.py", "--host", "127.0.0.1", "--port", "0",
+    a = subprocess.Popen([PY, "backend_py/server.py", "--host", "127.0.0.1", "--port", "0",
                           "--web-dir", WEB_DIST],
                          cwd=ROOT, env=_server_env(db), stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, text=True)
     try:
         ok, out = _read_until(a, "TOUCHSTONE_LISTEN")
         assert ok, f"实例 A 未就绪:\n{out}"
-        b = subprocess.run([PY, "server.py", "--host", "127.0.0.1", "--port", "0",
+        b = subprocess.run([PY, "backend_py/server.py", "--host", "127.0.0.1", "--port", "0",
                             "--web-dir", WEB_DIST],
                            cwd=ROOT, env=_server_env(db), capture_output=True,
                            text=True, timeout=60)
@@ -378,7 +383,7 @@ def test_server_second_instance_same_db_refused(tmp_path):
         assert "同一数据库已有运行中的实例" in (b.stdout + b.stderr)
         assert "--allow-shared-db" in (b.stdout + b.stderr)
         # 逃生口：显式共库可起（自担风险）
-        c = subprocess.Popen([PY, "server.py", "--host", "127.0.0.1", "--port", "0",
+        c = subprocess.Popen([PY, "backend_py/server.py", "--host", "127.0.0.1", "--port", "0",
                               "--web-dir", WEB_DIST, "--allow-shared-db"],
                              cwd=ROOT, env=_server_env(db), stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True)
@@ -402,7 +407,7 @@ def test_server_parent_watch_exits_when_parent_killed(tmp_path):
     OS 关闭写端 ⇒ server.py 收到 EOF 且父已死 ⇒ 收尾退出（不再留孤儿）。
     """
     db = str(tmp_path / "t.db")
-    child_cmd = [PY, os.path.join(ROOT, "server.py"), "--host", "127.0.0.1",
+    child_cmd = [PY, os.path.join(ROOT, "backend_py", "server.py"), "--host", "127.0.0.1",
                  "--port", "0", "--web-dir", WEB_DIST, "--parent-watch"]
     middle_src = (
         "import subprocess, sys, time\n"
@@ -538,6 +543,7 @@ def test_sqlite_lock_released_on_sigkill(tmp_path):
     child_src = (
         "import sys, time\n"
         f"sys.path.insert(0, {ROOT!r})\n"
+        f"sys.path.insert(0, {BACKEND_PY!r})\n"
         "import lifecycle\n"
         f"inst = lifecycle.SingleInstance({db!r}, logger=lambda m: None)\n"
         "assert inst.acquire()\n"

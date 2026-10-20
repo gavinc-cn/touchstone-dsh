@@ -14,7 +14,8 @@
 #   存量 profile 若还留着那条 insert, 请手工删除（同 id 两行会让面板行开关锁成 unaddressable）。
 #
 # 机器相关配置（repoDir / pythonPath）**可省**（2026-10-07 自包含包起）: 缺省 repoDir = 包自身目录,
-# 包里就有 server.py 与 webui/dist-plugin; 只有要指向别的检出、或指定解释器时才在 profile 覆盖:
+# 包里就有两版后端（Node backend/server.js、Python backend_py/server.py）与 webui/dist-plugin;
+# 只有要指向别的检出、或指定解释器时才在 profile 覆盖:
 #   - id: touchstone-dsh
 #     config: { pythonPath: <解释器> }        # 条目 id 是 touchstone-dsh（= 包名去掉 scope）
 # 环境变量: TS_DSH_PROFILE(默认 web) / TS_DSH_PYTHON(显式指定解释器, 优先)
@@ -54,7 +55,7 @@ pick_python() {
 # 缺省后端＝包内的 `backend/server.js`（要求宿主 Node ≥ 22.19，靠 node:sqlite），
 # 所以「不再要求用户机器上有 Python 与 pip」正是翻缺省的全部收益 —— 装插件不该再被
 # 解释器卡住。解释器只在两种情况下需要：① profile 里显式 `backend: python`（回滚/排障）；
-# ② 独立形态（`start.sh` / `touchstone.sh`）仍走 `server.py`。
+# ② 独立形态（`start.sh` / `touchstone.sh`）仍走 `backend_py/server.py`。
 # 探不到就只提示一句、**不再**往配置里塞 pythonPath（旧行为是硬报错 exit 1）。
 PYTHON_PATH="$(pick_python || true)"
 if [[ -z "$PYTHON_PATH" ]]; then

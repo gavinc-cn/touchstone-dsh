@@ -175,7 +175,7 @@ class IsolatedServer:
         )
         env.update(self.extra_env)
         self._logf = open(os.path.join(self.sandbox, "server.log"), "w", encoding="utf-8")
-        args = [sys.executable, "server.py", "--port", str(self.port),
+        args = [sys.executable, "backend_py/server.py", "--port", str(self.port),
                 "--web-dir", "webui/dist"]
         if self.trust_internal:
             # 插件形态：仅回环监听 + 免登信任头（server.py 侧硬校验 host 必须是回环）

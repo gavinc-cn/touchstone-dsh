@@ -6,9 +6,9 @@
 # （dist 不入库，部署机需装 Node）
 # 用法: ./touchstone.sh start|stop|restart|status|build|test|test-full|test-ui
 # 监听: 默认 127.0.0.1:4601（仅本机）；环境变量 TS_PORT / TS_HOST 覆盖
-#       （对外监听: TS_HOST=0.0.0.0）；server.py 绑定失败会自动 port+1 顺延
+#       （对外监听: TS_HOST=0.0.0.0）；后端绑定失败会自动 port+1 顺延
 # 运行产物: .run/server.pid（PID 文件）、.run/server.log（追加写日志）、
-#           .run/server.port（server.py 落盘的实际监听端口，探活与展示按它读取）
+#           .run/server.port（backend_py/server.py 落盘的实际监听端口，探活与展示按它读取）
 # 测试三档（2026-09-13 批次，细节见 tests/README.md）:
 #   test      快层：后端单测 pytest（~2s）+ 前端单测 vitest（webui 配置后自动纳入）
 #   test-full 快层 + 隔离实例 e2e 脚本（自起临时实例，无需站点，分钟级）
@@ -74,12 +74,12 @@ probe() {
     curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$(actual_port)/"
 }
 
-# 运行依赖预检: 解释器须能导入 requirements.txt 声明的运行依赖, 缺失时秒级报错
+# 运行依赖预检: 解释器须能导入 backend_py/requirements.txt 声明的运行依赖, 缺失时秒级报错
 # (否则 server 启动即崩, 要等 20s 探活超时才能从日志尾部看到 ModuleNotFoundError)
 require_runtime_deps() {
     if ! "$PY" -c "import zstandard, requests, lark_oapi, psutil" >/dev/null 2>&1; then
         echo "错误: $PY 缺少运行依赖(zstandard / requests / lark_oapi / psutil)" >&2
-        echo "先安装: $PY -m pip install -r requirements.txt" >&2
+        echo "先安装: $PY -m pip install -r backend_py/requirements.txt" >&2
         echo "或指定项目环境启动: TS_PYTHON=<项目环境解释器> $0 start" >&2
         exit 1
     fi
@@ -99,11 +99,12 @@ cmd_start() {
     # 运行依赖预检放在构建之前: 缺依赖时不必等前端构建白跑
     require_runtime_deps
     # 前置构建前端: dist 不入库, 启动时重建保证与源码一致(部署机需 Node);
-    # 任一步失败即中止启动(server.py 无 dist 会直接退出)
+    # 任一步失败即中止启动(后端无 dist 会直接退出)
     cmd_build
     mkdir -p "$RUN_DIR"
-    # nohup 后台启动(用 $PY, 兑现 TS_PYTHON 对 start 生效), 日志追加写
-    nohup "$PY" server.py --port "$PORT" --host "$HOST" >> "$LOG_FILE" 2>&1 &
+    # nohup 后台启动(用 $PY, 兑现 TS_PYTHON 对 start 生效), 日志追加写；
+    # Python 后端源码在 backend_py/（2026-10-19 起，仓库根 = 本脚本 cwd）
+    nohup "$PY" backend_py/server.py --port "$PORT" --host "$HOST" >> "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
     # 探活等待启动完成
     local waited=0

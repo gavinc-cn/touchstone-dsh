@@ -56,7 +56,9 @@ import sessparse
 from agents import scan_agents, scan_skills, DSH_PLUGIN_PREFIX
 from lib import norm_status, parse_fields, parse_status_md, read_text
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 仓库根（本文件位于 <仓库>/backend_py/，上溯一级）：webui/dist、.run、projects
+# 等运行期路径都锚在**仓库根**，与启停脚本/薄壳的 ROOT 同口径
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 静态页面目录: Vite 构建产物 webui/dist (可用 --web-dir 或环境变量覆盖)
 WEB_DIR = os.environ.get("TS_WEB_DIR") or os.path.join(BASE_DIR, "webui", "dist")
 PROJECTS_DIR = os.path.join(BASE_DIR, "projects")

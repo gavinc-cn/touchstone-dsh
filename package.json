@@ -25,8 +25,8 @@
     }
   },
   "files": [
-    "*.py",
-    "requirements.txt",
+    "backend_py/*.py",
+    "backend_py/requirements.txt",
     "backend/server.js",
     "backend/lib",
     "backend/routes",

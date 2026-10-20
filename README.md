@@ -145,7 +145,7 @@ flowchart LR
 ```bash
 git clone https://github.com/gavinc-cn/touchstone-dsh.git
 cd touchstone-dsh
-python3 -m pip install -r requirements.txt   # needed for standalone mode / plugin mode with backend: python
+python3 -m pip install -r backend_py/requirements.txt   # needed for standalone mode / plugin mode with backend: python
 ```
 
 ### 2. Start the site (standalone mode)
@@ -203,7 +203,7 @@ reverts anything: the default *is* `node` now). For that Python backend, the pla
 installed with pip, not npm:
 
 ```bash
-pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/requirements.txt
+pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/backend_py/requirements.txt
 # Windows: python -m pip install ...   (the official installer ships python.exe, not python3)
 ```
 
@@ -217,8 +217,8 @@ the exact command for the interpreter it picked; to pin another one, set `python
   config: { backend: python, pythonPath: /path/to/python }
 ```
 
-No `repoDir` is needed: the package carries `server.py`, `backend/` (the Node backend) and
-`webui/dist-plugin`, so the plugin falls back to its own directory.
+No `repoDir` is needed: the package carries both backends (`backend/` for Node, `backend_py/` for Python)
+and `webui/dist-plugin`, so the plugin falls back to its own directory.
 
 **Option B — from a checkout (development):**
 
@@ -309,19 +309,9 @@ Known limitations, stated plainly:
 
 ```
 touchstone-dsh/
-├── server.py            HTTP site: routing, auth, REST, SSE, static front end
-├── runner.py            Task execution engine and per-project scheduling
-├── waitq.py             Unified queue model (the single source of truth for "who runs next")
-├── board.py             Development board: cards, gates, agent sessions, archive sync
-├── chat.py              Session chat: queued messages and injection
-├── prompts.py           Per-round prompt templates (per task type, per stage)
-├── sessparse.py         Reads the dsh session store into a renderable transcript
-├── dshdriver.py         Client for the in-process dsh agent driver
-├── dshevents.py         Folds the dsh state stream into an in-process registry
-├── rag.py               Optional semantic search over the case library
-├── loadgen.py           Built-in stress engine (scenarios, metrics, reports)
-├── feishu.py            Feishu (Lark) integration
-├── db.py                SQLite data layer
+├── backend/             Node backend (the plugin-mode default): server.js + lib/ + routes/ + schema/
+├── backend_py/          Python backend: server.py, runner.py, waitq.py, board.py, chat.py, db.py, …
+│                        (+ requirements.txt). Legacy-but-kept; used by standalone mode / backend: python
 ├── builtin_prompts/     Prompt assets injected into first-round prompts
 ├── dsh-plugin/          The dsh plugin package (thin Node shell + driver + client bundle)
 ├── extensions/          Built-in assets installable from the settings page

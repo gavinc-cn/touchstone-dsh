@@ -14,7 +14,8 @@ Windows 原生运行的首选入口（bash/nohup/kill 不可用），Linux 上�
   则跳过，TS_FORCE_BUILD=1 强制重建；无 dist 则 server.py 直接退出），
   任一步失败即中止启动；
 - start 前做运行依赖预检（zstandard/requests 顶层导入，缺失即启动崩）；
-- 后台拉起 server.py：POSIX start_new_session 脱离本进程组、Windows
+- 后台拉起 backend_py/server.py（Python 后端源码在 backend_py/）：POSIX
+  start_new_session 脱离本进程组、Windows
   DETACHED_PROCESS 脱离控制台，日志追加写 .run/server.log，env 注入
   PYTHONUTF8=1 统一子进程编码；
 - stop 发 SIGTERM（Windows 无优雅终止信号，os.kill 即 TerminateProcess 强杀；
@@ -41,9 +42,12 @@ import time
 import urllib.error
 import urllib.request
 
-import platcompat
-
 ROOT = os.path.dirname(os.path.abspath(__file__))
+# Python 后端源码在 <仓库>/backend_py/（2026-10-19 起）：本启停器只 import 它的
+# platcompat（进程/端口兼容层），先把该目录放进 sys.path（后端自身启动时脚本目录
+# 本就自动在 sys.path 首位，无需此步）
+sys.path.insert(0, os.path.join(ROOT, "backend_py"))
+import platcompat  # noqa: E402 — 必须在 backend_py 入 sys.path 之后导入
 PORT = int(os.environ.get("TS_PORT", "4601"))
 HOST = os.environ.get("TS_HOST", "127.0.0.1")  # 监听地址: 默认仅本机回环, 对外监听显式 TS_HOST=0.0.0.0
 RUN_DIR = os.path.join(ROOT, ".run")
@@ -121,7 +125,7 @@ def precheck_deps():
         # `python.exe`、Linux 惯例是 `python3`, 报用户机器上真正在跑的那个最不容易误导。
         py = sys.executable or "python"
         print_err(f"错误: 当前解释器缺少运行依赖（{e}），请先执行:")
-        print_err(f"    {py} -m pip install -r requirements.txt")
+        print_err(f"    {py} -m pip install -r backend_py/requirements.txt")
         sys.exit(1)
 
 
@@ -300,7 +304,7 @@ def cmd_start():
     precheck_deps()
     cmd_build()
     os.makedirs(RUN_DIR, exist_ok=True)
-    cmd = [sys.executable, os.path.join(ROOT, "server.py"),
+    cmd = [sys.executable, os.path.join(ROOT, "backend_py", "server.py"),
            "--port", str(PORT), "--host", HOST]
     env = dict(os.environ, PYTHONUTF8="1")  # 统一 server 及其子进程的文本编码
     with open(LOG_FILE, "ab") as logf:

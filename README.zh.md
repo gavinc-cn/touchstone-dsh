@@ -133,7 +133,7 @@ flowchart LR
 ```bash
 git clone https://github.com/gavinc-cn/touchstone-dsh.git
 cd touchstone-dsh
-python3 -m pip install -r requirements.txt   # 独立形态 / 插件形态配了 backend: python 才需要
+python3 -m pip install -r backend_py/requirements.txt   # 独立形态 / 插件形态配了 backend: python 才需要
 ```
 
 ### 2. 启动站点（独立形态）
@@ -181,7 +181,7 @@ node ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/dsh-plugin/scrip
 缺省就是 `node`）。走 Python 后端时，平台自身的依赖走 pip，npm 不管：
 
 ```bash
-pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/requirements.txt
+pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/backend_py/requirements.txt
 # Windows 用 python -m pip install ...（官方安装器只装 python.exe，没有 python3）
 ```
 
@@ -194,8 +194,8 @@ pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/requir
   config: { backend: python, pythonPath: /path/to/python }
 ```
 
-**不需要配 `repoDir`**：包里带着 `server.py`、`backend/`（Node 后端）与 `webui/dist-plugin`，
-插件缺省就用包自身目录。
+**不需要配 `repoDir`**：包里带着两版后端（`backend/` Node、`backend_py/` Python）与
+`webui/dist-plugin`，插件缺省就用包自身目录。
 
 **方式 B —— 从检出安装（开发用）:**
 
@@ -279,19 +279,9 @@ python touchstone.py start | stop | restart | status | build | test
 
 ```
 touchstone-dsh/
-├── server.py            HTTP 站点：路由、鉴权、REST、SSE、静态前端
-├── runner.py            任务执行引擎与按项目调度
-├── waitq.py             统一队列模型（「下一个谁跑」的唯一权威）
-├── board.py             开发看板：卡片、门禁、agent 会话、归档同步
-├── chat.py              会话对话：排队消息与注入
-├── prompts.py           逐轮提示词模板（按任务类型与阶段）
-├── sessparse.py         读取 dsh 会话存储，还原成可渲染的对话
-├── dshdriver.py         dsh 进程内 agent 驱动的客户端
-├── dshevents.py         把 dsh 状态流折进进程内注册表
-├── rag.py               案例库可选语义检索
-├── loadgen.py           内置压测引擎（场景、指标、报告）
-├── feishu.py            飞书集成
-├── db.py                SQLite 数据层
+├── backend/             Node 后端（插件形态缺省）：server.js + lib/ + routes/ + schema/
+├── backend_py/          Python 后端：server.py、runner.py、waitq.py、board.py、chat.py、db.py……
+│                        （+ requirements.txt）；「保留但不退役」，独立形态 / backend: python 走它
 ├── builtin_prompts/     注入首轮提示词的提示词资产
 ├── dsh-plugin/          dsh 插件包（Node 薄壳 + 驱动 + 客户端 bundle）
 ├── extensions/          设置页可一键安装的内置资产

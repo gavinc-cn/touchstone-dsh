@@ -55,7 +55,8 @@ LOG_DIR_NAME = ".web"
 LOAD_MAX_SECONDS = 7200      # 单次发压硬上限（秒），超过杀进程树并按失败收尾
 LOAD_STOP_GRACE = 10.0       # 用户停止后给脚本的优雅收尾宽限（秒）
 LOAD_POLL_INTERVAL = 0.5     # 发压进程轮询间隔（秒）：等退出 + 查停止请求
-# 项目根（脚本驱动的 PYTHONPATH 注入点：脚本可 import loadgen.MetricsWriter）
+# 后端源码目录（脚本驱动的 PYTHONPATH 注入点：脚本可 import loadgen.MetricsWriter；
+# 本文件在 backend_py/，与 loadgen.py 同目录 ⇒ 直接取自身目录）
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 # dsh 插件族（路线 A）轮次参数：turn 启动宽限（秒）——followup 后 turn/start 由
 # agent loop 立刻 append，超过该宽限仍无事件即视为链路/宿主异常，收口本轮

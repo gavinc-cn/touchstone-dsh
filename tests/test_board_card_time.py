@@ -122,7 +122,7 @@ def _read(*parts):
 def test_ui_wiring_field_and_class_names():
     """服务端字段 `updated_at_ts` ↔ 前端读取 ↔ 卡面类名 `.board-card-time` 四处对齐。"""
     server_src = open(os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "board.py"),
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend_py", "board.py"),
         encoding="utf-8").read()
     util = _read("utils", "cardTime.js")
     board_jsx = _read("components", "BoardTab.jsx")

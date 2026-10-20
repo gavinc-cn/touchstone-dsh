@@ -27,8 +27,11 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))))
+# Python 后端源码在 <仓库>/backend_py/（2026-10-19 起）
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))),
+    "backend_py"))
 
 import sessparse  # noqa: E402
 

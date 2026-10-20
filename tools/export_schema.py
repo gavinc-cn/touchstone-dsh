@@ -293,8 +293,10 @@ def _fixture_text(title, ddl_list, index_sql, extra_ddl, seeds):
 
 def _load_db(tmp_db_path):
     """导入 db 并把库指到临时路径（**绝不碰真实库**）。"""
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(REPO_ROOT))
+    # Python 后端源码在 <仓库>/backend_py/（2026-10-19 起）
+    backend_py = REPO_ROOT / "backend_py"
+    if str(backend_py) not in sys.path:
+        sys.path.insert(0, str(backend_py))
     os.environ["TS_ADMIN_PASSWORDLESS"] = "1"
     import db                                                    # noqa: PLC0415
     db.DB_OVERRIDE = str(tmp_db_path)

@@ -22,8 +22,9 @@ import export_cases
 import lib
 import rag
 
-# 内置提示词资产目录：builtin_prompts/free_style/（流程文档 + 文件模板）
-_ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+# 内置提示词资产目录：<仓库>/builtin_prompts/free_style/（流程文档 + 文件模板；
+# 资产留在仓库根——Node 后端 backend/lib/prompts.js 读的是同一个真实目录）
+_ASSET_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "builtin_prompts", "free_style")
 # 资产读取缓存（进程内只读一次磁盘）
 _ASSET_CACHE = {}
