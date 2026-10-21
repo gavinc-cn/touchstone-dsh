@@ -526,6 +526,49 @@ function isIntegrityError(error) {
     && (Number(error.errcode) & 0xff) === 19;
 }
 
+/**
+ * 建项目 400 文案（Python 侧 `server.py:ERR_PROJECT_BODY_MISSING` 等同文，对拍按正文比）。
+ * 2026-10-21：空请求体不再沿用「project_dir 缺省 os.homedir()」兜底——旧行为会把家目录
+ * 建成一个项目（Windows 上名字=用户名），之后每次空体请求都撞 (user_id,name) 唯一索引并被
+ * 一律翻译成「项目名已存在」。桌面端 dsh-app 协议的 chunked 重放曾整片命中（见 lib/http.js ⑥）。
+ */
+const ERR_PROJECT_BODY_MISSING = '未收到项目信息（请求体为空或格式非法），请刷新页面后重试';
+/** 项目名（(user_id, name) 唯一索引）冲突文案（Python 同文） */
+const ERR_PROJECT_NAME_EXISTS = '项目名已存在';
+/**
+ * SQLite 对 projects(user_id, name) 唯一索引冲突的消息（Python sqlite3 与 node:sqlite
+ * 实测逐字节相同）。只有命中它才算真重名。
+ */
+const PROJECT_NAME_CONFLICT_MSG = 'UNIQUE constraint failed: projects.user_id, projects.name';
+
+/**
+ * 该约束错是否 (user_id, name) 唯一索引冲突（= 真重名）。
+ *
+ * 2026-10-21 事故教训：旧实现把**任意** SQLITE_CONSTRAINT（NOT NULL 等）都翻成
+ * 「项目名已存在」，真实原因被吞 ⇒ 桌面端那次「没这个项目却说已存在」多查了两轮。
+ * @param {any} error
+ * @returns {boolean}
+ */
+function isProjectNameConflict(error) {
+  return String((error && error.message) || error).includes(PROJECT_NAME_CONFLICT_MSG);
+}
+
+/**
+ * 非重名的数据库约束错文案（action: 创建/保存；Python 侧同模板同文）。
+ * @param {string} action
+ * @param {any} error
+ * @returns {string}
+ */
+function projectConstraintErrorText(action, error) {
+  return `项目${action}失败（数据库约束: ${String((error && error.message) || error)}）`;
+}
+
+/** `{name, project_dir}` 至少出现一个键（空体守卫；`body` 恒是普通对象） */
+function hasProjectFormKey(body) {
+  return Object.prototype.hasOwnProperty.call(body, 'name')
+    || Object.prototype.hasOwnProperty.call(body, 'project_dir');
+}
+
 /** Node 的 fs 错误（带 code/syscall），与「解码/解析」类错误区分开（同 `lib/loadgen.js` 口径） */
 function isOsError(error) {
   return Boolean(error) && typeof error.code === 'string' && typeof error.syscall === 'string';
@@ -626,6 +669,13 @@ function respondWorkDirUnavailable(ctx, failure) {
  */
 async function apiCreateProject(ctx) {
   const body = await ctx.readBody();           // Python do_POST:1048 统一读体
+  // 空体守卫（2026-10-21）：body 连 name/project_dir 键都没有（空体/非对象/格式非法）⇒
+  // 明确 400，**不**沿 `os.path.expanduser("~")` 兜底建项目——旧行为会落下「家目录项目」
+  // （Windows 上名字=用户名），之后每次空体请求都撞唯一索引并被误报成「项目名已存在」。
+  if (!hasProjectFormKey(body)) {
+    ctx.errorSpaced(400, ERR_PROJECT_BODY_MISSING);
+    return;
+  }
   const projectDir = pyStripBare(pyGet(body, 'project_dir', undefined)) || os.homedir();
   // 项目名称留空时自动取项目路径最后一段（前端已先行填充，此处兜底）
   const name = normalizeProjectName(
@@ -667,7 +717,14 @@ async function apiCreateProject(ctx) {
       reasoningEffort, permissionMode, { db: ctx.db });
   } catch (error) {
     if (isIntegrityError(error)) {
-      ctx.errorSpaced(400, '项目名已存在');
+      // 只有 (user_id, name) 唯一索引冲突才是真重名；其余约束错（NOT NULL 等）照实上报 +
+      // 落一行日志，不再一律冒充「项目名已存在」（2026-10-21 桌面端事故的教训）
+      if (isProjectNameConflict(error)) {
+        ctx.errorSpaced(400, ERR_PROJECT_NAME_EXISTS);
+        return;
+      }
+      console.error(`touchstone-node: 建项目撞数据库约束（非重名）: ${String(error && error.message)}`);
+      ctx.errorSpaced(400, projectConstraintErrorText('创建', error));
       return;
     }
     throw error;
@@ -731,7 +788,13 @@ async function apiUpdateProject(ctx, projectId) {
       reasoningEffort, permissionMode, { db: ctx.db });
   } catch (error) {
     if (isIntegrityError(error)) {
-      ctx.errorSpaced(400, '项目名已存在');
+      // 同建项目：只有 (user_id, name) 唯一索引冲突才是真重名，其余约束错照实上报
+      if (isProjectNameConflict(error)) {
+        ctx.errorSpaced(400, ERR_PROJECT_NAME_EXISTS);
+        return;
+      }
+      console.error(`touchstone-node: 改项目撞数据库约束（非重名）: ${String(error && error.message)}`);
+      ctx.errorSpaced(400, projectConstraintErrorText('保存', error));
       return;
     }
     throw error;

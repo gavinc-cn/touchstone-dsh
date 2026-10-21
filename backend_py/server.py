@@ -837,6 +837,26 @@ def path_last_segment(path):
     return ""
 
 
+# 建项目 400 文案（Node 侧 `backend/routes/projects.js` 逐字同文，对拍按正文比）：
+ERR_PROJECT_BODY_MISSING = "未收到项目信息（请求体为空或格式非法），请刷新页面后重试"
+ERR_PROJECT_NAME_EXISTS = "项目名已存在"
+# sqlite（Python sqlite3 与 Node node:sqlite 实测逐字节相同）对 projects(user_id,name)
+# 唯一索引冲突的消息；只有命中它才算「重名」，其余约束错照实上报。
+# 2026-10-21：旧实现把**任意** sqlite3.IntegrityError 都翻成「项目名已存在」，且请求体为空时
+# 回落到家目录/用户名兜底建项目 ⇒ 桌面端 chunked 请求体被吞时整片误报成重名（见 _read_json）。
+PROJECT_NAME_CONFLICT_MSG = "UNIQUE constraint failed: projects.user_id, projects.name"
+
+
+def is_project_name_conflict(exc):
+    """该 IntegrityError 是否 (user_id, name) 唯一索引冲突（= 真重名）。"""
+    return PROJECT_NAME_CONFLICT_MSG in str(exc)
+
+
+def project_constraint_error_text(action, exc):
+    """非重名的数据库约束错文案（action: 创建/保存；Node 侧同模板同文）。"""
+    return f"项目{action}失败（数据库约束: {exc}）"
+
+
 def fs_roots():
     """按服务端平台返回目录浏览的根路径列表。
 
@@ -2253,6 +2273,16 @@ class Handler(BaseHTTPRequestHandler):
                       "application/json; charset=utf-8")
 
     def _api_create_project(self, body):
+        # 请求体连 name/project_dir 键都没有（空体/非对象/格式非法）⇒ 明确 400，**不兜底**。
+        # 旧实现会回落到 project_dir=~、name=家目录末段（Windows 上=用户名）真建一个项目，
+        # 之后每次空体请求都撞那条项目的 (user_id,name) 唯一索引、被误报成「项目名已存在」。
+        # 2026-10-21 桌面端事故：dsh-app 协议把 POST 重放成 chunked，旧 _read_json 只认
+        # Content-Length ⇒ 体被当空 ⇒ 整片命中这条死路（根因/证据见 debug_runtime 文档）。
+        if "name" not in body and "project_dir" not in body:
+            self._respond(400, json.dumps(
+                {"error": ERR_PROJECT_BODY_MISSING}, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8")
+            return
         project_dir = (body.get("project_dir") or "").strip() or os.path.expanduser("~")
         # 项目名称留空时自动取项目路径最后一段（前端已先行填充, 此处兜底）
         name = normalize_project_name(
@@ -2295,8 +2325,15 @@ class Handler(BaseHTTPRequestHandler):
                                            skill_test, skill_cases,
                                            reasoning_effort=reasoning_effort,
                                            permission_mode=permission_mode)
-        except sqlite3.IntegrityError:
-            self._respond(400, json.dumps({"error": "项目名已存在"}, ensure_ascii=False).encode("utf-8"),
+        except sqlite3.IntegrityError as e:
+            # 只有 (user_id, name) 唯一索引冲突才是真重名；其余约束错（NOT NULL 等）
+            # 照实上报 + 落一行日志，不再一律冒充「项目名已存在」（2026-10-21 事故教训）
+            if is_project_name_conflict(e):
+                message = ERR_PROJECT_NAME_EXISTS
+            else:
+                message = project_constraint_error_text("创建", e)
+                print(f"[server] 建项目撞数据库约束（非重名）: {e}", file=sys.stderr)
+            self._respond(400, json.dumps({"error": message}, ensure_ascii=False).encode("utf-8"),
                           "application/json; charset=utf-8")
             return
         except OSError as e:
@@ -2350,8 +2387,14 @@ class Handler(BaseHTTPRequestHandler):
                               str(body.get("skill_test", row["skill_test"]) or "").strip(),
                               str(body.get("skill_cases", row["skill_cases"]) or "").strip(),
                               reasoning_effort, permission_mode)
-        except sqlite3.IntegrityError:
-            self._respond(400, json.dumps({"error": "项目名已存在"}, ensure_ascii=False).encode("utf-8"),
+        except sqlite3.IntegrityError as e:
+            # 同建项目：只有 (user_id, name) 唯一索引冲突才是真重名，其余约束错照实上报
+            if is_project_name_conflict(e):
+                message = ERR_PROJECT_NAME_EXISTS
+            else:
+                message = project_constraint_error_text("保存", e)
+                print(f"[server] 改项目撞数据库约束（非重名）: {e}", file=sys.stderr)
+            self._respond(400, json.dumps({"error": message}, ensure_ascii=False).encode("utf-8"),
                           "application/json; charset=utf-8")
             return
         except OSError as e:
@@ -5395,16 +5438,62 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def _read_json(self):
+        """读请求体 JSON 对象（Node 侧 `backend/lib/http.js:readJsonBody` 的对应物）。
+
+        逐条对应：Content-Length 缺失/≤0 ⇒ 空对象（**例外**见下）；长度头非十进制整数
+        ⇒ int() 抛错（不补响应，连接断）；读完再 json.loads，解析/解码失败 ⇒ 空对象；
+        非对象（数组/字符串/数字/null）⇒ 空对象（各接口不做类型防护）。
+
+        **分块传输**（`Transfer-Encoding: chunked` 且没有 Content-Length）：`http.server`
+        不代解分块帧，这里自己拆（`_read_chunked_body`）。为什么必须有（2026-10-21 桌面端
+        事故根因）：DSH 桌面端面板 iframe 走 `dsh-app://` 自定义协议，Electron 主进程
+        `forwardWebRequest` 用 ReadableStream 重放请求体（`duplex:'half'`）⇒ 转出来的 POST
+        只有 chunked、没有 Content-Length；旧实现只认 Content-Length ⇒ 整个桌面端面板的写
+        请求体被静默当空，建项目回落到家目录（Windows=用户名）并撞同名唯一索引，被误报成
+        「项目名已存在」。
+        """
         length = int(self.headers.get("Content-Length", 0) or 0)
-        if length <= 0:
+        if length > 0:
+            try:
+                data = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                return {}
+            # 合法 JSON 但非对象（数组/字符串/数字）时按空对象处理：
+            # 各接口对 data.get(...) 无类型防护，非 dict 会抛 AttributeError 断连
+            return data if isinstance(data, dict) else {}
+        transfer_encoding = (self.headers.get("Transfer-Encoding", "") or "").lower()
+        if "chunked" not in transfer_encoding:
             return {}
         try:
-            data = json.loads(self.rfile.read(length).decode("utf-8"))
+            data = json.loads(self._read_chunked_body().decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             return {}
-        # 合法 JSON 但非对象（数组/字符串/数字）时按空对象处理：
-        # 各接口对 data.get(...) 无类型防护，非 dict 会抛 AttributeError 断连
         return data if isinstance(data, dict) else {}
+
+    def _read_chunked_body(self):
+        """读 HTTP/1.1 分块正文（`Transfer-Encoding: chunked`），返回去掉分块帧的字节。
+
+        帧格式：`<hex-size>[;ext]\\r\\n<data>\\r\\n` 若干，直到 size=0 的结束块
+        （结束块后可能跟 trailer，读到空行为止，忽略内容）。
+        `http.server` 不会替我们解帧，必须按 `rfile` 逐段读；读出的正文与
+        Content-Length 形态等价（Node 侧由 node:http 代解，故那边只需读到 end）。
+        """
+        chunks = []
+        while True:
+            line = self.rfile.readline(65536)
+            if not line:
+                break                      # 客户端提前断开：按已读内容返回
+            size_text = line.split(b";", 1)[0].strip()
+            size = int(size_text, 16)      # 非法 chunk-size ⇒ ValueError（同 int(Content-Length) 口径）
+            if size == 0:
+                while True:                # 结束块后可能有 trailer：读到空行为止
+                    trailer = self.rfile.readline(65536)
+                    if trailer in (b"\r\n", b"\n", b""):
+                        break
+                break
+            chunks.append(self.rfile.read(size))
+            self.rfile.read(2)             # 每块数据后的 CRLF
+        return b"".join(chunks)
 
     def _respond(self, code, body, content_type, extra_headers=None):
         self.send_response(code)

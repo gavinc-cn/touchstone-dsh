@@ -34,12 +34,23 @@ function pyIntStrict(text) {
  * 读请求体（Python `server.py:_read_json`(5256) 的对应物）——**每个写端点都必须走它**。
  *
  * 逐条对齐 Python（任一条不同就是 bug，实例级对拍会照出来）：
- *  1. `Content-Length` 缺失或 ≤0 ⇒ 空对象，**不读流**；
+ *  1. `Content-Length` 缺失或 ≤0 ⇒ 空对象，**不读流**。**例外**：`Transfer-Encoding: chunked`
+ *     时没有长度头也可能有体（见 ⑥）；
  *  2. 长度头存在但不是十进制整数 ⇒ `int()` 抛错（调用方不补响应，连接直接断——Python 同形）；
  *  3. 读满 `length` 字节后 `JSON.parse`：解析失败（含 UTF-8 解码失败）⇒ 空对象；
  *  4. 合法 JSON 但**不是普通对象**（数组/字符串/数字/布尔/null）⇒ 空对象。Python 注释写明理由：
  *     各接口对 `data.get(...)` 无类型防护，非 dict 会抛 AttributeError 断连；
- *  5. 客户端提前断开导致字节不足 ⇒ 按已读内容解析（Python `rfile.read(n)` 返回短读，同形）。
+ *  5. 客户端提前断开导致字节不足 ⇒ 按已读内容解析（Python `rfile.read(n)` 返回短读，同形）；
+ *  6. **分块传输**（`Transfer-Encoding: chunked` 且**没有** Content-Length）⇒ **读到流结束**
+ *     再解析。Node 的 HTTP 服务端已把分块帧解好（data 事件就是正文），故这里只管读满到 end。
+ *     Python 侧对应 `_read_chunked_body()`（`http.server` 不代解分块帧，那边要自己拆）。
+ *
+ * ⑥ 为什么必须有（2026-10-21 桌面端事故的根因）：DSH 桌面端的面板 iframe 走 `dsh-app://`
+ * 自定义协议，Electron 主进程的 `forwardWebRequest` 用 ReadableStream 重放请求体
+ * （`duplex:'half'`）⇒ 转出来的 POST **只有 chunked、没有 Content-Length**（隔离 Electron
+ * 实测）。旧实现只认 Content-Length ⇒ 整个桌面端面板的写请求（建项目/建任务/看板操作/作答…）
+ * 的请求体被静默当空：建项目回落到 `os.homedir()`（Windows = 用户名），撞上库里那条同名的
+ * 兜底项目 ⇒ UNIQUE ⇒ 被误报成「项目名已存在」，用户看到"没这个项目却说已存在"。
  *
  * **必须 await**：不 await 时解析异常会变成 unhandledRejection 把整个后端带走（M3 的教训：
  * Node 侧没有 socketserver 那种「只断一条连接」的天然兜底，这是 `dispatchSafely` 存在的理由）。
@@ -64,7 +75,11 @@ export function readJsonBody(req) {
     // 且 `p1 === p2` 这条不变量失效）。
     return Promise.reject(error);
   }
-  if (!(length > 0)) return Promise.resolve({});
+  // 见函数头 ⑥：无长度头 + chunked ⇒ 读到 end。同时容忍大小写与逗号分隔的编码列表。
+  const chunked = String(req?.headers?.['transfer-encoding'] || '')
+    .toLowerCase().split(',').some((part) => part.trim() === 'chunked');
+  const readToEnd = chunked && !(length > 0);
+  if (!(length > 0) && !readToEnd) return Promise.resolve({});
 
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -97,6 +112,11 @@ export function readJsonBody(req) {
     req.on('data', (chunk) => {
       if (settled) return;
       let buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (readToEnd) {
+        // ⑥ 分块体：没有长度上限可裁（结束块由 HTTP 层保证），全部收下
+        chunks.push(buf);
+        return;
+      }
       // **只取前 `length` 字节**（= Python `rfile.read(length)`）：多出来的属于下一个请求
       // （pipelines/keep-alive），不能混进本次正文。单测「只读 Content-Length 字节」钉住它。
       const left = length - received;

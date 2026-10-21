@@ -302,7 +302,7 @@ test('建项目：派生子目录 free_style 是普通文件 ⇒ 400 且路径�
   assert.equal(countOf(env, 'projects'), 0);
 });
 
-test('建项目：project_dir 缺省 ⇒ os.homedir()（HOME 指到夹具，不碰真 home）', async (t) => {
+test('建项目：project_dir 缺省（带 name）⇒ os.homedir()（HOME 指到夹具，不碰真 home）', async (t) => {
   const env = setup('create-home');
   t.after(() => env.close());
   const home = path.join(env.dat, 'fakehome');
@@ -310,15 +310,54 @@ test('建项目：project_dir 缺省 ⇒ os.homedir()（HOME 指到夹具，不�
   const oldHome = process.env.HOME;
   process.env.HOME = home;                       // os.homedir() 与 os.path.expanduser("~") 同源
   try {
-    const r = await call(env, 'POST', '/api/projects', { body: {} });
+    const r = await call(env, 'POST', '/api/projects', { body: { name: 'home-proj' } });
     assert.equal(r.status, 200);
     const row = projectRow(env, r.json().id);
     assert.equal(row.project_dir, home);
-    assert.equal(row.name, 'fakehome');          // path_last_segment(home)
+    assert.equal(row.name, 'home-proj');
     assert.equal(row.work_dir, path.join(home, '.touchstone'));
     assert.ok(isDirNow(path.join(home, '.touchstone', 'bug_report')));
   } finally {
     if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+  }
+});
+
+test('建项目：空请求体（无 name/project_dir 键）⇒ 400 明确文案、不落行、不建 homedir 项目', async (t) => {
+  // 2026-10-21 桌面端事故：旧实现把空体回落成 project_dir=~ / name=家目录末段（Windows=用户名）
+  // 真建一个项目，之后每次空体请求都撞它的 (user_id,name) 唯一索引、被误报成「项目名已存在」。
+  const env = setup('create-empty');
+  t.after(() => env.close());
+  const oldHome = process.env.HOME;
+  process.env.HOME = env.dat;
+  try {
+    // ① 无体（无 Content-Length）：Python 侧这是 `_read_json` 的「无体」档
+    await expectBody(env, 'POST', '/api/projects', { body: undefined },
+      400, '{"error": "未收到项目信息（请求体为空或格式非法），请刷新页面后重试"}');
+    // ② 空 JSON 对象：旧实现同样回落到 homedir
+    await expectBody(env, 'POST', '/api/projects', { body: {} },
+      400, '{"error": "未收到项目信息（请求体为空或格式非法），请刷新页面后重试"}');
+    assert.equal(countOf(env, 'projects'), 0, '空体守卫必须一条项目行都不落');
+    assert.equal(isDirNow(path.join(env.dat, '.touchstone')), false,
+      '不许建出 homedir/.touchstone 目录');
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+  }
+});
+
+test('建项目：非重名约束错 ⇒ 400 照实上报（不再冒充「项目名已存在」）', async (t) => {
+  // 2026-10-21 事故教训：旧实现把任意 sqlite3.IntegrityError 都翻成「项目名已存在」。
+  // 用一个 BEFORE INSERT 触发器 RAISE(ABORT) 造真·非重名约束错。
+  const env = setup('create-constraint');
+  t.after(() => env.close());
+  env.db.exec("CREATE TRIGGER block_projects BEFORE INSERT ON projects"
+    + " BEGIN SELECT RAISE(ABORT, 'forced non-name constraint'); END;");
+  try {
+    await expectBody(env, 'POST', '/api/projects',
+      { body: { name: '撞触发器项目', project_dir: path.join(env.dat, 'trigger') } },
+      400, '{"error": "项目创建失败（数据库约束: forced non-name constraint）"}');
+    assert.equal(countOf(env, 'projects'), 0);
+  } finally {
+    env.db.exec('DROP TRIGGER IF EXISTS block_projects');
   }
 });
 

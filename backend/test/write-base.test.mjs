@@ -162,6 +162,50 @@ test('readJsonBody：不发 close 事件（只有 end）也能收尾', async () 
 });
 
 // --------------------------------------------------------------------------
+// readJsonBody —— 分块传输（2026-10-21 桌面端建项目事故）
+//
+// 桌面端面板走 `dsh-app://` 自定义协议：Electron 主进程 forwardWebRequest 用
+// ReadableStream 重放请求体（duplex:'half'）⇒ POST 只有 `Transfer-Encoding: chunked`、
+// 没有 Content-Length。旧实现把它当空体 ⇒ 建项目回落到家目录、撞唯一索引、误报重名。
+// 这里钉住：无长度头 + chunked ⇒ 读到 end 再解析；且回落口径与定长形态一致。
+// --------------------------------------------------------------------------
+
+test('readJsonBody：无 Content-Length 但 Transfer-Encoding: chunked ⇒ 读到 end 再解析', async () => {
+  const text = JSON.stringify({ name: '分块', n: 2, nested: { a: [1, 2] } });
+  // 多段 data 到达（Node 的 HTTP 层已解好分块帧，这里模拟解帧后的正文流）
+  const parts = [text.slice(0, 5), text.slice(5, 12), text.slice(12)];
+  const req = fakeReq({ 'transfer-encoding': 'chunked' }, parts);
+  assert.deepEqual(await readJsonBody(req), { name: '分块', n: 2, nested: { a: [1, 2] } });
+});
+
+test('readJsonBody：chunked 头的形态宽容面（大小写 / 编码列表 / 前后空白）', async () => {
+  for (const value of ['Chunked', 'CHUNKED', 'gzip, chunked', ' chunked ']) {
+    const req = fakeReq({ 'transfer-encoding': value }, '{"a":1}');
+    assert.deepEqual(await readJsonBody(req), { a: 1 }, `头 ${JSON.stringify(value)}`);
+  }
+});
+
+test('readJsonBody：chunked 的回落口径与定长一致（非法 JSON / 非对象 / 非法 UTF-8）', async () => {
+  assert.deepEqual(await readJsonBody(fakeReq({ 'transfer-encoding': 'chunked' }, '{')), {});
+  assert.deepEqual(await readJsonBody(fakeReq({ 'transfer-encoding': 'chunked' }, '[1,2]')), {});
+  const raw = Buffer.concat([
+    Buffer.from('{"a":"', 'utf8'), Buffer.from([0xff]), Buffer.from('"}', 'utf8'),
+  ]);
+  assert.deepEqual(await readJsonBody(fakeReq({ 'transfer-encoding': 'chunked' }, raw)), {});
+});
+
+test('readJsonBody：chunked 但 body 为空 ⇒ 空对象（不报错、不挂起）', async () => {
+  const req = fakeReq({ 'transfer-encoding': 'chunked' }, '');
+  assert.deepEqual(await readJsonBody(req), {});
+});
+
+test('readJsonBody：定长头与 chunked 同时出现 ⇒ 仍以内容长度为准（只读前 N 字节）', async () => {
+  const body = Buffer.from('{"a":1}EXTRA', 'utf8');
+  const req = fakeReq({ 'content-length': '7', 'transfer-encoding': 'chunked' }, body);
+  assert.deepEqual(await readJsonBody(req), { a: 1 });
+});
+
+// --------------------------------------------------------------------------
 // ctx.readBody / ctx.stateCache / ctx.sessionContext
 // --------------------------------------------------------------------------
 
