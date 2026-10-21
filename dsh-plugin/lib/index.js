@@ -841,7 +841,10 @@ function stopChild(proc, logger, why) {
  * cordis 插件入口。config 来自 profile patch insert 条目（install.sh 写入）:
  *   repoDir    Touchstone 平台根（可选; 缺省 = 包自身目录, 因为包是自包含的）
  *   pythonPath Python 解释器（可选; 缺省按 `python` → `python3` 顺序真跑一次探一个,
- *              本机该指含 zstandard 的 conda env 或已 pip 装过依赖的那支）
+ *              本机该指含 zstandard 的 conda env 或已 pip 装过依赖的那支）。
+ *              **Node 后端下它还有第二个作用**（2026-10-21）：透传为子进程的 `TS_PYTHON`,
+ *              供 `backend/lib/runner.js` 执行夹具脚本（`verify.py` / 发压 `run.py`）——
+ *              这些脚本是 agent 生成的 Python，与宿主用什么后端无关。
  *   extraEnv   透传子进程的额外环境变量（如 TOUCHSTONE_DB 指向隔离实例库）
  * 返回组合 disposer（注销路由 + 断开驱动 + SIGTERM 子进程），dsh 停用插件时调用；
  * 另有「启用即回收上一份壳」与「掉线自检」两条自愈路径（见文件头注释）。
@@ -936,6 +939,13 @@ export async function apply(ctx, config = {}) {
     // 用 process.execPath（= 当前 dsh 宿主跑的那个 node）而不是 PATH 上的 `node`：
     // 用户机器上可能根本没有 node 在 PATH 里（dsh 自己是打包运行的），
     // 而且这样能保证「探测的 Node」与「拉起后端的 Node」是同一个二进制（同一个 runtime）。
+    //
+    // 显式 `pythonPath` 透传为 `TS_PYTHON`（2026-10-21）：Node 后端不等于「不需要 Python」——
+    // 脚本复测的 `verify.py` 与脚本驱动压测的 `run.py` 都是 agent 生成的 Python 夹具脚本，
+    // 由 `backend/lib/runner.js` 解析解释器执行。配了就以配置为准（后端侧失败时不静默回落）；
+    // 不配则后端按平台候选自行探测（Windows: python → python3 → py -3），**不在这里预检**
+    // —— 不跑这两类任务就完全不需要 Python，这正是 Node 后端的收益。
+    if (config.pythonPath) childEnv.TS_PYTHON = config.pythonPath;
     if (!entryMissing) {
       // 能力探测（M8）：探不到的常见形态是 import 期就退出的后端 —— 那时日志里只有一行
       // `ERR_UNKNOWN_BUILTIN_MODULE: No such built-in module: node:sqlite`，用户无从下手。

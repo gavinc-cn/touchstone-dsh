@@ -8,7 +8,7 @@
  * 所以判据不是「node 能起来」，而是 node 路径下**一次都不许碰 Python**
  * （不探测解释器、不跑依赖预检、不出现缺依赖提示页）。这条性质只有把 PATH 完全控制住、
  * 用「被调用就写标记文件」的假解释器才测得准——所以本脚本把 PATH 换成只有假 python 的
- * 临时目录，再真调 `apply()` 走一遍七场景：
+ * 临时目录，再真调 `apply()` 走一遍八组场景：
  *   A 未配 backend（**缺省 node**，2026-10-15 M8 翻）⇒ 不碰 Python + 真起 Node 骨架
  *   B backend: node           ⇒ 同 A + 日志/SPA 判据
  *   C backend: node 但入口缺失 ⇒ 不抛异常、路由仍在、面板看到可读提示页
@@ -19,6 +19,8 @@
  *     F3 记录已过期（残留）/ F4 pid 存活但父进程已死（PID 复用/父死残留，不断言活宿主）
  *   G 能力探测失败（宿主 Node 无 node:sqlite）⇒ **不 spawn** + 提示页 + 两条出路
  *     （G 靠 `_setNodeRuntimeProbeForTest` 注入，真机上造不出「能力不足的宿主 Node」）
+ *   H node 后端 + 显式 `pythonPath` ⇒ 透传为子进程 `TS_PYTHON`（夹具脚本解释器；负对照＝
+ *     不配就不注入，交给 backend/lib/runner.js 按平台候选自行探测）
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -142,6 +144,31 @@ function makeCrashRepo(tag, stderrText) {
   fs.writeFileSync(path.join(dir, 'backend', 'server.js'),
     `process.stderr.write(${JSON.stringify(stderrText)} + "\\n");\nprocess.exit(3);\n`);
   return dir;
+}
+
+/**
+ * 造一个「把子进程收到的 TS_PYTHON 写盘就退出」的假后端仓库（H 用）。
+ * 为什么真起子进程而不是读代码：判据是**环境变量真的传到了后端进程**（Node 后端的
+ * 夹具脚本解释器覆盖），静态 grep 只能证明写了那行赋值。
+ */
+function makeEnvRepo(tag) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `ts-node-env-${tag}-`));
+  fs.mkdirSync(path.join(dir, 'backend'));
+  const out = path.join(dir, 'seen-ts-python.txt');
+  fs.writeFileSync(path.join(dir, 'backend', 'server.js'),
+    'const fs = require("node:fs");\n'
+    + `fs.writeFileSync(${JSON.stringify(out)}, String(process.env.TS_PYTHON ?? ""));\n`
+    + 'process.exit(0);\n');
+  return { dir, out };
+}
+
+/** 等假后端把观测结果写出来（子进程启动是异步的；5s 上限只防死等） */
+async function waitFile(file, ms = 5000) {
+  const deadline = performance.now() + ms;
+  while (!fs.existsSync(file) && performance.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return fs.existsSync(file);
 }
 
 /** 往隔离库写一条 `<db>.pid` 归属记录（形状与 backend/lib/lock.js:writePidRecord 同源） */
@@ -392,6 +419,42 @@ try {
     });
   } finally {
     _setNodeRuntimeProbeForTest(null);
+  }
+
+  // ---- H node 后端 + 显式 pythonPath：透传 TS_PYTHON（夹具脚本解释器随配置） ----
+  // Node 后端不等于「不需要 Python」：脚本复测 verify.py / 脚本驱动压测 run.py 仍是 Python
+  // 夹具脚本，由 backend/lib/runner.js 解析解释器。配了 pythonPath 就该以配置为准（失败时
+  // 后端响亮报错，不静默换 PATH 上另一支），没配则不注入、由后端按平台候选自己探。
+  const cfgEnvRepo = makeEnvRepo('cfg');
+  try {
+    const fakePy = 'C:/Users/dev/AppData/Local/Programs/Python/Python312/python.exe';
+    await withShell({
+      ...baseConfig, repoDir: cfgEnvRepo.dir, backend: 'node', pythonPath: fakePy,
+      // 宿主环境即使有 TS_PYTHON 也要被显式配置覆盖 ⇒ 判据只由 config.pythonPath 决定
+      extraEnv: { ...baseConfig.extraEnv, TS_PYTHON: '' },
+    }, async (s) => {
+      const seen = await waitFile(cfgEnvRepo.out);
+      const value = seen ? fs.readFileSync(cfgEnvRepo.out, 'utf8') : '<未写盘>';
+      check('H node 后端 + config.pythonPath ⇒ 子进程收到 TS_PYTHON（夹具脚本解释器以配置为准）',
+        value === fakePy, `${value} | ${s.logs.slice(-3).join(' | ')}`);
+    });
+  } finally {
+    fs.rmSync(cfgEnvRepo.dir, { recursive: true, force: true });
+  }
+  // 负对照：不配 pythonPath ⇒ 不注入（后端自行按平台候选探测；这里用空串显式隔离宿主环境）
+  const noCfgEnvRepo = makeEnvRepo('none');
+  try {
+    await withShell({
+      ...baseConfig, repoDir: noCfgEnvRepo.dir, backend: 'node',
+      extraEnv: { ...baseConfig.extraEnv, TS_PYTHON: '' },
+    }, async (s) => {
+      const seen = await waitFile(noCfgEnvRepo.out);
+      const value = seen ? fs.readFileSync(noCfgEnvRepo.out, 'utf8') : '<未写盘>';
+      check('H 负对照：未配 pythonPath ⇒ 不注入 TS_PYTHON（Python 链仍一次不碰）',
+        value === '' && !s.pythonCalled(), `${value} | ${s.logs.slice(-3).join(' | ')}`);
+    });
+  } finally {
+    fs.rmSync(noCfgEnvRepo.dir, { recursive: true, force: true });
   }
 } finally {
   for (const suffix of ['', '.lock', '.pid']) {

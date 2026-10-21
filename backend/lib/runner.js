@@ -196,15 +196,23 @@
  *      模块级 import runner.js ⇒ 静态 import 成环；Python 用函数内 `import board` 防循环，
  *      Node 的等价物即函数内动态 import——**位置也照 Python**（在卡片/项目两道校验
  *      之后，三条 `return None` 分支因此不触发 board 加载）。
- *   ㉙ **本族解释器口径（M6.5 冻结契约，R2 落地）**：用户夹具脚本（`verify.py`、方案包
- *      `run.py`）是 agent 按协议生成的 **Python** ⇒ `runOneScript` 与 `loadCmd` 的脚本驱动支
- *      两侧都跑 python3：A 侧 `sys.executable`、B 侧 `whichSync('python3')`（**运行期解析一次
- *      并缓存**；解析不到抛具名 `PythonInterpreterMissing`——**绝不回落 `'python3'` 字面量、
- *      绝不抛空**）。`loadCmd` 的**场景驱动**支是平台自己的引擎：A 侧
- *      `[sys.executable, <repo>/loadgen.py, 'run', …]`、B 侧
+ *   ㉙ **本族解释器口径（M6.5 冻结契约，R2 落地；2026-10-21 跨平台修订）**：用户夹具脚本
+ *      （`verify.py`、方案包 `run.py`）是 agent 按协议生成的 **Python** ⇒ `runOneScript` 与
+ *      `loadCmd` 的脚本驱动支两侧都跑本机 Python 3：A 侧 `sys.executable`、B 侧
+ *      `pythonExe()` **运行期解析一次并缓存**（解析不到抛具名 `PythonInterpreterMissing`——
+ *      **绝不回落字面量、绝不抛空**）。B 侧解析规则（`resolvePython`）：① 显式覆盖
+ *      `TS_PYTHON`（插件形态由薄壳把 `config.pythonPath` 透传下来）优先、失败**不静默回落**；
+ *      ② 否则按平台候选**逐个真 spawn 探一次**（`probePython`，探针 = 打印主版本 +
+ *      `sys.executable` 的 UTF-8 hex）——Windows `python` → `python3` → `py -3`（官方安装器
+ *      只装 `python.exe`；Store 的 `python3.exe` 是占位别名、真跑不返回；`py` 启动器要 `-3`），
+ *      POSIX `python3` → `python`（**顺序有意保持 M6.5 口径**：对拍里 B 侧仍是 python3，
+ *      与 A 侧 `sys.executable` 逐字节相同）。候选退出码非 0 / 不是 Python 3 / 无探针输出，
+ *      一律当不可用跳过。`loadCmd` 的**场景驱动**支是平台自己的引擎：A 侧
+ *      `[sys.executable, <repo>/backend_py/loadgen.py, 'run', …]`、B 侧
  *      `[process.execPath, <repo>/backend/lib/loadgen.js, 'run', …]` ⇒ 两侧 argv[0]/argv[1]
  *      是「本族解释器 + 本族入口」，**逐字节不可比是设计使然**（用例对这两个位置逐路径
- *      `ignore` 并写明理由），其余九处产物路径与参数逐字节比。`PYTHONPATH=ROOT_DIR` 两侧
+ *      `ignore` 并写明理由），其余九处产物路径与参数逐字节比。`PYTHONPATH=<Python 库目录>`
+ *      （= `backend_py/`；2026-10-19 搬目录后 Node 侧由 `PYTHON_LIB_DIR` 对齐，见该常量注释）两侧
  *      同值保留（用户 `run.py` 要 `import loadgen` 这个 Python 库）；M8 退役 Python 时重审。
  *   ㉚ **`_script_live` 的全关键字形参 → 一个 `opts` 袋**：Python
  *      `def _script_live(self, project, *, phase=None, current=None, event=None, stats=None,
@@ -305,13 +313,13 @@
  * 零 npm 依赖：只用 `node:` 内建模块 + 本仓库内模块。
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { RETIRED_FAMILY, RETIRED_MSG, agentFamily, whichSync } from './agents.js';
+import { RETIRED_FAMILY, RETIRED_MSG, agentFamily } from './agents.js';
 import * as chat from './chat.js';
 import {
   deleteRounds,
@@ -641,11 +649,20 @@ export const LOAD_STOP_GRACE = 10.0;
 /** 发压进程轮询间隔（秒，`LOAD_POLL_INTERVAL`）：等退出 + 查停止请求 */
 export const LOAD_POLL_INTERVAL = 0.5;
 /**
- * 项目根（`runner.ROOT_DIR` = `os.path.dirname(os.path.abspath(__file__))` 的对应物）：
- * 脚本驱动的 `PYTHONPATH` 注入点（脚本可 `import loadgen`）与场景驱动入口
- * `<repo>/loadgen.py` 的所在目录。与 `db.js` 的 `REPO_ROOT` 同值（各自算，不互相 import）。
+ * 仓库根：场景驱动入口 `<repo>/backend/lib/loadgen.js` 的所在目录。与 `db.js` 的 `REPO_ROOT`
+ * 同值（各自算，不互相 import）。
+ *
+ * ⚠ 2026-10-19 Python 后端搬进 `backend_py/` 后，Python 的 `runner.ROOT_DIR`（=
+ * `os.path.dirname(os.path.abspath(__file__))`）语义变成 **`backend_py/`**；Node 侧的
+ * 仓库根**不能**直接当 `PYTHONPATH` 用（见 `PYTHON_LIB_DIR`），两者用途不同、各自命名。
  */
 export const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+/**
+ * 脚本驱动注入的 `PYTHONPATH` 首段：用户 `run.py` 要 `import loadgen`（`MetricsWriter` 等），
+ * 与 Python 后端 `runner.ROOT_DIR`（`backend_py/`）**同值**（对拍口径，见文件头差异㉙）。
+ */
+export const PYTHON_LIB_DIR = path.join(ROOT_DIR, 'backend_py');
 
 /** `### PID <n>` 平台进度标记（`PID_MARK_RE`）：`_kill_residual` 从轮次日志尾找残留进程 */
 const PID_MARK_RE = /### PID (\d+)/g;
@@ -3045,9 +3062,9 @@ export class Runner {
    * 返回 `[归一化退出码, 记录文件名]`：超时/启动失败/非 0/1/2 退出码统一按 1（疑似回归）
    * 处理，输出全文存证；退出码 0/1/2 原样保留。
    *
-   * **本族解释器口径**（M6.5 冻结，见文件头差异㉙）：用户夹具脚本是 agent 按协议生成的
-   * Python（`verify.py`）⇒ 两侧都跑 python3（A 侧 `sys.executable`、B 侧 `which python3`
-   * 解析出的绝对路径），`cwd=case_dir`、env 加 `TS_ENV_LABEL`。
+   * **本族解释器口径**（M6.5 冻结 + 2026-10-21 跨平台修订，见文件头差异㉙）：用户夹具脚本
+   * 是 agent 按协议生成的 Python（`verify.py`）⇒ 两侧都跑本机 Python 3（A 侧 `sys.executable`、
+   * B 侧 `pythonExe()` 解析出的绝对路径），`cwd=case_dir`、env 加 `TS_ENV_LABEL`。
    *
    * @param {string} caseDir
    * @param {string} envLabel
@@ -3277,8 +3294,9 @@ export class Runner {
    * 脚本驱动传路径靠 `TS_*` 环境变量；场景驱动额外用命令行参数把指标/快照/日志/报告/
    * 运行键五处产物交给引擎（CLI 见 loadgen.main）。
    *
-   * **本族解释器口径**（文件头差异㉙）：脚本驱动两侧都是 python3（用户脚本是 Python）；
-   * 场景驱动是平台自己的引擎 —— A 侧 `[sys.executable, <repo>/loadgen.py, 'run', …]`、
+   * **本族解释器口径**（文件头差异㉙）：脚本驱动两侧都是本机 Python 3（用户脚本是 Python；
+   * B 侧走 `pythonExe()` 的跨平台解析 —— Windows 也认 `python.exe` / `py -3`）；
+   * 场景驱动是平台自己的引擎 —— A 侧 `[sys.executable, <repo>/backend_py/loadgen.py, 'run', …]`、
    * B 侧 `[process.execPath, <repo>/backend/lib/loadgen.js, 'run', …]`，两侧 argv[0]/argv[1]
    * 是「本族解释器 + 本族入口」，**逐字节不可比是设计使然**（其余九处参数逐字节比）。
    *
@@ -3340,8 +3358,9 @@ export class Runner {
       TS_PROJECT_DIR: project.project_dir,
       TS_CASES_ROOT: project.cases_root,
       TS_MAX_SECONDS: String(LOAD_MAX_SECONDS),
-      // 脚本可 import loadgen（MetricsWriter / 库函数）；输出不缓冲便于日志实时可读
-      PYTHONPATH: ROOT_DIR + path.delimiter + (env.PYTHONPATH || ''),
+      // 脚本可 import loadgen（MetricsWriter / 库函数）：首段必须是 Python 库目录（backend_py/），
+      // 与 Python 后端 runner.ROOT_DIR 同值；输出不缓冲便于日志实时可读
+      PYTHONPATH: PYTHON_LIB_DIR + path.delimiter + (env.PYTHONPATH || ''),
       PYTHONUNBUFFERED: '1',
     });
     let proc = null;
@@ -3850,9 +3869,9 @@ export class Runner {
 /**
  * Python 解释器绝对路径解析失败（`pythonExe` 抛它）。
  *
- * 为什么值得一个具名错误：`_run_one_script` / `_load_cmd` 的脚本驱动支**必须**跑 python3
- * （用户夹具脚本是 agent 按协议生成的 Python）。PATH 里找不到就**响亮报错**——绝不回落
- * `'python3'` 字面量（那会把「找不到解释器」变成子进程 ENOENT 的假业务失败）、绝不抛空。
+ * 为什么值得一个具名错误：`_run_one_script` / `_load_cmd` 的脚本驱动支**必须**跑本机 Python 3
+ * （用户夹具脚本是 agent 按协议生成的 Python）。一支可用的都找不到就**响亮报错**——绝不回落
+ * 字面量（那会把「找不到解释器」变成子进程 ENOENT 的假业务失败）、绝不抛空。
  */
 export class PythonInterpreterMissing extends Error {
   constructor(message) {
@@ -3861,26 +3880,139 @@ export class PythonInterpreterMissing extends Error {
   }
 }
 
-/** 解释器解析结果缓存（运行期只解析一次；`process.env.PATH` 在本进程生命周期内不变） */
-let pythonExeCache = null;
+/**
+ * 探针协议：主进程 spawn 候选解释器跑这段 `-c`，从 stdout 的标记行读
+ * 「主版本 + `sys.executable` 的 UTF-8 hex」。
+ *
+ * 为什么不直接 print 路径：Windows 上 Python 的 stdout 编码是控制台代码页（中文系统 GBK），
+ * 用户名/安装路径里的非 ASCII 字符会被写歪 ⇒ 解析出的路径 spawn 不回去。hex 是纯 ASCII，
+ * 与代码页无关；主版本用来识破 python2 哨兵（`python` 这个名字在部分系统是 Python 2）。
+ */
+const PYTHON_PROBE_MARKER = 'ts-python-probe';
+const PYTHON_PROBE_CODE = `import sys;print("${PYTHON_PROBE_MARKER}", sys.version_info[0],`
+  + ' sys.executable.encode("utf-8").hex())';
+/** 解析探针输出（标记前缀来自常量，防止两处手写字面量漂移） */
+const PYTHON_PROBE_RE = new RegExp(`^${PYTHON_PROBE_MARKER} ([0-9]+) ([0-9a-fA-F]+)$`);
+/** 探针超时：真解释器冷启动远小于它；Windows Store 的占位别名不返回，靠它收口 */
+const PYTHON_PROBE_TIMEOUT_MS = 5000;
 
 /**
- * 解析本机 python3 的**绝对路径**（A 侧 `sys.executable` 的对应物，见文件头差异㉙）。
- * 用 `agents.whichSync`（`shutil.which` 的 POSIX 子集）；解析失败抛 `PythonInterpreterMissing`。
+ * 候选解释器（`[名字, 固定参数]`，按尝试顺序；见文件头差异㉙）。
  *
+ * Windows 官方安装器只装 `python.exe`（没有 `python3.exe`），所以 **python 优先**；
+ * `py -3` 是官方启动器（`py.exe -3 <script>`），它解析出的 `sys.executable` 才是真解释器。
+ * POSIX 保持 M6.5 的 `python3` 优先（对拍口径不变；`python` 只作回退，若它是 Python 2
+ * 会被探针的主版本判定跳过）。
+ */
+const PYTHON_CANDIDATES_WIN32 = [['python', []], ['python3', []], ['py', ['-3']]];
+const PYTHON_CANDIDATES_POSIX = [['python3', []], ['python', []]];
+
+/** 平台候选表（`platform` 是显式形参，便于在 Linux 上单测 Windows 分支） */
+function pythonCandidates(platform) {
+  return platform === 'win32' ? PYTHON_CANDIDATES_WIN32 : PYTHON_CANDIDATES_POSIX;
+}
+
+/** 候选的展示名（错误文案用；`py -3` 连参数一起显示） */
+function pythonCandidateLabel([name, args]) {
+  return [name, ...args].join(' ');
+}
+
+/** 解释器解析结果缓存（运行期只解析一次；`process.env` 在本进程生命周期内不变） */
+let pythonExeCache = null;
+
+/** `path.isAbsolute` 的平台变体：`platform` 是单测可注入的形参，不能用宿主模块的口径 */
+function isAbsoluteOn(exe, platform) {
+  return platform === 'win32' ? path.win32.isAbsolute(exe) : path.posix.isAbsolute(exe);
+}
+
+/**
+ * 真跑一次探针（`-c` + `PYTHON_PROBE_CODE`），返回**绝对路径**或 null。
+ *
+ * 为什么是「按名字 spawn 再真跑」而不是查文件表：
+ *  - Windows 的 Microsoft Store 会在 PATH 上放 `python3.exe` 占位别名（GUI 应用，跑起来
+ *    不会正常返回）——查文件在不在会把它当命中；`py` 启动器同理，只有真跑才知道它有没有
+ *    可用的 Python 3。
+ *  - 存在但跑不起来的 shim / 退出码非 0 / stdout 里没有探针标记，一律判不可用。
+ * `env` 与生产 spawn 同一份（profile 的 extraEnv 可能改 PATH）；cwd 用临时目录——
+ * 解析解释器不该依赖后端进程的 cwd（cwd 被删时也不能把「找不到解释器」误判出来）。
+ */
+function probePython(name, args, env, platform) {
+  const proc = spawnSync(name, [...args, '-c', PYTHON_PROBE_CODE], {
+    cwd: os.tmpdir(),
+    encoding: 'utf8',
+    timeout: PYTHON_PROBE_TIMEOUT_MS,
+    windowsHide: true,
+    maxBuffer: 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env,
+  });
+  // 启动失败（ENOENT/EACCES/超时）与「被信号杀死」（status=null）都算不可用；
+  // 非 0 退出照 Python 的退出码语义也不算可用（探针只有真解释器能跑成功）。
+  if (proc.error || proc.status !== 0) return null;
+  for (const rawLine of String(proc.stdout ?? '').split(/\r?\n/)) {
+    const matched = PYTHON_PROBE_RE.exec(rawLine.trim());
+    if (!matched) continue;                       // 忽略解释器/sitecustomize 的杂输出
+    if (matched[1] !== '3' || matched[2].length % 2 !== 0) return null;
+    const exe = Buffer.from(matched[2], 'hex').toString('utf8');
+    return exe && isAbsoluteOn(exe, platform) ? exe : null;
+  }
+  return null;
+}
+
+/**
+ * 解析用户夹具脚本要用的 Python 3 解释器**绝对路径**（不缓存；缓存见 `pythonExe`）。
+ *
+ * 规则见文件头差异㉙：`TS_PYTHON` 显式覆盖优先（失败不回落）→ 平台候选逐个真跑探测。
+ * 全部不可用抛 `PythonInterpreterMissing`，文案列出试过的候选与两条修法。
+ *
+ * @param {{platform?: string, env?: NodeJS.ProcessEnv,
+ *          probe?: (name: string, args: string[]) => (string|null)}} [options]
+ *   单测注入缝（platform/env/probe）；生产调用一律不带参数。
  * @returns {string}
  */
-export function pythonExe() {
-  if (pythonExeCache === null) {
-    const found = whichSync('python3');
-    if (!found) {
-      throw new PythonInterpreterMissing(
-        'PATH 里找不到 python3（脚本复测的 verify.py 与发压 run.py 都是 Python 夹具脚本，'
-        + '必须用本机 python3 解释器执行；不回落字面量 "python3"）',
-      );
-    }
-    pythonExeCache = found;
+export function resolvePython(options = {}) {
+  const opts = options ?? {};
+  const platform = opts.platform ?? process.platform;
+  const env = opts.env ?? process.env;
+  const probe = opts.probe ?? ((name, args) => probePython(name, args, env, platform));
+  // ① 显式覆盖（插件形态的 config.pythonPath 由薄壳透传为 TS_PYTHON）：
+  //    写错要响亮——静默换 PATH 上另一支会让「配了 A 却跑 B」变成难查的谜案。
+  const override = String(env.TS_PYTHON ?? '').trim();
+  if (override) {
+    const found = probe(override, []);
+    if (found) return found;
+    throw new PythonInterpreterMissing(
+      `TS_PYTHON 指定的 Python 解释器不可用：${override}（脚本复测的 verify.py 与发压 run.py `
+      + '都必须用 Python 3 执行；请改成可执行 Python 3 的绝对路径，或删掉该变量改用 PATH 探测）',
+    );
   }
+  // ② 平台候选：真跑探针，命中即停
+  const candidates = pythonCandidates(platform);
+  for (const [name, args] of candidates) {
+    const found = probe(name, args);
+    if (found) return found;
+  }
+  throw new PythonInterpreterMissing(
+    'PATH 里找不到可用的 Python 3 解释器（脚本复测的 verify.py 与发压 run.py 都是 Python 夹具脚本，'
+    + `必须用本机 Python 3 执行；依次真跑探测过：${candidates.map(pythonCandidateLabel).join('、')}）。`
+    + '请安装 Python 3 并加入 PATH（Windows 官方安装器勾选 Add python.exe to PATH），'
+    + '或用 TS_PYTHON 指定解释器绝对路径（插件形态也可配 config.pythonPath）',
+  );
+}
+
+/**
+ * 解析本机 Python 3 的**绝对路径**并缓存（A 侧 `sys.executable` 的对应物，见文件头差异㉙）。
+ *
+ * 失败**不缓存**：用户按报错装好/配好解释器后，下一次任务重试即可用，不必重启后端。
+ * `options` 是单测注入缝（不走缓存）；生产调用一律不带参数。
+ *
+ * @param {{platform?: string, env?: NodeJS.ProcessEnv,
+ *          probe?: (name: string, args: string[]) => (string|null)}} [options]
+ * @returns {string}
+ */
+export function pythonExe(options = null) {
+  if (options !== null) return resolvePython(options);
+  if (pythonExeCache === null) pythonExeCache = resolvePython();
   return pythonExeCache;
 }
 

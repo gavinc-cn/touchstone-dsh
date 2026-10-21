@@ -45,7 +45,7 @@
 
 - 退出码 0 = 成功；非 0 = 失败（stderr 会被平台记进发压日志并作为失败原因）；
 - 脚本只允许写方案包目录内的文件（中间产物放 `TS_CASE_DIR` 下）；
-- 脚本可以 `import loadgen`（项目根已在 PYTHONPATH），复用 `MetricsWriter` 与
+- 脚本可以 `import loadgen`（平台已把 `loadgen` 所在目录加入 PYTHONPATH），复用 `MetricsWriter` 与
   分桶/分位函数，不必自己拼 JSON。
 
 ## 指标通道（两种驱动共用）
