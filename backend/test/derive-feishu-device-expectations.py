@@ -28,11 +28,13 @@ except ImportError as exc:  # pragma: no cover - 环境不对时给一句人话
     sys.exit(f"需要能 import lark_oapi 的解释器（本机：/opt/miniconda3/envs/my_pyenv/bin/python3）：{exc}")
 
 # 与 Node 侧 REQUIRED_SCOPES/EVENTS/CALLBACKS（feishu.py:1263-1271）逐字相同
+# 2026-10-22 飞书截图批次：末尾追加 `im:message:readonly`（下载消息中的图片资源所需）
 ADDONS = {
     "preset": False,
     "scopes": {"tenant": ["im:message.p2p_msg:readonly", "im:message.group_at_msg:readonly",
                           "im:message:send_as_bot", "application:app_slash_command:read",
-                          "application:app_slash_command:write"]},
+                          "application:app_slash_command:write",
+                          "im:message:readonly"]},
     "events": {"items": {"tenant": ["im.message.receive_v1"]}},
     "callbacks": {"items": ["card.action.trigger"]},
 }

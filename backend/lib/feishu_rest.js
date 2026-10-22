@@ -7,6 +7,8 @@
  *     过期前 5 分钟刷新（`expire = 取值时刻 + expire - 300`，**取值时刻在请求之前**）；
  *   - `_BOT_OPEN_ID`(:1050) / `botOpenId`(:1176 `bot_open_id`)；
  *   - `rest`(:1095 `_rest`) —— 统一鉴权、路径规范化、非 JSON/非 dict 重试 3 次；
+ *   - `restBytes`(:1148 `_rest_bytes`，2026-10-22 截图批次) —— 二进制下载（图片资源）：
+ *     路径规范化/token 与 `rest` 一致，但按 HTTP 状态码判定、不重试、请求头不带 Content-Type；
  *   - `restSendText`/`restSendCard`/`restReply`/`restPatchText`(:1140-1173)。
  *
  * 四条**实测契约**（照抄，不许「顺手修正」）：
@@ -312,6 +314,70 @@ export async function rest(method, path, { params, jsonBody, cfg, timeout = 10 }
     return out;
   }
   throw new FeishuRestError(`REST ${method} ${norm} ${errHint}（已重试 ${REST_ATTEMPTS} 次）`);
+}
+
+/**
+ * 飞书 REST **二进制**下载（截图资源用）。对齐 `feishu._rest_bytes`(feishu.py:1148-1178)：
+ * 路径规范化与 token 取法和 `rest()` **完全一致**，只是返回字节流而不是 JSON。
+ *
+ * 与 `rest()` 的三处差异（都是 oracle 本来的语义，不是简化）：
+ *  ① **不重试**（截图失败由上层直接回中文文案，不做 3 次粘包重试）；
+ *  ② **按 HTTP 状态码判定**（`not (200 <= status < 300)`）——非 2xx 先尝试把响应体当
+ *     JSON 解析：dict ⇒ 带业务码的 `REST {path} code=… msg`；非 JSON/非 dict ⇒
+ *     `REST {path} status=…`。2xx 一律按成功返回，**不看业务码**（资源下载成功体是二进制）；
+ *  ③ **请求头只带 Authorization，不带 Content-Type**（资源下载接口不接受 JSON 头；
+ *     契约 §3.4）。`timeout` 缺省 30 秒。
+ *
+ * 返回 `{data: Buffer, contentType: string}`；`contentType` 缺头时是空串（Python
+ * `r.headers.get("Content-Type") or ""`）。
+ * @param {string} method HTTP 方法
+ * @param {string} path 形如 `/open-apis/im/v1/messages/<mid>/resources/<key>`
+ * @param {{params?: object, cfg?: object, timeout?: number|null}} [options]
+ * @returns {Promise<{data: Buffer, contentType: string}>}
+ * @throws {FeishuRestError} cfg 缺失 / token 失败 / 网络异常 / 非 2xx（带业务码或 status）
+ */
+export async function restBytes(method, path, { params, cfg, timeout = 30 } = {}) {
+  if (cfg === null || cfg === undefined) {
+    throw new FeishuRestError('应用未配置（app_id/app_secret 缺失）');
+  }
+  let norm = `/${String(path).replace(/^\/+/, '')}`;
+  if (!norm.startsWith('/open-apis')) norm = `/open-apis${norm}`;
+  const query = encodeParams(params);
+  const url = `${FEISHU_HOST}${norm}${query ? `?${query}` : ''}`;
+  // token 在 try 之外取（同 `rest()` 的注释：Python 侧 `_tenant_token` 抛的 FeishuRestError
+  // 不属 `except (OSError, ValueError)` ⇒ 穿透本函数，不包装成「REST … 失败」）。
+  const token = await tenantToken(cfg);
+  let resp;
+  try {
+    const init = { method, headers: { Authorization: `Bearer ${token}` } };
+    if (timeout !== null && timeout !== undefined) init.signal = AbortSignal.timeout(timeout * 1000);
+    resp = await globalThis.fetch(url, init);
+  } catch (error) {
+    throw new FeishuRestError(`REST ${method} ${norm} 失败: ${errText(error)}`);
+  }
+  if (!(resp.status >= 200 && resp.status < 300)) {
+    // 非 2xx：响应体可能是 `{"code": ..., "msg": ...}` 业务错误体（缺权限那三个码由
+    // 调用方判定），也可能是网关的纯文本/HTML。**读体异常不外包装**（Python 侧
+    // `r.json()` 的读取异常同样穿透本函数，属已登记的跨运行时差异）。
+    const raw = await resp.text();
+    let out = null;
+    try {
+      out = JSON.parse(raw);
+    } catch {
+      out = null;
+    }
+    if (out !== null && typeof out === 'object' && !Array.isArray(out)) {
+      throw new FeishuRestError(
+        `REST ${norm} code=${pyStr(dictGet(out, 'code'))} ${pyStr(dictGet(out, 'msg', ''))}`,
+        dictGet(out, 'code', null),
+      );
+    }
+    throw new FeishuRestError(`REST ${norm} status=${resp.status}`);
+  }
+  return {
+    data: Buffer.from(await resp.arrayBuffer()),
+    contentType: resp.headers.get('content-type') || '',
+  };
 }
 
 /**

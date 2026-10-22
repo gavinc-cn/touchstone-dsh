@@ -57,13 +57,17 @@ export const SLOW_DOWN_STEP_S = 5;
 /** oracle 要求 lark-oapi ≥ 1.5.5（`feishu.py:2932 _REGISTER_MIN_VERSION`），仅作文案/溯源用 */
 export const LARK_MIN_VERSION = '1.5.5';
 
-/** 平台所需权限清单——**唯一真源**（与 `feishu.py:1263-1269` 逐字相同，含 token 类型） */
+/** 平台所需权限清单——**唯一真源**（与 `feishu.py:1263-1269` 逐字相同，含 token 类型）
+ *
+ * 2026-10-22 飞书截图批次：末尾追加 `im:message:readonly`（下载消息中的图片资源所需；
+ * 与 `feishu_provision.js` 的 `REQUIRED_SCOPES` 必须同集）。 */
 export const DEVICE_REQUIRED_SCOPES = Object.freeze([
   Object.freeze(['im:message.p2p_msg:readonly', 'tenant']),
   Object.freeze(['im:message.group_at_msg:readonly', 'tenant']),
   Object.freeze(['im:message:send_as_bot', 'tenant']),
   Object.freeze(['application:app_slash_command:read', 'tenant']),
   Object.freeze(['application:app_slash_command:write', 'tenant']),
+  Object.freeze(['im:message:readonly', 'tenant']),
 ]);
 /** 事件清单（`feishu.py:1270`） */
 export const DEVICE_REQUIRED_EVENTS = Object.freeze(['im.message.receive_v1']);

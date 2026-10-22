@@ -660,9 +660,10 @@ export async function dmText(openId, text, cfg, options = {}) {
 /** 卡片路径的未绑定引导（1916-1917/1924-1925：**「在单聊回复」**，区别于 1845 的「在这里回复」） */
 const UNBOUND_DM_CARD = '尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ '
   + '飞书设置，生成绑定码后在单聊回复「绑定 <码>」完成绑定';
-/** 消息路径 / 权限卡路径的未绑定引导（1845-1846 与 1558-1559：**「在这里回复」**） */
-const UNBOUND_DM_MSG = '尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ '
-  + '飞书设置，生成绑定码后在这里回复「绑定 <码>」完成绑定';
+/** 消息路径 / 权限卡路径的未绑定引导（1845-1846 与 1558-1559：**「在这里回复」**）
+ *
+ * 2026-10-22 截图批次：提为**导出常量**并与媒体路径共用（Python `feishu.py:1939-1940`
+ * 的 `UNBOUND_DM_MSG` 同串）；定义见下方「截图接收」节。 */
 
 // ==========================================================================
 // 多选暂存桶（`feishu.py:2096-2199`）
@@ -1256,6 +1257,318 @@ export async function executeIntent(binding, intent, senderOpenId, cfg = null, o
 }
 
 // ==========================================================================
+// 截图接收（`feishu.py:1928-2110`，2026-10-22 批次）
+// ==========================================================================
+//
+// 契约真源：`doc_ai/plan/202610/20261022_0837_飞书单聊截图支持（图片与图文消息转投绑定
+// 会话）.md` §三/§四/§五。链路：入站 `image`/`post` → 解析 content（§3.3）→ 逐张下载到
+// 内存（§3.4，全有或全无）→ `feishu_conv.routeText(..., images=…)` 存进目标项目
+// `<work_dir or <project_dir>/.touchstone>/board_media` 并按站点会话窗同款 markdown 绝对
+// 路径投递绑定会话（§3.5/§3.6）。所有文案与 Python 侧**逐字一致**（`MEDIA_*` 常量即
+// Python `feishu.py:1934-1955` 的同名常量；`feishu_conv.js` 存图时懒 import 本模块取用）。
+//
+// 依赖全走 `dep(options)`（`d.rest.restBytes`/`d.rest.restReply`/`d.db`/`d.conv`）——
+// 单测可以零网络打桩（见 `backend/test/feishu-media.test.mjs`）。
+
+/** `MEDIA_ENV`(`:1934`)：`=0` 关闭截图接收（回滚到旧「暂不支持该消息类型」） */
+export const MEDIA_ENV = 'TS_FEISHU_MEDIA';
+/** `MEDIA_MAX_BYTES`(`:1935`)：单张图片上限（与看板附件上限同值） */
+export const MEDIA_MAX_BYTES = 10 * 1024 * 1024;
+/** `MEDIA_MAX_COUNT`(`:1936`)：单条消息最多转几张（多余静默丢弃） */
+export const MEDIA_MAX_COUNT = 9;
+/** `MEDIA_TYPE_HINT`(`:1937`)：旧回执原串提出为常量（行为不变） */
+export const MEDIA_TYPE_HINT = '暂不支持该消息类型，请发送文字指令';
+/** 未绑定引导（文字/媒体/权限卡消息路径共用同一串，`feishu.py:1939-1940`） */
+export const UNBOUND_DM_MSG = '尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ '
+  + '飞书设置，生成绑定码后在这里回复「绑定 <码>」完成绑定';
+
+/** `MEDIA_SCOPE_HINT`(`:1943-1945`)：缺下载权限时的开通引导 */
+export const MEDIA_SCOPE_HINT = '截图功能需要飞书应用额外开通「获取单聊、群组消息（im:message:readonly）」'
+  + '权限：在「接入」卡片点「补齐配置」→「发布」，或到开发者后台「权限管理」'
+  + '添加该权限并发布新版本后重试。';
+/** `MEDIA_FAIL_PREFIX`(`:1946`)：后接具体原因 */
+export const MEDIA_FAIL_PREFIX = '截图接收失败：';
+/** `MEDIA_TOO_LARGE`(`:1947`) */
+export const MEDIA_TOO_LARGE = '图片过大（单张上限 10MB），请压缩后重发';
+/** `MEDIA_NO_IMAGE`(`:1948`) */
+export const MEDIA_NO_IMAGE = '消息里没有可下载的图片';
+/** `MEDIA_SAVE_FAIL_PREFIX`(`:1949`)：后接 OSError 文案（`feishu_conv.js` 存图使用） */
+export const MEDIA_SAVE_FAIL_PREFIX = '截图保存失败：';
+/** `MEDIA_HEADER_FMT`(`:1950`)：`%d` = 张数（`feishu_conv.js` 组文案用） */
+export const MEDIA_HEADER_FMT = '[飞书截图] 用户从飞书发送了 %d 张截图';
+/** `MEDIA_HEADER_NOTE`(`:1951`)：原消息无文字时追加在 header 后 */
+export const MEDIA_HEADER_NOTE = '（未附文字说明）';
+/** `MEDIA_MIME_EXT`(`:1954-1955`)：mime → 落盘扩展名（下载归一后使用；存盘共用同一份） */
+export const MEDIA_MIME_EXT = Object.freeze({
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg',
+  'image/gif': 'gif', 'image/webp': 'webp',
+});
+/** 下载消息资源缺权限时的飞书业务码（三种都按「缺权限」回 `MEDIA_SCOPE_HINT`，`:1957`） */
+const MEDIA_SCOPE_CODES = new Set([99991640, 99991672, 99991679]);
+/** post 消息的 locale 包裹顺序（`:1958`）：`zh_cn`/`en_us`/`ja_jp` 取第一个 dict */
+const MEDIA_LOCALES = Object.freeze(['zh_cn', 'en_us', 'ja_jp']);
+
+/**
+ * 下载的图片字节数超过 `MEDIA_MAX_BYTES`（`feishu.py:1961` 的 `MediaTooLarge`）。
+ * 单独成类是为了让 `handleMediaMessage` 与网络/权限错误分开回文案。
+ */
+export class MediaTooLarge extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'MediaTooLarge';
+  }
+}
+
+/**
+ * 截图接收总开关（`feishu.py:1965-1967`）：`TS_FEISHU_MEDIA` strip 后恰好 `"0"` 才关，
+ * 缺省开（与 `feishu_conv.enabled` 同款精确语义：`"0 "`/`" 0"` 关，`"00"`/`"false"` 开）。
+ * @param {{env?: NodeJS.ProcessEnv}} [options]
+ * @returns {boolean}
+ */
+export function mediaEnabled(options = {}) {
+  const env = dep(options).env || {};
+  return pyStripStrict(pyOr(env[MEDIA_ENV], '')) !== '0';
+}
+
+/** JSON 对象判定（Python `isinstance(x, dict)`；Buffer 不算） */
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && !Buffer.isBuffer(value);
+}
+
+/**
+ * `urllib.parse.quote(s, safe="")`（`feishu.py:2056-2057` 的路径段转义）：UTF-8 字节级，
+ * 只有 `A-Za-z0-9_.-~` 原样，其余大写十六进制 percent-encode（空格是 `%20`，不是 `+`）。
+ */
+function pyUrlQuote(value) {
+  let out = '';
+  for (const byte of Buffer.from(pyStr(value), 'utf8')) {
+    if ((byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a)
+      || (byte >= 0x30 && byte <= 0x39) || byte === 0x5f || byte === 0x2e
+      || byte === 0x2d || byte === 0x7e) {
+      out += String.fromCharCode(byte);
+    } else {
+      out += '%' + byte.toString(16).toUpperCase().padStart(2, '0');
+    }
+  }
+  return out;
+}
+
+/**
+ * 按魔数嗅探图片类型（`feishu.py:1970-1981` 的 `_sniff_image_mime`）：只认契约列出的
+ * 4 种（PNG `89 50 4E 47` / JPEG `FF D8 FF` / GIF `GIF8` / WEBP `RIFF....WEBP`），
+ * 识别不了返回空串（调用方再落 `application/octet-stream`）。
+ */
+function sniffImageMime(data) {
+  if (data.length >= 4 && data[0] === 0x89 && data[1] === 0x50
+    && data[2] === 0x4e && data[3] === 0x47) return 'image/png';
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (data.length >= 4 && data[0] === 0x47 && data[1] === 0x49
+    && data[2] === 0x46 && data[3] === 0x38) return 'image/gif';
+  if (data.length >= 12 && data[0] === 0x52 && data[1] === 0x49
+    && data[2] === 0x46 && data[3] === 0x46
+    && data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50) {
+    return 'image/webp';
+  }
+  return '';
+}
+
+/**
+ * 解析 `image`/`post` 消息内容 → `[text, [image_key, ...]]`（`feishu.py:1984-2048`
+ * 的 `_media_items`，契约 §3.3）。
+ *
+ * - `image`：content 取 `image_key`（非空字符串），text 恒空；
+ * - `post`：先解 locale 包裹（`zh_cn`/`en_us`/`ja_jp` 按序取第一个 dict；事件体通常是
+ *   扁平形态，两种都容忍）；title（strip 后非空）作第一行；`content` 为「段落数组的
+ *   数组」，段内 `text`/`a` 取显示文字（`a` 不取 href）、`img` 追加 image_key、其它 tag
+ *   忽略；段落文字用 `\n` 连接、空段落不产生空行；
+ * - 其它类型 / JSON 非法 / 形状不对 ⇒ `["", []]`。
+ *
+ * 形态差异：Python 的 `evt["content"]` 是 str（事件体），但为了与 oracle 的
+ * `isinstance(raw, dict)` 分支同义，这里也接受**已解析的 dict**（单测/回调链复用）。
+ * @param {object} evt
+ * @returns {[string, string[]]}
+ */
+export function mediaItems(evt) {
+  const raw = dget(evt, 'content');
+  let content;
+  if (typeof raw === 'string') {
+    try {
+      content = pyJsonLoads(raw || '{}');
+    } catch (e) {
+      if (e instanceof SyntaxError) return ['', []];      // oracle: `except ValueError`
+      throw e;
+    }
+  } else if (isPlainObject(raw)) {
+    content = raw;
+  } else {
+    return ['', []];
+  }
+  if (!isPlainObject(content)) return ['', []];
+  const mtype = dget(evt, 'message_type');
+  if (mtype === 'image') {
+    const key = dget(content, 'image_key');
+    return ['', (typeof key === 'string' && key.length > 0) ? [key] : []];
+  }
+  if (mtype !== 'post') return ['', []];
+  let post = content;
+  for (const loc of MEDIA_LOCALES) {
+    const wrapped = dget(content, loc);
+    if (isPlainObject(wrapped)) {
+      post = wrapped;
+      break;
+    }
+  }
+  const lines = [];
+  const keys = [];
+  const title = dget(post, 'title');
+  if (typeof title === 'string' && pyTruthy(pyStripStrict(title))) {
+    lines.push(pyStripStrict(title));
+  }
+  const paragraphs = dget(post, 'content');
+  if (Array.isArray(paragraphs)) {
+    for (const para of paragraphs) {
+      if (!Array.isArray(para)) continue;
+      const buf = [];
+      for (const blk of para) {
+        if (!isPlainObject(blk)) continue;
+        const tag = dget(blk, 'tag');
+        if (tag === 'text' || tag === 'a') {
+          const txt = dget(blk, 'text');
+          if (typeof txt === 'string') buf.push(txt);     // `a` 取显示文字，不取 href
+        } else if (tag === 'img') {
+          const key = dget(blk, 'image_key');
+          if (typeof key === 'string' && key.length > 0) keys.push(key);
+        }
+      }
+      const line = buf.join('');
+      if (pyTruthy(pyStripStrict(line))) lines.push(line);  // 空文字/纯图片段落不产生空行
+    }
+  }
+  return [lines.join('\n'), keys];
+}
+
+/**
+ * 下载消息内图片资源 → `{data: Buffer, mime: 归一 mime}`（`feishu.py:2051-2066` 的
+ * `_download_image`，契约 §3.4）。
+ *
+ * 路径 `GET /open-apis/im/v1/messages/<mid>/resources/<key>?type=image`（tenant token
+ * 鉴权、不带 Content-Type 请求头、超时 30s、不重试）。mime 先按 Content-Type 归一
+ * （去参数转小写 + `MEDIA_MIME_EXT`），未知再按魔数嗅探；仍未知按二进制
+ * （`mime=application/octet-stream`，落盘 ext=`bin`）。
+ * 字节数 **>** `MEDIA_MAX_BYTES` ⇒ 抛 `MediaTooLarge`；REST 失败抛 `FeishuRestError`。
+ * @param {string} messageId
+ * @param {string} imageKey
+ * @param {object|null} cfg
+ * @param {object} [options] 依赖注入（`rest`）
+ * @returns {Promise<{data: Buffer, mime: string}>}
+ */
+export async function downloadImage(messageId, imageKey, cfg, options = {}) {
+  const d = dep(options);
+  const path = `/open-apis/im/v1/messages/${pyUrlQuote(pyStr(messageId))}`
+    + `/resources/${pyUrlQuote(pyStr(imageKey))}`;
+  const res = await d.rest.restBytes('GET', path, {
+    params: { type: 'image' }, cfg, timeout: 30,
+  });
+  const raw = res === null || res === undefined ? {} : res;
+  const data = Buffer.isBuffer(raw.data) ? raw.data : Buffer.from(raw.data || []);
+  if (data.length > MEDIA_MAX_BYTES) {
+    throw new MediaTooLarge(
+      `图片 ${data.length} 字节超过上限 ${MEDIA_MAX_BYTES} 字节`,
+    );
+  }
+  let mime = pyStr(pyOr(raw.contentType, '')).split(';')[0].trim().toLowerCase();
+  if (!Object.hasOwn(MEDIA_MIME_EXT, mime)) {
+    mime = sniffImageMime(data) || 'application/octet-stream';
+  }
+  return { data, mime };
+}
+
+/** 异常 → Python `str(e)`（消息面文案用：`Error` 取 `.message`，其余 `pyStr`） */
+function mediaErrText(error) {
+  if (error instanceof Error) {
+    return error.message === undefined ? String(error) : error.message;
+  }
+  return pyStr(error);
+}
+
+/**
+ * 单聊 `image`/`post` 消息：解析 → 逐张下载（全有或全无）→ 投递绑定会话
+ * （`feishu.py:2069-2110` 的 `_handle_media_message`，契约 §3.2）。
+ *
+ * 判定顺序（与 Python 严格同序）：功能开关 → 类型 → 通用对话开关 → 绑定校验 →
+ * 解析（`post` 纯文字当普通文本投递）→ 张数截断 → 逐张下载 → `routeText(images=…)`。
+ * 任一张失败就一张都不投递（避免半截图文）；失败一律回中文文案，绝不静默。
+ *
+ * 依赖缝：`d.rest.restBytes` / `d.rest.restReply` / `d.db.getFeishuBindingByOpen` /
+ * `d.conv.enabled` / `d.conv.routeText`（单测零网络打桩；产线不传 options）。
+ * @param {object} evt 6 键消息事件（`onMessageEvent` 的产物）
+ * @param {object|null} cfg 连接所有者的应用凭据
+ * @param {object} [options]
+ * @returns {Promise<void>}
+ */
+export async function handleMediaMessage(evt, cfg = null, options = {}) {
+  const d = dep(options);
+  const mid = dget(evt, 'message_id');
+  const mtype = dget(evt, 'message_type');
+  if (!mediaEnabled(options)) {                                  // ① 回滚阀
+    await d.rest.restReply(mid, MEDIA_TYPE_HINT, cfg);
+    return;
+  }
+  if (mtype !== 'image' && mtype !== 'post') {                   // ② 不在本批范围
+    await d.rest.restReply(mid, MEDIA_TYPE_HINT, cfg);
+    return;
+  }
+  if (!pyTruthy(await d.conv.enabled(options))) {                // ③ 通用对话关 = 无处可投
+    await d.rest.restReply(mid, MEDIA_TYPE_HINT, cfg);
+    return;
+  }
+  const sender = pyOr(dget(evt, 'sender_open_id'), '');
+  const binding = d.db.getFeishuBindingByOpen(sender, options);  // ④ 绑定校验
+  if (binding === null || binding === undefined) {
+    await d.rest.restReply(mid, UNBOUND_DM_MSG, cfg);
+    return;
+  }
+  const parsed = mediaItems(evt);                                // ⑤ 解析
+  const text = parsed[0];
+  const found = parsed[1];
+  d.log(`feishu inbound: 媒体消息 type=${pyStr(mtype)} images=${found.length}`);
+  if (found.length === 0) {                                      // ⑥ 无图
+    if (mtype === 'post' && pyTruthy(text)) {
+      // post 纯文字：当普通文本走同一套路由/自动新建/排队语义
+      await d.rest.restReply(mid, await d.conv.routeText(binding, text, cfg, options), cfg);
+    } else {
+      await d.rest.restReply(mid, MEDIA_FAIL_PREFIX + MEDIA_NO_IMAGE, cfg);
+    }
+    return;
+  }
+  const keys = found.slice(0, MEDIA_MAX_COUNT);                  // ⑦ 张数截断
+  const images = [];
+  for (const key of keys) {                                      // ⑧ 逐张下载（全有或全无）
+    try {
+      images.push(await downloadImage(mid, key, cfg, options));
+    } catch (e) {
+      let reply;
+      if (e instanceof MediaTooLarge) {
+        reply = MEDIA_FAIL_PREFIX + MEDIA_TOO_LARGE;
+      } else if (e instanceof FeishuRestError) {
+        reply = MEDIA_SCOPE_CODES.has(e.code) ? MEDIA_SCOPE_HINT
+          : MEDIA_FAIL_PREFIX + mediaErrText(e);
+      } else {
+        reply = MEDIA_FAIL_PREFIX + mediaErrText(e);
+      }
+      await d.rest.restReply(mid, reply, cfg);
+      return;
+    }
+  }
+  await d.rest.restReply(                                  // ⑨ 投递绑定会话
+    mid, await d.conv.routeText(binding, text, cfg, options, images), cfg,
+  );
+}
+
+// ==========================================================================
 // 消息入站主流程（`feishu.py:1769-1860`）
 // ==========================================================================
 
@@ -1324,9 +1637,8 @@ export async function handleMessageEvent(evt, cfg = null, options = {}) {
       if (!pyTruthy(bo) || !mentions.some((m) => dget(pyOr(m, {}), 'open_id') === bo)) return;
     }
     if (dget(evt, 'message_type') !== 'text') {
-      if (dget(evt, 'chat_type') !== 'group') {
-        await d.rest.restReply(mid, '暂不支持该消息类型，请发送文字指令', cfg);
-      }
+      if (dget(evt, 'chat_type') === 'group') return;   // 旧行为：群聊媒体消息静默（1815-1818）
+      await handleMediaMessage(evt, cfg, options);      // 单聊 image/post：截图接收（§3.2）
       return;
     }
     let content;

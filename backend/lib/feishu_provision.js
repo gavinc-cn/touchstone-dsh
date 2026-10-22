@@ -174,6 +174,11 @@ export const SEND_PROBE_MIN_S = 60;
  * `register_app` 的 addons 预置、`application/v7` config 的补齐三处共用同一份。
  * 每项 `[scope_name, token_type, 中文说明]`（第三列是给「人」看的，进不了协议）。
  *
+ * 2026-10-22 飞书截图批次：末尾追加 `im:message:readonly`——下载消息里的图片资源
+ * （`GET /open-apis/im/v1/messages/:message_id/resources/:file_key?type=image`）要求
+ * `im:message` / `im:message:readonly` / `im:message.history:readonly` 任一；平台用
+ * 中权限最窄的 `im:message:readonly`。
+ *
  * M9 起 addons 的生成在 `feishu_device.js`（`DEVICE_REQUIRED_*`），本表必须与它**同集**
  * ——否则「创建应用时声明的权限」与「事后 apply 补的权限」会漂移，而这正是本项要防的坑。
  * 故文件末尾有一处一致性断言（启动即炸，不留到线上）。
@@ -184,6 +189,7 @@ export const REQUIRED_SCOPES = Object.freeze([
   Object.freeze(['im:message:send_as_bot', 'tenant', '以机器人身份发消息/卡片']),
   Object.freeze(['application:app_slash_command:read', 'tenant', '读取斜杠指令']),
   Object.freeze(['application:app_slash_command:write', 'tenant', '注册斜杠指令']),
+  Object.freeze(['im:message:readonly', 'tenant', '读取消息中的图片/文件资源']),
 ]);
 /** 事件清单（`feishu.py:1270`）：`[event, 中文说明]` */
 export const REQUIRED_EVENTS = Object.freeze([Object.freeze(['im.message.receive_v1', '接收消息'])]);

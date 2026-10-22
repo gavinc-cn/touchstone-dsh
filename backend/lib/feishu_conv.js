@@ -44,6 +44,10 @@
  * 未验清单（真飞书行为、真线程并发、`{e!r}` 的完整 repr 面、多用户 loop 等）见
  * M7.5-R3 实施报告，不藏在注释里。
  */
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+
 import { agentFamily } from './agents.js';
 import * as chatMod from './chat.js';
 import * as dbMod from './db.js';
@@ -1198,6 +1202,67 @@ async function newSession(binding, title = '', options = {}) {
 }
 
 // ==========================================================================
+// 截图存盘（`feishu_conv.py:92-127`，2026-10-22 截图批次）
+// ==========================================================================
+
+/**
+ * 截图落盘目录（`feishu_conv.py:92-100` 的 `_media_dir`）：
+ * `<project.work_dir or <project.project_dir>/.touchstone>/board_media`——与
+ * `server.py` 看板附件上传**同一表达式**，现有媒体端点与前端 `absToMedia` 才能直接识别。
+ */
+function mediaDirOf(project) {
+  const base = project.work_dir || path.join(project.project_dir, '.touchstone');
+  return path.join(base, 'board_media');
+}
+
+/**
+ * 存图 + 组投递文案（`feishu_conv.py:103-127` 的 `_store_images`，契约 §3.5/§3.6）。
+ *
+ * 文件名 `fid = m<毫秒时间戳>_<10 位 hex>.<ext>`（与看板附件同款正则
+ * `^m\d+_[0-9a-f]{10}\.[A-Za-z0-9]{1,10}$` ⇒ 现有媒体端点直接可用）；展示名
+ * `飞书截图<序号>.<ext>`（序号 1 起）。文案：
+ * ```
+ * header = MEDIA_HEADER_FMT % len(images) + (MEDIA_HEADER_NOTE if not text else "")
+ * block  = header + "：\n" + "\n".join("![飞书截图<k>.<ext>](/abs/path)")
+ * composed = (text + "\n\n" + block) if text else block
+ * ```
+ * 常量表在 `feishu_inbound.js`（= Python `feishu.py` 的 `MEDIA_*`），这里**懒 import**
+ * 取用：`feishu_conv → feishu_inbound` 的静态导入会与入站侧的回调互相牵连（本文件唯一
+ * 保留的静态导入方向仍是「只向下」），而存图路径不在文字路径上 ⇒ 懒加载零成本。
+ * 失败口径：Python 捕 `OSError`；Node 没有 OSError 类（fs 错误是带 `code` 的 `Error`）
+ * ⇒ 这里捕 `mkdirSync`/`writeFileSync` 的全部异常，统一折成 `MEDIA_SAVE_FAIL_PREFIX+原因`。
+ * @param {object} project 目标项目行（`work_dir`/`project_dir` 来自 db.project_view）
+ * @param {string} text 原消息文字（可能为空串）
+ * @param {object[]} images 元素 `{data: Buffer, mime: string}`
+ * @returns {Promise<[string, string]>} `[composed, ""]` 成功 / `["", MEDIA_SAVE_FAIL_PREFIX+原因]`
+ */
+async function storeImages(project, text, images) {
+  const media = await import('./feishu_inbound.js');
+  const mdir = mediaDirOf(project);
+  const lines = [];
+  try {
+    fs.mkdirSync(mdir, { recursive: true });
+    for (let k = 1; k <= images.length; k += 1) {
+      const img = images[k - 1] || {};
+      const data = img.data || Buffer.alloc(0);
+      const mime = pyStr(img.mime || 'application/octet-stream');
+      const ext = Object.hasOwn(media.MEDIA_MIME_EXT, mime) ? media.MEDIA_MIME_EXT[mime] : 'bin';
+      // Python `f"m{int(time.time() * 1000)}_{secrets.token_hex(5)}.{ext}"`
+      const fid = `m${Date.now()}_${crypto.randomBytes(5).toString('hex')}.${ext}`;
+      const abs = path.join(mdir, fid);
+      fs.writeFileSync(abs, data);
+      lines.push(`![飞书截图${k}.${ext}](${abs})`);
+    }
+  } catch (e) {
+    return ['', media.MEDIA_SAVE_FAIL_PREFIX + errText(e)];
+  }
+  const header = media.MEDIA_HEADER_FMT.replace('%d', pyStr(images.length))
+    + (pyTruthy(text) ? '' : media.MEDIA_HEADER_NOTE);
+  const block = `${header}：\n${lines.join('\n')}`;
+  return [pyTruthy(text) ? `${text}\n\n${block}` : block, ''];
+}
+
+// ==========================================================================
 // R3 主入口：单聊自由文本路由（`feishu_conv.py:91-148`）
 // ==========================================================================
 
@@ -1214,14 +1279,21 @@ async function newSession(binding, title = '', options = {}) {
  *
  * ⚠**`note` 两处拼接形态不同**：`:125` 用 `"\n" + note`、`:148` 用 `+ note` 直贴——照抄，别「统一」。
  *
+ * 截图支持（2026-10-22，`feishu_conv.py:128-135`）：第 5 参 `images` 非空表示本次消息带图
+ * （元素 `{data: Buffer, mime: string}`），在**目标项目解析成功之后**（无项目仍回引导、
+ * 不落盘）存进该项目 `board_media/` 并按契约 §3.6 组 `composed`（原文字 + 空行 + header +
+ * markdown 绝对路径）再投递；存盘失败回 `MEDIA_SAVE_FAIL_PREFIX+原因` 且**不投递**。
+ * 既有文字路径（`images` 为 `null`/`[]`）一个字节不变。
+ *
  * @param {object} binding `feishu_bindings` 行（四列指针）
- * @param {string} text 已剥 @ 且非空的文本（主流程保证）
+ * @param {string} text 已剥 @ 且非空的文本（主流程保证；媒体路径可能为空串）
  * @param {object|null} cfg 应用凭据（可为假值 ⇒ 发送闸只留痕）
  * @param {object} [options] 依赖注入（见文件头差异 C）
+ * @param {object[]|null} [images] 入站图片载荷（`{data, mime}`），追加在末位 ⇒ 既有调用点零改动
  * @returns {Promise<string>} 回飞书的文本（**唯一直接调用点**：`feishu_inbound.js` 的
  *   `handleMessageEvent`，条件「单聊 + 意图未识别 + 总开关开」）
  */
-export async function routeText(binding, text, cfg = null, options = {}) {
+export async function routeText(binding, text, cfg = null, options = {}, images = null) {
   const d = deps(options);
   if (pyLen(pyOr(text, '')) > d.chat.MESSAGE_MAX) {
     return fmtD(MESSAGE_TOO_LONG, d.chat.MESSAGE_MAX);
@@ -1260,10 +1332,17 @@ export async function routeText(binding, text, cfg = null, options = {}) {
     d.db.setFeishuCurSession(openId, project.id, sid, title, options);
   }
   if (!pyTruthy(title)) title = pySlice(sid, 12);
+  let composed = text;
+  if (pyTruthy(images)) {
+    // 目标项目已解析成功 ⇒ 才落盘（无项目分支在上面已返回，不产生孤儿文件）
+    const stored = await storeImages(project, pyOr(text, ''), images);
+    composed = stored[0];
+    if (pyTruthy(stored[1])) return stored[1] + (pyTruthy(note) ? `\n${note}` : '');
+  }
   const baseline = baselineOf(sid, options);
   let res;
   try {
-    res = await d.chat.submit(project.id, sid, text, {
+    res = await d.chat.submit(project.id, sid, composed, {
       ...options,
       family: d.agents.agentFamily(project.agent_path),
       extraMeta: {
@@ -1279,6 +1358,11 @@ export async function routeText(binding, text, cfg = null, options = {}) {
   } catch (e) {
     trace(`投递失败 sid=${sid}: ${errorRepr(e)}`, options);
     return `投递失败：${errText(e)}` + (pyTruthy(note) ? `\n${note}` : '');
+  }
+  if (pyTruthy(images)) {
+    // 真机核对日志（契约 §3.2）：投递成功才打，sid/project 只在此层可知（stderr）
+    d.log(`[feishu] 截图 ${images.length} 张已存 board_media 并投递 sid=${sid}`
+      + `（project=${project.id}）`);
   }
   const state = pyTruthy(res.queued) ? '排队中' : '执行中';
   return `已投递到「${title}」（${state}），跑完把答复发回这里` + note;
@@ -1437,11 +1521,12 @@ function clipReply(text) {
 // ==========================================================================
 
 // `feishu_inbound.js` 的惰性转发器按这 7 个名字取（名字/位置参数签错一位就断链）：
-//   enabled(options) / routeText(binding, text, cfg, options) /
+//   enabled(options) / routeText(binding, text, cfg, options[, images]) /
 //   convIntent(binding, action, groups, senderOpenId, cfg, options) /
 //   onCardAction(sender, binding, value, action, cfg, options) /
 //   setDefaultProject(binding, project, options) / projectById(binding, projectId, options) /
 //   start(options)   —— 全部可 async，调用方都 await。
+// 2026-10-22 截图批次：`routeText` 末位追加第 5 参 `images`（既有调用点零改动）。
 
 /** 用例/诊断读口（Python 私有名 → Node `_` 前缀别名，与 R2 的 `_parse_intent` 同风格） */
 export const _card = makeCard;

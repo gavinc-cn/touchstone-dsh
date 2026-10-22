@@ -189,7 +189,7 @@ function harness(tag, over = {}) {
   // 注意这是**测试缝**（`resetInboundState`），oracle 侧对应「进程重启」。
   inbound.resetInboundState();
   const stderr = [];
-  const calls = { reply: [], dm: [], bot: [], board: {}, conv: [], slash: [] };
+  const calls = { reply: [], dm: [], bot: [], board: {}, conv: [], slash: [], restBytes: [] };
   const clock = { t: over.now === undefined ? 1000 : over.now };
 
   const rest = {
@@ -204,6 +204,13 @@ function harness(tag, over = {}) {
     async botOpenId(cfg) {
       calls.bot.push(cfg);
       return over.botOpenId === undefined ? 'ou_bot' : over.botOpenId;
+    },
+    /** 截图下载替身（`feishu.py:1148 _rest_bytes`）：用例必须显式打桩，**漏网即打红** */
+    async restBytes(...a) {
+      calls.restBytes.push(a);
+      if (over.restBytesErr !== undefined) throw over.restBytesErr;
+      if (over.restBytes === undefined) throw new Error('意外下载：用例未打桩 rest.restBytes');
+      return over.restBytes(a);
     },
   };
   const board = {
@@ -453,26 +460,92 @@ test('handleMessageEvent：群聊 @ 判定（bot_open_id 为假 ⇒ 静默；@ �
   } finally { h.close(); }
 });
 
-test('handleMessageEvent：非文本（单聊回文案 / 群聊静默）+ 文本抽取剥 @ 占位符', async () => {
+test('handleMessageEvent：非文本分支（其它类型/两个开关关闭仍回旧文案；群聊静默）+ 剥 @ 占位符', async () => {
   const h = harness('inbound-text');
   try {
     bind('ou_a', 1, 0, h.options);
     const cfg = { app_id: 'cli_x', app_secret: 's' };
-    await inbound.handleMessageEvent(msgEvt({ message_type: 'image', content: '' }), cfg, h.options);
-    assert.deepEqual(h.calls.reply.map((r) => r[1]), ['暂不支持该消息类型，请发送文字指令']);
+    // ① 其它类型（file）：不在本批范围 ⇒ 旧回执 MEDIA_TYPE_HINT；零下载、连 conv.enabled 都不问
+    await inbound.handleMessageEvent(msgEvt({ message_type: 'file', content: '' }), cfg, h.options);
+    assert.deepEqual(h.calls.reply.map((r) => r[1]), [inbound.MEDIA_TYPE_HINT]);
+    assert.deepEqual(h.calls.conv, [], '类型不在 image/post ⇒ 不问通用对话开关');
+    assert.deepEqual(h.calls.restBytes, [], '其它类型零下载');
+    // ② TS_FEISHU_MEDIA=0 ⇒ image 也回旧文案：回滚阀**先于**类型/conv 判定，零下载
+    const off = harness('inbound-media-off', { env: { TS_FEISHU_MEDIA: '0' } });
+    try {
+      bind('ou_a', 1, 0, off.options);
+      await inbound.handleMessageEvent(
+        msgEvt({ message_type: 'image', content: '{"image_key": "img_v3_1"}' }), cfg, off.options);
+      assert.deepEqual(off.calls.reply.map((r) => r[1]), [inbound.MEDIA_TYPE_HINT]);
+      assert.deepEqual(off.calls.conv, [], '回滚阀先于 conv.enabled');
+      assert.deepEqual(off.calls.restBytes, []);
+    } finally { off.close(); }
+    // ③ 通用对话关闭（夹具 conv.enabled=false）⇒ image 回旧文案、零下载（问过一次开关）
+    await inbound.handleMessageEvent(
+      msgEvt({ message_id: 'om_c', message_type: 'image', content: '{"image_key": "img_v3_1"}' }),
+      cfg, h.options);
+    assert.equal(h.calls.reply[1][1], inbound.MEDIA_TYPE_HINT);
+    assert.deepEqual(h.calls.conv, [['enabled']], '媒体路径问一次通用对话开关（关 ⇒ 无处可投）');
+    assert.deepEqual(h.calls.restBytes, [], 'conv 关零下载');
+    // ④ 群聊 image：静默（零回复/零下载，旧行为）
     await inbound.handleMessageEvent(
       msgEvt({ message_id: 'om_g', message_type: 'image', chat_type: 'group',
         mentions: [{ key: '@_user_1', open_id: 'ou_bot' }] }), cfg, h.options);
-    assert.equal(h.calls.reply.length, 1, '群聊非文本什么都不回');
+    assert.equal(h.calls.reply.length, 2, '群聊非文本什么都不回');
     // 剥占位符 + 每次 strip（1824-1827）
     await inbound.handleMessageEvent(
       msgEvt({ message_id: 'om_p', content: '{"text": " @_user_1  帮助 "}',
         mentions: [{ key: '@_user_1', open_id: 'ou_bot' }] }), cfg, h.options);
-    assert.equal(h.calls.reply[1][1], inbound.HELP_TEXT);
+    assert.equal(h.calls.reply[2][1], inbound.HELP_TEXT);
     // 内容坏 JSON ⇒ content={} ⇒ text="" ⇒ 静默（1820-1822）
     await inbound.handleMessageEvent(msgEvt({ message_id: 'om_b', content: 'not-json' }),
       cfg, h.options);
-    assert.equal(h.calls.reply.length, 2, '坏 JSON 静默');
+    assert.equal(h.calls.reply.length, 3, '坏 JSON 静默');
+  } finally { h.close(); }
+});
+
+test('handleMessageEvent：单聊 image/post 走截图接收（下载 → routeText(images=…)，回执透传）', async () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01, 0x02, 0x03, 0x04]);
+  const h = harness('inbound-media-ok', {
+    convEnabled: true,
+    routeReply: '已投递到「T」（执行中），跑完把答复发回这里',
+    restBytes: () => ({ data: png, contentType: 'image/png' }),
+  });
+  try {
+    bind('ou_a', 1, 0, h.options);
+    const cfg = { app_id: 'cli_x', app_secret: 's' };
+    await inbound.handleMessageEvent(
+      msgEvt({ message_type: 'image', content: '{"image_key": "img_v3_1"}' }), cfg, h.options);
+    // ① 下载：路径含 urlquote、params/超时照契约 §3.4
+    assert.equal(h.calls.restBytes.length, 1, '一张图下载一次');
+    const [method, path, restOpts] = h.calls.restBytes[0];
+    assert.equal(method, 'GET');
+    assert.equal(path, '/open-apis/im/v1/messages/om_1/resources/img_v3_1');
+    assert.deepEqual(restOpts.params, { type: 'image' });
+    assert.equal(restOpts.cfg, cfg);
+    assert.equal(restOpts.timeout, 30);
+    // ② 投递：routeText 第 5 参带 images（Node 原第 4 参 options 不动 ⇒ images 追加在末位）
+    const route = h.calls.conv.filter((c) => c[0] === 'routeText');
+    assert.equal(route.length, 1);
+    assert.deepEqual(route[0].slice(1, 3), [db.getFeishuBindingByOpen('ou_a', h.options), '']);
+    assert.equal(route[0][3], cfg);
+    assert.equal(route[0][4], h.options);
+    assert.equal(route[0][5].length, 1);
+    assert.deepEqual(route[0][5][0], { data: png, mime: 'image/png' });
+    // ③ 回执 = routeText 的返回值原样
+    assert.deepEqual(h.calls.reply.map((r) => r[1]), ['已投递到「T」（执行中），跑完把答复发回这里']);
+    // ④ 入站日志（§3.2）：type + 图片张数
+    assert.ok(h.stderr.includes('feishu inbound: 媒体消息 type=image images=1'),
+      `stderr=${JSON.stringify(h.stderr)}`);
+    // ⑤ post 纯文字无图 ⇒ 当普通文本走 routeText（4 参、零下载）
+    await inbound.handleMessageEvent(msgEvt({ message_id: 'om_p', message_type: 'post',
+      content: JSON.stringify({ title: '', content: [[{ tag: 'text', text: '纯文字' }]] }) }),
+    cfg, h.options);
+    assert.equal(h.calls.restBytes.length, 1, '无图不下载');
+    const route2 = h.calls.conv.filter((c) => c[0] === 'routeText');
+    assert.equal(route2.length, 2);
+    assert.equal(route2[1].length, 5, '无图走 4 参调用（options 末位，无 images）');
+    assert.equal(route2[1][2], '纯文字');
   } finally { h.close(); }
 });
 

@@ -20,6 +20,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
@@ -399,6 +400,127 @@ test('routeText：没有 cur_title 时 title 回落 sid 前 12 位（切片是�
   h.st.sessionExists = () => true;
   const b = makeBinding({ cur_sid: 'abcdefghijklmnop', cur_title: '', cur_project_id: 7 });
   assert.equal(await conv.routeText(b, 'x', CFG, h.options), '已投递到「abcdefghijkl」（执行中），跑完把答复发回这里');
+});
+
+// --------------------------------------------------------------------------
+// ③b 截图批次（2026-10-22）：routeText 第 5 参 images（既有调用点零改动）
+//     契约：doc_ai/plan/202610/20261022_0837_* §3.5/§3.6
+// --------------------------------------------------------------------------
+
+/** 契约 §3.1 的三条固定文案（与 `feishu_inbound.js` 的同名常量逐字相同） */
+const MEDIA_HEADER_FMT = '[飞书截图] 用户从飞书发送了 %d 张截图';
+const MEDIA_HEADER_NOTE = '（未附文字说明）';
+const MEDIA_SAVE_FAIL_PREFIX = '截图保存失败：';
+const MEDIA_FID_RE = /^m\d+_[0-9a-f]{10}\.[A-Za-z0-9]{1,10}$/;
+
+/** 建一个临时项目目录（`work_dir`），返回 `{base, workDir, readdir, read}` */
+function mediaTmp(tag) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), `ts-conv-${tag}-`));
+  return {
+    base,
+    workDir: path.join(base, 'work'),
+    mediaDir: path.join(base, 'work', 'board_media'),
+    readdir() {
+      const dir = path.join(base, 'work', 'board_media');
+      return fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
+    },
+    read(fid) { return fs.readFileSync(path.join(base, 'work', 'board_media', fid)); },
+    cleanup() { fs.rmSync(base, { recursive: true, force: true }); },
+  };
+}
+
+test('routeText：images 省略/null/[] ⇒ 原文字路径一个字节不变（第 5 参不传时零影响）', async () => {
+  for (const images of [undefined, null, []]) {
+    const h = harness();
+    h.st.projects = [makeProject(7)];
+    h.st.sessionExists = () => true;
+    const b = makeBinding({ cur_sid: 's1', cur_title: 'T', cur_project_id: 7 });
+    const reply = await (images === undefined
+      ? conv.routeText(b, '你好', CFG, h.options)
+      : conv.routeText(b, '你好', CFG, h.options, images));
+    assert.equal(h.calls.submit.length, 1);
+    assert.equal(h.calls.submit[0][2], '你好', `images=${JSON.stringify(images)}`);
+    assert.equal(reply, '已投递到「T」（执行中），跑完把答复发回这里');
+    // 文字路径不碰盘（不产生 board_media 目录/文件）：work_dir 未给 ⇒ 真实现里也不会落盘
+  }
+});
+
+test('routeText：images 非空 ⇒ 存 board_media（fid 正则）+ §3.6 组 composed + 回执不变 + 投递日志', async () => {
+  const tmp = mediaTmp('store');
+  try {
+    const png = Buffer.from('89504e470d0a1a0a', 'hex');
+    const jpg = Buffer.from('ffd8ff', 'hex');
+    const h = harness();
+    h.st.projects = [makeProject(7, { work_dir: tmp.workDir })];
+    h.st.sessionExists = () => true;
+    const b = makeBinding({ cur_sid: 's1', cur_title: 'T', cur_project_id: 7 });
+    const images = [{ data: png, mime: 'image/png' }, { data: jpg, mime: 'image/jpeg' }];
+    const reply = await conv.routeText(b, '这是说明', CFG, h.options, images);
+    // ① 落盘：2 个合法 fid，字节 = 下载字节
+    const files = tmp.readdir();
+    assert.equal(files.length, 2, `files=${JSON.stringify(files)}`);
+    for (const fid of files) assert.match(fid, MEDIA_FID_RE);
+    const pngFid = files.find((f) => f.endsWith('.png'));
+    const jpgFid = files.find((f) => f.endsWith('.jpg'));
+    assert.ok(pngFid && jpgFid, '两件扩展名按 mime 落盘');
+    assert.deepEqual(tmp.read(pngFid), png);
+    assert.deepEqual(tmp.read(jpgFid), jpg);
+    // ② 文案 = 原文字 + 空行 + header + markdown 绝对路径（§3.6 逐字）
+    const header = MEDIA_HEADER_FMT.replace('%d', '2');
+    const composed = `这是说明\n\n${header}：\n`
+      + `![飞书截图1.png](${path.join(tmp.mediaDir, pngFid)})`
+      + `\n![飞书截图2.jpg](${path.join(tmp.mediaDir, jpgFid)})`;
+    assert.equal(h.calls.submit[0][2], composed);
+    // ③ 回执不变 + 投递日志（§3.2；走 stderr 的 log 口）
+    assert.equal(reply, '已投递到「T」（执行中），跑完把答复发回这里');
+    assert.ok(h.logText().includes(`[feishu] 截图 2 张已存 board_media 并投递 sid=s1`
+      + '（project=7）'), `log=${JSON.stringify(h.calls.log)}`);
+    // ④ 无文字 ⇒ header 追加「（未附文字说明）」且无前导空行
+    const h2 = harness();
+    h2.st.projects = [makeProject(7, { work_dir: tmp.workDir })];
+    h2.st.sessionExists = () => true;
+    await conv.routeText(makeBinding({ cur_sid: 's1', cur_title: 'T', cur_project_id: 7 }),
+      '', CFG, h2.options, [{ data: png, mime: 'image/png' }]);
+    const second = h2.calls.submit[0][2];
+    assert.ok(second.startsWith(MEDIA_HEADER_FMT.replace('%d', '1') + MEDIA_HEADER_NOTE + '：\n'),
+      `无文字 header 形态不对：${second}`);
+    assert.ok(!second.startsWith('\n'), '无文字时不产生前导空行');
+  } finally { tmp.cleanup(); }
+});
+
+test('routeText：存盘 OSError ⇒ MEDIA_SAVE_FAIL_PREFIX+原因（note 照旧拼接）且**不投递**', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-conv-oserr-'));
+  const blocker = path.join(base, 'blocker');
+  fs.writeFileSync(blocker, 'x');
+  try {
+    const h = harness();
+    h.st.projects = [makeProject(7, { work_dir: blocker })];
+    h.st.sessionExists = () => false;          // 会话失效 ⇒ note=STALE_NOTE，随后自动新建
+    const b = makeBinding({ cur_sid: 'gone', cur_title: 'T', cur_project_id: 7,
+      default_project_id: 7 });
+    const reply = await conv.routeText(b, '说明', CFG, h.options,
+      [{ data: Buffer.from('89504e470d0a1a0a', 'hex'), mime: 'image/png' }]);
+    assert.ok(reply.startsWith(MEDIA_SAVE_FAIL_PREFIX), `实得：${reply}`);
+    assert.ok(reply.length > MEDIA_SAVE_FAIL_PREFIX.length, '要带具体原因');
+    assert.ok(reply.endsWith(`\n${ORA.STALE_NOTE}`), 'note 用换行拼接（与其它失败档同形）');
+    assert.deepEqual(h.calls.submit, [], '存盘失败一张都不投递');
+    assert.equal(h.logText().includes('[feishu] 截图'), false, '没投递就不许打「已投递」日志');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('routeText：长度闸先于落盘（超长文字 + images ⇒ 直接回执，零文件零提交）', async () => {
+  const tmp = mediaTmp('gate');
+  try {
+    const h = harness();
+    h.st.projects = [makeProject(7, { work_dir: tmp.workDir })];
+    h.st.sessionExists = () => true;
+    const b = makeBinding({ cur_sid: 's1', cur_title: 'T', cur_project_id: 7 });
+    const reply = await conv.routeText(b, 'x'.repeat(20001), CFG, h.options,
+      [{ data: Buffer.from('89504e470d0a1a0a', 'hex'), mime: 'image/png' }]);
+    assert.equal(reply, ORA.MESSAGE_TOO_LONG.replace('%d', '20000'));
+    assert.deepEqual(h.calls.submit, []);
+    assert.deepEqual(tmp.readdir(), [], '长度闸在 store 之前 return（不产孤儿文件）');
+  } finally { tmp.cleanup(); }
 });
 
 // --------------------------------------------------------------------------

@@ -83,14 +83,15 @@ const VERIFICATION_URI = 'https://accounts.feishu.cn/qrcode?device_code=DC-abc12
   + '&user_code=WDJB-MJHT&expires_in=600';
 
 /** oracle `_encode_addons`(108-112) 对 `_provision_addons()` 的输出（真类跑出来的原串） */
-const ORACLE_ADDONS_ENCODED = 'H4sIAAAAAAACA4WP3QrCMAyF3yXXY6CXfRWRkrWxFvtHEicyfHe7gTAQ8S6c75zk'
-  + 'ZIHGJKRgLpiEBhBXGwmYBZQKlg5OELPJJIKBxnZsNkswTOhrSU8Y9jRwvTeL-ttihIq3KHaq2gG2lqJDjbWYPltJKFf'
-  + 'ras5Y_Lbhr-nBUQnOrwFopqJb9a7krx_GT0smR3EmOx96rOccpjShu-2jp66yH9GtV0flGALxan8D2oEjljEBAAA';
+const ORACLE_ADDONS_ENCODED = 'H4sIAAAAAAACA4WPzQoCMQyE3yXnpaDHvopIybaxFvtHUldk8d3tLigrIt5C5ptkZobKJNRAnzAKDSC2VBLQMzTK'
+  + 'mLtwgJB0IhH0pOq-miReM6ErOd5h2Kqey7UabL8RLZSdQTFjaV3AWmOw2ELJus9GIsrZ2JISZrde-AvdODT6_PH-'
+  + 'fHwMQBPlthbqXPpqpl7ZmSyFicy067busxjjiPaytR76lp1Cu2RRjYP3xAv-BGcWtj5HAQAA';
 
 /** oracle `_normalize_addons` + `json.dumps(..., ensure_ascii=False, separators=(",",":"))` 的**明文** */
 const ORACLE_ADDONS_PAYLOAD = '{"preset":false,"scopes":{"tenant":["im:message.p2p_msg:readonly",'
   + '"im:message.group_at_msg:readonly","im:message:send_as_bot",'
-  + '"application:app_slash_command:read","application:app_slash_command:write"]},'
+  + '"application:app_slash_command:read","application:app_slash_command:write",'
+  + '"im:message:readonly"]},'
   + '"events":{"items":{"tenant":["im.message.receive_v1"]}},'
   + '"callbacks":{"items":["card.action.trigger"]}}';
 
