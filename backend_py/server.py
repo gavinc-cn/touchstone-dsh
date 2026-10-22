@@ -75,21 +75,76 @@ PORT_RETRY = 10  # 端口绑定失败时自动 port+1 顺延重试的上限（�
 TRUST_USER_HEADER = "X-TS-Internal-User"
 TRUST_INTERNAL_USER = False  # 由 main() 按 --trust-internal-user 置位（仅限回环监听）
 
-# dsh 会话级权限档映射（2026-10-03 P3 第二批；2026-10-04 常量搬到 dshdriver ——
-# board/runner 起会话时也要按**项目默认值**应用权限档，而 server 反向依赖 board
-# （循环导入），映射只能由最底层的驱动模块持有；此处保留同名别名，既有引用不变）。
-# manual 逐条确认 ↔ workspace-write（sandbox=workspace-write + approval=ask；平台随即
-# 接管该会话审批代答，见 board.answer_approval / dshdriver.set_permission）；
-# yolo 自动通过 / auto 完全自主 ↔ danger-full-access（approval=never，本机默认档）。
-# ⚠️ 这是**语义近似**：dsh 的 preset 是 sandbox×approval 组合，与平台三档并不一一
-# 对应（yolo 与 auto 落到同一档）；UI 改用 dsh 原生 preset 名的下拉是后续细化项。
-DSH_PERMISSION_PRESETS = dshdriver.PERMISSION_PRESETS
-# 反向近似（宿主 preset → 平台三档）：仅用于「平台没记过档位」的会话（用户在 dsh 侧
-# 直跑后被接管的卡会话）。正向映射本就多对一（yolo/auto 同 preset），反查统一取 yolo
-# 作展示；平台自己切过的会话以驱动记下的 mode 为准，不走这里。
-DSH_PRESET_MODES = dshdriver.PRESET_MODES
+# 会话级权限档（2026-10-03 P3 第二批；2026-10-21 对齐 DSH 宿主权限目录）。
+# 值域＝宿主 preset catalog（驱动 `GET /presets` 的 options[].value），旧三档
+# manual/yolo 只作 API 兼容别名（dshdriver.LEGACY_PERMISSION_ALIASES，§5.3）。
+# 目录缓存/校验集合放本模块（§5.2）：_permission_catalog_payload() 供
+# GET /api/agents/presets，_permission_catalog_values() 供 normalize/会话 profile 校验。
+_PERMISSION_CACHE = {}
+_PERMISSION_CACHE_TTL = 60.0
+# 从未成功取到宿主目录时的档位值兜底集合：DSH 三个内置产品档（宿主默认目录的子集；
+# auto/path-rules/write-guard 等目录扩展档在目录未知时不接受，见 §5.3 歧义裁决）
+_PERMISSION_BUILTIN_VALUES = {"read-only", "workspace-write", "danger-full-access"}
+# 最近一次成功取到的目录档位值集合；None=从未成功过（不随 TTL 过期清空，§5.2）
+_PERMISSION_CATALOG_VALUES = None
+# 旧插件/旧帧的权限 mode → preset **展示兜底**映射（§5.5）：只用于读回显，不是写入路径
+_LEGACY_PERMISSION_MODE_PRESETS = {"manual": "workspace-write",
+                                   "yolo": "danger-full-access",
+                                   "auto": "danger-full-access"}
 # 思考等级合法值白名单（dsh reasoningEffort）：项目默认值与会话级切换都校验它
 DSH_EFFORT_LEVELS = dshdriver.EFFORT_LEVELS
+
+
+def _permission_catalog_payload():
+    """宿主权限目录载荷（GET /api/agents/presets 的数据源，§5.2；60s 成功缓存）。
+
+    返回 `{"available", "options":[{value,label,description}], "default",
+    "default_label"}`：
+      - 驱动未配置 / 调用抛 DshDriverError ⇒ available=False 的空载荷（**失败不缓存**，
+        下次再试；不抛 5xx——前端下拉降级而不是阻断项目弹窗其它字段）；
+      - options 先滤空 value，再逐个 `dshdriver.permission_option` 归一
+        （内置档中文产品名、自定义档宿主 name/description、auto 产品名）；
+      - default 取宿主的 default（str），default_label = options 里同 value 的 label。
+    每次成功取到目录后同步更新进程内「已知档位值集合」（不随 TTL 过期清空）；
+    从未成功过 ⇒ `_permission_catalog_values()` 回退内置三档。
+    """
+    global _PERMISSION_CATALOG_VALUES
+    hit = _PERMISSION_CACHE.get("presets")
+    if hit and time.time() - hit[0] < _PERMISSION_CACHE_TTL:
+        return hit[1]
+    empty = {"available": False, "options": [], "default": "", "default_label": ""}
+    if not dshdriver.configured():
+        return empty
+    try:
+        raw = dshdriver.presets("") or {}
+    except dshdriver.DshDriverError:
+        return empty
+    options = []
+    for opt in raw.get("options") or []:
+        row = opt if isinstance(opt, dict) else {}
+        item = dshdriver.permission_option(row.get("value"), row.get("name"),
+                                           row.get("description"))
+        if item:
+            options.append(item)
+    default = str(raw.get("default") or "")
+    default_label = next((o["label"] for o in options if o["value"] == default), "")
+    result = {"available": True, "options": options,
+              "default": default, "default_label": default_label}
+    _PERMISSION_CATALOG_VALUES = {o["value"] for o in options}
+    _PERMISSION_CACHE["presets"] = (time.time(), result)
+    return result
+
+
+def _permission_catalog_values():
+    """进程内「已知权限档值集合」（§5.3/§5.4 校验口径）。
+
+    取最近一次成功目录的档位值（不随 TTL 过期清空）；从未成功取到目录 ⇒ DSH 内置
+    三档（read-only / workspace-write / danger-full-access）。
+    返回**新 set**（调用方可自由使用，不会改到缓存）。
+    """
+    if _PERMISSION_CATALOG_VALUES is None:
+        return set(_PERMISSION_BUILTIN_VALUES)
+    return set(_PERMISSION_CATALOG_VALUES)
 
 
 def normalize_effort(value):
@@ -105,12 +160,27 @@ def normalize_effort(value):
     return v if v in DSH_EFFORT_LEVELS else None
 
 
-def normalize_permission_mode(value):
-    """权限档取值归一（项目默认值用）：''=不指定；manual/yolo/auto 原样；非法返回 None。"""
+def normalize_permission_mode(value, existing=""):
+    """权限档取值归一（项目默认值用，§5.3）。
+
+    ''（或 None/空白）=不指定；`manual`/`yolo` 是旧三档的 API 兼容别名，映射到宿主
+    preset；PATCH 未变值（v == existing）直通（防止目录暂不可用时把存量值判非法）；
+    其余必须在进程内「已知档位值集合」里（宿主目录；从未取到目录时回落内置三档）。
+    非法值返回 None（调用方 400，不静默丢弃）。
+
+    `auto` 的歧义裁决（§5.3）：**不走旧别名**——只有宿主目录里确实有 auto 档时才被
+    接受；旧 auto（完全自主）语义已由 §4 数据迁移消化。
+    """
     v = str(value or "").strip()
     if not v:
         return ""
-    return v if v in DSH_PERMISSION_PRESETS else None
+    if v in dshdriver.LEGACY_PERMISSION_ALIASES:
+        return dshdriver.LEGACY_PERMISSION_ALIASES[v]
+    if v == str(existing or ""):
+        return v
+    if v in _permission_catalog_values():
+        return v
+    return None
 
 # 用例文件夹名：FS0004_用例名称
 CASE_DIR_RE = lib.CASE_DIR_RE
@@ -272,8 +342,8 @@ def family_capabilities(family):
     if family == "dsh_plugin":
         # P3（2026-10-03）：compact（驱动 /compact 命令）、fork（宿主
         # sessionController.fork）、profile=会话级**模型**切换（/model）、
-        # permission=**权限档**切换（/permission → permissionPresets.set，档位
-        # 用 DSH_PERMISSION_PRESETS 语义近似映射；ask 档下平台接管审批代答）。
+        # permission=**权限档**切换（/permission → permissionPresets.set；档位来自
+        # 宿主权限目录 /presets（2026-10-21 起），ask 档下平台接管审批代答）。
         return {"stream": True, "chat": True, "queue": True,
                 "steer": True, "abort": True, "compact": True,
                 "fork": True, "rewind": True, "profile": True, "permission": True,
@@ -408,23 +478,23 @@ def _session_owned(sid):
 
 
 def _session_permission_mode(state):
-    """会话级权限档（会话窗「权限」控件的数据源，2026-10-04 修恒置灰）。
+    """会话级权限档（会话窗「权限」控件的数据源，§5.5）。
 
     `state` = `dshevents` 注册表里的会话实时态（`permission` 由插件的
     `driver/permission` 状态帧折入，见 dshevents）。取值优先级：
 
-    1. `mode`——平台三档 manual/yolo/auto（驱动随写记下，唯一能区分 yolo/auto 的
-       来源，二者落到同一宿主 preset）；
-    2. 反查 `preset`——宿主 preset 实况（会话在平台外被改过，或插件是老版本）；
-       经 DSH_PRESET_MODES 近似映射。danger-full-access 反查取 yolo。
-
-    两者都无 → 返回空串（调用方不下发 `permission`，前端保持置灰：**不猜**）。
+    1. `preset`——宿主 preset 实况（**新的首选**，可能是 path-rules/write-guard 等
+       任意宿主档），非空原样返回；
+    2. 否则旧插件/旧帧的 `mode`（manual/yolo/auto）做展示兜底映射
+       （manual→workspace-write、yolo/auto→danger-full-access；**只读回显**，不是写入
+       路径——2026-10-21 起旧三档不再作为值域）；
+    3. 都没有 → 返回空串（调用方不下发 `permission`，前端保持置灰：**不猜**）。
     """
     perm = (state or {}).get("permission") or {}
-    mode = str(perm.get("mode") or "")
-    if mode:
-        return mode
-    return DSH_PRESET_MODES.get(str(perm.get("preset") or ""), "")
+    preset = str(perm.get("preset") or "")
+    if preset:
+        return preset
+    return _LEGACY_PERMISSION_MODE_PRESETS.get(str(perm.get("mode") or ""), "")
 
 
 def _session_queue_state(project_id, unit_state, running=False,
@@ -1373,6 +1443,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/agents/models":
             # 指定 agent 已配置的模型列表(唯一族 dsh 走宿主驱动 /models), 供模型下拉
             self._respond(200, json.dumps(agent_models(parsed.get("agent_path", [""])[0]),
+                                          ensure_ascii=False).encode("utf-8"),
+                          "application/json; charset=utf-8")
+        elif path == "/api/agents/presets":
+            # 宿主权限目录（权限档下拉数据源，2026-10-21 批次 §5.2）：登录即可读；
+            # 驱动不可用时也回 200 的 available=false 空载荷（前端置灰降级，不拦截）
+            self._respond(200, json.dumps(_permission_catalog_payload(),
                                           ensure_ascii=False).encode("utf-8"),
                           "application/json; charset=utf-8")
         elif path == "/api/agents/skills":
@@ -2351,11 +2427,13 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(404, b'{"error":"project not found"}',
                           "application/json; charset=utf-8")
             return
-        # 项目级会话默认值：未带键＝保持存量值；带了非法值报 400（不静默丢弃）
+        # 项目级会话默认值：未带键＝保持存量值；带了非法值报 400（不静默丢弃）。
+        # permission_mode 的 existing 传存量值（§5.3）：PATCH 未变值直通，防止宿主
+        # 目录暂不可用时把存量档判非法。
         reasoning_effort = normalize_effort(
             body.get("reasoning_effort", row["reasoning_effort"]))
         permission_mode = normalize_permission_mode(
-            body.get("permission_mode", row["permission_mode"]))
+            body.get("permission_mode", row["permission_mode"]), row["permission_mode"])
         if reasoning_effort is None or permission_mode is None:
             self._respond(400, json.dumps(
                 {"error": "思考等级或权限档非法"}, ensure_ascii=False).encode("utf-8"),
@@ -3656,9 +3734,10 @@ class Handler(BaseHTTPRequestHandler):
                 if sel.get("model"):
                     data["sessionModel"] = (f"{sel['provider']}/{sel['model']}"
                                             if sel.get("provider") else sel["model"])
-                # 会话级权限档（会话窗「权限」控件，2026-10-04 修）：优先事件流里学到的
-                # 平台三档 mode；没有时（外部直跑后接管的会话、老插件）按宿主 preset
-                # 反查近似档位；两者都没有就不下发 ⇒ 前端保持置灰（不猜）。
+                # 会话级权限档（会话窗「权限」控件，2026-10-04 修；2026-10-21 对齐宿主
+                # 目录）：优先事件流里学到的宿主 preset 实况（可能是 path-rules 等任意
+                # 档）；只有旧插件旧帧缺 preset 时才用旧 mode 做展示兜底映射；都没有就
+                # 不下发 ⇒ 前端保持置灰（不猜）。
                 pmode = _session_permission_mode(st)
                 if pmode:
                     data["permission"] = pmode
@@ -3722,10 +3801,14 @@ class Handler(BaseHTTPRequestHandler):
 
         路线 A P3（2026-10-03）：dsh_plugin 支持会话级**模型切换**（驱动 `/model`
         → 宿主 selectModel）与**权限档切换**（驱动 `/permission` →
-        宿主 permissionPresets.set），同步直调、即时生效。权限档走
-        DSH_PERMISSION_PRESETS 的语义近似映射：manual ↔ workspace-write+approval=ask
-        （平台随即接管审批代答，见 board.answer_approval），yolo/auto ↔
-        danger-full-access。
+        宿主 permissionPresets.set），同步直调、即时生效。
+
+        2026-10-21（§5.4）：权限档按**宿主权限目录**校验——空值不校验；manual/yolo
+        是旧三档 API 兼容别名，映射到 preset；其余值必须在进程内「已知档位值集合」
+        （宿主目录；从未取到目录时回落内置三档）里，否则 400 文案逐字＝
+        `权限档非法（宿主权限目录里没有该档位）`。通过后 `set_permission(sid, preset)`
+        ——**不再传 mode**；回执 `permission_mode` 给**映射后的 canonical preset**
+        （真正下发的值），便于前端乐观回显对齐。
 
         2026-10-04 加**思考等级**（`reasoning_effort`，dsh reasoningEffort）：与模型
         一次下传（驱动 `/model` 的 `reasoning_effort`），空串=不改；非法值 400（白名单
@@ -3744,7 +3827,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         fam = runner.agent_family(row["agent_path"])
         model = str(body.get("model") or "")
-        pmode = str(body.get("permission_mode") or "")
+        # 权限档：旧三档别名先归一（manual→workspace-write、yolo→danger-full-access；
+        # auto 不在此列，只有目录里确实有 auto 档才接受，§5.3）
+        pmode_raw = str(body.get("permission_mode") or "").strip()
+        pmode = dshdriver.LEGACY_PERMISSION_ALIASES.get(pmode_raw, pmode_raw)
         effort = normalize_effort(body.get("reasoning_effort")) if "reasoning_effort" in body else ""
         if fam != "dsh_plugin":
             self._respond(400, json.dumps({"error": "该 agent 族不支持会话级配置"},
@@ -3761,17 +3847,17 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(400, b'{"error":"model/permission_mode/reasoning_effort required"}',
                           "application/json; charset=utf-8")
             return
-        if pmode and pmode not in DSH_PERMISSION_PRESETS:
-            self._respond(400, json.dumps({"error": "权限档非法（manual/yolo/auto）"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+        if pmode and pmode not in _permission_catalog_values():
+            self._respond(400, json.dumps(
+                {"error": "权限档非法（宿主权限目录里没有该档位）"},
+                ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8")
             return
         try:
             if pmode:
-                # 三档 mode 一并下传：宿主 preset 到三档是多对一（yolo/auto 同 preset），
-                # 只靠回读 preset 反推不出是哪一档；驱动记下 mode 并随状态帧回给平台，
-                # 会话窗「权限」控件据此显示当前档位（2026-10-04 修恒置灰）。
-                dshdriver.set_permission(sid, DSH_PERMISSION_PRESETS[pmode], mode=pmode)
+                # preset 直达宿主（2026-10-21 起不再随传旧三档 mode：档位即宿主 preset，
+                # 会话窗回显走 driver/permission 帧的 preset，见 server._session_permission_mode）
+                dshdriver.set_permission(sid, pmode)
             if model or effort:
                 # 只改思考等级时 model 传空串：插件从会话当前模型选择回读 provider/model
                 dshdriver.set_model(sid, model, reasoning_effort=effort)
@@ -3780,7 +3866,7 @@ class Handler(BaseHTTPRequestHandler):
                           "application/json; charset=utf-8")
             return
         self._respond(200, json.dumps({"ok": True, "model": model,
-                                       "permission_mode": pmode,
+                                       "permission_mode": pmode,      # canonical preset
                                        "reasoning_effort": effort or ""},
                                       ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")

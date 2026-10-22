@@ -35,6 +35,13 @@ RECONNECT_MAX = 10.0
 # 读空闲上限：插件每 15s 发一次 keepalive 注释帧，这里放宽到 4 倍留出抖动余量
 STREAM_IDLE = 60.0
 
+# 旧插件/旧帧的权限 mode → 宿主 preset **展示兜底**映射（2026-10-21，契约 §5.5）：
+# 只用于读回显（前端/起会话默认值），不是写入路径。新代码的 `driver/permission` 帧
+# 带的是宿主 preset 实况（`permission.preset`），走不到这里。
+LEGACY_PERMISSION_MODE_PRESETS = {"manual": "workspace-write",
+                                  "yolo": "danger-full-access",
+                                  "auto": "danger-full-access"}
+
 
 def _merge_permission(live, old):
     """权限折叠（`/live` 对齐用）：preset 以宿主实况为准，mode 以平台记下的为准。
@@ -483,18 +490,22 @@ def session_effort(sid):
 
 
 def session_permission_mode(sid):
-    """会话当前**权限档**（平台三档 manual/yolo/auto，取不到返回 ''）。
+    """会话当前**权限档**（宿主 preset key，取不到返回 ''）。
 
-    取值优先级与 server._session_permission_mode 同源：平台切过的 `mode` 优先
-    （宿主 preset 到三档是多对一，只有 mode 能区分 yolo/auto）；没有 mode 时按宿主
-    preset 反查近似档位（外部直跑后接管的会话）。两者皆无返回 ''。
+    取值优先级与 server._session_permission_mode 同源（契约 §5.5）：
+      1. `permission.preset` 非空 ⇒ **原样返回**（新的首选，可能是 path-rules /
+         write-guard 等任意宿主档——board._start_web 会把它当起会话的显式档下发）；
+      2. 否则旧插件/旧帧的 `permission.mode`（manual/yolo/auto）做**展示兜底**映射
+         （manual→workspace-write、yolo/auto→danger-full-access，只读回显、不是写入
+         路径）；
+      3. 都没有返回 ''（调用方按「未知」处理，回落项目默认/宿主默认，不猜）。
     """
     st = get(sid) or {}
     perm = st.get("permission") or {}
-    mode = str(perm.get("mode") or "")
-    if mode:
-        return mode
-    return dshdriver.PRESET_MODES.get(str(perm.get("preset") or ""), "")
+    preset = str(perm.get("preset") or "")
+    if preset:
+        return preset
+    return LEGACY_PERMISSION_MODE_PRESETS.get(str(perm.get("mode") or ""), "")
 
 
 def snapshot():

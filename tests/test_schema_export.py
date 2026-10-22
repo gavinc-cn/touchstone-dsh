@@ -253,12 +253,30 @@ def test_unknown_handler_raises(isolated_db, monkeypatch):
 
 
 def test_guards_fire_only_when_condition_holds(isolated_db):
-    """rows 守卫：条件不成立时跳过、成立时执行（老库夹具上全部 13 步都该触发）。"""
+    """rows 守卫：条件不成立时跳过、成立时执行（老库夹具上除权限档迁移外都应触发）。
+
+    2026-10-21 权限档迁移（`2026-10-21_projects_permission_mode_presets`）是**数据
+    迁移**，守卫 SQL 引用 `projects.permission_mode` 列——而 raw ancient 夹具是
+    2026-10-04 之前的库，本就没有该列（真实启动时先由 migrate() 的 ALTER 补列，且这类
+    极老库不可能带旧三档值）。故这里先给夹具补列（让守卫 SQL 可执行），并断言该步
+    **不命中**；它的命中路径由 `test_project_session_defaults.py::
+    test_permission_mode_migration_normalizes_legacy_values` 覆盖。
+    """
     path = _exec_sql_file(os.path.join(SCHEMA_DIR, "fixtures/ancient.sql"))
+    # raw 夹具不跑 migrate()：手工补列，只为让 2026-10-21 迁移的 when SQL 可执行
+    # （夹具里没有旧三档行 ⇒ 本来就不该命中；不补列会 no such column 而非「跳过」）。
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("ALTER TABLE projects ADD COLUMN permission_mode"
+                     " TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    finally:
+        conn.close()
     db.DB_OVERRIDE = path
     executed = db.run_declared_migrations()          # 夹具上直接跑清单（不先 migrate）
     ids = {step["id"] for step in db.MIGRATIONS}
-    assert set(executed) == ids, "老库夹具应触发全部声明式迁移"
+    assert set(executed) == ids - {"2026-10-21_projects_permission_mode_presets"}, \
+        "老库夹具应触发除权限档数据迁移外的全部声明式迁移"
     conn = db.connect()
     try:
         assert conn.execute("SELECT state FROM wait_items WHERE kind='card'"

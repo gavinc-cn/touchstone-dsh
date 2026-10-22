@@ -21,6 +21,7 @@
 import http.client
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -295,22 +296,81 @@ def set_model(session_id, model, provider="", reasoning_effort=""):
     return _request("POST", "/model", payload, timeout=60)
 
 
-# ---------- P3 第二批：审批代答 + 权限 preset（2026-10-03）----------
-
-# 平台三档权限 → dsh preset 名（2026-10-03 P3 第二批）。manual 逐条确认 ↔
-# workspace-write（sandbox=workspace-write + approval=ask；平台随即接管该会话审批
-# 代答，见 answer_approval）；yolo 自动通过 / auto 完全自主 ↔ danger-full-access
-# （approval=never，本机默认档）。⚠️ 这是**语义近似**：dsh 的 preset 是
-# sandbox×approval 组合，与平台三档并不一一对应（yolo 与 auto 落到同一档）。
+# ---------- P3 第二批：审批代答 + 权限 preset（2026-10-03；2026-10-21 对齐宿主目录）----------
+#
+# 权限档（2026-10-21 批次）：平台档位改为**动态对齐 DSH 宿主权限目录**（驱动
+# `GET /presets` 的 options）——值域是宿主 preset key（read-only / workspace-write /
+# danger-full-access / path-rules / write-guard / auto …），不再是平台自造的 manual/
+# yolo/auto 三档。下面两个表只保留**旧三档 API/展示兼容**语义，不是新的值域：
+#
 # 定义收在这里（dshdriver）而不是 server：board/runner 起会话时也要按项目默认值
-# 应用权限档，而 server 反向依赖 board（循环导入），只能由最底层的驱动模块持有。
-PERMISSION_PRESETS = {"manual": "workspace-write",
-                      "yolo": "danger-full-access",
-                      "auto": "danger-full-access"}
-# 反向近似（宿主 preset → 平台三档）：仅用于「平台没记过档位」的会话（用户在 dsh 侧
-# 直跑后被接管的卡会话）。正向映射本就多对一（yolo/auto 同 preset），反查统一取 yolo
-# 作展示；平台自己切过的会话以驱动记下的 mode 为准，不走这里。
-PRESET_MODES = {"workspace-write": "manual", "danger-full-access": "yolo"}
+# 应用权限档，而 server 反向依赖 board（循环导入），只能由最底层的驱动模块持有；
+# Node 侧 backend/lib/dshdriver.js 有逐字同义的一份（契约 §3）。
+#
+# 旧三档 → 宿主 preset 的 **API 兼容别名**（manual/yolo）。auto 不在此表：它现在
+# 是宿主目录里可能真实存在的档位（§5.3 歧义裁决），只认目录里确实有 auto 的情形；
+# 旧库里的 yolo/auto 已由数据迁移（§4）消化，不再按旧语义映射。
+LEGACY_PERMISSION_ALIASES = {"manual": "workspace-write",
+                             "yolo": "danger-full-access"}
+# 内置档的中文产品名（镜像 DSH 客户端展示层 `displayPermissionPreset`）：宿主对内置
+# 三档上报的 name 就是 machine value（不是中文名），中文名由客户端映射；auto 恒用产品名。
+BUILTIN_PERMISSION_LABELS_ZH = {
+    "read-only": "仅可查看",
+    "workspace-write": "工作区内修改",
+    "danger-full-access": "完全权限",
+    "auto": "自动审查（实验）",
+}
+# 镜像 DSH 客户端 DEFAULT_PRESET_LABELS：宿主上报英文默认名时也归中文产品名
+BUILTIN_PERMISSION_LABELS_EN = {
+    "read-only": "Read Only",
+    "workspace-write": "Workspace Write",
+    "danger-full-access": "Full access",
+}
+# 内置档描述（TS 补充；DSH 下拉不显示描述。宿主给了 description 时**宿主优先**，
+# 见 permission_option）。
+BUILTIN_PERMISSION_DESCRIPTIONS = {
+    "read-only": "只读运行；所有修改动作都需要审批。",
+    "workspace-write": "可修改工作区与允许的临时目录；更宽的操作需要审批。",
+    "danger-full-access": "不受沙箱限制，也不再弹审批。",
+    "auto": "无沙箱运行；每次原生工具调用和 PTC 内层调用前由同一模型进行实验性审查。",
+}
+# 宿主自定义档 name 的 kebab 形态（`some-preset` → `Some Preset`，镜像 DSH 展示层）
+KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+def permission_option(value, name="", description=""):
+    """把宿主目录的一项 option 归一成平台下拉项：`{value, label, description}`。
+
+    纯函数（契约 §3，Node 侧 `permissionOption` 逐字同义）：
+      1. value 去空白；空值返回 `{}`（调用方过滤掉）；
+      2. name 空则用 value；description 空串；
+      3. label：auto 恒用中文产品名；内置档且宿主 name 是 machine value / 英文默认名
+         ⇒ 对应中文产品名；其余 name 命中 kebab 形态 ⇒ 逐词首字母大写，否则原样；
+      4. description：宿主给了就用（**宿主优先**）；否则回落内置补充描述；未知档为空；
+      5. 不认识的 value 也照常返回，不报错（目录是唯一真源，平台不猜合法性）。
+    """
+    v = str(value or "").strip()
+    if not v:
+        return {}
+    nm = str(name or "") or v
+    desc = str(description or "")
+    if v == "auto":
+        label = BUILTIN_PERMISSION_LABELS_ZH["auto"]
+    elif (v in BUILTIN_PERMISSION_LABELS_ZH
+          and nm in (v, BUILTIN_PERMISSION_LABELS_EN.get(v))):
+        label = BUILTIN_PERMISSION_LABELS_ZH[v]
+    elif KEBAB_RE.match(nm):
+        # 逐词首字母大写（`some-preset` → `Some Preset`，连字符按词分隔，镜像 DSH）
+        label = re.sub(r"(^| )([a-z0-9])",
+                       lambda m: m.group(1) + m.group(2).upper(),
+                       nm.replace("-", " "))
+    else:
+        label = nm
+    if not desc:
+        desc = BUILTIN_PERMISSION_DESCRIPTIONS.get(v, "")
+    return {"value": v, "label": label, "description": desc}
+
+
 # 思考等级（dsh 宿主 reasoningEffort）合法取值：pi-ai 的 ModelThinkingLevel 全集。
 # `off`＝不思考（宿主模型目录会把它列进 efforts，dsh 自己的控件也提供），故一并放行；
 # 具体某个模型支持哪几档由宿主模型目录（驱动 `/models` 的 `efforts`）给出，平台只做
@@ -335,11 +395,15 @@ def answer_approval(session_id, approval_id, decision):
 def set_permission(session_id, preset, mode=None):
     """切换会话权限 preset（宿主 `permissionPresets.set`）并**把该会话的审批交给平台**。
 
-    preset 名来自 `/presets` 的 options[].value。preset 的 approval=ask 时平台必须
-    用 `answer_approval` 作答（插件据此认领 waterfall）；never 时瀑布不会被调用。
-    `mode`（可选）＝平台三档 manual/yolo/auto：preset 到三档是多对一，只有平台知道
-    用户点的哪一档，故随写一起交给驱动记下（后续经 `driver/permission` 状态帧回读，
-    供会话窗「权限」控件显示）。返回 `{preset, approval, hold_approvals, permission}`。
+    preset 名来自宿主权限目录（驱动 `GET /presets` 的 options[].value，见
+    `permission_option`）。preset 的 approval=ask 时平台必须用 `answer_approval`
+    作答（插件据此认领 waterfall）；never 时瀑布不会被调用。
+    返回 `{preset, approval, hold_approvals, permission}`。
+
+    `mode`（可选，**本批平台不再传**）：历史遗留的平台三档 manual/yolo/auto 回显
+    辅助字段（旧插件 `driver/permission` 帧的 mode 来源）。2026-10-21 起档位由宿主
+    preset 目录表达，平台侧路径（apply_session_defaults / 会话 profile 端点）一律
+    只传 preset；保留该形参仅为兼容老调用方/旧版插件，不再写新语义。
     """
     body = {"session_id": session_id, "preset": preset}
     if mode:
@@ -443,7 +507,8 @@ def apply_session_defaults(session_id, model="", provider="",
     参数：
       model/provider     会话当前模型（可为空：档位不变、仅改思考等级时由插件回读）；
       reasoning_effort   思考等级（dshdriver.EFFORT_LEVELS 之一，空=不改）；
-      permission_mode    平台三档（manual/yolo/auto，空=不改）；
+      permission_mode    权限档（宿主 preset key；旧三档 manual/yolo 作 API 兼容别名
+                         先映射，空=不改；**auto 原样＝宿主 auto 档**，不再是旧语义）；
       log                可选 `callable(text)`，逐条即时落日志（失败场景）。
     """
     warns = []
@@ -457,14 +522,17 @@ def apply_session_defaults(session_id, model="", provider="",
                 pass                                  # 日志失败绝不影响起会话
 
     if permission_mode:
-        preset = PERMISSION_PRESETS.get(permission_mode, "")
+        # 档位直达宿主 preset（2026-10-21，§5.6）：manual/yolo 只是旧三档 API 兼容
+        # 别名，其余值原样作为宿主 preset（含 auto/path-rules 等目录档）；**不带 mode**。
+        raw = str(permission_mode).strip()
+        preset = LEGACY_PERMISSION_ALIASES.get(raw, raw)
         if not preset:
-            _warn(f"### 项目权限档 {permission_mode!r} 非法，已跳过（会话沿用宿主默认）\n")
+            _warn(f"### 项目权限档 {raw!r} 非法，已跳过（会话沿用宿主默认）\n")
         else:
             try:
-                set_permission(session_id, preset, mode=permission_mode)
+                set_permission(session_id, preset)
             except DshDriverError as e:
-                _warn(f"### 项目权限档 {permission_mode} 未生效：{e}\n")
+                _warn(f"### 项目权限档 {raw} 未生效：{e}\n")
     if reasoning_effort:
         if reasoning_effort not in EFFORT_LEVELS:
             _warn(f"### 项目思考等级 {reasoning_effort!r} 非法，已跳过"
@@ -497,10 +565,22 @@ def models():
     return _request("GET", "/models", timeout=30)
 
 
-def presets(session_id):
-    """读会话可选权限 preset：`{current, options:[{value,name,description}], default}`。"""
+def presets(session_id=""):
+    """读宿主权限目录（`GET /presets`）：`{session_id, current, options, default}`。
+
+    options 每项 `{value, name, description}`——`value` 是平台保存/下发的档位键，
+    展示层经 `permission_option` 归一（内置档中文产品名、自定义档宿主 name/description）。
+
+    2026-10-21 起插件支持 **`session_id` 省略/空串**（§5.1）：只回**进程级目录**本身
+    （`current` 为空、不查会话池）——平台项目弹窗/会话窗的档位下拉数据源（没有具体
+    会话可依附，但目录与默认档是进程级信息）。带 sid 时行为不变（池外 404、服务
+    不可用 503），供会话级窗口按当前会话取 `current`。
+    """
+    sid = str(session_id or "")
+    if not sid:
+        return _request("GET", "/presets", timeout=30)
     return _request("GET", "/presets?session_id="
-                    + urllib.parse.quote(str(session_id), safe=""), timeout=30)
+                    + urllib.parse.quote(sid, safe=""), timeout=30)
 
 
 def answer_question(session_id, call_id, answers):
