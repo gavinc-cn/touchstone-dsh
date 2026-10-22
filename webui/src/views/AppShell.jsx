@@ -13,6 +13,7 @@ import StressTab from '../components/StressTab.jsx'
 import { canonicalPermission, permissionDefaultLabel, permissionItems, permissionLabel }
   from '../utils/permission'
 import { effortChoices } from '../utils/sessionEffort'
+import { dirCanGoUp, dirPathText, dirUpTitle, dirRootHint } from '../utils/dirNav'
 // 主标签页定义/默认序/布局规范化（含压测面板默认置末的存量迁移）唯一出处
 import { TAB_KEYS, TAB_LABEL, normTabCfg } from '../utils/tabCfg'
 import { RzHandles } from '../components/RzHandles'
@@ -1136,11 +1137,14 @@ export default function AppShell() {
             </DialogTitle>
           </DialogHeader>
           <div className="flex items-center gap-1.5">
-            <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground" title={dirData?.path || ''}>
-              {dirData?.path || '（选择根目录）'}
+            <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
+              title={dirData?.path || dirPathText(dirData)}>
+              {dirPathText(dirData) || '（选择根目录）'}
             </span>
-            <Button variant="outline" size="sm" disabled={dirBusy || !dirData?.parent}
-              onClick={() => navDir(dirData.parent)}>
+            {/* parent 空串=文件系统根（盘符根 / POSIX 根）⇒「上级」进盘符/根列表；null=已在根视角。
+                2026-10-22 卡 1044：修复 Windows 盘符根上级被禁用、进不了盘符列表（无法选盘符/切换盘） */}
+            <Button variant="outline" size="sm" disabled={dirBusy || !dirCanGoUp(dirData)}
+              onClick={() => navDir(dirData.parent)} title={dirUpTitle(dirData)}>
               <ArrowUp /> 上级
             </Button>
             <Button variant="outline" size="sm" disabled={dirBusy}
@@ -1173,6 +1177,10 @@ export default function AppShell() {
             {dirBusy && <div className="p-2 text-xs text-muted-foreground">加载中…</div>}
             {!dirBusy && !(dirData?.dirs || []).length && (
               <div className="p-2 text-xs text-muted-foreground">无子目录</div>
+            )}
+            {/* 根视角提示（仅 Windows 盘符列表）：说明怎么把盘符根目录选为结果 */}
+            {!dirBusy && dirRootHint(dirData) && (
+              <div className="p-2 text-xs text-muted-foreground">{dirRootHint(dirData)}</div>
             )}
             {!dirBusy && (dirData?.dirs || []).map((d) => (
               <button key={d.path} type="button"

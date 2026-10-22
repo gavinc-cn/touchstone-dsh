@@ -1039,7 +1039,12 @@ def fs_browse(raw_path):
     """列出一个目录下的子目录（不含文件），供前端目录选择对话框浏览。
 
     返回 platform(服务端平台)/roots(根列表)/path(规整后的绝对路径)/
-    parent(上级目录, 已到根时为 None)/dirs(子目录 {name, path} 列表)。
+    parent(上级目录; 三态见下)/dirs(子目录 {name, path} 列表)。
+    parent 三态（2026-10-22，卡 1044「目录选择支持选盘符」）：
+      - 普通字符串：上级目录；
+      - 空串 ""：当前是**文件系统根**（Windows 盘符根如 D:\\ / POSIX 根 /）⇒ 前端「上级」
+        进入根视角（Windows = 盘符列表「此电脑」），从盘符内部也能切到别的盘 / 选盘符；
+      - None：当前就是根视角（盘符/根列表），无处可上。
     raw_path 为空时返回根视角（dirs 即根列表）。目录不存在或不可读返回 None。
     """
     platform = "windows" if os.name == "nt" else ("macos" if sys.platform == "darwin" else "linux")
@@ -1065,8 +1070,8 @@ def fs_browse(raw_path):
         return None
     dirs.sort(key=lambda d: d["name"])
     parent = os.path.dirname(path)
-    if parent == path:  # os.path.dirname 对根目录返回自身，视为已到根
-        parent = None
+    if parent == path:  # os.path.dirname 对根目录返回自身 ⇒ 已在文件系统根
+        parent = ""     # 「上级」进根视角（盘符/根列表）；根视角自身仍是 None
     return {"platform": platform, "roots": roots, "path": path,
             "parent": parent, "dirs": dirs}
 

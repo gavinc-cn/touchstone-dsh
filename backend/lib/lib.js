@@ -513,6 +513,12 @@ function platformName() {
  * 返回 `platform/roots/path/parent/dirs`；`rawPath` 为空时是根视角（dirs 即根列表）；
  * 目录不存在或不可读返回 `null`（调用方 400）。条目用 **stat 跟随符号链接**判定目录
  * （Python `entry.is_dir()` 的默认行为），坏条目跳过而不中断整个列举。
+ *
+ * `parent` 三态（2026-10-22，卡 1044「目录选择支持选盘符」，与 `server.py:fs_browse` 逐点对齐）：
+ *   - 普通字符串：上级目录；
+ *   - 空串 `''`：当前是**文件系统根**（Windows 盘符根如 `D:\` / POSIX 根 `/`）⇒ 前端「上级」
+ *     进入根视角（Windows = 盘符列表「此电脑」），从盘符内部也能切到别的盘 / 选盘符；
+ *   - `null`：当前就是根视角（盘符/根列表），无处可上。
  * @param {string} rawPath
  * @returns {{platform: string, roots: string[], path: string, parent: string|null,
  *            dirs: Array<{name: string, path: string}>}|null}
@@ -546,7 +552,7 @@ export function fsBrowse(rawPath) {
   }
   dirs.sort((a, b) => pyStrCompare(a.name, b.name));
   let parent = pyDirname(dirPath);
-  if (parent === dirPath) parent = null;     // dirname 对根目录返回自身 ⇒ 视为已到根
+  if (parent === dirPath) parent = '';       // 文件系统根 ⇒「上级」进根视角（盘符/根列表）
   return { platform, roots, path: dirPath, parent, dirs };
 }
 
