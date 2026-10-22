@@ -114,9 +114,14 @@ export default function AppShell() {
   const [delTarget, setDelTarget] = useState(null)
   const [delName, setDelName] = useState('')
   const { rzOn, rzStyle, rzStart, rzDragStart, rzReset } = useResizable()
-  const { rzOn: dupRzOn, rzStyle: dupRzStyle, rzDragStart: dupDragStart, rzReset: dupRzReset } = useResizable()
-  const { rzOn: dirRzOn, rzStyle: dirRzStyle, rzDragStart: dirDragStart, rzReset: dirRzReset } = useResizable()
-  const { rzOn: delRzOn, rzStyle: delRzStyle, rzDragStart: delDragStart, rzReset: delRzReset } = useResizable()
+  // 每个弹窗各自一份 useResizable：手柄的 start 必须与 style/class 同源，否则拖一个弹窗的边框
+  // 会去缩放另一个弹窗（2026-10-21 用户报「选择目录弹窗拖边框，改的是背后的编辑项目弹窗」）
+  const { rzOn: dupRzOn, rzStyle: dupRzStyle, rzStart: dupRzStart,
+          rzDragStart: dupDragStart, rzReset: dupRzReset } = useResizable()
+  const { rzOn: dirRzOn, rzStyle: dirRzStyle, rzStart: dirRzStart,
+          rzDragStart: dirDragStart, rzReset: dirRzReset } = useResizable()
+  const { rzOn: delRzOn, rzStyle: delRzStyle, rzStart: delRzStart,
+          rzDragStart: delDragStart, rzReset: delRzReset } = useResizable()
   const refreshTimer = useRef(null)
 
   // ---- 侧栏个性化: 项目列表拖拽排序 + 侧栏宽度拖拽 ----
@@ -1071,7 +1076,7 @@ export default function AppShell() {
           style={{ ...dupRzStyle, marginTop: 0 }}
           showCloseButton={false}
         >
-          <RzHandles start={rzStart} reset={rzReset} />
+          <RzHandles start={dupRzStart} reset={dupRzReset} />
           <DialogHeader className="text-left">
             <DialogTitle className="cursor-move select-none text-sm" onMouseDown={dupDragStart}>目录重复提醒</DialogTitle>
           </DialogHeader>
@@ -1097,7 +1102,7 @@ export default function AppShell() {
           style={{ ...dirRzStyle, marginTop: 0 }}
           showCloseButton={false}
         >
-          <RzHandles start={rzStart} reset={dirRzReset} />
+          <RzHandles start={dirRzStart} reset={dirRzReset} />
           <DialogHeader className="text-left">
             <DialogTitle className="cursor-move select-none text-sm" onMouseDown={dirDragStart}>
               选择目录
@@ -1166,7 +1171,7 @@ export default function AppShell() {
           style={{ ...delRzStyle, marginTop: 0 }}
           showCloseButton={false}
         >
-          <RzHandles start={rzStart} reset={delRzReset} />
+          <RzHandles start={delRzStart} reset={delRzReset} />
           <DialogHeader className="text-left">
             <DialogTitle className="cursor-move select-none text-sm" onMouseDown={delDragStart}>
               删除项目

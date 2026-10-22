@@ -86,8 +86,12 @@ export function useResizable(persistKey, persistH = true) {
   }, [persistKey, persistH])
 
   const start = useCallback((e, dir) => {
+    if (e.button !== 0) return
     const el = e.currentTarget.closest('.modal')
     if (!el) return
+    // 阻止 mousedown 的默认「开始选区」动作: 边框手柄是透明条, 不拦的话拖到弹窗外会
+    // 选中背后页面的文字(用户报「拖边框会选到背后的编辑项目页面」, 与标题栏拖动同口径)
+    e.preventDefault()
     // 先停掉打开动画(zoom-in/enter 会覆盖定位导致取到的 rect 失真), 再读真实布局
     el.style.animation = 'none'
     el.style.transition = 'none'
