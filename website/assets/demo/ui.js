@@ -138,7 +138,8 @@
 
   function tabsHtml() {
     var s = S();
-    var keys = ['board', 'tasks', 'stress', 'monitor', 'bugs'];
+    // 标签页默认序与产品站 AppShell 一致（2026-10-22 起压测面板在末位）
+    var keys = ['board', 'tasks', 'monitor', 'bugs', 'stress'];
     return keys.map(function (k) {
       return '<button type="button" class="dtab' + (s.tab === k ? ' on' : '') + '" ' + act('tab', 'data-k="' + k + '"') + '>' + esc(T('shell.tabs.' + k)) + '</button>';
     }).join('');

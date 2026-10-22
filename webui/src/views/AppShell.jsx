@@ -13,6 +13,8 @@ import StressTab from '../components/StressTab.jsx'
 import { canonicalPermission, permissionDefaultLabel, permissionItems, permissionLabel }
   from '../utils/permission'
 import { effortChoices } from '../utils/sessionEffort'
+// 主标签页定义/默认序/布局规范化（含压测面板默认置末的存量迁移）唯一出处
+import { TAB_KEYS, TAB_LABEL, normTabCfg } from '../utils/tabCfg'
 import { RzHandles } from '../components/RzHandles'
 import TouchstoneLogo from '../components/TouchstoneLogo.jsx'
 import { Button } from '@/components/ui/button'
@@ -29,26 +31,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Plus, Pencil, LogOut, Menu, Settings, ShieldUser, RefreshCw, Archive, ArchiveRestore, Trash2, FolderOpen, FolderPlus, ArrowUp, EyeOff, X } from 'lucide-react'
 
 const DUP_LABEL = { project_dir: '项目目录', work_dir: '工作目录' }
-
-// 主标签页定义（顺序 = 默认顺序；key 与 user_prefs 存储约定，勿改）
-const TABS = [
-  { key: 'board', label: '开发看板' },
-  { key: 'tasks', label: '测试任务' },
-  { key: 'stress', label: '压测面板' },
-  { key: 'monitor', label: '监控面板' },
-  { key: 'bugs', label: 'Bug 报告' },
-]
-const TAB_KEYS = TABS.map((t) => t.key)
-const TAB_LABEL = Object.fromEntries(TABS.map((t) => [t.key, t.label]))
-
-// 标签页布局规范化：未知 key 丢弃、缺失 key 按默认序补尾、hidden 只留合法 key
-// （服务端 prefs 可能落后于前端版本——增删标签页后仍能正确恢复）
-function normTabCfg(cfg) {
-  const order = (Array.isArray(cfg?.order) ? cfg.order : []).filter((k) => TAB_KEYS.includes(k))
-  for (const k of TAB_KEYS) if (!order.includes(k)) order.push(k)
-  const hidden = (Array.isArray(cfg?.hidden) ? cfg.hidden : []).filter((k) => TAB_KEYS.includes(k))
-  return { order, hidden }
-}
 
 // 取路径最后一段（项目名称留空时自动命名）: / 与 \ 均按分隔符处理(跨 Windows/Linux),
 // 忽略尾部分隔符与纯盘符段(如 "D:"), 与后端 path_last_segment 行为一致
@@ -834,14 +816,14 @@ export default function AppShell() {
               <TabsContent value="tasks" className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 <TasksTab onCreated={(type) => { if (type === 'stress') openTab('stress') }} />
               </TabsContent>
-              <TabsContent value="stress" className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                <StressTab />
-              </TabsContent>
               <TabsContent value="monitor" className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 <MonitorTab project={store.currentProject} />
               </TabsContent>
               <TabsContent value="bugs" className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 <BugsTab project={store.currentProject} />
+              </TabsContent>
+              <TabsContent value="stress" className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                <StressTab />
               </TabsContent>
             </Tabs>
           ) : (
