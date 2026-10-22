@@ -203,6 +203,19 @@ test('fsBrowse：根视角（path="" ⇒ dirs 即根列表，parent=null）', ()
     : process.platform === 'darwin' ? 'macos' : 'linux');
 });
 
+test('fsBrowse：文件系统根的 parent 为空串 ⇒「上级」进根视角（盘符/根列表）', () => {
+  // 2026-10-22 卡 1044：Windows 盘符根（D:\）的 parent 曾是 null ⇒ 前端「上级」被禁用，
+  // 从盘符内部永远回不到盘符列表（选不了盘符 / 切不到别的盘）。现在给空串 = 「上级」= 根视角；
+  // 根视角自身仍是 null（见上一条）。本用例在 POSIX（"/"）与 Windows（首个盘符根）都能跑。
+  for (const root of lib.fsRoots()) {
+    const data = lib.fsBrowse(root);
+    assert.ok(data, `文件系统根 ${root} 应可浏览`);
+    assert.equal(data.path, lib.realpathOrResolve(root));
+    assert.equal(data.parent, '');
+    assert.deepEqual(data.roots, lib.fsRoots());
+  }
+});
+
 test('fsBrowse：只列子目录（含隐藏目录与符号链接目录）、按名字码点序、给 parent', () => {
   const dir = tmpDir();
   fs.mkdirSync(path.join(dir, 'b_dir'));

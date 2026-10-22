@@ -266,6 +266,13 @@ test('/api/fs/browse：200 子目录列表 / 400 目录不存在或不可读', a
     const roots = await get(fx.db, me, '/api/fs/browse');
     assert.equal(roots.status, 200);
     assert.deepEqual(roots.json.roots, ['/']);
+    assert.equal(roots.json.parent, null);   // 根视角自身无处可上
+
+    // 2026-10-22 卡 1044：文件系统根（盘符根 / "/"）的 parent 是空串 ⇒ 前端「上级」进根视角
+    const atRoot = await get(fx.db, me, `/api/fs/browse?path=${encodeURIComponent('/')}`);
+    assert.equal(atRoot.status, 200);
+    assert.equal(atRoot.json.path, '/');
+    assert.equal(atRoot.json.parent, '');
 
     const bad = await get(fx.db, me, '/api/fs/browse?path=/no/such/dir/xyz');
     assert.equal(bad.status, 400);
