@@ -340,6 +340,29 @@ MIGRATIONS = [
                 "    OR last_error LIKE '阻塞让行提交异常%'"],
     },
     {
+        # 权限档改存 DSH 宿主 preset（2026-10-21，与「权限档位对齐 DSH 目录」同批）。
+        # **为什么排在重建表那一步之前**：重建表只搬 12 个老列，会把 permission_mode
+        # 一起丢掉（ancient 库靠下次启动的补列加回）。若本步排在其后，极老库在
+        # 「补列→重建表→本步」同一轮启动里会因列已被重建掉而报 no such column；
+        # 排在其前时列一定已由 migrate() 的 ALTER 补上（上面 projects 补列块先执行）。
+        # 现实时序也自洽：permission_mode 是 2026-10-04 才加的列，带旧三档值的库必然
+        # 早已越过重建表那一步。
+        "id": "2026-10-21_projects_permission_mode_presets",
+        "desc": "权限档改存 DSH 宿主 preset：旧三档 manual/yolo/auto 归一"
+                "（manual→workspace-write，yolo/auto→danger-full-access），"
+                "此后 permission_mode 只存宿主 preset key 或空串",
+        # 守卫只认「旧三档值还在库里」时才跑；跑完即不再命中（幂等）。
+        "when": {"kind": "rows",
+                 "sql": "SELECT 1 FROM projects"
+                        " WHERE permission_mode IN ('manual','yolo','auto') LIMIT 1"},
+        "sql": [
+            "UPDATE projects SET permission_mode='workspace-write'"
+            " WHERE permission_mode='manual'",
+            "UPDATE projects SET permission_mode='danger-full-access'"
+            " WHERE permission_mode IN ('yolo','auto')",
+        ],
+    },
+    {
         "id": "2026-09-04_projects_drop_global_unique_name",
         "desc": "旧库 projects.name 全局 UNIQUE → (user_id,name) 用户内唯一：重建表",
         "when": {"kind": "index_origin_unique", "table": "projects"},

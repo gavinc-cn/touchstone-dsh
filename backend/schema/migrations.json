@@ -60,6 +60,18 @@
       ]
     },
     {
+      "id": "2026-10-21_projects_permission_mode_presets",
+      "desc": "权限档改存 DSH 宿主 preset：旧三档 manual/yolo/auto 归一（manual→workspace-write，yolo/auto→danger-full-access），此后 permission_mode 只存宿主 preset key 或空串",
+      "when": {
+        "kind": "rows",
+        "sql": "SELECT 1 FROM projects WHERE permission_mode IN ('manual','yolo','auto') LIMIT 1"
+      },
+      "sql": [
+        "UPDATE projects SET permission_mode='workspace-write' WHERE permission_mode='manual'",
+        "UPDATE projects SET permission_mode='danger-full-access' WHERE permission_mode IN ('yolo','auto')"
+      ]
+    },
+    {
       "id": "2026-09-04_projects_drop_global_unique_name",
       "desc": "旧库 projects.name 全局 UNIQUE → (user_id,name) 用户内唯一：重建表",
       "when": {
