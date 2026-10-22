@@ -314,7 +314,8 @@ test('帧折叠表：12 种状态帧逐条折进注册表', () => {
   // ⑥ driver/permission：{mode, preset}（都转字符串，空帧也整项覆盖）
   send('driver/permission', 's2', { mode: 'yolo', preset: 'danger-full-access' }, 11);
   assert.deepEqual(hub.get('s2').permission, { mode: 'yolo', preset: 'danger-full-access' });
-  assert.equal(hub.sessionPermissionMode('s2'), 'yolo');
+  // 2026-10-21 §5.5：preset 优先（可能已是 path-rules 等宿主档），mode 仅作旧帧兜底
+  assert.equal(hub.sessionPermissionMode('s2'), 'danger-full-access');
   send('driver/permission', 's2', {}, 12);
   assert.deepEqual(hub.get('s2').permission, { mode: '', preset: '' });
 
@@ -396,18 +397,29 @@ test('sessionEffort / sessionPermissionMode：取值优先级与「未知」口�
   assert.equal(hub.sessionPermissionMode('s1'), '');
   send('driver/model', 's1', { model: 'm', reasoningEffort: 'medium' }, 2);
   assert.equal(hub.sessionEffort('s1'), 'medium');
-  // 没有 mode 时按宿主 preset 反查近似档位（外部直跑后接管）
+  // ① preset 优先：宿主实况档原样回读（含 path-rules / write-guard 这类平台不认识的档）
   send('driver/permission', 's1', { mode: '', preset: 'workspace-write' }, 3);
-  assert.equal(hub.sessionPermissionMode('s1'), 'manual');
-  // 平台切过的 mode 优先（preset 到三档多对一，只有 mode 能区分 yolo/auto）
-  send('driver/permission', 's1', { mode: 'auto', preset: 'workspace-write' }, 4);
-  assert.equal(hub.sessionPermissionMode('s1'), 'auto');
-  // 未知 preset / 原型键 ⇒ 空串（不猜、不误命中）
-  send('driver/permission', 's1', { mode: '', preset: 'toString' }, 5);
+  assert.equal(hub.sessionPermissionMode('s1'), 'workspace-write');
+  send('driver/permission', 's1', { mode: '', preset: 'path-rules' }, 4);
+  assert.equal(hub.sessionPermissionMode('s1'), 'path-rules');
+  // ② preset 优先于 mode（旧插件才带 mode；新写入路径不再传 mode）
+  send('driver/permission', 's1', { mode: 'auto', preset: 'workspace-write' }, 5);
+  assert.equal(hub.sessionPermissionMode('s1'), 'workspace-write');
+  // ③ 旧帧兜底：preset 为空时才按 mode 做展示映射（新代码基本走不到）
+  send('driver/permission', 's1', { mode: 'manual', preset: '' }, 6);
+  assert.equal(hub.sessionPermissionMode('s1'), 'workspace-write');
+  send('driver/permission', 's1', { mode: 'yolo', preset: '' }, 7);
+  assert.equal(hub.sessionPermissionMode('s1'), 'danger-full-access');
+  send('driver/permission', 's1', { mode: 'auto', preset: '' }, 8);
+  assert.equal(hub.sessionPermissionMode('s1'), 'danger-full-access', '旧 auto 语义已并入完全权限');
+  // ④ 未知 mode ⇒ 空串（不猜）；preset 非空一律原样回读（宿主是权威）
+  send('driver/permission', 's1', { mode: 'bogus', preset: '' }, 9);
   assert.equal(hub.sessionPermissionMode('s1'), '');
-  send('driver/permission', 's1', { mode: '', preset: '不存在的档' }, 6);
-  assert.equal(hub.sessionPermissionMode('s1'), '');
-  // 断连=未知：读口一律空串
+  send('driver/permission', 's1', { mode: '', preset: 'toString' }, 10);
+  assert.equal(hub.sessionPermissionMode('s1'), 'toString', 'preset 原样回读，不再按白名单反查');
+  send('driver/permission', 's1', { mode: '', preset: '不存在的档' }, 11);
+  assert.equal(hub.sessionPermissionMode('s1'), '不存在的档');
+  // ⑤ 断连=未知：读口一律空串
   hub._setConnected(false);
   assert.equal(hub.sessionEffort('s1'), '');
   assert.equal(hub.sessionPermissionMode('s1'), '');

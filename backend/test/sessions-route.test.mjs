@@ -20,6 +20,7 @@ import { test } from 'node:test';
 import { zstdCompressSync } from 'node:zlib';
 
 import * as board from '../lib/board.js';
+import * as dshevents from '../lib/dshevents.js';
 import * as sessparse from '../lib/sessparse.js';
 import * as serverstate from '../lib/serverstate.js';
 import { jsonBody } from '../lib/http.js';
@@ -339,6 +340,42 @@ test('board/session/messages：normal 分支（found:true）的字段与 queue_s
       const { ctx, res } = mkCtx(fx, { search: `sid=${sid}` });
       await boardSessionMessages(ctx, pid);
       assert.equal(bodyJson(res).queue_state, board.QS_INTERACTION);
+    }
+  });
+});
+
+test('board/session/messages：meta.permission 回显会话实况 preset（§5.5；旧 mode 只做展示兜底）', async () => {
+  await withFixture('sess-route-perm', async (fx) => {
+    const pid = insertProject(fx.db, { projectDir: PROJECT_DIR });
+    const sid = makeSession('session-dddd1111-2222-4333-8444-555555555555');
+    insertCard(fx.db, pid, { sessionId: sid });
+    // dshevents 注册表是模块级单例：直接灌实时态（生产由 driver/permission 状态帧折入）
+    const hub = dshevents.HUB;
+    hub._setConnected(true);
+    try {
+      const readPermission = async () => {
+        const { ctx, res } = mkCtx(fx, { search: `sid=${sid}` });
+        await boardSessionMessages(ctx, pid);
+        assert.equal(res.status, 200);
+        return bodyJson(res);
+      };
+      // ① 新帧：preset 优先、原样回显（path-rules 平台不认识也照实给前端）
+      hub._sessions.set(sid, { permission: { mode: '', preset: 'path-rules' } });
+      assert.equal((await readPermission()).permission, 'path-rules');
+      // ② 新帧内置档：原样（不再是旧三档反查值）
+      hub._sessions.set(sid, { permission: { mode: '', preset: 'workspace-write' } });
+      assert.equal((await readPermission()).permission, 'workspace-write');
+      // ③ 旧插件旧帧：preset 空、mode=yolo ⇒ 展示兜底映射成 danger-full-access
+      hub._sessions.set(sid, { permission: { mode: 'yolo', preset: '' } });
+      assert.equal((await readPermission()).permission, 'danger-full-access');
+      // ④ 两样都没有 / mode 不认识 ⇒ 不下发 permission 键（前端置灰，不猜）
+      hub._sessions.set(sid, { permission: { mode: '', preset: '' } });
+      assert.equal('permission' in (await readPermission()), false);
+      hub._sessions.set(sid, { permission: { mode: 'boss', preset: '' } });
+      assert.equal('permission' in (await readPermission()), false);
+    } finally {
+      hub._sessions.delete(sid);
+      hub._setConnected(false);
     }
   });
 });

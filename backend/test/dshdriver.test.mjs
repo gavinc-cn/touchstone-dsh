@@ -510,6 +510,13 @@ test('status/media/presets：查询串编码（Python quote 口径，逐字节�
     assert.deepEqual(drv.last().query, { session_id: 'session-a' });
     await driver.presets('a/b');
     assert.equal(drv.last().rawQuery, '?session_id=a/b', 'presets 同 status：斜杠不编码');
+    // 2026-10-21：空 session_id ⇒ **不带查询串**（取目录用，插件侧不查会话池）
+    await driver.presets();
+    assert.equal(drv.last().path, '/touchstone-agent/presets');
+    assert.equal(drv.last().rawQuery, '');
+    assert.deepEqual(drv.last().query, {});
+    await driver.presets('');
+    assert.equal(drv.last().rawQuery, '', "显式空串同「不带 session_id」");
   });
 });
 
@@ -741,10 +748,33 @@ test('applySessionDefaults：权限先于思考等级下发；无告警；log �
     const paths = drv.calls.map((c) => c.path);
     assert.deepEqual(paths, ['/touchstone-agent/permission', '/touchstone-agent/model'],
       '先权限档后思考等级（与 Python 同序）');
+    // 2026-10-21：权限档改为 host preset 直达 ⇒ manual 别名映射后下发，**不再带 mode**
     assert.deepEqual(drv.calls[0].body,
-      { session_id: 'session-a', preset: 'workspace-write', mode: 'manual' });
+      { session_id: 'session-a', preset: 'workspace-write' });
     assert.deepEqual(drv.calls[1].body,
       { session_id: 'session-a', model: 'deepseek-flash', provider: 'deepseek-official', reasoning_effort: 'high' });
+  });
+});
+
+test('applySessionDefaults：preset 直达（manual/yolo 别名映射，path-rules/auto 原样，均不带 mode）', async () => {
+  await withDriver(async (drv) => {
+    const cases = [
+      ['manual', 'workspace-write'],          // 旧档别名
+      ['yolo', 'danger-full-access'],         // 旧档别名
+      ['auto', 'auto'],                       // 不再走旧别名：宿主的 auto 是独立实验档
+      ['path-rules', 'path-rules'],           // 宿主自定义档原样
+      ['write-guard', 'write-guard'],
+      ['read-only', 'read-only'],
+    ];
+    for (const [input, preset] of cases) {
+      const warns = await driver.applySessionDefaults('session-a', '', '', '', input);
+      assert.deepEqual(warns, [], input);
+      assert.deepEqual(drv.last().body, { session_id: 'session-a', preset }, input);
+      assert.equal('mode' in drv.last().body, false, `${input}：不再下传 mode`);
+    }
+    // 带空白的入参先 strip 再映射
+    await driver.applySessionDefaults('session-a', '', '', '', '  manual  ');
+    assert.deepEqual(drv.last().body, { session_id: 'session-a', preset: 'workspace-write' });
   });
 });
 
@@ -792,13 +822,65 @@ test('applySessionDefaults：log 抛异常不影响业务（告警照收），�
   });
 });
 
+// ---------- 权限目录归一（纯函数，契约 §3） ----------
+
+test('permissionOption：内置中文产品名 / EN 默认名 / 自定义透传 / kebab Title-Case / 宿主 desc 优先', () => {
+  const ZH = driver.BUILTIN_PERMISSION_LABELS_ZH;
+  const EN = driver.BUILTIN_PERMISSION_LABELS_EN;
+  const DESC = driver.BUILTIN_PERMISSION_DESCRIPTIONS;
+  // ① 内置三档：宿主上报的 name 就是 machine value ⇒ 仍显示中文产品名；描述用 TS 侧补充
+  assert.deepEqual(driver.permissionOption('read-only', 'read-only', ''),
+    { value: 'read-only', label: '仅可查看', description: DESC['read-only'] });
+  assert.deepEqual(driver.permissionOption('workspace-write', 'workspace-write'),
+    { value: 'workspace-write', label: '工作区内修改', description: DESC['workspace-write'] });
+  assert.deepEqual(driver.permissionOption('danger-full-access', 'danger-full-access', ''),
+    { value: 'danger-full-access', label: '完全权限', description: DESC['danger-full-access'] });
+  // ② EN 默认名同样归中文产品名（镜像 DSH 客户端 DEFAULT_PRESET_LABELS）
+  assert.equal(EN['read-only'], 'Read Only');
+  assert.equal(EN['workspace-write'], 'Workspace Write');
+  assert.equal(EN['danger-full-access'], 'Full access');
+  assert.equal(driver.permissionOption('read-only', 'Read Only', '').label, '仅可查看');
+  assert.equal(driver.permissionOption('workspace-write', 'Workspace Write', '').label, '工作区内修改');
+  assert.equal(driver.permissionOption('danger-full-access', 'Full access', '').label, '完全权限');
+  // ③ auto：DSH 客户端对 auto 恒用产品名（host name 即使给别的也不用）
+  assert.deepEqual(driver.permissionOption('auto', 'auto', ''),
+    { value: 'auto', label: '自动审查（实验）', description: DESC.auto });
+  assert.equal(driver.permissionOption('auto', '完全自主', '').label, '自动审查（实验）');
+  // ④ 自定义档：宿主 name/description 透传
+  assert.deepEqual(driver.permissionOption('path-rules', '路径规则', '项目内可读写；项目外读允许、写需审批；白名单直通；黑名单一律审批。'),
+    { value: 'path-rules', label: '路径规则', description: '项目内可读写；项目外读允许、写需审批；白名单直通；黑名单一律审批。' });
+  // ⑤ 宿主给了 description ⇒ 优先于内置描述
+  assert.equal(driver.permissionOption('read-only', 'read-only', '宿主自己的描述').description,
+    '宿主自己的描述');
+  // ⑥ 无 name / name===value 的 kebab 值 ⇒ Title-Case（镜像 DSH）
+  assert.equal(driver.permissionOption('some-preset').label, 'Some Preset');
+  assert.equal(driver.permissionOption('some-preset', 'some-preset', '').label, 'Some Preset');
+  assert.equal(driver.permissionOption('a-b-c', '', '').label, 'A B C');
+  // ⑦ 未知 value + 非 kebab 的 name ⇒ 原样；未知且无描述 ⇒ 空描述
+  const odd = driver.permissionOption('奇怪档', '奇怪 档', '');
+  assert.deepEqual(odd, { value: '奇怪档', label: '奇怪 档', description: '' });
+  assert.deepEqual(driver.permissionOption('path-rules', '路径规则', ''),
+    { value: 'path-rules', label: '路径规则', description: '' });
+  // ⑧ value 两端空白先 strip；空 value ⇒ 空对象（调用方过滤）
+  assert.equal(driver.permissionOption(' path-rules ', '路径规则', '').value, 'path-rules');
+  assert.deepEqual(driver.permissionOption(''), {});
+  assert.deepEqual(driver.permissionOption('   '), {});
+  assert.deepEqual(driver.permissionOption(null), {});
+  assert.deepEqual(driver.permissionOption(undefined), {});
+  // ⑨ 常量逐字（跨语言契约）
+  assert.deepEqual(driver.LEGACY_PERMISSION_ALIASES,
+    { manual: 'workspace-write', yolo: 'danger-full-access' });
+  assert.deepEqual(ZH, { 'read-only': '仅可查看', 'workspace-write': '工作区内修改',
+    'danger-full-access': '完全权限', auto: '自动审查（实验）' });
+  assert.deepEqual(Object.keys(DESC).sort(),
+    ['auto', 'danger-full-access', 'read-only', 'workspace-write']);
+});
+
 // ---------- 常量与轮次口径 ----------
 
-test('常量：权限档映射/思考等级/帧类型/退出码', () => {
-  assert.deepEqual(driver.PERMISSION_PRESETS,
-    { manual: 'workspace-write', yolo: 'danger-full-access', auto: 'danger-full-access' });
-  assert.deepEqual(driver.PRESET_MODES,
-    { 'workspace-write': 'manual', 'danger-full-access': 'yolo' });
+test('常量：思考等级/帧类型/退出码（旧三档映射常量已随 2026-10-21 权限对齐删除）', () => {
+  assert.equal('PERMISSION_PRESETS' in driver, false);
+  assert.equal('PRESET_MODES' in driver, false);
   assert.deepEqual([...driver.EFFORT_LEVELS],
     ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
   assert.equal(driver.TURN_END, 'turn/end');

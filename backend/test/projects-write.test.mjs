@@ -231,9 +231,40 @@ test('建项目：14 个字段全给 ⇒ 逐列落库（skill_test/skill_cases �
     guide_text: '指南', env_label: 'dev', model: 'm1',
     skill_understand: 'su', skill_deploy: 'sd', skill_commit: 'sc',
     skill_test: 'st', skill_cases: 'scs',
-    reasoning_effort: 'high', permission_mode: 'yolo',
+    reasoning_effort: 'high',
+    // 2026-10-21：权限档存宿主 preset key；旧档 yolo 走兼容别名归一
+    permission_mode: 'danger-full-access',
     commit_spec: '', deploy_spec: '',
   });
+});
+
+test('建项目：permission_mode 归一（manual/yolo 别名→preset；内置档直存；未知/auto 需宿主目录）', async (t) => {
+  const env = setup('create-perm');
+  t.after(() => env.close());
+  const cases = [
+    ['manual', 'workspace-write'],                 // 旧档兼容别名
+    ['yolo', 'danger-full-access'],                // 旧档兼容别名
+    ['read-only', 'read-only'],                    // 目录不可用时回退内置三档
+    ['workspace-write', 'workspace-write'],
+    ['danger-full-access', 'danger-full-access'],
+  ];
+  for (const [input, stored] of cases) {
+    const r = await call(env, 'POST', '/api/projects', {
+      body: { name: `p-${input}`, project_dir: path.join(env.dat, `d-${input}`),
+        permission_mode: input },
+    });
+    assert.equal(r.status, 200, input);
+    assert.equal(projectRow(env, r.json().id).permission_mode, stored, input);
+  }
+  // auto 不再当旧档：只有宿主目录里确实有 auto 才接受（本用例没配驱动 ⇒ 目录回退内置三档）
+  await expectBody(env, 'POST', '/api/projects',
+    { body: { name: 'p-auto', project_dir: path.join(env.dat, 'd-auto'), permission_mode: 'auto' } },
+    400, '{"error": "思考等级或权限档非法"}');
+  // 其余未知值同样 400（与旧行为一致）
+  await expectBody(env, 'POST', '/api/projects',
+    { body: { name: 'p-path', project_dir: path.join(env.dat, 'd-path'),
+      permission_mode: 'path-rules' } },
+    400, '{"error": "思考等级或权限档非法"}');
 });
 
 test('建项目：重名 ⇒ 400 带空格 + 不落行（`项目名已存在`）', async (t) => {
@@ -434,7 +465,34 @@ test('改项目：非法 reasoning_effort / permission_mode ⇒ 400 带空格且
     400, '{"error": "思考等级或权限档非法"}');
   const row = projectRow(env, pid);
   assert.equal(row.reasoning_effort, 'low');
-  assert.equal(row.permission_mode, 'auto');
+  assert.equal(row.permission_mode, 'auto', '400 后存量原样（auto 不再是旧档别名，但存量行不动）');
+});
+
+test('改项目：permission_mode 的 existing 直通（目录未知时存量值不被判非法）+ 别名/内置档归一', async (t) => {
+  const env = setup('patch-perm');
+  t.after(() => env.close());
+  // 模拟「目录暂不可用」：存量值不在内置兜底集合里（pm-new 是宿主目录才可能有的自定义档）
+  const pid = seedProject(env, { name: 'p-perm', permissionMode: 'pm-new' });
+  // ① 未带键 ⇒ pyGet 回落存量；existing 直通不判非法、不改值
+  await expectBody(env, 'PATCH', `/api/projects/${pid}`, { body: { name: 'p-perm-2' } },
+    200, '{"ok":true}');
+  assert.equal(projectRow(env, pid).permission_mode, 'pm-new');
+  // ② 显式提交与存量同值 ⇒ existing 直通（目录里没有也接受）
+  await expectBody(env, 'PATCH', `/api/projects/${pid}`,
+    { body: { permission_mode: 'pm-new' } }, 200, '{"ok":true}');
+  assert.equal(projectRow(env, pid).permission_mode, 'pm-new');
+  // ③ 换成内置档 ⇒ 接受并落库
+  await expectBody(env, 'PATCH', `/api/projects/${pid}`,
+    { body: { permission_mode: 'read-only' } }, 200, '{"ok":true}');
+  assert.equal(projectRow(env, pid).permission_mode, 'read-only');
+  // ④ 旧档别名照样归一后落库（manual → workspace-write）
+  await expectBody(env, 'PATCH', `/api/projects/${pid}`,
+    { body: { permission_mode: 'manual' } }, 200, '{"ok":true}');
+  assert.equal(projectRow(env, pid).permission_mode, 'workspace-write');
+  // ⑤ 未知值仍 400，且不改进存量
+  await expectBody(env, 'PATCH', `/api/projects/${pid}`,
+    { body: { permission_mode: 'bogus' } }, 400, '{"error": "思考等级或权限档非法"}');
+  assert.equal(projectRow(env, pid).permission_mode, 'workspace-write');
 });
 
 test('改项目：不存在的项目 ⇒ 404 紧凑，且**体已被读掉**（Python 在调用 handler 前读体）', async (t) => {

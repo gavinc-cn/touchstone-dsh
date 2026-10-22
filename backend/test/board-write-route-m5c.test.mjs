@@ -27,6 +27,7 @@ import { test } from 'node:test';
 
 import * as board from '../lib/board.js';
 import * as sessparse from '../lib/sessparse.js';
+import { _resetPermissionCatalogCacheForTest } from '../lib/servercaps.js';
 import { dispatch, makeContext } from '../routes/index.js';
 import { freshDb, insertCard, insertMsg, insertProject, insertWait, setBoardSettings }
   from './m3fixture.mjs';
@@ -103,6 +104,19 @@ class FakeDriver {
     this.calls = [];
     this.forkSid = 'session-11111111-1111-4111-8111-111111111111';
     this.renameTitle = null;                 // 非 null ⇒ /rename 回该值（验 accepted_title）
+    // 宿主权限目录（2026-10-21 权限档对齐；profile 端点校验 catalog 值用）
+    this.presetsPayload = {
+      current: 'danger-full-access',
+      options: [
+        { value: 'read-only', name: 'read-only' },
+        { value: 'workspace-write', name: 'workspace-write' },
+        { value: 'danger-full-access', name: 'danger-full-access' },
+        { value: 'path-rules', name: '路径规则', description: '项目内可读写；项目外读允许、写需审批。' },
+        { value: 'write-guard', name: '完全权限（拦截）', description: '完全权限底座；越界写入需确认。' },
+        { value: 'auto', name: 'auto' },
+      ],
+      default: 'danger-full-access',
+    };
     this.server = http.createServer((req, res) => {
       const chunks = [];
       req.on('data', (c) => chunks.push(c));
@@ -114,7 +128,7 @@ class FakeDriver {
         const full = req.url.split('?')[0];
         const p = full.startsWith('/touchstone-agent')
           ? full.slice('/touchstone-agent'.length) : full;
-        this.calls.push({ path: p, full, method: req.method, body });
+        this.calls.push({ path: p, full, rawUrl: req.url, method: req.method, body });
         this.route(req, res, p, body);
       });
     });
@@ -128,6 +142,7 @@ class FakeDriver {
     if (p === '/session') return json(200, { session_id: body.session_id || 'session-new-0000' });
     if (p === '/model') return json(200, { selected: { model: body.model } });
     if (p === '/permission') return json(200, { ok: true });
+    if (p === '/presets') return json(200, this.presetsPayload);
     if (p === '/fork') return json(200, { new_session_id: this.forkSid });
     if (p === '/rename') {
       return json(200, { title: this.renameTitle === null ? body.title : this.renameTitle });
@@ -541,6 +556,7 @@ test('POST .../answer/deliver：没有待送达答案 ⇒ 400；有待送达 ⇒
 // --------------------------------------------------------------------------
 
 test('POST .../sessions/<sid>/profile：空三者 ⇒ 400；非法档位/等级 ⇒ 400（文案含白名单）', async () => {
+  _resetPermissionCatalogCacheForTest();
   const s = setup('profile-bad');
   const cid = insertCard(s.db, s.pid, { sessionId: 'sid-a', sessions: '["sid-a"]' });
   const url = `/api/projects/${s.pid}/board/sessions/sid-a/profile`;
@@ -554,10 +570,12 @@ test('POST .../sessions/<sid>/profile：空三者 ⇒ 400；非法档位/等级 
   const badEffort = await call(s, 'POST', url, { body: { reasoning_effort: '超强' } });
   assert.equal(badEffort.status, 400);
   assert.equal(badEffort.json().error, '思考等级非法（off/minimal/low/medium/high/xhigh/max 或留空）');
+  // 2026-10-21：档位校验改成「宿主权限目录里有没有」；目录不可用时回退内置三档兜底集合
   const badPmode = await call(s, 'POST', url, { body: { permission_mode: 'whatever' } });
   assert.equal(badPmode.status, 400);
-  assert.equal(badPmode.json().error, '权限档非法（manual/yolo/auto）');
+  assert.equal(badPmode.json().error, '权限档非法（宿主权限目录里没有该档位）');
   assert.equal(cid > 0, true);
+  _resetPermissionCatalogCacheForTest();
   s.close();
 });
 
@@ -574,19 +592,25 @@ test('POST .../sessions/<sid>/profile：只读归属（非本卡会话 404；越
   s.close();
 });
 
-test('POST .../sessions/<sid>/profile：权限档/模型/思考等级三路下发（preset 映射逐点核对）', async () => {
+test('POST .../sessions/<sid>/profile：权限档/模型/思考等级三路下发（preset 直达、回执 canonical）', async () => {
+  _resetPermissionCatalogCacheForTest();
   const s = setup('profile-ok');
   insertCard(s.db, s.pid, { sessionId: 'sid-a', sessions: '["sid-a"]' });
   const url = `/api/projects/${s.pid}/board/sessions/sid-a/profile`;
   await withDriver(async (drv) => {
+    // 旧档 manual 仍兼容：别名映射成 preset 下发/回执，**不再带 mode**
     const perm = await call(s, 'POST', url, { body: { permission_mode: 'manual' } });
     assert.equal(perm.status, 200);
-    assert.deepEqual(perm.json(), { ok: true, model: '', permission_mode: 'manual',
+    assert.deepEqual(perm.json(), { ok: true, model: '', permission_mode: 'workspace-write',
       reasoning_effort: '' });
     const pcall = drv.byPath('/permission');
     assert.equal(pcall.length, 1);
-    assert.equal(pcall[0].body.preset, 'workspace-write');         // manual ↔ workspace-write
-    assert.equal(pcall[0].body.mode, 'manual');                    // 三档 mode 一并下传
+    assert.deepEqual(pcall[0].body, { session_id: 'sid-a', preset: 'workspace-write' });
+    assert.equal('mode' in pcall[0].body, false, '2026-10-21 起不再下传三档 mode');
+    // 内置档原样下发（preset 即平台值）
+    await call(s, 'POST', url, { body: { permission_mode: 'read-only' } });
+    assert.deepEqual(drv.byPath('/permission')[1].body,
+      { session_id: 'sid-a', preset: 'read-only' });
     // 模型 + 思考等级同一次下发（只给等级时 model 传空串，插件自行回读）
     const both = await call(s, 'POST', url,
       { body: { model: 'deepseek/deepseek-chat', reasoning_effort: 'high' } });
@@ -600,6 +624,39 @@ test('POST .../sessions/<sid>/profile：权限档/模型/思考等级三路下�
     assert.equal(onlyEffort.json().model, '');
     assert.equal(drv.byPath('/model')[1].body.model, '');           // 空 model ⇒ 只改等级
   });
+  _resetPermissionCatalogCacheForTest();
+  s.close();
+});
+
+test('POST .../sessions/<sid>/profile：接受宿主目录里的自定义档（path-rules/write-guard/auto）', async () => {
+  _resetPermissionCatalogCacheForTest();
+  const s = setup('profile-catalog');
+  insertCard(s.db, s.pid, { sessionId: 'sid-a', sessions: '["sid-a"]' });
+  const url = `/api/projects/${s.pid}/board/sessions/sid-a/profile`;
+  await withDriver(async (drv) => {
+    // 先经新端点取到目录 ⇒ 进程内「已知档位集合」= 宿主全集（含 path-rules/write-guard/auto）
+    const catalog = await call(s, 'GET', '/api/agents/presets');
+    assert.equal(catalog.status, 200);
+    assert.equal(catalog.json().available, true);
+    assert.equal(drv.calls[0].full, '/touchstone-agent/presets', '取目录不带 session_id');
+    for (const preset of ['path-rules', 'write-guard', 'auto']) {
+      const r = await call(s, 'POST', url, { body: { permission_mode: preset } });
+      assert.equal(r.status, 200, preset);
+      assert.deepEqual(r.json(), { ok: true, model: '', permission_mode: preset,
+        reasoning_effort: '' });
+    }
+    assert.deepEqual(drv.byPath('/permission').map((c) => c.body), [
+      { session_id: 'sid-a', preset: 'path-rules' },
+      { session_id: 'sid-a', preset: 'write-guard' },
+      { session_id: 'sid-a', preset: 'auto' },
+    ]);
+    // 目录里没有的档位 ⇒ 400 新文案（目录已知 ≠ 放行任意值）
+    const bad = await call(s, 'POST', url, { body: { permission_mode: 'no-such-preset' } });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.json().error, '权限档非法（宿主权限目录里没有该档位）');
+    assert.equal(drv.byPath('/permission').length, 3, '400 档不发驱动请求');
+  });
+  _resetPermissionCatalogCacheForTest();
   s.close();
 });
 
