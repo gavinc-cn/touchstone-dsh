@@ -6216,14 +6216,20 @@ setBoardHooks({
 });
 
 /**
- * chat 投递桥（M5-2）：`_deliver_unit` / `_deliver_now` 两个口接线。
+ * chat 投递桥：`_deliver_unit` / `_deliver_now` / `_ensure_watch` 三个口接线。
  *
- * `ensureWatch` **不接线**（M5-3 的 `_ensure_watch`）——`chat.externalPreflight` 对「外部会话
- * 投递许可」的判定在未接线时按**返回 false** 处置（拒投并给明确文案），这正是我们要的响亮
- * 失败：外部会话（dsh GUI 直跑/接管）的投递在 M5-3 补齐前一律明说「未获投递许可」，绝不静默
- * 投递进未知状态。池内会话（`owned:true`）与未对齐（未知）路径不经过该口，行为一个字节不变。
+ * `ensureWatch` 是 **2026-10-22 补接**（修 #1003）：M5-3 落地了 `_ensure_watch` 本体、也经
+ * `setBoardHooks` 注入了看板内部调用点，却漏挂到 chat 的投递桥 ⇒ `chat.externalPreflight`
+ * 第⑤步永远拿不到「看管声明」口，所有 `owned:false` 会话（dsh GUI 直跑 / `origin='sync'` 卡）
+ * 从 TS 会话窗发送恒被拒，文案却写「看管声明失败：插件过旧或不可达」——**一次 `/watch` 都没
+ * 发**，与插件新旧无关（实测卡 1003 连发 6 条「继续」全部 400）。现在三个口全接上，未注册
+ * 只剩测试桩一种可能；声明失败仍由 `ensureWatch` 返回 false 响亮失败（不静默投递）。
+ *
+ * 注意 `ensureWatch` 是 **async**（内部打驱动 `POST /watch`）：`chat.externalPreflight` 已
+ * 按 `await` 结果判定，绝不能再退回同步 `!ensureWatch(sid)`（Promise 恒真值会误放行）。
  */
 chatMod.setBoardBridge({
+  ensureWatch,       // `_ensure_watch`（board.py:4048）——M5-3 本体，2026-10-22 补接线（#1003）
   deliverUnit,       // `_deliver_unit`（board.py:2080）——M5-2
   deliverNow,        // `_deliver_now`（board.py:2136）——M5-2
 });

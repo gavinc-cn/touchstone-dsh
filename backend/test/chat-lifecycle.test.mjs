@@ -400,7 +400,8 @@ test('DeliveryRefused：外部会话三条拒投文案（未获许可 / 无活 a
     const baseline = () => waitq.msgRows({ sid: 's-ext' }, { db: fx.db }).length;
     assert.equal(baseline(), 0);
 
-    // ① 外部会话 + 未接线看管声明（M5 缝①）⇒ 按 Python 的「看管声明失败」文案拒投
+    // ① 外部会话 + 桥未注册（测试桩；生产桥由 board.js 末尾接线，见
+    //    chat-external-wiring.test.mjs）⇒ 按 Python 的「看管声明失败」文案拒投
     setHub([{ session_id: 's-ext', owned: false, status: 'running', last_seq: 1 }]);
     await assert.rejects(() => chat.submit(pid, 's-ext', 'hi', { db: fx.db }), (err) => {
       assert.ok(err instanceof chat.DeliveryRefused, '必须是 DeliveryRefused（端点是 instanceof 判定）');
@@ -411,10 +412,14 @@ test('DeliveryRefused：外部会话三条拒投文案（未获许可 / 无活 a
     });
     assert.equal(baseline(), 0, '拒投 ⇒ 不落 chat_msgs 行');
 
-    // ② 看管声明成功 ⇒ 放行（落到投递；这里没有驱动 ⇒ 消息落 error，但**行落了**）
-    chat.setBoardBridge({ ensureWatch: () => true });
+    // ② 看管声明成功 ⇒ 放行（落到投递；这里没有驱动 ⇒ 消息落 error，但**行落了**）。
+    //    桩桥按生产形态写成 **async**：preflight 必须 await 并采纳结果（#1003 的姊妹缺陷：
+    //    同步 `!ensureWatch(sid)` 会把 Promise 恒当真值，watched=false 被误放行）。
+    let watchCalls = 0;
+    chat.setBoardBridge({ ensureWatch: async () => { watchCalls += 1; return true; } });
     await assert.rejects(() => chat.submit(pid, 's-ext', 'hi', { db: fx.db }));
     assert.equal(baseline(), 1, '放行 ⇒ 行落表（投递失败另算）');
+    assert.equal(watchCalls, 1, '前置闸必须真调一次看管声明（且 await 它的结果）');
 
     // ③ 宿主无活 agent ⇒ 拒投
     setHub([{ session_id: 's-ext2', owned: false, status: 'unknown', last_seq: 1 }]);
@@ -436,11 +441,12 @@ test('DeliveryRefused：外部会话三条拒投文案（未获许可 / 无活 a
     delete process.env.TS_EXTERNAL_DELIVER;
 
     // ⑤ 池内会话（owned=true）与未知（hub 断连 ⇒ get 为 null）一律放行，不抛
+    //    preflight 自 M5-3 起是 async（要 await 驱动的看管声明）：这里一律 await 才收得到异常
     setHub([{ session_id: 's-own', owned: true, status: 'idle', last_seq: 0 }]);
-    chat.externalPreflight('s-own', { db: fx.db });
+    await chat.externalPreflight('s-own', { db: fx.db });
     dshevents.HUB._connected = false;
-    chat.externalPreflight('s-ext', { db: fx.db });
-    chat.externalPreflight('', { db: fx.db });
+    await chat.externalPreflight('s-ext', { db: fx.db });
+    await chat.externalPreflight('', { db: fx.db });
   });
 });
 

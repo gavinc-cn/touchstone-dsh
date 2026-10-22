@@ -68,8 +68,11 @@
  * ══════════════════════════════════════════════════════════════════════════════
  * M5 缝：board 投递桥（**注入式，不许静默成功**）
  * ══════════════════════════════════════════════════════════════════════════════
- * Python 里 chat 对 board 的依赖只有三处，Node 侧 board.js（M5）尚无对应函数，故做成显式
- * 注入口 `setBoardBridge({ensureWatch, deliverUnit, deliverNow})`；未注册时：
+ * Python 里 chat 对 board 的依赖只有三处，Node 侧是显式注入口
+ * `setBoardBridge({ensureWatch, deliverUnit, deliverNow})`。**M5-2/M5-3 起 board.js 末尾已把
+ * 三个口全部接上**（`deliverUnit`/`deliverNow` 在 M5-2；`ensureWatch` 在 2026-10-22 补接，
+ * 修 #1003——此前漏接导致所有 `owned:false` 会话从 TS 侧恒被拒、文案却指向「插件过旧」），
+ * 未注册只剩测试桩一种可能；未注册时仍按响亮失败收口：
  *   ① `externalPreflight` 第⑤步的 `board._ensure_watch(sid)` ⇒ `ensureWatch` 视作**返回
  *      false** ⇒ 外部会话按 Python 的「看管声明失败」文案拒投（逐字一致，不落行）；
  *   ② `rebuildRun` 的卡片评论分支 `board._deliver_unit(...)` ⇒ 抛「卡片投递桥未接线（M5）」
@@ -687,13 +690,15 @@ export const DSH_INJECT = new Map();
 /** 消息单元终态钩子 `fn(msgId, state)`（`_MSG_DONE_HOOK`；单一注册位，后注册覆盖先注册） */
 let MSG_DONE_HOOK = null;
 
-/** board 投递桥（M5 缝；未注册时三处依赖按文件头「M5 缝」各走响亮失败） */
+/** board 投递桥（M5 缝；生产接线见 board.js 末尾，未注册只剩测试桩） */
 let BOARD_BRIDGE = null;
 
 /**
  * 注册 board 投递桥（M5 接线口）：`{ensureWatch, deliverUnit, deliverNow}`。
  *
- *   - `ensureWatch(sid)` → boolean：对应 `board._ensure_watch`（外部会话投递前置闸第⑤步）；
+ *   - `ensureWatch(sid)` → `boolean | Promise<boolean>`：对应 `board._ensure_watch`（外部
+ *     会话投递前置闸第⑤步）。**生产实现是 async**（驱动 `POST /watch` 远端调用）⇒ 调用方
+ *     必须 `await`（`externalPreflight` 已按此口径 await；同步取真值会把 Promise 当真）；
  *   - `deliverUnit(project, card, comment, message, inject, options)`：对应
  *     `board._deliver_unit`（卡片评论排队投递，等 turn 结束）；
  *   - `deliverNow(project, card, comment, message, inject, options)`：对应
@@ -786,11 +791,16 @@ export function externalDeliverEnabled({ env = process.env } = {}) {
  * 为什么放在 `submit` 首行：投递的**唯一入口**是统一队列（chat_msgs 行 + m: 等待项一个
  * 事务），一旦落行就必然要等 worker 拾取、失败也只能落 error 终态——闸必须在落行之前。
  *
+ * **async**（2026-10-22 起，修 #1003）：第⑤步的看管声明要等驱动的 `POST /watch` 回执
+ * （`board.ensureWatch` 是 async），所以本闸必须 `await` 真实结果——漏 await 会把
+ * Promise 真值当成「声明成功」，`watched=false` 的会话会被误放行（#1003 的同源缺陷）。
+ *
  * @param {string} sid
  * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
+ * @returns {Promise<void>}
  * @throws {DeliveryRefused}
  */
-export function externalPreflight(sid, options = {}) {
+export async function externalPreflight(sid, options = {}) {
   if (!sid) return;
   const st = dshevents.get(sid);
   if (st === null) return;                       // 未知：保持现状（真失败仍由投递错误兜底）
@@ -807,11 +817,15 @@ export function externalPreflight(sid, options = {}) {
     // 宿主里没有活 agent（会话已结束/被销毁）：投递必然 404，别让用户白等
     throw new DeliveryRefused('会话已结束，无法投递（宿主无活动 agent）');
   }
-  // 看管声明（`board._ensure_watch`）：M5 未接线时视作**返回 false**（文件头 M5 缝①）
+  // 看管声明（`board._ensure_watch`，M5-3 起 board.js 末尾已接线）：`ensureWatch` 是
+  // **async**（内部打驱动 `POST /watch`）⇒ 必须 await 真实结果再判定，不能拿 Promise
+  // 真值当成功。声明失败时 board.ensureWatch 已留痕并返回 false（旧插件 404 / 驱动不可达 /
+  // watched=false 三档同口）；桥或该口缺失只可能来自测试桩，同样按 false 收口。
   const bridge = BOARD_BRIDGE;
   const ensureWatch = bridge !== null && typeof bridge.ensureWatch === 'function'
     ? bridge.ensureWatch : null;
-  if (ensureWatch === null || !ensureWatch(sid)) {
+  const watched = ensureWatch === null ? false : Boolean(await ensureWatch(sid));
+  if (!watched) {
     throw new DeliveryRefused(
       '该会话是 dsh 直跑会话，平台未获投递许可（看管声明失败：插件过旧或不可达），'
       + '请到 dsh 会话窗口发送',
@@ -859,7 +873,7 @@ export async function submit(projectId, sid, message, options = {}) {
     taskId = null, cardId = null, commentId = null, inject = false,
     family = '', model = '', extraMeta = null,
   } = options;
-  externalPreflight(sid, options);          // 首行前置闸：外部会话未获许可即拒投（不落行）
+  await externalPreflight(sid, options);    // 首行前置闸：外部会话未获许可即拒投（不落行）
   const msgId = newMsgId();
   wq('msgPrune')(MSG_KEEP_SEC, MSG_MAX, options);   // 终态回收（msg_prune 表版，R8）
   const inst = runnerInstance();
