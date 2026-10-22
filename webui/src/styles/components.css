@@ -1219,10 +1219,13 @@ body.tabbar-dragging, body.tabbar-dragging * { cursor: grabbing !important; user
 .sess-queue-tag.on { color: var(--run); border-color: var(--run); }
 .sess-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sess-queue-btn { height: 22px; padding: 0 8px; font-size: calc(11px * var(--fs)); gap: 4px; flex: none; }
-/* 权限档下拉项（label + 描述两行，与 kimi code 选项形态一致；描述仅在展开列表内） */
-.sess-perm-item { display: flex; flex-direction: column; gap: 1px; }
+/* 权限档下拉项（label + 描述两行；描述仅在展开列表内）。
+   2026-10-21 起档位/描述动态跟随 DSH 宿主权限目录，宿主描述可能很长（如 path-rules /
+   write-guard 约 40 字）——限宽 + 允许换行，避免下拉被单行描述撑到视口外 */
+.sess-perm-item { display: flex; flex-direction: column; gap: 1px; max-width: 260px; }
 .sess-perm-label { font-size: calc(12.5px * var(--fs)); }
-.sess-perm-desc { font-size: calc(11px * var(--fs)); color: var(--muted-foreground); }
+.sess-perm-desc { font-size: calc(11px * var(--fs)); color: var(--muted-foreground);
+  white-space: normal; line-height: 1.45; }
 /* 权限档触发器（收起态）：只显示档位名单行 + 省略号（防与模型下拉重叠；
    描述由 SelectValue children 显式覆盖掉，见 ComposerBar） */
 .sess-ctl-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

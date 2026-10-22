@@ -9,9 +9,10 @@
 //        chatRunning/taskRunning/queuedN/board/sending(发送-停止按钮分态; 忙/运行中=「排队」),
 //        stopDisabled(外部会话「停止」置灰, C 批 T8: 轮次归 dsh GUI, 平台停不了;
 //         仅置灰不隐藏——用户看得见按钮在、但停不了),
-//        permMode/modelSel/modelOpts/onSetModel/onSetPermission/effortSel/effortOpts/onSetEffort
+//        permMode/permOpts/modelSel/modelOpts/onSetModel/onSetPermission/effortSel/effortOpts/onSetEffort
 //        (会话级配置四控件, Task 4 + 2026-10-04 思考等级;
-//        权限三档 manual/yolo/auto；档位文案出处 kimi code，语义走服务端 DSH_PERMISSION_PRESETS 近似映射;
+//        权限档位动态跟随 DSH 宿主权限目录（permOpts=宿主目录 options，来自
+//        /api/agents/presets；空=目录不可用，降级为 chip 只读展示）;
 //        思考等级选项=该模型支持档位，来自 /api/agents/models 的 efforts，空则用内置档位表),
 //        queueRows/injecting/onInject(排队消息行 + 「立即注入」按钮: 平台队列行
 //         msgId=撤销排队立即投递当前上下文; dsh 宿主 inbox 行只展示、无按钮),
@@ -29,15 +30,8 @@ import { Send, Square, Plus, FileText, X, Zap } from 'lucide-react'
 import SlashMenu from './SlashMenu'
 import { queueStatePlaceholder } from '../utils/queueBadge'
 import { cancellableRow } from '../utils/queueRestore'
-
-/** 权限档选项（值 manual/yolo/auto + 标签与描述取自 kimi web 客户端同款文案
-    ＝设计出处，见 kimi-code 仓库 i18n permission* 词条；服务端按
-    DSH_PERMISSION_PRESETS 做语义近似映射，非逐项等价） */
-export const PERM_OPTS = [
-  { value: 'manual', label: '逐条确认', desc: '每个工具操作都需要你手动确认' },
-  { value: 'yolo', label: '自动通过', desc: '自动批准工具操作，但遇到关键问题仍会询问' },
-  { value: 'auto', label: '完全自主', desc: '完全自主运行，智能体自己做决定，不再询问' },
-]
+import { canonicalPermission, permissionDesc, permissionItems, permissionLabel }
+  from '../utils/permission'
 
 /** token 数 → 紧凑文本(32876 → 32.9k), 用于圈圈 tooltip 展示上下文用量 */
 function fmtTok(n) {
@@ -50,7 +44,7 @@ function fmtTok(n) {
 export default function ComposerBar({ value, onChange, atts, onRemoveAtt, uploading, inputLocked,
     caps, meta, onSend, onStop, stopDisabled, chatRunning, taskRunning,
     queuedN, board, sending,
-    permMode, modelSel, modelOpts, onSetModel, onSetPermission,
+    permMode, permOpts, modelSel, modelOpts, onSetModel, onSetPermission,
     effortSel, effortOpts, onSetEffort,
     queueRows, injecting, onInject,
     cancelling, onCancelQueuedRow, onCancelQueue,
@@ -61,16 +55,21 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
   /* ---------- 底栏三控件(Task 4)派生 ---------- */
   // 可交互判定（2026-10-03 起全部按能力位，不再按族名硬编码）：
   //   profile    能力位 = 会话级**模型**切换（唯一族 dsh_plugin 为 True）
-  //   permission 能力位 = 权限档切换（dsh_plugin 为 True；三档经 server
-  //     DSH_PERMISSION_PRESETS 近似映射到宿主 preset，非逐项等价）
+  //   permission 能力位 = 权限档切换（dsh_plugin 为 True；档位列表动态跟随 DSH 宿主
+  //     权限目录 /api/agents/presets，目录不可用/为空 ⇒ 降级为 chip 只读展示）
   const modelInteractive = board && !!caps?.profile
-  const permInteractive = board && !!caps?.permission
+  const permInteractive = board && !!caps?.permission && (permOpts?.length || 0) > 0
   // 思考等级（2026-10-04）：档位属会话请求参数，看板卡与**任务会话**都可交互
   // （任务侧端点 POST /api/tasks/<id>/session/profile 只开这一项；模型/权限档仍限看板卡）
   const effortInteractive = !!caps?.profile && !!(effortOpts?.options || []).length
-  // 权限档文案/置灰: permMode 未回读(meta.permission 未到)或不可交互
-  const permOpt = PERM_OPTS.find((o) => o.value === permMode) || null
-  const permText = permOpt ? permOpt.label : '权限'
+  // 权限档文案/置灰: permMode 未回读(meta.permission 未到)或不可交互；
+  // 档位名走展示层映射（目录 label → 内置中文名 → 原值），旧值 manual/yolo 由
+  // canonicalPermission 在显示层兜底（后端已返回 preset key，旧帧才可能见到旧值）
+  const permText = permissionLabel(permOpts, permMode)
+  const permDesc = permissionDesc(permOpts, permMode)
+  // 收起态 title = 命中档位的描述（无描述回退档位名；未回读提示读取中）
+  const permTitle = !permMode ? '权限模式读取中…'
+    : (permDesc ? `权限：${permText}（${permDesc}）` : `权限：${permText}`)
   // 思考等级展示值: 回读值(meta.sessionEffort/乐观选择) → 空=该模型默认档（宿主有默认
   // 档时括注出来，如「默认（最高）」）——与 dsh 自己的控件同口径（显示生效档位）
   const effortVal = effortSel || meta?.sessionEffort || ''
@@ -234,25 +233,28 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
         </Button>
         {/* 2026-09-19 移除底栏「立即注入」勾选框：发送一律先排队，运行中要插话
             走排队行的「立即注入」按钮（用户报该勾选框多余） */}
-        {/* 权限档（三档：逐条确认 manual / 自动通过 yolo / 完全自主 auto，
-            标签与描述取自 kimi web 客户端同款文案＝设计出处；语义走 server
-            DSH_PERMISSION_PRESETS 近似映射）；
-            可交互=board+caps.permission，置灰=meta 未回读（permMode=null）或不可交互 */}
+        {/* 权限档（2026-10-21 起动态跟随 DSH 宿主权限目录 /api/agents/presets：
+            档位列表/顺序/标签/描述与宿主一致，内置档中文名由展示层映射（utils/permission）；
+            下发的值是宿主 preset key（read-only/workspace-write/danger-full-access/...）；
+            可交互=board+caps.permission+目录非空（目录为空降级为右侧 chip），
+            置灰=meta 未回读（permMode=null）或不可交互 */}
         {permInteractive ? (
-          <Select value={permMode || undefined} onValueChange={onSetPermission}
+          <Select value={canonicalPermission(permMode) || undefined} onValueChange={onSetPermission}
             disabled={!permMode}>
             <SelectTrigger size="sm" className="h-8 max-w-[130px] px-2 text-xs gap-1"
-              title={permOpt ? `权限：${permOpt.label}（${permOpt.desc}）` : '权限模式读取中…'}>
+              title={permTitle}>
               {/* 收起态只显示档位名：Radix 默认把选中项内容（含描述）portal 进触发器，
-                  显式给 SelectValue children 覆盖；描述仅在展开列表内显示（对齐 kimi code） */}
+                  显式给 SelectValue children 覆盖；描述仅在展开列表内显示 */}
               <SelectValue className="sess-ctl-value" placeholder="权限">{permText}</SelectValue>
             </SelectTrigger>
             <SelectContent>
-              {PERM_OPTS.map((o) => (
-                <SelectItem key={o.value} value={o.value} title={o.desc}>
+              {/* 选项=宿主目录 + 现值兜底项（utils/permission.permissionItems） */}
+              {permissionItems(permOpts, permMode).map((o) => (
+                <SelectItem key={o.value} value={o.value} title={o.description || undefined}>
                   <span className="sess-perm-item">
                     <span className="sess-perm-label">{o.label}</span>
-                    <span className="sess-perm-desc">{o.desc}</span>
+                    {/* 宿主没给描述（如内置档/旧插件）时只显示档位名，不渲染空行 */}
+                    {o.description ? <span className="sess-perm-desc">{o.description}</span> : null}
                   </span>
                 </SelectItem>
               ))}

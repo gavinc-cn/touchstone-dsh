@@ -10,7 +10,8 @@ import MonitorTab from '../components/MonitorTab.jsx'
 import BugsTab from '../components/BugsTab.jsx'
 import BoardTab from '../components/BoardTab.jsx'
 import StressTab from '../components/StressTab.jsx'
-import { PERM_OPTS } from '../components/ComposerBar'
+import { canonicalPermission, permissionDefaultLabel, permissionItems, permissionLabel }
+  from '../utils/permission'
 import { effortChoices } from '../utils/sessionEffort'
 import { RzHandles } from '../components/RzHandles'
 import TouchstoneLogo from '../components/TouchstoneLogo.jsx'
@@ -99,6 +100,10 @@ export default function AppShell() {
   const [pf, setPf] = useState({ name: '', project_dir: '', agent_path: '', work_dir: '', env_label: '', guide_text: '', model: '', reasoning_effort: '', permission_mode: '', skill_understand: '', skill_deploy: '', skill_commit: '', skill_test: '', skill_cases: '' })
   // 当前智能体已配置的模型列表(agents/models API), 随 agent_path 变化重新拉取
   const [modelOpts, setModelOpts] = useState({ models: [], default: '' })
+  // DSH 宿主权限目录(preset catalog, 2026-10-21): 项目弹窗「权限」下拉的档位来源,
+  // 打弹窗时拉取(与模型列表同一刷新时机); available:false=宿主/驱动不可用 ⇒ 下拉降级置灰
+  const [permCatalog, setPermCatalog] = useState(
+    { available: false, options: [], default: '', default_label: '' })
   // 当前智能体可用的 skill 列表(agents/skills API), 随 agent_path / project_dir 变化重新拉取
   const [skillOpts, setSkillOpts] = useState([])
   // 目录选择弹窗(服务端目录浏览 API): 当前浏览数据 + 加载中标记 + 回填目标字段(project_dir/work_dir)
@@ -367,6 +372,23 @@ export default function AppShell() {
     }
   }
 
+  // 拉取 DSH 宿主权限目录(档位列表/顺序/标签/描述动态跟随宿主; 与模型列表同一刷新时机)。
+  // 成功=normalize 成 {available,options,default,default_label}; 失败/驱动不可用=空目录,
+  // 权限下拉据此置灰降级(仍可正常保存其它字段)
+  async function loadAgentPresets() {
+    try {
+      const r = await projectApi.agentPresets()
+      setPermCatalog({
+        available: !!(r && r.available),
+        options: (r && Array.isArray(r.options)) ? r.options : [],
+        default: (r && r.default) || '',
+        default_label: (r && r.default_label) || '',
+      })
+    } catch {
+      setPermCatalog({ available: false, options: [], default: '', default_label: '' })
+    }
+  }
+
   // 拉取当前智能体可用的 skill 列表; 拉取成功且列表非空时, 清除已不在列表中的
   // 选中值(引用不存在的 skill 会误导 agent); 列表为空(扫描失败/dsh)时保留现值防误清
   async function loadAgentSkills(agentPath, projectDir) {
@@ -413,6 +435,7 @@ export default function AppShell() {
     setProjModal(true)
     scanAgents()
     loadAgentModels(p?.agent_path || '')
+    loadAgentPresets()   // 权限档目录（宿主级，不随 agent 变化）
     loadAgentSkills(p?.agent_path || '', p?.project_dir || '')
   }
 
@@ -606,6 +629,22 @@ export default function AppShell() {
     ? pf.model
     : (modelValue === '__default__' ? modelOpts.default : modelValue)
   const effortOpts = effortChoices(modelOpts, effortModel)
+
+  // ---- 项目弹窗「权限」控件（2026-10-21：动态跟随 DSH 宿主权限目录）----
+  // 值/提交口径=宿主 preset key（''=留空用宿主默认）；选项=目录选项 + 现值兜底项
+  // （permissionItems 保证 Radix Select 不会因现值不在目录而退化成占位符）。
+  // 目录不可用（available:false，驱动未配置/调用失败）⇒ 下拉 disabled，触发器只显示
+  // 现值 label（permissionLabel：目录 label → 内置中文名 → 原值），仍可正常保存其它字段。
+  const permUnavailable = !permCatalog.available
+  const permValue = pf.permission_mode ? canonicalPermission(pf.permission_mode) : '__default__'
+  const permTriggerText = pf.permission_mode
+    ? permissionLabel(permCatalog.options, pf.permission_mode)
+    : permissionDefaultLabel(permCatalog)
+  const permTriggerTitle = permUnavailable
+    ? '宿主权限目录不可用（需要 dsh 插件宿主）；留空用宿主默认'
+    : (pf.permission_mode
+      ? '留空用宿主默认；显式选择后项目内新起的看板卡片会话按此档运行'
+      : '尚未显式选择：暗色显示的是宿主默认档（留空即用默认）')
 
   return (
     <div className="flex h-svh">
@@ -956,30 +995,36 @@ export default function AppShell() {
               </Select>
             </div>
             <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>思考等级：列表来自当前模型的可用档位；留空用智能体默认；设置后新起的会话（含任务与看板卡）按此档运行</div>
-            {/* 权限档（2026-10-04）：项目内**看板卡片会话**的默认权限档（三档语义近似映射见
-                server.DSH_PERMISSION_PRESETS）；任务会话暂不适用（无审批作答面，manual 会挂起）。 */}
+            {/* 权限档（2026-10-21 起动态跟随 DSH 宿主权限目录 /api/agents/presets）：
+                项目内**看板卡片会话**的默认权限档；档位列表/顺序/标签与宿主一致，提交值
+                为宿主 preset key（read-only/workspace-write/danger-full-access/path-rules/...）。
+                目录不可用（驱动未配置/宿主插件缺失）时下拉置灰，只展示现值 label，仍可保存
+                其它字段。任务会话暂不适用（无审批作答面，需要审批的档会挂起）。 */}
             <div className="form-row">
-              <label title="项目内看板卡片会话的默认权限档；留空用宿主默认（完全访问）">权限</label>
-              <Select value={pf.permission_mode || '__default__'}
+              <label title="项目内看板卡片会话的默认权限档；留空用宿主默认">权限</label>
+              <Select value={permValue} disabled={permUnavailable}
                 onValueChange={(v) => setPf({ ...pf, permission_mode: v === '__default__' ? '' : v })}>
                 <SelectTrigger className={'min-w-[200px] flex-1' + (pf.permission_mode ? '' : ' text-muted-foreground')}
-                  title={pf.permission_mode ? '' : '尚未显式选择：暗色显示的是宿主默认档（留空即用默认）'}>
-                  <SelectValue />
+                  title={permTriggerTitle}>
+                  {/* 触发器只显示档位名（两行选项内容只属于展开列表，显式 children 覆盖） */}
+                  <SelectValue className="sess-ctl-value" placeholder="权限">{permTriggerText}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__default__">默认（宿主默认）</SelectItem>
-                  {PERM_OPTS.map((o) => (
-                    <SelectItem key={o.value} value={o.value} title={o.desc}>
+                  {/* 哨兵项=留空用宿主默认（Radix Select 不允许空串值） */}
+                  <SelectItem value="__default__">{permissionDefaultLabel(permCatalog)}</SelectItem>
+                  {/* 选项=宿主目录 + 现值兜底项（目录不可用时也保证现值有匹配项、不退化成占位符） */}
+                  {permissionItems(permCatalog.options, pf.permission_mode).map((o) => (
+                    <SelectItem key={o.value} value={o.value} title={o.description || undefined}>
                       <span className="sess-perm-item">
                         <span className="sess-perm-label">{o.label}</span>
-                        <span className="sess-perm-desc">{o.desc}</span>
+                        {o.description ? <span className="sess-perm-desc">{o.description}</span> : null}
                       </span>
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
-            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>权限：项目内新起的看板卡片会话按此档运行（逐条确认＝平台接管审批代答）；任务会话暂不支持权限档</div>
+            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>权限：项目内新起的看板卡片会话按此档运行；审批请求由平台接管并在会话窗作答；任务会话暂不支持权限档</div>
             <div className="form-row"><label title="理解/分析项目时优先使用的 skill，注入每类任务首轮提示词">理解项目</label>
               <Select value={pf.skill_understand || '__none__'}
                 onValueChange={(v) => setPf({ ...pf, skill_understand: v === '__none__' ? '' : v })}>

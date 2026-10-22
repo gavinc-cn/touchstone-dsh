@@ -93,6 +93,11 @@ export const projectApi = {
   // 指定 agent 的模型列表(dsh 插件族走宿主 /models 目录; 空/未知/退场路径只回默认模型), 供模型下拉
   agentModels: (agentPath) =>
     api.get(`/api/agents/models?agent_path=${encodeURIComponent(agentPath || '')}`),
+  // DSH 宿主权限目录(preset catalog): 档位列表/顺序/标签/描述动态跟随宿主, 供权限下拉。
+  // 返回 {available, options:[{value,label,description}], default, default_label};
+  // 驱动未配置/调用失败时 200 {available:false, options:[], ...}(非错误, 前端据此降级置灰)
+  // —— 契约见 .run/permission-dsh-align-contract.md §5.2/§6.1
+  agentPresets: () => api.get('/api/agents/presets'),
   // 指定 agent CLI 可用的 skill 列表(用户级+项目级 SKILL.md 扫描), 供项目能力下拉
   agentSkills: (agentPath, projectDir) =>
     api.get(`/api/agents/skills?agent_path=${encodeURIComponent(agentPath || '')}&project_dir=${encodeURIComponent(projectDir || '')}`),

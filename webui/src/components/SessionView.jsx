@@ -16,7 +16,8 @@ import { toast } from '../utils/toast'
 import { renderMd } from '../utils/renderMd'
 import { absToMedia, mediaDisplayUrl, projectRoots } from '../utils/mediaText'
 import { isPlaceholderImage } from '../utils/media'
-import ComposerBar, { PERM_OPTS } from './ComposerBar'
+import ComposerBar from './ComposerBar'
+import { permissionLabel } from '../utils/permission'
 import { effortChoices, effortText } from '../utils/sessionEffort'
 import FilePreview from './FilePreview'
 import MergeHandoffDialog from './MergeHandoffDialog'
@@ -804,11 +805,14 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   //     掩一下才「点了立刻见效」；服务端行真消失后由 useEffect 回收（只留仍在面里的）
   const [cancelling, setCancelling] = useState('')
   const [cancelledIds, setCancelledIds] = useState(() => new Set())
-  // 会话级配置(Task 4): permMode=权限档(manual/yolo/auto；null=meta 未回读前置灰);
+  // 会话级配置(Task 4): permMode=权限档(DSH 宿主 preset key；null=meta 未回读前置灰);
+  // permOpts=DSH 宿主权限目录选项(2026-10-21 动态跟随 /api/agents/presets；空=目录不可用,
+  // 权限控件降级为只读 chip 并用内置中文名展示);
   // modelSel=模型乐观选择(未选时以 meta.sessionModel/项目默认兜底);
   // modelOpts=项目 agent 模型列表(模型下拉选项);
   // effortSel=思考等级乐观选择(2026-10-04；未选时以 meta.sessionEffort 兜底, ''=默认档)
   const [permMode, setPermMode] = useState(null)
+  const [permOpts, setPermOpts] = useState([])
   const [modelSel, setModelSel] = useState(null)
   const [modelOpts, setModelOpts] = useState({ models: [], default: '' })
   const [effortSel, setEffortSel] = useState(null)
@@ -1146,13 +1150,22 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
 
   // 会话级配置(Task 4): board 会话打开/切换时重置选择态(meta 未回读前置灰渲染),
   // 并拉取项目 agent 模型列表(模型下拉选项与思考等级档位来源; 与 AppShell 项目弹窗同端点,
-  // dsh-plugin: 前缀由后端识别)
+  // dsh-plugin: 前缀由后端识别) + DSH 宿主权限目录(权限档选项来源; 宿主级目录, 不依赖 agent)
   useEffect(() => {
     setPermMode(null)
     setModelSel(null)
     setEffortSel(null)
-    if (!boardSid) return undefined
     let stopped = false
+    if (!boardSid) {
+      // 任务会话没有权限档控件；清空防串会话残留（模型目录保留现有行为不动）
+      setPermOpts([])
+      return undefined
+    }
+    // 宿主权限目录 200/失败都降级为空数组：ComposerBar 据此退化为只读 chip
+    // （展示名走 permissionLabel 的内置中文名兜底）
+    projectApi.agentPresets()
+      .then((r) => { if (!stopped) setPermOpts((r && Array.isArray(r.options)) ? r.options : []) })
+      .catch(() => { if (!stopped) setPermOpts([]) })
     if (proj?.agent_path) {
       projectApi.agentModels(proj.agent_path)
         .then((r) => { if (!stopped) setModelOpts(r || { models: [], default: '' }) })
@@ -1163,8 +1176,9 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     return () => { stopped = true }
   }, [boardSid, proj?.agent_path])
 
-  // meta 轮询回读后同步权限档/模型/思考等级显示: 权限档(manual/yolo/auto, 服务端按
-  // DSH_PERMISSION_PRESETS 映射)、当前模型与思考等级(dsh reasoningEffort)回读,
+  // meta 轮询回读后同步权限档/模型/思考等级显示: 权限档=DSH 宿主 preset key（后端已归一，
+  // 旧库/旧帧的 manual/yolo 由 permissionLabel/canonicalPermission 在显示层兜底）、
+  // 当前模型与思考等级(dsh reasoningEffort)回读,
   // 与乐观切换结果对齐(服务端异常时轮询回读兜底, 不变则无操作)
   useEffect(() => {
     if (meta?.permission != null) setPermMode(meta.permission)
@@ -1408,9 +1422,10 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   }
 
   /* ---------- 会话级配置(Task 4): 权限档/模型切换(仅 board + caps.permission/profile 可交互) ---------- */
-  // 权限档切换（三档）：manual 逐条确认 / yolo 自动通过 /
-  // auto 完全自主（档位文案与枚举出处 kimi web 客户端，见 kimi-code 仓库；服务端按 DSH_PERMISSION_PRESETS 映射）；切换即
-  // 调 profile 端点即时生效，乐观回显 + 轮询回读兜底（sid 快照防 stale 写）
+  // 权限档切换（2026-10-21 起动态跟随 DSH 宿主权限目录）：直接把宿主 preset key 作为
+  // permission_mode 提交（read-only/workspace-write/danger-full-access/path-rules/...，
+  // 不再做旧三档映射）；切换即调 profile 端点即时生效，乐观回显 + 轮询回读兜底
+  // （sid 快照防 stale 写）
   async function onSetPermission(mode) {
     if (!mode || mode === permMode) return
     const sid = boardSid               // 发起时会话标识: await 后仍是当前会话才写 state/toast
@@ -1418,7 +1433,8 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       await boardApi.setSessionProfile(boardPid, sid, { permission_mode: mode })
       if (sid !== boardSidRef.current) return   // 已切会话: 旧请求结果静默丢弃(防 stale 写)
       setPermMode(mode)
-      toast(`权限已切换：${(PERM_OPTS.find((o) => o.value === mode) || {}).label || mode}`)
+      // toast 用展示层档位名（目录 label → 内置中文名 → 原值）
+      toast(`权限已切换：${permissionLabel(permOpts, mode)}`)
     } catch (e) {
       if (sid === boardSidRef.current) toast(e.message)
     }
@@ -1773,6 +1789,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
           board={board}
           sending={sending}
           permMode={permMode}
+          permOpts={permOpts}
           modelSel={modelSel}
           modelOpts={modelOpts}
           onSetModel={onSetModel}
