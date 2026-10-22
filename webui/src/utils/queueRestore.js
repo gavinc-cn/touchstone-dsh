@@ -20,7 +20,7 @@ export const RESTORE_SEP = '\n\n'
  * 排队行是否可取消：**平台队列行**（有 msgId）且还没开始执行。
  *
  * 三路来源里只有平台行能取消——`server`（dsh 宿主 inbox 排队行）在 dsh 侧，平台撤不掉；
- * `running`（发送中）已经交给会话，撤销不回来（后端原子守卫同样会拒）。
+ * `running`（已发送）已经交给会话，撤销不回来（后端原子守卫同样会拒）。
  * `pending`（乐观 chip）带 msgId，与服务端行同一条消息，照常可取消。
  *
  * @param {{msgId?: string, state?: string}} row queueRows 的一行

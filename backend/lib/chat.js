@@ -141,7 +141,7 @@ let MSG_SEQ = 0;
 
 /** 消息状态机（逐条对齐 chat.py:54-59） */
 export const STATE_QUEUED = 'queued';       // 已入队，等项目空闲
-export const STATE_RUNNING = 'running';     // 正在执行（发送中 / 等 turn 结束）
+export const STATE_RUNNING = 'running';     // 正在执行（已发送，等 turn 结束）
 export const STATE_DONE = 'done';           // 已送达且 turn 结束
 export const STATE_YIELDED = 'yielded';     // 已送达；turn 挂起等作答，运行位已让出
 export const STATE_ERROR = 'error';         // 执行失败（error 字段为原因）

@@ -29,6 +29,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Send, Square, Plus, FileText, X, Zap } from 'lucide-react'
 import SlashMenu from './SlashMenu'
 import { queueStatePlaceholder } from '../utils/queueBadge'
+import { queueRowTag } from '../utils/queueRowTag'
 import { cancellableRow } from '../utils/queueRestore'
 import { canonicalPermission, permissionDesc, permissionItems, permissionLabel }
   from '../utils/permission'
@@ -139,23 +140,23 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
       )}
       {/* 排队消息列表（2026-09-10）：逐行带「立即注入」按钮——
           平台统一队列行（msgId，项目忙时排队的消息）：撤销排队立即投递到会话
-          当前上下文，不再等项目空闲（发送中的行已在执行，不可注入）。
+          当前上下文，不再等项目空闲（已发送的行已在执行，不可注入）。
           dsh 宿主 inbox 排队行（meta.queue）无平台 msg_id，只展示、无按钮。
           P6 起行 tag 文案分离来源：服务端队列行「服务端排队」、平台队列行「排队中」、
-          执行中行「发送中」（此前三路同显「排队中」，服务端/平台排队不区分）*/}
+          执行中行「已发送」（此前三路同显「排队中」，服务端/平台排队不区分；
+          文案唯一出处 utils/queueRowTag，2026-10-22 由「发送中」改定）*/}
       {queueRows.length > 0 && (
         <div className="sess-queue">
           {queueRows.map((q) => {
             // 可注入：平台排队行（msgId 且未在执行）
             const canInject = caps.steer && q.msgId && q.state !== 'running'
             // 可取消（2026-10-17）：平台排队行且未开始执行——行内「取消」只撤这一条，
-            // 并把原文放回输入框（dsh 宿主 inbox 行与「发送中」行撤不掉）
+            // 并把原文放回输入框（dsh 宿主 inbox 行与「已发送」行撤不掉）
             const canCancel = !!onCancelQueuedRow && cancellableRow(q)
             return (
               <div key={q.key} className="sess-queue-row" title={q.text}>
                 <span className={'sess-queue-tag' + (q.state === 'server' ? ' on' : '')}>
-                  {q.state === 'server' ? '服务端排队'
-                    : q.state === 'running' ? '发送中' : '排队中'}
+                  {queueRowTag(q.state)}
                 </span>
                 <span className="sess-queue-text">
                   {q.text.slice(0, 60)}{q.text.length > 60 ? '…' : ''}

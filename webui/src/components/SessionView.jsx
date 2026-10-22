@@ -902,7 +902,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
 
   // 会话回退（提问动作行里的 ↺，dsh 插件族）：会话在跑/有排队时服务端必拒
   // （409，旧 SESSION_BUSY 语义），按钮置灰等空闲——覆盖任务/卡片单元在跑、会话自身在跑、
-  // 平台队列与服务端队列非空；发送中（消息尚未落库）同样置灰
+  // 平台队列与服务端队列非空；本地发送请求在途（sending，消息尚未落库）同样置灰
   const rewindEnabled = !!caps.rewind
   const rewindBusy = taskRunning || chatRunning || unitRawState === 'running'
     || queuedN > 0 || (meta?.queue?.length || 0) > 0 || sending
@@ -1208,8 +1208,9 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   //   2) chat.msgs  —— 平台统一队列消息单元（queued/running；带 msg_id → 可「立即注入」，
   //      撤销排队直接投递进会话当前上下文，见 injectQueued）
   //   3) pendingMsgs —— 本地乐观 chip（服务端尚未收录时的即时反馈）
-  // 行 tag 文案按 state 分离（P6）：server=服务端排队 / running=发送中 / 其余=排队中
-  // （渲染在 ComposerBar；三路合并本体不变——消息行非徽标，不经 queue_state）
+  // 行 tag 文案按 state 分离（P6）：server=服务端排队 / running=已发送 / 其余=排队中
+  // （文案唯一出处 utils/queueRowTag，渲染在 ComposerBar；三路合并本体不变——
+  // 消息行非徽标，不经 queue_state）
   const queueRows = useMemo(() => {
     const out = []
     const taken = []

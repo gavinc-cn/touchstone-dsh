@@ -52,7 +52,7 @@ _MSG_SEQ = [0]                       # msg_id 自增序号（仅发号用；记�
 
 MESSAGE_MAX = 20000  # 单条对话消息长度上限
 STATE_QUEUED = "queued"          # 已入队，等项目空闲
-STATE_RUNNING = "running"        # 正在执行（发送中 / 等 turn 结束）
+STATE_RUNNING = "running"        # 正在执行（已发送，等 turn 结束）
 STATE_DONE = "done"              # 已送达且 turn 结束
 STATE_YIELDED = "yielded"        # 已送达；turn 挂起等作答，运行位已让出（2026-09-27）
 STATE_ERROR = "error"            # 执行失败（error 字段为原因）
