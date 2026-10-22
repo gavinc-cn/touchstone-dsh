@@ -284,7 +284,7 @@ Runtime paths inside a project's work directory:
 
 | Area | Supported |
 |------|-----------|
-| Agent sessions | Create, resume, reply, inject into the running turn, cancel, compact, fork, rewind-by-fork, model and permission-preset switching |
+| Agent sessions | Create, resume, reply, inject into the running turn, cancel, compact, fork, rewind-by-fork, model and permission-preset switching (presets follow your DSH permission catalog) |
 | Session observability | Full transcript rendering, archive state, attachment preview, live status stream (no polling) |
 | Tasks | Six types, seven stages, stop conditions, date-range scoping, per-round logs, restart, continue |
 | Board | Cards across five columns, drag & drop, queue position, parent dependencies, scheduled start, trash, isolated worktrees |
