@@ -5545,8 +5545,8 @@ export async function answerInteraction(proj, card, qid, answers, options = {}) 
 export const _answer_interaction = answerInteraction;
 
 /**
- * 应答卡片会话的待审批请求（Python `answer_approval`；单族 dsh_plugin，manual 逐条确认档挂起
- * 的工具调用）。
+ * 应答卡片会话的待审批请求（Python `answer_approval`；单族 dsh_plugin，approval=ask 档挂起的
+ * 工具调用）。
  *
  * 与 `answerInteraction` 同款白名单校验：`approval_id` 必须是缓存里的实况值；
  * `decision ∈ approved/rejected`；`scope="session"` 为「本会话内批准」——dsh 无该语义，

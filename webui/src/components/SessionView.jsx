@@ -565,7 +565,7 @@ const QuestionBar = memo(function QuestionBar({ withQBar, qbarOpen, questions, f
      允许乱序作答（已答按题 id 存 ans，翻页往返保留）
    - 最小化（2026-09-19）：头行右侧折叠按钮把卡片收成一行摘要条（挡会话消息时
      随时折起），点条展开；折叠态在轮询刷新（meta 更新）间保持
-   - 审批（manual 逐条确认档挂起的工具调用）：批准 / 本会话内批准 / 拒绝 三按钮
+   - 审批（approval=ask 档挂起的工具调用）：批准 / 本会话内批准 / 拒绝 三按钮
      （审批面板文案出处 kimi web；decision=approved/rejected，scope=session 本会话内批准）
    data = 会话端点下发的 interaction（见 board._iw_interaction）；answer 由 SessionView
    注入（board / task 各自端点），失败提示在调用方 toast；qid/approval_id 变化重置选择 */

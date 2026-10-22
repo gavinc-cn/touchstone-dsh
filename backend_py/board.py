@@ -5244,7 +5244,7 @@ def answer_interaction(proj, card, qid, answers):
 
 
 def answer_approval(proj, card, approval_id, decision, scope=""):
-    """应答卡片会话的待审批请求（单族：dsh_plugin，manual 逐条确认档挂起的工具调用）。
+    """应答卡片会话的待审批请求（单族：dsh_plugin，approval=ask 档挂起的工具调用）。
 
     与 answer_interaction 同款白名单校验：approval_id 必须是缓存里的实况值
     （防伪造/旧 id 重放）；decision ∈ approved/rejected（平台两态），
