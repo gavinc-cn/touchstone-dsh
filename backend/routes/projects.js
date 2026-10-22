@@ -695,9 +695,10 @@ async function apiCreateProject(ctx) {
   const skillCommit = pyStripStr(pyGet(body, 'skill_commit', ''));
   const skillTest = pyStripStr(pyGet(body, 'skill_test', ''));
   const skillCases = pyStripStr(pyGet(body, 'skill_cases', ''));
-  // 项目级会话默认值（2026-10-04）：思考等级 / 权限档（空=不指定，非法=400 不静默丢弃）
+  // 项目级会话默认值（2026-10-04）：思考等级 / 权限档（空=不指定，非法=400 不静默丢弃）。
+  // 2026-10-21 起权限档存宿主 preset key（`manual/yolo` 旧别名仍兼容归一；创建路径 existing=""）
   const reasoningEffort = normalizeEffort(pyGet(body, 'reasoning_effort', undefined));
-  const permissionMode = normalizePermissionMode(pyGet(body, 'permission_mode', undefined));
+  const permissionMode = normalizePermissionMode(pyGet(body, 'permission_mode', undefined), '');
   if (reasoningEffort === null || permissionMode === null) {
     ctx.errorSpaced(400, '思考等级或权限档非法');
     return;
@@ -746,8 +747,10 @@ async function apiUpdateProject(ctx, projectId) {
   const row = ctx.ownedProject(projectId);
   if (row === null) return;                    // 已回 404 project not found（紧凑字节串）
   const reasoningEffort = normalizeEffort(pyGet(body, 'reasoning_effort', row.reasoning_effort));
+  // 未带键＝保持存量：`pyGet` 回落行值后，把**行值**作为 existing 传给归一（Python 同语义）；
+  // 目录暂不可用时存量自定义档不被判非法（契约 §5.3）
   const permissionMode = normalizePermissionMode(
-    pyGet(body, 'permission_mode', row.permission_mode));
+    pyGet(body, 'permission_mode', row.permission_mode), row.permission_mode);
   if (reasoningEffort === null || permissionMode === null) {
     ctx.errorSpaced(400, '思考等级或权限档非法');
     return;

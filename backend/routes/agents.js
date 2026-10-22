@@ -1,13 +1,14 @@
 /**
- * 路由族：智能体探测三条（M6-6）
+ * 路由族：智能体探测四条（M6-6；2026-10-21 增加权限目录）
  *
  *   GET /api/agents/scan   → `server.py:1330`（`agents.scan_agents()`）
  *   GET /api/agents/models → `server.py:1333`（`agent_models(agent_path)`）
+ *   GET /api/agents/presets→ `_permission_catalog_payload()`（宿主权限目录，60s 缓存）
  *   GET /api/agents/skills → `server.py:1338`（`{"skills": scan_skills(agent_path, project_dir)}`）
  *
- * 三条都是**登录即可读**（`do_GET` 顶部只查 `_current_user()`，不吃 `_require_admin`），
+ * 四条都是**登录即可读**（`do_GET` 顶部只查 `_current_user()`，不吃 `_require_admin`），
  * 成功体一律 `json.dumps(..., ensure_ascii=False)` ⇒ `ctx.json`；本族**没有**任何写口，
- * 也没有错误体（参数缺省各自回落空串）。
+ * 也没有错误体（参数缺省各自回落空串；权限目录不可用也是 200 `available:false`）。
  *
  * `agent_models` / `_dsh_plugin_models`（server.py:147/208）本该住 `lib/`，但 M6-6 的
  * 冻结契约不许改 `backend/lib/**`；它们只被这一条端点消费，故落在本文件（**唯一**消费者），
@@ -16,10 +17,13 @@
  *    `display_name` = `provider/<显示名>` 供下拉展示）；
  *  - 空 `agent_path`（db 默认 ''）与未知路径都归默认族 ⇒ **不列模型**、只回读部署默认模型；
  *  - 结果进 60s 的 `_MODELS_CACHE`（键 = agent_path），驱动不可用时回空表且**不缓存**。
+ *
+ * `/api/agents/presets` 的目录归一/缓存/「已知档位集合」全部收在 `servercaps.js`
+ * （`permissionCatalogPayload()`，契约 §5.2），本文件只做 `ctx.json(200, await …)`。
  */
 import * as agents from '../lib/agents.js';
 import * as dshdriver from '../lib/dshdriver.js';
-import { dshDefaultModel } from '../lib/servercaps.js';
+import { dshDefaultModel, permissionCatalogPayload } from '../lib/servercaps.js';
 
 /** `_MODELS_CACHE_TTL`（server.py:139）：60s */
 const MODELS_CACHE_TTL = 60.0;
@@ -136,6 +140,14 @@ export const routes = [
     /** `agent_models(parsed["agent_path"][0])`：模型下拉数据源（宿主 `/models`） */
     handler: async (ctx) => {
       ctx.json(200, await agentModels(ctx.q('agent_path', '')));
+    },
+  },
+  {
+    method: 'GET',
+    path: '/api/agents/presets',
+    /** `_permission_catalog_payload()`：权限下拉数据源（宿主 `GET /presets`，60s 缓存） */
+    handler: async (ctx) => {
+      ctx.json(200, await permissionCatalogPayload());
     },
   },
   {

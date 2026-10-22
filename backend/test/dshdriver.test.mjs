@@ -778,14 +778,19 @@ test('applySessionDefaults：preset 直达（manual/yolo 别名映射，path-rul
   });
 });
 
-test('applySessionDefaults：非法档位/等级只告警跳过，不发请求', async () => {
+test('applySessionDefaults：空白档位只告警跳过；非空值一律按 preset 下发（合法性由宿主/落库校验）', async () => {
   await withDriver(async (drv) => {
-    const warns = await driver.applySessionDefaults('session-a', 'm', 'p', 'turbo', 'boss');
-    assert.equal(drv.calls.length, 0, '两个非法值都不该发请求');
+    const warns = await driver.applySessionDefaults('session-a', 'm', 'p', 'turbo', '   ');
+    assert.equal(drv.calls.length, 0, '空白档位 + 非法等级都不该发请求');
     assert.deepEqual(warns, [
-      "### 项目权限档 'boss' 非法，已跳过（会话沿用宿主默认）\n",
+      "### 项目权限档 '' 非法，已跳过（会话沿用宿主默认）\n",   // 与 Python 同：strip 后再 repr
       "### 项目思考等级 'turbo' 非法，已跳过（合法值：off/minimal/low/medium/high/xhigh/max）\n",
     ]);
+    // 非空但宿主不认识的 value：新口径不在驱动层本地判非法（项目落库时已按宿主目录校验过），
+    // 原样作为 preset 下发、由宿主裁决（契约 §5.6：`preset = LEGACY_PERMISSION_ALIASES.get(v, v)`）
+    const forwarded = await driver.applySessionDefaults('session-a', '', '', '', 'boss');
+    assert.deepEqual(forwarded, []);
+    assert.deepEqual(drv.last().body, { session_id: 'session-a', preset: 'boss' });
   });
 });
 

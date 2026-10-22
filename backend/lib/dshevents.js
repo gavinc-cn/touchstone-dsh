@@ -78,13 +78,13 @@
  *   ⑨ **日志**：`[dshevents] …` 留痕走 `console.log`（Python 是 `print(..., flush=True)`），
  *      文案逐字相同——插件形态下由薄壳落 `<库目录>/plugin-backend.log`。
  *
- * 只 import `dshdriver.js` 的五个冻结导出：`configured` / `liveSnapshot` / `archived` /
- * `stateStream` / `PRESET_MODES`（最后一个承载 `session_permission_mode` 的 preset→三档反查，
- * Python 侧用的就是 `dshdriver.PRESET_MODES`；`driverUrl`/`authHeaders` 由 dshdriver 内部使用，
- * 本文件不直接调）。契约测试见 `backend/test/dshevents.test.mjs`。
+ * 只 import `dshdriver.js` 的四个冻结导出：`configured` / `liveSnapshot` / `archived` /
+ * `stateStream`（`driverUrl`/`authHeaders` 由 dshdriver 内部使用，本文件不直接调）。
+ * 权限档读回（2026-10-21 对齐 DSH 宿主目录后）**不再依赖驱动模块的 preset→三档反查表**：
+ * 宿主 preset 优先原样回读，旧帧 mode 的展示兜底映射由本文件自己的常量承担。
+ * 契约测试见 `backend/test/dshevents.test.mjs`。
  */
 import {
-  PRESET_MODES,
   archived as driverArchived,
   configured as driverConfigured,
   liveSnapshot as driverLiveSnapshot,
@@ -158,9 +158,21 @@ function mergePermission(live, old) {
   return { mode, preset };
 }
 
-/** 宿主 preset → 平台三档反查（对齐 `dshdriver.PRESET_MODES.get(key, "")`，缺省空串＝未知） */
-function presetMode(preset) {
-  return hasOwn(PRESET_MODES, preset) ? String(PRESET_MODES[preset]) : '';
+/**
+ * 旧插件旧帧的 mode → 宿主 preset 展示兜底映射（契约 §5.5）。
+ *
+ * 只用于读回显：新写入路径下平台值与宿主 preset 已一一对应，`mode` 只在旧插件旧帧里出现。
+ * `auto` 的旧语义（完全自主）已由 2026-10-21 数据迁移并入 danger-full-access。
+ */
+const LEGACY_MODE_DISPLAY = Object.freeze({
+  manual: 'workspace-write',
+  yolo: 'danger-full-access',
+  auto: 'danger-full-access',
+});
+
+/** 旧帧 mode → 展示用 preset key（未知 mode ⇒ 空串＝不猜） */
+function legacyModeDisplay(mode) {
+  return hasOwn(LEGACY_MODE_DISPLAY, mode) ? String(LEGACY_MODE_DISPLAY[mode]) : '';
 }
 
 /** 有限 ms 的等待（`stop()` 的超时用；Promise 竞争，超时后不取消原 Promise） */
@@ -311,19 +323,20 @@ export class EventHub {
   }
 
   /**
-   * 会话当前**权限档**（平台三档 manual/yolo/auto，取不到返回空串）。
+   * 会话当前**权限档**（宿主 preset key，取不到返回空串）。
    *
-   * 平台切过的 `mode` 优先（宿主 preset 到三档是多对一，只有 mode 能区分 yolo/auto）；
-   * 没有 mode 时按宿主 preset 反查近似档位（外部直跑后接管的会话）。两者皆无返回 `''`。
+   * 优先级（契约 §5.5）：① `permission.preset` 非空 ⇒ 原样返回（新首选，可能是 path-rules
+   * 等平台不认识的宿主自定义档）；② 否则旧插件旧帧的 `mode` ∈ {manual,yolo,auto} ⇒ 展示
+   * 兜底映射成 preset；③ 都没有 ⇒ `''`（未知，不猜）。
    *
    * @param {string} sid
    */
   sessionPermissionMode(sid) {
     const st = this.get(sid) || {};
     const perm = st.permission || {};
-    const mode = textOr(perm.mode || '');
-    if (mode) return mode;
-    return presetMode(textOr(perm.preset || ''));
+    const preset = textOr(perm.preset || '');
+    if (preset) return preset;
+    return legacyModeDisplay(textOr(perm.mode || ''));
   }
 
   /** 全部已知会话的实时态快照（未连接时返回 `{}`；值为浅拷贝） */
@@ -805,7 +818,7 @@ export function sessionEffort(sid) {
   return HUB.sessionEffort(sid);
 }
 
-/** 会话当前权限档（取不到 ⇒ ''） */
+/** 会话当前权限档（宿主 preset key；取不到 ⇒ ''） */
 export function sessionPermissionMode(sid) {
   return HUB.sessionPermissionMode(sid);
 }

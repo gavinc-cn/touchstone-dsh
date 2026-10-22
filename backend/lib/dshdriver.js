@@ -18,6 +18,7 @@
  *   health / available / live_snapshot     health / available / liveSnapshot
  *   live / status / media / models         live / status / media / models
  *   presets / archived                     presets / archived
+ *     （`presets` 的 `session_id` 可空：空 ⇒ 取宿主全局权限目录、不带查询串）
  *   create_session / resume_session        createSession / resumeSession
  *   ensure_session / prompt / steer        ensureSession / prompt / steer
  *   cancel / dispose / compact / fork      cancel / dispose / compact / fork
@@ -30,9 +31,11 @@
  *   parse_stream_line / parse_sse_*        parseStreamLine / parseSseBlock（再导出 sse.js）
  *   feed_into / stream / state_stream      feedInto / stream / stateStream
  *   TurnWaiter.wait_turn(timeout)          TurnWaiter.wait(timeoutMs)
- *   PERMISSION_PRESETS / PRESET_MODES / EFFORT_LEVELS / ARCHIVE_UNKNOWN_SESSION /
- *   WATCH_UNSUPPORTED / TURN_END / INTERACTION / REQUEST_TIMEOUT / HEALTH_TIMEOUT /
- *   STREAM_IDLE_TIMEOUT / WATCH_TIMEOUT    全部同名同值（秒级常量保持 Python 数值）
+ *   LEGACY_PERMISSION_ALIASES / BUILTIN_PERMISSION_LABELS_ZH / BUILTIN_PERMISSION_LABELS_EN /
+ *   BUILTIN_PERMISSION_DESCRIPTIONS / permissionOption / EFFORT_LEVELS /
+ *   ARCHIVE_UNKNOWN_SESSION / WATCH_UNSUPPORTED / TURN_END / INTERACTION / REQUEST_TIMEOUT /
+ *   HEALTH_TIMEOUT / STREAM_IDLE_TIMEOUT / WATCH_TIMEOUT    全部同名同值/同义（秒级常量保持
+ *   Python 数值；`permission_option` 在 Node 侧为 `permissionOption`）
  *   _stop_watcher / STOP_WATCH_INTERVAL    由 sse.js 的 STOP_WATCH_INTERVAL_MS 承担（再导出）
  *
  * ── 与 Python 的语义差异（逐条，均为形态差异而非行为差异） ────────────────────────────
@@ -404,11 +407,15 @@ export async function models() {
 
 /**
  * 读会话可选权限 preset：`{current, options:[{value,name,description}], default}`。
- * 查询串编码同 `status`（Python `quote(str(session_id))`，`safe='/'`）。
  *
- * @param {string} sessionId
+ * `sessionId` 为空（缺省/空串）⇒ **不带查询串**取宿主全局权限目录（不查会话池；2026-10-21
+ * 权限档对齐后平台的唯一目录数据源）。带 sid 时查询串编码同 `status`
+ * （Python `quote(str(session_id))`，`safe='/'`）。
+ *
+ * @param {string} [sessionId]
  */
-export async function presets(sessionId) {
+export async function presets(sessionId = '') {
+  if (!sessionId) return request('GET', '/presets', null, SHORT_TIMEOUT_MS);
   return request('GET', `/presets?session_id=${quoteQuery(sessionId)}`, null, SHORT_TIMEOUT_MS);
 }
 
@@ -622,28 +629,98 @@ export async function setModel(sessionId, model, provider = '', reasoningEffort 
 // ---------- 审批代答 + 权限 preset ----------
 
 /**
- * 平台三档权限 → dsh preset 名。manual 逐条确认 ↔ workspace-write（sandbox=workspace-write +
- * approval=ask；平台随即接管该会话审批代答）；yolo 自动通过 / auto 完全自主 ↔
- * danger-full-access（approval=never）。
+ * 旧平台三档 → 宿主 preset 的**兼容别名**（只用于旧库/旧请求的写入归一，不再是平台档位集合）。
  *
- * ⚠️ 这是**语义近似**：dsh 的 preset 是 sandbox×approval 组合，与平台三档并不一一对应
- * （yolo 与 auto 落到同一档）。定义收在驱动模块而不是 server：board/runner 起会话时也要按
- * 项目默认值应用权限档，而 server 反向依赖 board（循环导入），只能由最底层的驱动持有。
+ * - `manual`（逐条确认）语义近似 workspace-write（sandbox=workspace-write + approval=ask；
+ *   平台随即接管该会话审批代答）；
+ * - `yolo`（自动通过）语义近似 danger-full-access（approval=never）。
+ *
+ * `auto` **不在别名表里**：DSH 宿主的 auto 是独立实验档（完全权限底座 + 逐调用模型审查），
+ * 与旧平台「完全自主」并非同一物；旧 auto 语义已由 2026-10-21 数据迁移并入
+ * danger-full-access，此后只有宿主目录里确实列出 auto 时才接受该值。
+ *
+ * 定义收在驱动模块：server/board/runner 起会话与校验都要做同一份归一。
  */
-export const PERMISSION_PRESETS = Object.freeze({
+export const LEGACY_PERMISSION_ALIASES = Object.freeze({
   manual: 'workspace-write',
   yolo: 'danger-full-access',
-  auto: 'danger-full-access',
 });
 
-/**
- * 反向近似（宿主 preset → 平台三档）：仅用于「平台没记过档位」的会话（用户在 dsh 侧直跑后
- * 被接管的卡会话）。正向映射本就多对一（yolo/auto 同 preset），反查统一取 yolo 作展示。
- */
-export const PRESET_MODES = Object.freeze({
-  'workspace-write': 'manual',
-  'danger-full-access': 'yolo',
+/** 内置三档的中文产品名（与 DSH 客户端 `displayPermissionPreset` 同规则） */
+export const BUILTIN_PERMISSION_LABELS_ZH = Object.freeze({
+  'read-only': '仅可查看',
+  'workspace-write': '工作区内修改',
+  'danger-full-access': '完全权限',
+  auto: '自动审查（实验）',
 });
+
+/** 内置三档的英文默认名（镜像 DSH 客户端 `DEFAULT_PRESET_LABELS`；用于识别宿主上报的英文名） */
+export const BUILTIN_PERMISSION_LABELS_EN = Object.freeze({
+  'read-only': 'Read Only',
+  'workspace-write': 'Workspace Write',
+  'danger-full-access': 'Full access',
+});
+
+/** 内置档/auto 的描述（TS 侧补充：DSH 下拉不显示描述；宿主给了 description 时宿主优先） */
+export const BUILTIN_PERMISSION_DESCRIPTIONS = Object.freeze({
+  'read-only': '只读运行；所有修改动作都需要审批。',
+  'workspace-write': '可修改工作区与允许的临时目录；更宽的操作需要审批。',
+  'danger-full-access': '不受沙箱限制，也不再弹审批。',
+  auto: '无沙箱运行；每次原生工具调用和 PTC 内层调用前由同一模型进行实验性审查。',
+});
+
+/** kebab-case preset 名判据（DSH 下拉对自定义档名做 Title-Case 展示） */
+export const KEBAB_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/** 逐词首字母大写（`some-preset` → `Some Preset`；镜像 DSH 客户端的 Title-Case 规则） */
+function titleCaseWords(text) {
+  return String(text).split('-')
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+}
+
+/**
+ * 权限目录选项归一（纯函数，契约 §3；Python `permission_option` 的同义实现）。
+ *
+ * 返回 `{value, label, description}`；`value` 去空白后为空 ⇒ `{}`（调用方过滤）。
+ *
+ * label 规则（顺序敏感）：
+ *   ① `value === 'auto'` ⇒ 中文产品名「自动审查（实验）」（DSH 客户端对 auto 恒用产品名）；
+ *   ② 内置三档且 `name` ∈ {value, 英文默认名} ⇒ 对应中文产品名（宿主上报的 name 就是
+ *      machine value，中文名由展示层映射）；
+ *   ③ 否则 `name` 匹配 kebab ⇒ 逐词 Title-Case（镜像 DSH）；非 kebab ⇒ 原样用 name。
+ * description：宿主给了就用宿主的；否则回退内置描述。
+ *
+ * 不认识的 value 也照常返回（label 走 name/Title-Case 规则），不报错 —— 宿主目录是唯一真源。
+ *
+ * @param {unknown} value 宿主 preset key
+ * @param {unknown} [name] 宿主上报的显示名
+ * @param {unknown} [description] 宿主上报的描述
+ * @returns {{value: string, label: string, description: string}|{}}
+ */
+export function permissionOption(value, name = '', description = '') {
+  const v = String(value ?? '').trim();
+  if (!v) return {};
+  // 契约：name = str(name or "")，空值回落 value（不 strip：kebab 判定按原样）
+  const n = name ? String(name) : v;
+  const desc = description ? String(description) : '';
+  let label;
+  if (v === 'auto') {
+    // DSH 客户端对 auto 恒用产品名（宿主 name 即使是别的也不采）
+    label = BUILTIN_PERMISSION_LABELS_ZH.auto;
+  } else if (lookupOwn(BUILTIN_PERMISSION_LABELS_ZH, v)
+      && (n === v || n === lookupOwn(BUILTIN_PERMISSION_LABELS_EN, v))) {
+    label = BUILTIN_PERMISSION_LABELS_ZH[v];
+  } else if (KEBAB_RE.test(n)) {
+    label = titleCaseWords(n);
+  } else {
+    label = n;
+  }
+  return {
+    value: v,
+    label,
+    description: desc || lookupOwn(BUILTIN_PERMISSION_DESCRIPTIONS, v),
+  };
+}
 
 /** 思考等级（dsh 宿主 reasoningEffort）合法取值：pi-ai 的 ModelThinkingLevel 全集 */
 export const EFFORT_LEVELS = Object.freeze([
@@ -686,14 +763,16 @@ export async function answerApproval(sessionId, approvalId, decision) {
 /**
  * 切换会话权限 preset（宿主 `permissionPresets.set`）并**把该会话的审批交给平台**。
  *
- * preset 名来自 `/presets` 的 options[].value。preset 的 approval=ask 时平台必须用
- * `answerApproval` 作答（插件据此认领 waterfall）；never 时瀑布不会被调用。`mode`（可选）
- * ＝平台三档 manual/yolo/auto：preset 到三档是多对一，只有平台知道用户点的哪一档，故随写
- * 一起交给驱动记下（后续经 `driver/permission` 状态帧回读）。
+ * preset 名来自 `/presets` 的 options[].value（宿主目录是唯一真源，可为 path-rules 等自定义档）。
+ * preset 的 approval=ask 时平台必须用 `answerApproval` 作答（插件据此认领 waterfall）；never 时
+ * 瀑布不会被调用。
+ *
+ * `mode`（可选）＝旧平台三档 manual/yolo/auto：**2026-10-21 权限档对齐后平台不再传**（平台值
+ * 就是 preset key，不再有多对一的档位需要额外记）；形参保留只为兼容旧调用方/旧测试。
  *
  * @param {string} sessionId
  * @param {string} preset 宿主 preset 名
- * @param {string|null} [mode] 平台三档
+ * @param {string|null} [mode] 旧平台三档（本批平台不再传）
  */
 export async function setPermission(sessionId, preset, mode = null) {
   const body = { session_id: sessionId, preset };
@@ -800,7 +879,7 @@ export async function watchSession(sessionId, on = true, { timeoutMs = WATCH_TIM
  * @param {string} [model] 会话当前模型（可为空：档位不变、仅改思考等级时由插件回读）
  * @param {string} [provider]
  * @param {string} [reasoningEffort] 空=不改；非 `EFFORT_LEVELS` 之一直接告警跳过
- * @param {string} [permissionMode] 平台三档（manual/yolo/auto），空=不改
+ * @param {string} [permissionMode] 权限档：宿主 preset key（兼容旧档 manual/yolo 别名），空=不改
  * @param {((text: string) => void)|null} [log] 可选日志回调，逐条即时落日志
  * @returns {Promise<string[]>} 告警文本列表（每条自带 `### ` 前缀与换行，与 Python 逐字同）
  */
@@ -818,15 +897,19 @@ export async function applySessionDefaults(sessionId, model = '', provider = '',
     }
   };
   if (permissionMode) {
-    const preset = lookupOwn(PERMISSION_PRESETS, permissionMode);
+    // 2026-10-21：项目里存的就是宿主 preset key（可能 manual/yolo 旧别名）⇒ 归一后
+    // **直接下发 preset**，不再带旧三档 mode（宿主 auto 档原样下发）。
+    // 与 Python 逐字同：先 strip，告警/失败文案用的是 strip 后的值。
+    const value = String(permissionMode).trim();
+    const preset = lookupOwn(LEGACY_PERMISSION_ALIASES, value) || value;
     if (!preset) {
-      warn(`### 项目权限档 ${reprText(permissionMode)} 非法，已跳过（会话沿用宿主默认）\n`);
+      warn(`### 项目权限档 ${reprText(value)} 非法，已跳过（会话沿用宿主默认）\n`);
     } else {
       try {
-        await setPermission(sessionId, preset, permissionMode);
+        await setPermission(sessionId, preset);
       } catch (error) {
         if (error instanceof DshDriverError) {
-          warn(`### 项目权限档 ${permissionMode} 未生效：${error.message}\n`);
+          warn(`### 项目权限档 ${value} 未生效：${error.message}\n`);
         } else {
           throw error;
         }

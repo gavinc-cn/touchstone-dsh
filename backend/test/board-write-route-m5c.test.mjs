@@ -570,6 +570,10 @@ test('POST .../sessions/<sid>/profile：空三者 ⇒ 400；非法档位/等级 
   const badEffort = await call(s, 'POST', url, { body: { reasoning_effort: '超强' } });
   assert.equal(badEffort.status, 400);
   assert.equal(badEffort.json().error, '思考等级非法（off/minimal/low/medium/high/xhigh/max 或留空）');
+  // 纯空白 permission_mode ⇒ strip 后为空＝「不指定」⇒ 三者皆空 400（与 Python `str(...).strip()` 同）
+  const blank = await call(s, 'POST', url, { body: { permission_mode: '   ' } });
+  assert.equal(blank.status, 400);
+  assert.equal(blank.text(), '{"error":"model/permission_mode/reasoning_effort required"}');
   // 2026-10-21：档位校验改成「宿主权限目录里有没有」；目录不可用时回退内置三档兜底集合
   const badPmode = await call(s, 'POST', url, { body: { permission_mode: 'whatever' } });
   assert.equal(badPmode.status, 400);
@@ -610,6 +614,12 @@ test('POST .../sessions/<sid>/profile：权限档/模型/思考等级三路下�
     // 内置档原样下发（preset 即平台值）
     await call(s, 'POST', url, { body: { permission_mode: 'read-only' } });
     assert.deepEqual(drv.byPath('/permission')[1].body,
+      { session_id: 'sid-a', preset: 'read-only' });
+    // 两端空白先 strip 再归一（与 Python `str(...).strip()` 同）：回执/下发都是 canonical
+    const padded = await call(s, 'POST', url, { body: { permission_mode: '  read-only  ' } });
+    assert.deepEqual(padded.json(), { ok: true, model: '', permission_mode: 'read-only',
+      reasoning_effort: '' });
+    assert.deepEqual(drv.byPath('/permission')[2].body,
       { session_id: 'sid-a', preset: 'read-only' });
     // 模型 + 思考等级同一次下发（只给等级时 model 传空串，插件自行回读）
     const both = await call(s, 'POST', url,

@@ -462,6 +462,78 @@ test('ancient 夹具：第一轮表重建丢 9 列（既有行为），第二轮
 });
 
 // --------------------------------------------------------------------------
+// ④b 数据迁移：旧权限三档 → DSH 宿主 preset key（2026-10-21 契约 §4）
+// --------------------------------------------------------------------------
+
+test('迁移：projects.permission_mode 旧三档（manual/yolo/auto）在 initDb 后归一为宿主 preset key', () => {
+  const dbPath = path.join(tmpDir('ts-db-permission-'), 'perm.db');
+  // ① 空库首启：rows 守卫无行 ⇒ 本步跳过，executed 与既有期望逐项相同（不新增执行项）
+  assert.deepEqual(db.initDb({ dbPath, env: ENV_PASSWORDLESS }).executed, FRESH_EXECUTED);
+
+  // ② 造旧行（模拟迁移前的老库）：三个旧档值各一行
+  const handle = db.openDb(dbPath);
+  try {
+    const insert = handle.prepare(
+      'INSERT INTO projects(user_id, name, project_dir, work_dir, bug_dir,'
+      + ' created_at, permission_mode) VALUES(1,?,?,?,?,?,?)');
+    const before = [
+      ['p-manual', 'manual'], ['p-yolo', 'yolo'], ['p-auto', 'auto'], ['p-empty', ''],
+    ];
+    for (const [name, permissionMode] of before) {
+      insert.run(name, `/src/${name}`, `/wd/${name}`, '', '2026-10-01 00:00:00', permissionMode);
+    }
+    assert.deepEqual(many(handle,
+      'SELECT name, permission_mode FROM projects ORDER BY name'), [
+      { name: 'p-auto', permission_mode: 'auto' },
+      { name: 'p-empty', permission_mode: '' },
+      { name: 'p-manual', permission_mode: 'manual' },
+      { name: 'p-yolo', permission_mode: 'yolo' },
+    ]);
+  } finally {
+    handle.close();
+  }
+
+  // ③ 再跑一次启动序：迁移步在清单里的顺序（rebuild 之前）执行，值归一
+  assert.deepEqual(db.initDb({ dbPath, env: ENV_PASSWORDLESS }).executed, [
+    '2026-10-21_projects_permission_mode_presets',
+    ...FRESH_EXECUTED,
+  ]);
+  const after = db.openDb(dbPath);
+  try {
+    assert.deepEqual(many(after,
+      'SELECT name, permission_mode FROM projects ORDER BY name'), [
+      { name: 'p-auto', permission_mode: 'danger-full-access' },
+      { name: 'p-empty', permission_mode: '' },                 // 空串不动（= 不指定）
+      { name: 'p-manual', permission_mode: 'workspace-write' },
+      { name: 'p-yolo', permission_mode: 'danger-full-access' },
+    ]);
+  } finally {
+    after.close();
+  }
+
+  // ④ 幂等：归一后守卫不再命中，再启动不重复执行本步
+  assert.deepEqual(db.initDb({ dbPath, env: ENV_PASSWORDLESS }).executed, FRESH_EXECUTED);
+});
+
+test('迁移：Node 侧执行的是与 Python 同一份清单（step id/守卫/语句逐条相同）', () => {
+  const steps = db.loadContract().migrations.steps;
+  const step = steps.find((s) => s.id === '2026-10-21_projects_permission_mode_presets');
+  assert.ok(step, 'migrations.json 必须包含 2026-10-21 权限档迁移步');
+  assert.equal(step.when.kind, 'rows');
+  assert.match(step.when.sql, /permission_mode IN \('manual','yolo','auto'\)/);
+  assert.deepEqual(step.sql, [
+    "UPDATE projects SET permission_mode='workspace-write' WHERE permission_mode='manual'",
+    "UPDATE projects SET permission_mode='danger-full-access' WHERE permission_mode IN ('yolo','auto')",
+  ]);
+  assert.equal(step.handler, undefined, '本步是纯 SQL、无宿主语言 handler');
+  // 位置：必须在「重建表」那步之前（重建只搬 12 个老列，会把 permission_mode 丢回空）
+  const index = steps.findIndex((s) => s.id === step.id);
+  const rebuild = steps.findIndex((s) => s.id === '2026-09-04_projects_drop_global_unique_name');
+  assert.ok(index >= 0 && rebuild >= 0 && index < rebuild,
+    '权限档迁移必须排在重建表之前（db.py 注释里的兼容性约束）');
+});
+
+// --------------------------------------------------------------------------
 // ⑤ seedAdmin 三档口令来源
 // --------------------------------------------------------------------------
 

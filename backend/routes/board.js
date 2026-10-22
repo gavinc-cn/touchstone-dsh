@@ -61,7 +61,7 @@ import { pyStrip } from '../lib/lib.js';
 import { pyJsonDumps } from '../lib/pyjson.js';
 import { PyB64Error, b64decode } from '../lib/pybase64.js';
 import { unquote } from '../lib/query.js';
-import { DSH_EFFORT_LEVELS, DSH_PERMISSION_PRESETS, familyCapabilities, normalizeEffort,
+import { DSH_EFFORT_LEVELS, familyCapabilities, normalizeEffort, permissionCatalogValues,
   sessFamily } from '../lib/servercaps.js';
 import * as sessparse from '../lib/sessparse.js';
 import { cancelQueueAction, injectMsg } from './sessions.js';
@@ -970,8 +970,11 @@ async function apiBoardSessionProfile(ctx, projectId, sid) {
   if (boardOwnsSid(row, sid, ctx.db) === null) { ctx.error(404, 'session not found'); return; }
   const fam = agents.agentFamily(row.agent_path);
   const model = pyStrScalar(pyTruthy(pyGet(body, 'model')) ? pyGet(body, 'model') : '');
-  const pmode = pyStrScalar(pyTruthy(pyGet(body, 'permission_mode'))
-    ? pyGet(body, 'permission_mode') : '');
+  // 2026-10-21 §5.4：先取原值并 strip，再做旧档别名映射（与 Python 同序：映射后统一校验）
+  const pmodeRaw = pyStrScalar(pyTruthy(pyGet(body, 'permission_mode'))
+    ? pyGet(body, 'permission_mode') : '').trim();
+  const pmode = Object.prototype.hasOwnProperty.call(dshdriver.LEGACY_PERMISSION_ALIASES, pmodeRaw)
+    ? dshdriver.LEGACY_PERMISSION_ALIASES[pmodeRaw] : pmodeRaw;
   const effort = pyHas(body, 'reasoning_effort')
     ? normalizeEffort(pyGet(body, 'reasoning_effort')) : '';
   if (fam !== 'dsh_plugin') {
@@ -986,14 +989,15 @@ async function apiBoardSessionProfile(ctx, projectId, sid) {
     ctx.error(400, 'model/permission_mode/reasoning_effort required');   // 紧凑
     return;
   }
-  if (pmode && !Object.prototype.hasOwnProperty.call(DSH_PERMISSION_PRESETS, pmode)) {
-    ctx.errorSpaced(400, '权限档非法（manual/yolo/auto）');
+  // 档位校验＝「宿主权限目录里有没有」（映射后的 canonical 值；目录不可用时回退内置三档兜底）
+  if (pmode && !permissionCatalogValues().has(pmode)) {
+    ctx.errorSpaced(400, '权限档非法（宿主权限目录里没有该档位）');
     return;
   }
   try {
     if (pmode) {
-      // 三档 mode 一并下传（宿主 preset 到三档是多对一，只靠回读 preset 反推不出档位）
-      await dshdriver.setPermission(sid, DSH_PERMISSION_PRESETS[pmode], pmode);
+      // 平台值就是宿主 preset key ⇒ 不再下传旧三档 mode（宿主按 preset 接管审批）
+      await dshdriver.setPermission(sid, pmode);
     }
     if (model || effort) {
       // 只改思考等级时 model 传空串：插件从会话当前模型选择回读 provider/model
@@ -1003,6 +1007,7 @@ async function apiBoardSessionProfile(ctx, projectId, sid) {
     if (e instanceof DshDriverError) { ctx.errorSpaced(502, pyStrErr(e)); return; }
     throw e;
   }
+  // 回执给**映射后的 canonical preset**（真正下发的值），便于前端乐观回显对齐
   ctx.json(200, { ok: true, model, permission_mode: pmode, reasoning_effort: effort || '' });
 }
 

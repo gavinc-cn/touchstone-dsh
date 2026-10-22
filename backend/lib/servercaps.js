@@ -1,14 +1,17 @@
 /**
  * `server.py` 顶部那组「会话元信息派生」函数的 Node 对应物（M3 读路径）：
- * 能力声明、会话解析族归一、默认模型、有效模型、权限档反查、会话归属三态。
+ * 能力声明、会话解析族归一、默认模型、有效模型、权限目录/权限档归一、会话归属三态。
  *
  * 为什么单独一个文件而不是塞进路由：看板族（`routes/board.js`）与会话族
  * （`routes/sessions.js`）**都要**用它们（`_api_get_board` 下发 family/capabilities，
  * `_session_payload` 下发 model/capabilities/owned…），而这两族由不同的人写。
  * 放在 Lead 名下的小文件里，两边都 import 同一份，不会出现「两处各写一份 capability 表」。
  *
- * 白名单常量（权限档/思考等级/反查表）**复用 `dshdriver.js` 的导出**，不另抄一份：
- * Python 侧同样是 `DSH_PERMISSION_PRESETS = dshdriver.PERMISSION_PRESETS` 的别名。
+ * 权限档（2026-10-21 权限档对齐 DSH 宿主目录，契约 §5.2/§5.3/§5.5）：
+ * 宿主目录是唯一真源（驱动 `GET /presets` 不带 session_id），本模块负责 60s 缓存、
+ * 「已知档位值集合」、项目级 `normalizePermissionMode` 与会话 meta 的 `permission` 回读。
+ * 领域常量（`LEGACY_PERMISSION_ALIASES` / 内置中文名 / `permissionOption`）复用
+ * `dshdriver.js` 的导出，不另抄一份（Python 侧同样从 `dshdriver` 取）。
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -19,10 +22,6 @@ import * as dshdriver from './dshdriver.js';
 
 /** 思考等级白名单（`dshdriver.EFFORT_LEVELS`，与 Python 同源） */
 export const DSH_EFFORT_LEVELS = dshdriver.EFFORT_LEVELS;
-/** 平台三档 → 宿主 preset（`server.py:84`） */
-export const DSH_PERMISSION_PRESETS = dshdriver.PERMISSION_PRESETS;
-/** 宿主 preset → 平台三档近似反查（`server.py:88`） */
-export const DSH_PRESET_MODES = dshdriver.PRESET_MODES;
 
 /** `~/.dsh/settings.yaml` 的 agent-default-model 段：provider 行后的 model 行 */
 const DSH_DEFAULT_MODEL_RE =
@@ -54,11 +53,126 @@ export function normalizeEffort(value) {
   return DSH_EFFORT_LEVELS.includes(v) ? v : null;
 }
 
-/** `normalize_permission_mode`：''=不指定；manual/yolo/auto 原样；非法返回 null */
-export function normalizePermissionMode(value) {
+// ---------- 权限目录（DSH 宿主 preset catalog） ----------
+
+/** 权限目录缓存 TTL（秒，照 `_MODELS_CACHE_TTL`）：仅成功入缓存 */
+const PERMISSION_CATALOG_TTL = 60;
+
+/** 目录缓存键（固定键：取目录不带 session_id，全局只有一份） */
+const PERMISSION_CATALOG_KEY = 'presets';
+
+/** `PERMISSION_CATALOG_CACHE`：固定键 → `[时刻秒, payload]`（失败不入缓存） */
+const PERMISSION_CATALOG_CACHE = new Map();
+
+/** 从未成功取到目录时的兜底已知档位集合：三个 DSH 内置产品档 */
+const BUILTIN_PERMISSION_VALUES = Object.freeze([
+  'read-only', 'workspace-write', 'danger-full-access',
+]);
+
+/**
+ * 进程内「已知档位值集合」= 最近一次**成功**取到目录的 value 全集。
+ * `null` = 从未成功过（回退 `BUILTIN_PERMISSION_VALUES`）。不随 TTL 过期清空
+ * （目录服务临时抖动不应把存量/刚下发的档位判非法）。
+ * @type {Set<string>|null}
+ */
+let permissionCatalogValuesKnown = null;
+
+/** 目录不可用时的统一回执（成功/失败**都是 200**，无错误体） */
+function permissionCatalogUnavailable() {
+  return { available: false, options: [], default: '', default_label: '' };
+}
+
+/**
+ * 取宿主权限目录（`dshdriver.presets('')`）并归一成前端契约形状，60s 缓存、成功才缓存。
+ *
+ * 回执：`{available, options:[{value,label,description}], default, default_label}`
+ * - 驱动未配置 / 抛 `DshDriverError` ⇒ `{available:false, options:[], default:'', default_label:''}`
+ *   （不缓存失败；其他异常照抛，不静默兜底）；
+ * - `options` 先过滤空 value，再逐个 `permissionOption` 归一（内置档中文名 / 自定义档宿主名）；
+ * - `default_label` 由 `options` 里同 value 的 label 反查，找不到 ⇒ `''`；
+ * - 每次成功后同步刷新「已知档位值集合」（`permissionCatalogValues()` 的同步数据源）。
+ *
+ * @returns {Promise<{available: boolean, options: object[], default: string, default_label: string}>}
+ */
+export async function permissionCatalogPayload() {
+  // 60s 缓存优先（与 Python `_permission_catalog_payload` 同序、与 `_MODELS_CACHE` 同款：
+  // 缓存只在成功时写入；驱动随后不可用也不清成功缓存，最多 60s 后自然失效）
+  const hit = PERMISSION_CATALOG_CACHE.get(PERMISSION_CATALOG_KEY);
+  if (hit && Date.now() / 1000 - hit[0] < PERMISSION_CATALOG_TTL) return hit[1];
+  if (!dshdriver.configured()) return permissionCatalogUnavailable();
+  let raw;
+  try {
+    raw = await dshdriver.presets('');
+  } catch (error) {
+    if (error instanceof dshdriver.DshDriverError) return permissionCatalogUnavailable();
+    throw error;
+  }
+  const rawOptions = (raw !== null && typeof raw === 'object' && Array.isArray(raw.options))
+    ? raw.options : [];
+  const options = [];
+  for (const item of rawOptions) {
+    // 只认普通对象项（坏形状跳过而不是把端点打成 500；正常目录恒为对象）
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) continue;
+    const option = dshdriver.permissionOption(item.value, item.name, item.description);
+    if (!option.value) continue;                     // 空 value 过滤
+    options.push(option);
+  }
+  const dflt = (raw !== null && typeof raw === 'object' && raw.default) ? String(raw.default) : '';
+  const matched = options.find((option) => option.value === dflt);
+  const payload = {
+    available: true,
+    options,
+    default: dflt,
+    default_label: matched ? matched.label : '',
+  };
+  // 成功才刷新「已知档位集合」+ 入缓存（失败分支在上面直接 return，绝不清空/不缓存）
+  permissionCatalogValuesKnown = new Set(options.map((option) => option.value));
+  PERMISSION_CATALOG_CACHE.set(PERMISSION_CATALOG_KEY, [Date.now() / 1000, payload]);
+  return payload;
+}
+
+/**
+ * 进程内「已知档位值集合」（同步）：最近一次成功目录的 value 全集；
+ * 从未成功过 ⇒ 三个 DSH 内置产品档。返回**副本**（调用方改不到内部状态）。
+ *
+ * 用途：`normalizePermissionMode` 与卡片会话 profile 端点的档位校验。
+ * @returns {Set<string>}
+ */
+export function permissionCatalogValues() {
+  return new Set(permissionCatalogValuesKnown === null
+    ? BUILTIN_PERMISSION_VALUES : permissionCatalogValuesKnown);
+}
+
+/**
+ * 测试缝：清空权限目录缓存与「已知档位集合」（**生产路径不调用**，名字里的 `ForTest`
+ * 就是这条约定）。用途＝用例间隔离模块级 60s 缓存。
+ */
+export function _resetPermissionCatalogCacheForTest() {
+  PERMISSION_CATALOG_CACHE.clear();
+  permissionCatalogValuesKnown = null;
+}
+
+/**
+ * `normalize_permission_mode`：项目级权限档归一（契约 §5.3）。
+ *
+ * 顺序：空 ⇒ `''`（不指定）；旧档别名 `manual/yolo` ⇒ 宿主 preset（兼容旧请求，先于
+ * 目录校验，目录暂不可用也照样接受）；与存量同值 ⇒ 原样直通（PATCH 未变值/目录不可用时
+ * 不把存量判非法）；在已知档位集合里 ⇒ 原样；否则 `null`（调用方 400，**不静默丢弃**）。
+ *
+ * 注意 `auto` **不走旧别名**：只有宿主目录里确实有 auto 档才被接受。
+ *
+ * @param {unknown} value 请求里的 permission_mode
+ * @param {unknown} [existing] 存量值（创建路径传 `''`；PATCH 传当前行值）
+ * @returns {string|null} 归一值 / `''`（不指定）/ `null`（非法）
+ */
+export function normalizePermissionMode(value, existing = '') {
   const v = String(pyOrEmpty(value)).trim();
   if (!v) return '';
-  return Object.prototype.hasOwnProperty.call(DSH_PERMISSION_PRESETS, v) ? v : null;
+  if (Object.prototype.hasOwnProperty.call(dshdriver.LEGACY_PERMISSION_ALIASES, v)) {
+    return dshdriver.LEGACY_PERMISSION_ALIASES[v];
+  }
+  if (v === String(pyOrEmpty(existing)).trim()) return v;
+  return permissionCatalogValues().has(v) ? v : null;
 }
 
 /** `_dsh_default_model`：读 `~/.dsh/settings.yaml` 的默认模型，任何失败返回 ''（不抛） */
@@ -127,16 +241,31 @@ export function familyCapabilities(family) {
   };
 }
 
+/** 旧插件旧帧的 mode → 展示兜底映射（只用于读回显，**不是**写入路径） */
+const LEGACY_MODE_DISPLAY = Object.freeze({
+  manual: 'workspace-write',
+  yolo: 'danger-full-access',
+  auto: 'danger-full-access',
+});
+
 /**
- * `_session_permission_mode`：会话级权限档。
- * ① 平台记下的 `mode`（唯一能区分 yolo/auto 的来源）；② 反查宿主 `preset`（老插件/外部改过）。
- * 两者都无 → `''`（调用方**不下发** `permission`，前端保持置灰：不猜）。
+ * `_session_permission_mode`：会话级权限档回读（契约 §5.5）。
+ *
+ * 优先级：① `state.permission.preset` 非空 ⇒ **原样返回**（新首选，可能是 path-rules 等
+ * 宿主自定义档，平台不认识的也照实给前端）；② 否则旧插件旧帧的 `mode` ∈ {manual,yolo,auto}
+ * ⇒ 展示兜底映射成 preset（只针对旧帧，新代码基本走不到）；③ 都没有 ⇒ `''`（调用方
+ * **不下发** `permission`，前端保持置灰：不猜）。
+ *
+ * @param {object|null|undefined} state dshevents 注册表里的会话实时态
+ * @returns {string} 宿主 preset key 或 `''`
  */
 export function sessionPermissionMode(state) {
   const perm = (state || {}).permission || {};
+  const preset = String(perm.preset || '');
+  if (preset) return preset;
   const mode = String(perm.mode || '');
-  if (mode) return mode;
-  return DSH_PRESET_MODES[String(perm.preset || '')] || '';
+  return Object.prototype.hasOwnProperty.call(LEGACY_MODE_DISPLAY, mode)
+    ? LEGACY_MODE_DISPLAY[mode] : '';
 }
 
 /**

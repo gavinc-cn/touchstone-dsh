@@ -258,6 +258,8 @@ export async function boardSessionMessages(ctx, projectId) {
       if (sel.model) {
         data.sessionModel = sel.provider ? `${sel.provider}/${sel.model}` : sel.model;
       }
+      // 会话级权限档（2026-10-21 契约 §5.5）：值是**宿主 preset key**（preset 优先原样回读，
+      // 旧插件旧帧的 mode 才走展示兜底映射）；取不到不下发，前端置灰不猜。
       const pmode = sessionPermissionMode(st);
       if (pmode) data.permission = pmode;
       const effort = dshevents.sessionEffort(sid);

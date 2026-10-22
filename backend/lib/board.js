@@ -2823,7 +2823,9 @@ export async function startWeb(project, card, family, extra = '', options = {}) 
       await dshMod.resumeSession(sid, `card-${card.id}`, workspace, mId, mProvider);
     }
     // 项目级会话默认值（思考等级 + 权限档，best-effort）：取值优先「会话实时态里已有的
-    // 显式值」（用户在会话详情页改过的档位跨「开始/打回续改」存活），否则回落项目默认
+    // 显式值」（用户在会话详情页改过的档位跨「开始/打回续改」存活），否则回落项目默认。
+    // 2026-10-21 权限档对齐 DSH 目录后，两处取值都是**宿主 preset key**（可能 path-rules 等
+    // 自定义档）；`applySessionDefaults` 内部再归一旧档 manual/yolo 别名后直达下发。
     const effort = sessionEffort(sid) || String(dbmod.rowOpt(project, 'reasoning_effort') || '').trim();
     const pmode = sessionPermissionMode(sid)
       || String(dbmod.rowOpt(project, 'permission_mode') || '').trim();
