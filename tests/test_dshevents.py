@@ -70,8 +70,9 @@ def test_fold_usage_and_model(monkeypatch):
 def test_fold_permission_frame(monkeypatch):
     """`driver/permission` 帧折叠（2026-10-04 修「会话窗权限控件恒置灰」的数据源）。
 
-    平台三档 mode（唯一能区分 yolo/auto 的来源）与宿主 preset 实况都要能折进注册表；
-    `/live` 对齐时 preset 以快照为准、mode 保留平台记下的值（快照里带 mode 也认）。
+    帧形保留 `{mode, preset}`：preset 是宿主实况（2026-10-21 起平台下发档位只传
+    preset，mode 基本为空；旧插件旧帧仍可能带旧三档 mode）。`/live` 对齐时 preset
+    以快照为准、mode 保留平台记下的值（快照里带 mode 也认）。
     """
     hub = _hub(monkeypatch, [
         {"seq": 1, "type": "driver/attached", "session_id": "s1", "data": {"owned": True}},
@@ -93,6 +94,41 @@ def test_fold_permission_frame(monkeypatch):
                                           "preset": "danger-full-access"}
     # 两者皆空 → None（未知，绝不推断）
     assert dshevents._merge_permission({}, {}) is None
+
+
+def test_session_permission_mode_prefers_preset():
+    """§5.5 会话级权限读口（board 起会话默认值/显式值来源）：preset 优先（任意宿主档
+    原样返回，含 path-rules 等自定义档）；旧插件旧帧的 mode 才做展示兜底映射
+    （manual→workspace-write、yolo/auto→danger-full-access）；都没有 → 空串。"""
+    hub = dshevents.HUB
+    with hub._cond:
+        was_connected = hub._connected
+        old = dict(hub._sessions)
+        hub._connected = True
+        hub._sessions = {
+            "s-preset": {"permission": {"mode": "", "preset": "path-rules"}},
+            "s-preset-legacy-mode": {"permission": {"mode": "manual",
+                                                    "preset": "write-guard"}},
+            "s-mode": {"permission": {"mode": "manual", "preset": ""}},
+            "s-auto": {"permission": {"mode": "auto", "preset": ""}},
+            "s-bogus": {"permission": {"mode": "bogus", "preset": ""}},
+            "s-empty": {"permission": None},
+            "s-none": {},
+        }
+    try:
+        assert dshevents.session_permission_mode("s-preset") == "path-rules"
+        # preset 优先于旧 mode（不再做三档近似）
+        assert dshevents.session_permission_mode("s-preset-legacy-mode") == "write-guard"
+        assert dshevents.session_permission_mode("s-mode") == "workspace-write"
+        assert dshevents.session_permission_mode("s-auto") == "danger-full-access"
+        assert dshevents.session_permission_mode("s-bogus") == ""
+        assert dshevents.session_permission_mode("s-empty") == ""
+        assert dshevents.session_permission_mode("s-none") == ""
+        assert dshevents.session_permission_mode("不存在") == ""      # 断连=未知
+    finally:
+        with hub._cond:
+            hub._sessions = old
+            hub._connected = was_connected
 
 
 def test_fold_inbox_queue_rows(monkeypatch):

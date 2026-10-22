@@ -69,38 +69,99 @@ def test_scan_agents_only_plugin_entry(monkeypatch):
     assert items[0]["version"] == "0.131.4" and items[0]["found"] is True
 
 
-# ---------- 会话级权限档（2026-10-04 修「权限控件恒置灰」） ----------
+# ---------- 会话级权限档（2026-10-04 修「权限控件恒置灰」；2026-10-21 对齐宿主目录） ----------
 
 def test_session_permission_mode_source():
-    """权限档取值（会话窗「权限」控件的数据源）：平台三档 mode 优先；无 mode 时按宿主
-    preset 反查近似档位；两者皆无 → 空串（调用方不下发 ⇒ 前端保持置灰，不猜）。
-
-    yolo/auto 在正向映射里落到同一宿主 preset（多对一），故**只有** mode 能区分它们；
-    反查只在平台没记过档位的会话（外部直跑后接管）用，统一取 yolo。
+    """权限档取值（§5.5 会话窗「权限」控件的数据源）：**宿主 preset 实况优先**——新的
+    首选，可能是 path-rules/write-guard 等任意宿主档；只有旧插件/旧帧缺 preset 时才用
+    `mode` 做展示兜底映射（manual→workspace-write、yolo/auto→danger-full-access），
+    该映射是**只读回显**、不是写入路径；两者皆无 → 空串（不下发 ⇒ 前端置灰，不猜）。
     """
     assert server._session_permission_mode(None) == ""
     assert server._session_permission_mode({}) == ""
     assert server._session_permission_mode({"permission": None}) == ""
+    # preset 优先：同帧里即便带旧 mode，也以宿主实况为准
     assert server._session_permission_mode(
-        {"permission": {"mode": "manual", "preset": "workspace-write"}}) == "manual"
+        {"permission": {"mode": "manual", "preset": "workspace-write"}}) == "workspace-write"
     assert server._session_permission_mode(
-        {"permission": {"mode": "auto", "preset": "danger-full-access"}}) == "auto"
-    # mode 缺席（外部会话/老插件）：preset 反查
+        {"permission": {"mode": "auto", "preset": "danger-full-access"}}) == "danger-full-access"
+    # 自定义宿主档原样返回（不再是三档近似）
     assert server._session_permission_mode(
-        {"permission": {"mode": "", "preset": "workspace-write"}}) == "manual"
+        {"permission": {"mode": "", "preset": "path-rules"}}) == "path-rules"
     assert server._session_permission_mode(
-        {"permission": {"mode": "", "preset": "danger-full-access"}}) == "yolo"
+        {"permission": {"mode": "", "preset": "write-guard"}}) == "write-guard"
+    # 不认识的 preset 也原样返回（宿主目录是唯一真源，平台不猜合法性）
     assert server._session_permission_mode(
-        {"permission": {"mode": "", "preset": "没见过的 preset"}}) == ""
-    # 反查表与正向表同源：manual 往返一致（yolo/auto 多对一，不参与往返断言）
-    assert server.DSH_PRESET_MODES[server.DSH_PERMISSION_PRESETS["manual"]] == "manual"
-    assert (server.DSH_PERMISSION_PRESETS["yolo"]
-            == server.DSH_PERMISSION_PRESETS["auto"] == "danger-full-access")
+        {"permission": {"mode": "", "preset": "没见过的 preset"}}) == "没见过的 preset"
+    # 旧插件旧帧只有 mode：展示兜底映射
+    assert server._session_permission_mode(
+        {"permission": {"mode": "manual", "preset": ""}}) == "workspace-write"
+    assert server._session_permission_mode(
+        {"permission": {"mode": "yolo", "preset": ""}}) == "danger-full-access"
+    assert server._session_permission_mode(
+        {"permission": {"mode": "auto", "preset": ""}}) == "danger-full-access"
+    assert server._session_permission_mode(
+        {"permission": {"mode": "bogus", "preset": ""}}) == ""
+    assert server._session_permission_mode(
+        {"permission": {"mode": "", "preset": ""}}) == ""
+
+
+def test_driver_permission_domain_constants():
+    """§3 共享领域常量：旧三档别名（auto 不在其中——§5.3 歧义裁决）与内置档中文/英文名。"""
+    assert dshdriver.LEGACY_PERMISSION_ALIASES == {
+        "manual": "workspace-write", "yolo": "danger-full-access"}
+    assert "auto" not in dshdriver.LEGACY_PERMISSION_ALIASES
+    assert dshdriver.BUILTIN_PERMISSION_LABELS_ZH == {
+        "read-only": "仅可查看",
+        "workspace-write": "工作区内修改",
+        "danger-full-access": "完全权限",
+        "auto": "自动审查（实验）"}
+    assert dshdriver.BUILTIN_PERMISSION_LABELS_EN == {
+        "read-only": "Read Only",
+        "workspace-write": "Workspace Write",
+        "danger-full-access": "Full access"}
+    assert set(dshdriver.BUILTIN_PERMISSION_DESCRIPTIONS) == {
+        "read-only", "workspace-write", "danger-full-access", "auto"}
+
+
+def test_permission_option_pure_function():
+    """`permission_option` 纯函数（§3）：内置三档中文产品名、auto 恒用产品名、宿主英文
+    默认名也归中文名、自定义档 name/kebab Title-Case、宿主 description 优先、空值跳过。"""
+    po = dshdriver.permission_option
+    # 空 value：返回空 dict（调用方过滤）
+    assert po("", "x", "y") == {}
+    assert po(None) == {}
+    assert po("   ") == {}
+    # 内置档：宿主上报 name= machine value（本机实测）⇒ 中文产品名
+    assert po("read-only", "read-only") == {
+        "value": "read-only", "label": "仅可查看",
+        "description": "只读运行；所有修改动作都需要审批。"}
+    assert po("workspace-write", "workspace-write")["label"] == "工作区内修改"
+    assert po("danger-full-access", "danger-full-access")["label"] == "完全权限"
+    # 英文默认名（DSH 客户端 DEFAULT_PRESET_LABELS）同样归中文产品名
+    assert po("read-only", "Read Only")["label"] == "仅可查看"
+    assert po("workspace-write", "Workspace Write")["label"] == "工作区内修改"
+    assert po("danger-full-access", "Full access")["label"] == "完全权限"
+    # auto 恒用产品名（即使宿主给了别的 name）
+    assert po("auto", "auto")["label"] == "自动审查（实验）"
+    assert po("auto", "别的名字")["label"] == "自动审查（实验）"
+    # 自定义档：宿主 name/description 原样用
+    assert po("path-rules", "路径规则", "项目内可读写") == {
+        "value": "path-rules", "label": "路径规则", "description": "项目内可读写"}
+    # kebab name → 逐词首字母大写（镜像 DSH；description 回落内置补充表，未知档为空）
+    assert po("some-preset") == {"value": "some-preset", "label": "Some Preset",
+                                 "description": ""}
+    # 宿主 description 优先于内置补充描述
+    assert po("read-only", "read-only", "宿主描述")["description"] == "宿主描述"
+    # 不认识的 value 也照常返回（不报错）：name 原样，没 name 用 value
+    assert po("myCustom", "My Custom")["label"] == "My Custom"
+    assert po("myCustom")["label"] == "myCustom"
 
 
 def test_set_permission_passes_mode(monkeypatch):
-    """`dshdriver.set_permission` 把平台三档 mode 随写下传（不带 mode 时请求体不出现该字段，
-    兼容老插件：驱动侧按「来源不明」清 mode、只留 preset 实况）。"""
+    """`dshdriver.set_permission` 保留 mode 可选参数（老插件兼容）；本批平台**不再传**
+    mode（档位由宿主 preset 目录表达，见 apply_session_defaults/会话 profile 端点）。
+    不带 mode 时请求体不出现该字段。"""
     calls = []
     monkeypatch.setattr(dshdriver, "_request",
                         lambda m, p, payload=None, timeout=None:
@@ -1328,7 +1389,11 @@ def test_server_rewind_dsh_task_rebinds_session(monkeypatch):
 
 
 def test_client_p3b_endpoints(monkeypatch):
-    """审批/权限端点的拼装（answer_approval / set_permission / presets）。"""
+    """审批/权限端点的拼装（answer_approval / set_permission / presets）。
+
+    presets 支持**免 session_id**（§5.1/§5.2）：空串时省略查询串、只回进程级目录
+    （平台项目弹窗/会话窗下拉的数据源）；带 sid 时沿用旧查询串形态。
+    """
     calls = []
 
     def fake_request(method, path, payload=None, timeout=None):
@@ -1338,19 +1403,22 @@ def test_client_p3b_endpoints(monkeypatch):
         if path == "/permission":
             return {"ok": True, "preset": payload["preset"], "hold_approvals": True}
         if path.startswith("/presets"):
-            return {"current": "workspace-write", "options": []}
+            return {"session_id": "", "current": "", "options": [],
+                    "default": "danger-full-access"}
         return {}
 
     monkeypatch.setattr(dshdriver, "_request", fake_request)
     assert dshdriver.answer_approval("session-a", "ap-1", "allowed-once")["outcome"] == "allowed-once"
     assert dshdriver.set_permission("session-a", "workspace-write")["hold_approvals"] is True
-    assert dshdriver.presets("session-a")["current"] == "workspace-write"
+    assert dshdriver.presets("session-a")["current"] == ""
+    dshdriver.presets("")
     assert calls[0] == ("POST", "/approval",
                         {"session_id": "session-a", "approval_id": "ap-1",
                          "decision": "allowed-once"})
     assert calls[1] == ("POST", "/permission",
                         {"session_id": "session-a", "preset": "workspace-write"})
-    assert calls[2][0] == "GET" and calls[2][1].startswith("/presets?session_id=")
+    assert calls[2][0] == "GET" and calls[2][1] == "/presets?session_id=session-a"
+    assert calls[3][0] == "GET" and calls[3][1] == "/presets"
 
 
 def test_iw_interaction_dsh_approval_answerable_from_mark(monkeypatch):
@@ -1417,8 +1485,10 @@ def test_board_answer_approval_dsh_direct_and_scope(monkeypatch):
 
 
 def test_server_session_profile_dsh_permission_and_model(monkeypatch):
-    """dsh 会话级配置：权限档映射到 preset（manual→workspace-write）+ 模型同请求可带；
-    非法档 400、两者皆空 400、驱动异常 502。"""
+    """dsh 会话级配置（§5.4）：权限档按**宿主目录**校验——manual/yolo 映射到 preset、
+    目录里的值（含 path-rules 等自定义档）直通，未知档 400 且文案逐字＝
+    `权限档非法（宿主权限目录里没有该档位）`；回执 permission_mode 为 canonical preset；
+    下发 set_permission 不再带 mode；模型同请求可带；两者皆空 400、驱动异常 502。"""
     import server
 
     calls = []
@@ -1431,26 +1501,40 @@ def test_server_session_profile_dsh_permission_and_model(monkeypatch):
         def _board_owns_sid(self, row, sid):
             return {"id": 1}
 
+    # 已知档位值集合＝宿主目录（单测里直接打桩读口，目录拉取另有 test_agents 覆盖）
+    monkeypatch.setattr(server, "_permission_catalog_values",
+                        lambda: {"read-only", "workspace-write", "danger-full-access",
+                                 "path-rules", "write-guard", "auto"})
     seen = []
     monkeypatch.setattr(server.dshdriver, "set_permission",
                         lambda sid, preset, mode=None:
                         seen.append(("preset", sid, preset, mode)) or {})
     monkeypatch.setattr(server.dshdriver, "set_model",
                         lambda sid, model, **kw: seen.append(("model", sid, model)) or {})
+    # 旧档 manual → canonical workspace-write；回执给 canonical（真正下发的值）
     server.Handler._api_board_session_profile(_H(), 1, "session-a",
                                               {"permission_mode": "manual"})
-    # 三档 mode 随写一起下传（preset→三档多对一，只有平台知道点的是哪一档；
-    # 驱动记下后经 driver/permission 帧回读，会话窗「权限」控件据此点亮）
     assert calls[-1][0] == 200
-    assert seen == [("preset", "session-a", "workspace-write", "manual")]
+    assert seen == [("preset", "session-a", "workspace-write", None)]
+    assert calls[-1][1]["permission_mode"] == "workspace-write"
+    # yolo → danger-full-access；模型同请求可带
     server.Handler._api_board_session_profile(_H(), 1, "session-a",
                                               {"permission_mode": "yolo", "model": "m1"})
     assert calls[-1][0] == 200
-    assert seen[-2:] == [("preset", "session-a", "danger-full-access", "yolo"),
+    assert seen[-2:] == [("preset", "session-a", "danger-full-access", None),
                          ("model", "session-a", "m1")]
+    assert calls[-1][1]["permission_mode"] == "danger-full-access"
+    # 宿主目录里的自定义档直通（不再被三档白名单拒绝）
+    server.Handler._api_board_session_profile(_H(), 1, "session-a",
+                                              {"permission_mode": "path-rules"})
+    assert calls[-1][0] == 200
+    assert seen[-1] == ("preset", "session-a", "path-rules", None)
+    assert calls[-1][1]["permission_mode"] == "path-rules"
+    # 未知档：400 + 逐字文案
     server.Handler._api_board_session_profile(_H(), 1, "session-a",
                                               {"permission_mode": "bogus"})
     assert calls[-1][0] == 400
+    assert calls[-1][1]["error"] == "权限档非法（宿主权限目录里没有该档位）"
     server.Handler._api_board_session_profile(_H(), 1, "session-a", {})
     assert calls[-1][0] == 400
 

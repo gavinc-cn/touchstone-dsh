@@ -625,14 +625,31 @@ class _Handler(BaseHTTPRequestHandler):
                                  "default_effort": ""}]}],
                 "routable_providers": ["deepseek-official"], "failures": []})
         if path == "/presets":
-            return self._json(200, {
-                "current": "workspace-write",
-                "default": "workspace-write",
-                "options": [{"value": "read-only", "name": "只读", "approval": "never"},
-                            {"value": "workspace-write", "name": "工作区可写",
-                             "approval": "ask"},
-                            {"value": "danger-full-access", "name": "完全访问",
-                             "approval": "never"}]})
+            # 宿主权限目录（2026-10-21 起对齐 DSH web profile 实测形态）：
+            # - session_id 省略/空串 ⇒ 只回进程级目录（current 空、不查会话池，§5.1）——
+            #   平台项目弹窗/会话窗「权限」下拉的数据源；
+            # - 内置三档宿主上报 name= machine value（中文名由客户端展示层映射）；
+            # - 自定义档 name/description 用宿主配置；auto 的 name 也是 auto；
+            # - 宿主默认档 danger-full-access。
+            sid = (q.get("session_id") or [""])[0]
+            catalog = {
+                "default": "danger-full-access",
+                "options": [
+                    {"value": "read-only", "name": "read-only"},
+                    {"value": "workspace-write", "name": "workspace-write"},
+                    {"value": "danger-full-access", "name": "danger-full-access"},
+                    {"value": "path-rules", "name": "路径规则",
+                     "description": "项目内可读写；项目外读允许、写需审批；白名单直通；黑名单一律审批。"},
+                    {"value": "write-guard", "name": "完全权限（拦截）",
+                     "description": "完全权限底座；项目内/白名单写入直通；越界写入弹框确认并自动学习白名单；复杂命令由 AI 判定。"},
+                    {"value": "auto", "name": "auto"}]}
+            if not sid:
+                return self._json(200, {"session_id": "", "current": "", **catalog})
+            sess = drv.sessions.get(sid)
+            if sess is None:
+                return self._json(404, {"error": f"会话不在驱动池中: {sid}"})
+            return self._json(200, {"session_id": sid,
+                                    "current": "danger-full-access", **catalog})
         if path == "/media":
             mid = (q.get("id") or [""])[0]
             if mid == "missing":

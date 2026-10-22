@@ -13,6 +13,89 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 import agents
+import dshdriver
+import server
+
+
+# ---------- 权限目录载荷（GET /api/agents/presets 的数据源，2026-10-21） ----------
+
+# 本机 web profile 实测的宿主目录（契约 §2；内置三档 name= machine value、
+# 自定义档 name/description 为宿主配置、auto 的 name 也是 auto）
+_HOST_CATALOG = {
+    "session_id": "", "current": "", "default": "danger-full-access",
+    "options": [
+        {"value": "read-only", "name": "read-only"},
+        {"value": "workspace-write", "name": "workspace-write"},
+        {"value": "danger-full-access", "name": "danger-full-access"},
+        {"value": "path-rules", "name": "路径规则",
+         "description": "项目内可读写；项目外读允许、写需审批；白名单直通；黑名单一律审批。"},
+        {"value": "write-guard", "name": "完全权限（拦截）",
+         "description": "完全权限底座；项目内/白名单写入直通；越界写入弹框确认并自动学习白名单；复杂命令由 AI 判定。"},
+        {"value": "auto", "name": "auto"},
+    ],
+}
+
+
+def test_permission_catalog_payload_available(monkeypatch):
+    """目录可用态：options 逐个 permission_option（内置档中文产品名、自定义档宿主
+    name/description、auto 产品名），default_label 取同 value 的 label；同时更新进程内
+    「已知档位值集合」（供 normalize/会话 profile 校验）。"""
+    monkeypatch.setattr(dshdriver, "configured", lambda: True)
+    monkeypatch.setattr(dshdriver, "presets", lambda session_id="": dict(_HOST_CATALOG))
+    monkeypatch.setattr(server, "_PERMISSION_CACHE", {})
+    monkeypatch.setattr(server, "_PERMISSION_CATALOG_VALUES", None)
+    payload = server._permission_catalog_payload()
+    assert payload["available"] is True
+    assert [o["value"] for o in payload["options"]] == [
+        "read-only", "workspace-write", "danger-full-access",
+        "path-rules", "write-guard", "auto"]
+    by = {o["value"]: o for o in payload["options"]}
+    assert by["read-only"]["label"] == "仅可查看"
+    assert by["workspace-write"]["label"] == "工作区内修改"
+    assert by["danger-full-access"]["label"] == "完全权限"
+    assert by["path-rules"]["label"] == "路径规则"
+    assert by["write-guard"]["label"] == "完全权限（拦截）"
+    assert by["auto"]["label"] == "自动审查（实验）"
+    # 宿主 description 优先；缺省时用内置补充描述
+    assert by["path-rules"]["description"].startswith("项目内可读写")
+    assert by["read-only"]["description"] == "只读运行；所有修改动作都需要审批。"
+    assert payload["default"] == "danger-full-access"
+    assert payload["default_label"] == "完全权限"
+    assert server._permission_catalog_values() == {
+        "read-only", "workspace-write", "danger-full-access",
+        "path-rules", "write-guard", "auto"}
+
+
+def test_permission_catalog_payload_unavailable(monkeypatch):
+    """目录不可用两态（驱动未配置 / 驱动调用失败）：200 空载荷（不抛 5xx）、**失败不入
+    缓存**（下次重试）；从未成功取到目录 ⇒ 档位值集合回退 DSH 内置三档。"""
+    monkeypatch.setattr(server, "_PERMISSION_CACHE", {})
+    monkeypatch.setattr(server, "_PERMISSION_CATALOG_VALUES", None)
+    empty = {"available": False, "options": [], "default": "", "default_label": ""}
+    # ① 驱动未配置（独立形态）
+    monkeypatch.setattr(dshdriver, "configured", lambda: False)
+    assert server._permission_catalog_payload() == empty
+    assert server._PERMISSION_CACHE == {}          # 失败不缓存
+    # 从未成功 ⇒ 内置三档（read-only/workspace-write/danger-full-access）
+    assert server._permission_catalog_values() == {
+        "read-only", "workspace-write", "danger-full-access"}
+    # ② 驱动已配置但调用失败
+    monkeypatch.setattr(dshdriver, "configured", lambda: True)
+    calls = []
+
+    def boom(session_id=""):
+        calls.append(session_id)
+        raise dshdriver.DshDriverError(-2, "驱动不可达")
+    monkeypatch.setattr(dshdriver, "presets", boom)
+    assert server._permission_catalog_payload() == empty
+    assert server._PERMISSION_CACHE == {}          # 仍是失败不缓存
+    assert calls == [""]                           # 空 sid（目录与具体会话无关）
+    # 恢复后再取：成功即入缓存（60s TTL 内不再打驱动）
+    monkeypatch.setattr(dshdriver, "presets", lambda session_id="": dict(_HOST_CATALOG))
+    payload = server._permission_catalog_payload()
+    assert payload["available"] is True and payload["options"]
+    assert server._permission_catalog_payload() == payload
+    assert "presets" in server._PERMISSION_CACHE
 
 
 # ---------- agent_family ----------
