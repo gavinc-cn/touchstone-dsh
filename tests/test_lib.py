@@ -224,3 +224,43 @@ def test_git_log_changes_non_repo_degrades(tmp_path):
     """非 git 目录：ok=False 携带 error（调用方静默降级），不抛异常。"""
     r = lib.git_log_changes(str(tmp_path))
     assert r["ok"] is False and r["error"]
+
+
+# ---------- 最近提交（探索任务「最近变更优先」的取数口） ----------
+
+def test_git_recent_commits_structured_and_limited(tmp_path):
+    """最近提交：逐条 {hash,date,subject,files}，按提交时间倒序，limit 只截提交条数。"""
+    repo = str(tmp_path / "repo_recent")
+    os.makedirs(repo)
+    _git(repo, "init", "-q")
+    _write(os.path.join(repo, "a.txt"), "1")
+    _write(os.path.join(repo, "b.txt"), "2")
+    _git(repo, "add", "a.txt", "b.txt")
+    _git(repo, "commit", "-q", "-m", "add a and b",
+         env={"GIT_AUTHOR_DATE": "2026-08-01T12:00:00",
+              "GIT_COMMITTER_DATE": "2026-08-01T12:00:00"})
+    _write(os.path.join(repo, "c.txt"), "3")
+    _git(repo, "add", "c.txt")
+    _git(repo, "commit", "-q", "-m", "add c",
+         env={"GIT_AUTHOR_DATE": "2026-09-02T12:00:00",
+              "GIT_COMMITTER_DATE": "2026-09-02T12:00:00"})
+    r = lib.git_recent_commits(repo)
+    assert r["ok"] is True
+    commits = r["commits"]
+    # 倒序：新提交在前；每条自带日期/说明/变更文件（功能聚类要用）
+    assert [c["subject"] for c in commits] == ["add c", "add a and b"]
+    assert commits[0]["date"] == "2026-09-02"
+    assert commits[0]["files"] == ["c.txt"]
+    assert commits[1]["date"] == "2026-08-01"
+    assert commits[1]["files"] == ["a.txt", "b.txt"]
+    assert len(commits[0]["hash"]) >= 7
+    # limit 只截提交条数（与文件无关）
+    r1 = lib.git_recent_commits(repo, limit=1)
+    assert r1["ok"] is True and len(r1["commits"]) == 1
+    assert r1["commits"][0]["subject"] == "add c"
+
+
+def test_git_recent_commits_non_repo_degrades(tmp_path):
+    """非 git 目录：ok=False + error（调用方静默降级），不抛异常。"""
+    r = lib.git_recent_commits(str(tmp_path))
+    assert r["ok"] is False and r["error"]

@@ -349,6 +349,100 @@ test('_date_range_ctx：commits[:60] 截断（第 61 条不注入）', () => {
   }
 });
 
+// --------------------------------------------------------------------------
+// 最近变更优先（无日期范围的默认优先范围；取数走 lib.gitRecentCommits）
+// --------------------------------------------------------------------------
+
+/** 最近提交的假 git 输出：块首行是 TAB 分隔的 hash/日期/标题（标题含空格不能按空格切） */
+function recentBlocks(commits) {
+  return commits.map(([head, ...files]) => `\x00${head}\n${files.join('\n')}`).join('\n');
+}
+
+test('normal_prompt：无日期范围默认注入「最近变更优先」段（按天倒序、逐条列变更文件）', () => {
+  const dir = tmpDir('ts-git-');
+  const canned = path.join(dir, 'canned.txt');
+  const argsFile = path.join(dir, 'args.txt');
+  fs.writeFileSync(canned, recentBlocks([
+    ['abc1234\t2026-10-13\trefactor(interface): 定长字符类型宏', 'src/a.h', 'src/b.h'],
+    ['def5678\t2026-10-13\ttest: 补单测', 'test/c.cpp'],
+    ['aaa1111\t2026-10-12\tfix: 修复下单链路', 'src/order.py'],
+  ]));
+  // 记录 argv 以钉死 `-n 30`（条数上限若漏传，夹具输出相同会静默通过）
+  const script = `#!/bin/sh
+printf '%s\\n' "$*" > "${argsFile}"
+cat "${canned}"
+`;
+  const proj = project(tmpDir());
+  try {
+    withFakeGit(script, () => {
+      const p = prompts.normal_prompt(proj, task());
+      assert.ok(p.includes('- 优先范围（最近变更优先）：'));
+      assert.ok(p.includes('按功能聚类并合并同一功能的跨天改动'));
+      assert.ok(p.includes('「最近变更与功能合并规则」'));
+      assert.ok(p.includes('- 最近变更（按提交日期倒序，最多 30 条提交）：'));
+      assert.ok(p.includes('  【2026-10-13】2 条提交：'));
+      assert.ok(p.includes('  【2026-10-12】1 条提交：'));
+      assert.ok(p.indexOf('【2026-10-13】') < p.indexOf('【2026-10-12】'));
+      assert.ok(p.includes('    - abc1234 refactor(interface): 定长字符类型宏'));
+      assert.ok(p.includes('      文件：src/a.h、src/b.h'));
+      assert.ok(p.includes('      文件：src/order.py'));
+      assert.ok(p.indexOf('- 优先范围（最近变更优先）') < p.indexOf('- 停止条件'));
+      assert.ok(readText(argsFile).includes(' -n 30 '), readText(argsFile));
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('normal_prompt：「最近变更」每条提交文件最多 8 个；失败/空仓库降级仍留规则', () => {
+  const dir = tmpDir('ts-git-');
+  const canned = path.join(dir, 'canned.txt');
+  const files = Array.from({ length: 10 }, (_, i) => `src/f${i}.py`);
+  fs.writeFileSync(canned, recentBlocks([['abc1234\t2026-10-13\tfeat: 大改动', ...files]]));
+  const proj = project(tmpDir());
+  try {
+    withFakeGit(cannedGit(canned), () => {
+      const p = prompts.normal_prompt(proj, task());
+      assert.ok(p.includes(`      文件：${files.slice(0, 8).join('、')} …共 10 个`));
+      assert.ok(!p.includes('src/f8.py') && !p.includes('src/f9.py'));
+    });
+    fs.writeFileSync(`${canned}.fail`, 'fatal: boom');
+    withFakeGit(cannedGit(canned), () => {
+      const p = prompts.normal_prompt(proj, task());
+      assert.ok(p.includes('- 优先范围（最近变更优先）：'));
+      assert.ok(p.includes('git 摘录失败（fatal: boom）'));
+      assert.ok(p.includes('请自行用 git log 等分析最近改动'));
+      assert.ok(p.includes('无法判断时按功能分级推进'));
+    });
+    fs.rmSync(`${canned}.fail`);
+    fs.writeFileSync(canned, '');
+    withFakeGit(cannedGit(canned), () => {
+      const p = prompts.normal_prompt(proj, task());
+      assert.ok(p.includes('仓库没有提交记录'));
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('normal_prompt：显式日期范围优先，不叠加「最近变更优先」段', () => {
+  const dir = tmpDir('ts-git-');
+  const canned = path.join(dir, 'canned.txt');
+  // 日期范围路径走 gitLogChanges（块首行空格分隔）：这里只要求取数成功
+  fs.writeFileSync(canned, `${logBlocks([['abc1234 2026-01-01 ts-parity x', 'src/a.py']])}\n`);
+  const proj = project(tmpDir());
+  try {
+    withFakeGit(cannedGit(canned), () => {
+      const p = prompts.normal_prompt(proj, task({ date_from: '2026-01-01', date_to: '2026-01-02' }));
+      assert.ok(p.includes('- 提交日期范围：2026-01-01 .. 2026-01-02'));
+      assert.ok(!p.includes('- 优先范围（最近变更优先）'));
+      assert.ok(!p.includes('最多 30 条提交'));
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('retest_range_prompt：code_refs[:100] 按**码点**截断（emoji 恰在第 100 个码点）', async () => {
   const wd = tmpDir();
   const { proj } = bugEnv(wd);
@@ -480,8 +574,14 @@ test('_semantic_order：RAG 未配置 ⇒ 返回 [] 且不触发检索（不触�
 });
 
 test('next_round_prompt / compact_prompt：续轮分版与常量', () => {
-  assert.ok(prompts.next_round_prompt(3).includes('继续执行自由风格探索测试第 3 轮'));
-  assert.ok(prompts.next_round_prompt(2, task({ task_type: 'regression' })).includes('继续执行存量用例回归第 2 轮'));
+  const p = prompts.next_round_prompt(3);
+  assert.ok(p.includes('继续执行自由风格探索测试第 3 轮'));
+  // 多轮任务：续轮先继续未覆盖的「最近变更」功能组，再回落到功能分级
+  assert.ok(p.includes('最近变更') && p.includes('变更功能组'));
+  assert.ok(p.indexOf('变更功能组') < p.indexOf('功能分级'));
+  const r = prompts.next_round_prompt(2, task({ task_type: 'regression' }));
+  assert.ok(r.includes('继续执行存量用例回归第 2 轮'));
+  assert.ok(!r.includes('最近变更'));          // 回归不生成新用例，不注入变更优先
   assert.ok(prompts.next_round_prompt(1, task({ task_type: 'mystery' })).includes('继续执行自由风格探索测试第 1 轮'));
   assert.equal(prompts.compact_prompt(), '/compact');
   assert.deepEqual([...prompts.STAGE_ORDER], ['gen_case', 'execute', 'report', 'analyze', 'fix', 'deploy', 'retest']);

@@ -721,6 +721,51 @@ export function gitLogChanges(projectDir, dateFrom = '', dateTo = '', limit = 10
   return { ok: true, commits: commits.slice(0, limit), files: pySorted(new Set(files)) };
 }
 
+/**
+ * `lib.git_recent_commits`：摘录最近 `limit` 条提交（提交时间倒序，**逐条保留变更文件归属**）。
+ *
+ * 逐点对齐 `lib.py:git_recent_commits`：
+ *  ① 命令：`log -n <limit> --pretty=format:%x00%h%x09%ad%x09%s --date=short --name-only`
+ *     —— 块首行用 **TAB** 分隔 hash/日期/标题（标题含空格，不能按空格切）；
+ *  ② 返回 `{ok:true, commits:[{hash,date,subject,files[]}]}`；
+ *     非 git/失败一律 `{ok:false,error}` 静默降级（调用方 `prompts` 给降级文案）；
+ *  ③ 每个提交块以 `\x00` 分隔；块首行形态异常（少于 3 段）整块跳过，不产半条记录；
+ *  ④ 同一提交内重复文件名只留一次（按首次出现顺序）；空块/纯空白行跳过；
+ *  ⑤ stdout 按文本模式读（`\r\n`→`\n`），stderr 按 Python `strip()` 裁、码点截 300；
+ *  ⑥ `limit` 直接以字符串进 `-n`（生产/对拍都传整数；Python 侧 `int(limit)` 对整数同值）。
+ *
+ * 与 `gitLogChanges` 的区别：不看日期范围、按条数取最近提交，且不把文件摊平
+ * ——探索任务要按「功能」聚类最近改动，必须知道每个文件是哪次提交改的。
+ *
+ * @param {string} projectDir 项目目录（`git -C` 的目标）
+ * @param {number} [limit] 提交条数上限（默认 30）
+ * @returns {{ok: true, commits: {hash: string, date: string, subject: string, files: string[]}[]}
+ *   | {ok: false, error: string}}
+ */
+export function gitRecentCommits(projectDir, limit = 30) {
+  const cmd = ['-C', String(projectDir), '-c', 'core.quotepath=false', 'log',
+    '-n', String(limit),
+    '--pretty=format:%x00%h%x09%ad%x09%s', '--date=short', '--name-only'];
+  // 不传 env：继承本进程环境（照 subprocess.run 的缺省）——对拍的固定 GIT_ENV 靠这条继承生效。
+  const p = spawnSync('git', cmd, { encoding: 'utf8', timeout: 20_000, maxBuffer: 64 * 1024 * 1024 });
+  if (p.error) return { ok: false, error: `git 不可用: ${p.error.message}` };
+  if (p.status !== 0) return { ok: false, error: sliceCodePoints(pyStrip(p.stderr ?? ''), 300) };
+  const stdout = String(p.stdout ?? '').replace(/\r\n?/g, '\n');
+  const commits = [];
+  for (const blk of stdout.split('\x00')) {
+    const lines = blk.split(PY_SPLITLINES_RE).filter((ln) => pyStrip(ln) !== '');
+    if (!lines.length) continue;
+    const parts = lines[0].split('\t');
+    if (parts.length < 3) continue;    // 头部形态异常：整块跳过
+    const files = [];
+    for (const ln of lines.slice(1)) {
+      if (!files.includes(ln)) files.push(ln);
+    }
+    commits.push({ hash: parts[0], date: parts[1], subject: parts.slice(2).join('\t'), files });
+  }
+  return { ok: true, commits };
+}
+
 // --------------------------------------------------------------------------
 // 案例库写口与固化判定（`lib.py:50-109 / 176-212`，M6-6 接线前补齐）
 //

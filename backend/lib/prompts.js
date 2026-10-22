@@ -84,7 +84,7 @@ import { fileURLToPath } from 'node:url';
 
 // `export_cases.scan_cases`（M6-2 已落）与 `lib` 的读侧子集（含 M6-4 新落的 `gitLogChanges`）
 import { scanCases } from './export-cases.js';
-import { bugCases, findCaseDirs, gitLogChanges, pyJoin, pyStrip, readText } from './lib.js';
+import { bugCases, findCaseDirs, gitLogChanges, gitRecentCommits, pyJoin, pyStrip, readText } from './lib.js';
 // `rag` 的配置/检索入口（M6-3 已落）+ 它那套 Python 语义小工具（错误类/真值/码点切片）
 import {
   AttributeError, KeyError, ValueError, change_query, load_config, pySliceCodePoints, pyTruthy,
@@ -238,6 +238,13 @@ export const _ASSET_DIR = pyJoin(REPO_ROOT, 'builtin_prompts', 'free_style');
 
 /** 资产读取缓存（**进程内只读一次磁盘、永不失效**；键是 `"/".join(names)`） */
 export const _ASSET_CACHE = new Map();
+
+/**
+ * 探索任务「最近变更优先」的取数口径（prompt 预算上限，**不是时间窗口**）：
+ * 最近 N 条提交 + 每条提交最多列 M 个变更文件；功能聚类/新旧合并/按天倒序交给 agent。
+ */
+export const RECENT_COMMIT_LIMIT = 30;
+export const RECENT_FILES_PER_COMMIT = 8;
 
 /**
  * 生命周期阶段（与 `server.STAGES` / `runner.STAGES` / 前端 `STAGES` 保持一致；
@@ -420,6 +427,68 @@ export function _date_range_priority(project, task) {
 }
 
 /**
+ * `prompts._render_recent_commits`：把最近提交渲染成「按提交日期倒序、按天分组」的清单。
+ *
+ * `commits` 为 `lib.gitRecentCommits` 的逐条记录（取数已按提交时间倒序）；同一提交的
+ * 变更文件最多列 `RECENT_FILES_PER_COMMIT` 个，超出给「…共 N 个」提示——文件清单用于
+ * agent 判断改动落在哪个功能上，不是全量 diff。
+ */
+function _render_recent_commits(commits) {
+  const groups = new Map();
+  for (const c of commits) {
+    if (!groups.has(c.date)) groups.set(c.date, []);
+    groups.get(c.date).push(c);
+  }
+  const lines = [`- 最近变更（按提交日期倒序，最多 ${RECENT_COMMIT_LIMIT} 条提交）：`];
+  // 日期是 YYYY-MM-DD（ASCII）：字符串降序 = 日期倒序（排序对象与 Python 一致）
+  for (const date of [...groups.keys()].sort().reverse()) {
+    const items = groups.get(date);
+    lines.push(`  【${date}】${items.length} 条提交：`);
+    for (const c of items) {
+      lines.push(`    - ${c.hash} ${c.subject}`);
+      const files = pyOr(c.files, []);
+      if (files.length) {
+        const shown = files.slice(0, RECENT_FILES_PER_COMMIT).join('、');
+        const more = files.length > RECENT_FILES_PER_COMMIT
+          ? ` …共 ${files.length} 个` : '';
+        lines.push(`      文件：${shown}${more}`);
+      }
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+/**
+ * `prompts._recent_changes_priority`：探索任务优先范围段——显式日期范围优先，否则默认
+ * 「最近变更优先（功能粒度）」。
+ *
+ * 规则句在任何情况下都注入（取不到提交清单时给可读降级文案），避免 agent 退回纯功能
+ * 分级顺序；功能聚类/跨天合并/按功能最近改动日期倒序的细则见流程文档
+ * 「最近变更与功能合并规则」一节。
+ */
+export function _recent_changes_priority(project, task) {
+  const df = stripOrEmpty(pyGetItem(task, 'date_from'));
+  const dt = stripOrEmpty(pyGetItem(task, 'date_to'));
+  if (df || dt) return _date_range_priority(project, task);
+  const head = ('- 优先范围（最近变更优先）：先按下方「最近变更」清单分析改动涉及的功能，'
+    + '按功能聚类并合并同一功能的跨天改动，按功能最近改动日期倒序，'
+    + '本轮优先生成并执行变更功能相关的用例；变更功能覆盖完后再按根 INDEX.md'
+    + '「功能分级」推进（规则见流程文档「最近变更与功能合并规则」）；'
+    + '清单被截断时可用 git log 自行补充。\n');
+  const log = gitRecentCommits(pyGetItem(project, 'project_dir'), RECENT_COMMIT_LIMIT);
+  const commits = pyTruthy(pyGet(log, 'ok')) ? pyOr(pyGet(log, 'commits'), []) : [];
+  if (commits.length) return head + _render_recent_commits(commits);
+  let reason;
+  if (pyTruthy(pyGet(log, 'ok'))) {
+    reason = '仓库没有提交记录';
+  } else {
+    reason = `git 摘录失败（${pyOr(pyGet(log, 'error'), '未知原因')}）`;
+  }
+  return head + (`- 最近变更：${reason}，请自行用 git log 等分析最近改动；`
+    + '无法判断时按功能分级推进。\n');
+}
+
+/**
  * `prompts.normal_prompt`：常规测试轮（执行一轮自由风格探索测试，流程文档与模板由平台注入）。
  *
  * `end_stage` 收窄每轮范围：gen_case 只生成用例不执行；execute 执行回状态不写 bug 报告；
@@ -440,7 +509,7 @@ export function normal_prompt(project, task) {
   }
   const ctx = _project_context(project);
   const ctxBlock = ctx ? `- 项目上下文：\n${ctx}\n` : '';
-  const datePart = _date_range_priority(project, task);
+  const datePart = _recent_changes_priority(project, task);
   const head = (
     '执行一轮自由风格探索测试，严格按下方《流程文档》与《文件模板》执行，约束如下：\n'
     + `- 案例库根目录：${pyGetItem(project, 'cases_root')}（INDEX.md/ROUNDS.md 不存在则按附带模板初始化）\n`
@@ -979,7 +1048,9 @@ export function next_round_prompt(round_no, task = null) {
   }
   return (
     `继续执行自由风格探索测试第 ${round_no} 轮：换一个 ROUNDS.md 未记录过的`
-    + '角度生成新 case，并按根 INDEX.md「功能分级」节从高优先级到低优先级推进'
+    + '角度生成新 case；若首轮注入的「最近变更」功能组尚未覆盖完，继续优先覆盖'
+    + '这些变更功能组（规则见首轮流程文档「最近变更与功能合并规则」），全部覆盖后'
+    + '再按根 INDEX.md「功能分级」节从高优先级到低优先级推进'
     + '（高优先级功能域未覆盖时不选边界/异常类细节角度），'
     + '约束同首轮（案例库根目录、bug_report 目录、阅读范围、'
     + '选项、红线）；只执行这一轮，结束后更新工作目录下 .live/live.json phase=done '
@@ -1003,6 +1074,7 @@ export {
   _project_context as projectContext,
   _date_range_ctx as dateRangeCtx,
   _date_range_priority as dateRangePriority,
+  _recent_changes_priority as recentChangesPriority,
   normal_prompt as normalPrompt,
   _stress_doc as stressDoc,
   stress_prompt as stressPrompt,

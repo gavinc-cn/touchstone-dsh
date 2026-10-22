@@ -243,3 +243,42 @@ def git_log_changes(project_dir, date_from="", date_to="", limit=100):
     commits = commits[:limit]
     return {"ok": True, "commits": commits, "files": sorted(set(files))}
 
+
+def git_recent_commits(project_dir, limit=30):
+    """摘录最近 limit 条 git 提交（提交时间倒序，逐条保留「提交 → 变更文件」归属）。
+
+    返回 {"ok": True, "commits": [{"hash": 短hash, "date": "YYYY-MM-DD",
+          "subject": 标题, "files": [本次提交的变更文件相对路径, ...]}, ...]}；
+    非 git 仓库/git 不可用/空仓库返回 {"ok": False, "error": "..."}（调用方静默降级）。
+
+    与 git_log_changes 的区别：不看日期范围、按条数取最近的提交，且不把文件摊平
+    ——探索任务要按「功能」聚类最近改动，必须知道每个文件是哪次提交改的。
+    提交块以 \\x00 分隔（文件名不会含 NUL），块首行是 TAB 分隔的 hash/日期/标题
+    （标题里可能有空格，故用 TAB 而非空格分隔）。
+    """
+    cmd = ["git", "-C", project_dir, "-c", "core.quotepath=false", "log",
+           "-n", str(int(limit)),
+           "--pretty=format:%x00%h%x09%ad%x09%s", "--date=short", "--name-only"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=20)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"git 不可用: {e}"}
+    if out.returncode != 0:
+        return {"ok": False, "error": (out.stderr or "").strip()[:300]}
+    commits = []
+    for blk in out.stdout.split("\x00"):
+        lines = [ln for ln in blk.splitlines() if ln.strip()]
+        if not lines:
+            continue
+        parts = lines[0].split("\t", 2)
+        if len(parts) < 3:
+            continue          # 头部形态异常：整块跳过，绝不产出半条记录
+        files = []
+        for ln in lines[1:]:
+            if ln not in files:   # 同一提交内同名文件（重命名/多根路径）只留一次
+                files.append(ln)
+        commits.append({"hash": parts[0], "date": parts[1],
+                        "subject": parts[2], "files": files})
+    return {"ok": True, "commits": commits}
+

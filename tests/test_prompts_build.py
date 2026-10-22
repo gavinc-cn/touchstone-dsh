@@ -116,6 +116,9 @@ def _no_git_no_net(monkeypatch):
     monkeypatch.setattr(lib, "git_log_changes",
                         lambda d, f="", t="", limit=100: {"ok": False,
                                                           "error": "stub: 非 git 仓库"})
+    monkeypatch.setattr(lib, "git_recent_commits",
+                        lambda d, limit=30: {"ok": False,
+                                             "error": "stub: 非 git 仓库"})
     monkeypatch.setattr(rag, "load_config", lambda: None)
     monkeypatch.setattr(rag, "retrieve_detail",
                         lambda *a, **k: pytest.fail("单测不得触发 RAG 检索（触网）"))
@@ -128,6 +131,29 @@ def _stub_git_ok(monkeypatch, commits=("abc123 2026-01-02 张三 修复登录",)
                         lambda d, f="", t="", limit=100: {"ok": True,
                                                           "commits": list(commits),
                                                           "files": list(files)})
+
+
+# 最近提交样例：同一天两条 + 前一天一条（同一天的两条要并组展示，顺序保持取数倒序）
+_RECENT_COMMITS = [
+    {"hash": "abc1234", "date": "2026-10-13",
+     "subject": "refactor(interface): 定长字符类型宏与 CharCs 下沉 zrtools 并加 ZRT_ 前缀",
+     "files": ["src/interface/str_types.h", "src/utilities/zrtools/zrt_str_types.h"]},
+    {"hash": "def5678", "date": "2026-10-13", "subject": "test: 补 zrt 单测",
+     "files": ["test/unit/zrtools/zrt_str_types_test.cpp"]},
+    {"hash": "aaa1111", "date": "2026-10-12", "subject": "fix: 修复下单链路",
+     "files": ["src/order.py"]},
+]
+
+
+def _stub_recent_ok(monkeypatch, commits=None, calls=None):
+    """打桩最近提交取数为成功态（最近变更优先段注入用）；calls 收集 limit 实参。"""
+    data = [dict(c) for c in (commits if commits is not None else _RECENT_COMMITS)]
+
+    def fake(project_dir, limit=30):
+        if calls is not None:
+            calls.append(limit)
+        return {"ok": True, "commits": [dict(c) for c in data]}
+    monkeypatch.setattr(lib, "git_recent_commits", fake)
 
 
 # ---------- 1. 分派与输入形态 ----------
@@ -194,23 +220,30 @@ def test_normal_prompt_injects_builtin_flow_doc_and_templates(tmp_path):
     p = prompts.normal_prompt(_project(tmp_path), _task())
     for frag in ("# 自由风格探索性测试（Free Style Test）流程",
                  "## 功能分级与测试顺序",
+                 "## 最近变更与功能合并规则",   # 变更优先（功能粒度）：最近新增/修改的功能先测
                  "# FS0000_用例名称",          # templates/case_template.md
                  "# FS0000 状态",              # templates/status_template.md
                  "# <目录名> 索引",            # templates/index_template.md
                  "# <一句话标题>"):            # templates/bug_report_template.md
         assert frag in p, frag
+    # 变更优先规则落进流程文档：功能聚合成组、同功能跨天合并、旧功能有改动同样优先
+    assert "- **变更优先（先于分级推进）**" in p
+    assert "变更功能组" in p and "跨天提交合并" in p
+    assert "旧功能" in p and "同样进入变更功能组" in p
     assert p.count("\n\n---\n\n") >= 4                       # 模板以分隔线依次附在文档后
     assert p.index("ROUND_DONE") < p.index("## 功能分级与测试顺序")
+    assert p.index("## 功能分级与测试顺序") < p.index("## 最近变更与功能合并规则")
     # 探索首轮不注入压测资产
     assert "# 压力测试场景生成流程（平台内置）" not in p
 
 
 def test_normal_prompt_date_range_priority_and_degradation(tmp_path, monkeypatch):
-    """带提交日期范围注入「优先范围 + 提交/变更文件摘录」；无范围不出现；摘录失败降级。"""
+    """带提交日期范围注入「优先范围 + 提交/变更文件摘录」；摘录失败降级。"""
     proj = _project(tmp_path)
-    # 无日期范围：整段不出现
+    # 无日期范围：不注入日期范围段（优先范围改由「最近变更优先」段承担）
     p = prompts.normal_prompt(proj, _task())
-    assert "- 优先范围" not in p and "提交日期范围" not in p
+    assert "- 提交日期范围" not in p
+    assert "- 优先范围（最近变更优先）" in p
     # 有日期范围：摘录成功
     _stub_git_ok(monkeypatch)
     p = prompts.normal_prompt(proj, _task(date_from="2026-01-01", date_to="2026-01-31"))
@@ -232,6 +265,69 @@ def test_normal_prompt_date_range_priority_and_degradation(tmp_path, monkeypatch
                         lambda d, f="", t="", limit=100: {"ok": False, "error": "git 不可用"})
     p = prompts.normal_prompt(proj, _task(date_from="2026-01-01"))
     assert "- git 摘录失败（git 不可用）" in p
+
+
+def test_normal_prompt_recent_changes_priority(tmp_path, monkeypatch):
+    """无日期范围时默认注入「最近变更优先」：按天倒序分组、逐条列提交与变更文件。"""
+    proj = _project(tmp_path)
+    calls = []
+    _stub_recent_ok(monkeypatch, calls=calls)
+    p = prompts.normal_prompt(proj, _task())
+    assert "- 优先范围（最近变更优先）：" in p
+    assert "按功能聚类并合并同一功能的跨天改动" in p
+    assert "「最近变更与功能合并规则」" in p
+    assert "- 最近变更（按提交日期倒序，最多 30 条提交）：" in p
+    # 同一天两条并进同一日期组；日期组按倒序（10-13 在 10-12 前）
+    assert "  【2026-10-13】2 条提交：" in p
+    assert "  【2026-10-12】1 条提交：" in p
+    assert p.index("【2026-10-13】") < p.index("【2026-10-12】")
+    # 提交行与变更文件行（文件用顿号并列，供 agent 做功能聚类）
+    assert ("    - abc1234 refactor(interface): 定长字符类型宏与 CharCs 下沉 zrtools "
+            "并加 ZRT_ 前缀") in p
+    assert "      文件：src/interface/str_types.h、src/utilities/zrtools/zrt_str_types.h" in p
+    assert "      文件：src/order.py" in p
+    # 位置：约束块里、停止条件之前
+    assert p.index("- 优先范围（最近变更优先）") < p.index("- 停止条件")
+    # 取数上限按常量传（30 条）
+    assert calls == [30]
+
+
+def test_normal_prompt_recent_changes_file_cap_and_degradation(tmp_path, monkeypatch):
+    """每条提交的变更文件最多列 8 个；git 失败/空仓库给可读降级文案且规则仍在。"""
+    proj = _project(tmp_path)
+    many = [{"hash": "abc1234", "date": "2026-10-13", "subject": "feat: 大改动",
+             "files": [f"src/f{i}.py" for i in range(10)]}]
+    _stub_recent_ok(monkeypatch, commits=many)
+    p = prompts.normal_prompt(proj, _task())
+    shown = "、".join(f"src/f{i}.py" for i in range(8))
+    assert f"      文件：{shown} …共 10 个" in p
+    assert "src/f8.py" not in p and "src/f9.py" not in p
+    # git 失败：保留规则句 + 失败原因，并让 agent 自行取数
+    monkeypatch.setattr(lib, "git_recent_commits",
+                        lambda d, limit=30: {"ok": False, "error": "git 不可用: x"})
+    p = prompts.normal_prompt(proj, _task())
+    assert "- 优先范围（最近变更优先）：" in p
+    assert "git 摘录失败（git 不可用: x）" in p
+    assert "请自行用 git log 等分析最近改动" in p
+    assert "无法判断时按功能分级推进" in p
+    # 空提交：同样可读降级
+    monkeypatch.setattr(lib, "git_recent_commits",
+                        lambda d, limit=30: {"ok": True, "commits": []})
+    p = prompts.normal_prompt(proj, _task())
+    assert "仓库没有提交记录" in p
+
+
+def test_normal_prompt_explicit_date_range_wins_over_recent(tmp_path, monkeypatch):
+    """显式日期范围优先：走原「提交日期范围」段，不叠加最近变更段、不调最近取数。"""
+    proj = _project(tmp_path)
+    calls = []
+    _stub_recent_ok(monkeypatch, calls=calls)
+    _stub_git_ok(monkeypatch)
+    p = prompts.normal_prompt(proj, _task(date_from="2026-01-01", date_to="2026-01-31"))
+    assert "- 提交日期范围：2026-01-01 .. 2026-01-31" in p
+    assert "- 优先范围（最近变更优先）" not in p
+    assert "最多 30 条提交" not in p
+    assert calls == []
 
 
 # ---------- 3. 项目上下文与能力 skill 注入 ----------
@@ -550,10 +646,14 @@ def test_next_round_and_compact_prompts():
     assert "第 3 轮" in p and "自由风格探索测试" in p
     assert "ROUNDS.md" in p and "根 INDEX.md" in p and ".live/live.json" in p
     assert "ROUND_DONE" in p and "约束同首轮" in p
+    # 多轮任务：续轮先继续未覆盖的「最近变更」功能组，再回落到功能分级
+    assert "最近变更" in p and "变更功能组" in p
+    assert p.index("变更功能组") < p.index("功能分级")
     r = prompts.next_round_prompt(3, _task(task_type="regression"))
     assert "第 3 轮" in r and "存量用例回归" in r and "重跑范围指令" in r
     assert "严禁生成任何新用例" in r and "REGRESSION_DONE" in r
     assert "自由风格探索测试" not in r
+    assert "最近变更" not in r          # 回归不生成新用例，不注入变更优先
     assert "自由风格探索测试" in prompts.next_round_prompt(2, _task(task_type="normal"))
     assert prompts.compact_prompt() == "/compact"
 

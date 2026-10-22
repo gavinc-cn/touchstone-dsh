@@ -29,6 +29,11 @@ _ASSET_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 # 资产读取缓存（进程内只读一次磁盘）
 _ASSET_CACHE = {}
 
+# 探索任务「最近变更优先」的取数口径（prompt 预算上限，不是时间窗口）：
+# 最近 N 条提交 + 每条提交最多列 M 个变更文件；功能聚类/新旧合并/按天倒序交给 agent。
+RECENT_COMMIT_LIMIT = 30
+RECENT_FILES_PER_COMMIT = 8
+
 # 生命周期阶段（与 server.STAGES / runner.STAGES / 前端 STAGES 保持一致；
 # prompts 不 import server 防循环依赖）
 STAGE_ORDER = ("gen_case", "execute", "report", "analyze", "fix", "deploy", "retest")
@@ -162,6 +167,59 @@ def _date_range_priority(project, task):
             "本轮优先设计并执行与这些改动相关的用例；\n" + ctx)
 
 
+def _render_recent_commits(commits):
+    """把最近提交渲染成「按提交日期倒序、按天分组」的清单文本。
+
+    commits 为 lib.git_recent_commits 的逐条记录（取数已按提交时间倒序）；同一提交
+    的变更文件最多列 RECENT_FILES_PER_COMMIT 个，超出给「…共 N 个」提示——文件清单
+    用于 agent 判断改动落在哪个功能上，不是全量 diff。
+    """
+    groups = {}
+    for c in commits:
+        groups.setdefault(c["date"], []).append(c)
+    lines = [f"- 最近变更（按提交日期倒序，最多 {RECENT_COMMIT_LIMIT} 条提交）："]
+    for date in sorted(groups, reverse=True):
+        items = groups[date]
+        lines.append(f"  【{date}】{len(items)} 条提交：")
+        for c in items:
+            lines.append(f"    - {c['hash']} {c['subject']}")
+            files = c.get("files") or []
+            if files:
+                shown = "、".join(files[:RECENT_FILES_PER_COMMIT])
+                more = (f" …共 {len(files)} 个"
+                        if len(files) > RECENT_FILES_PER_COMMIT else "")
+                lines.append(f"      文件：{shown}{more}")
+    return "\n".join(lines) + "\n"
+
+
+def _recent_changes_priority(project, task):
+    """探索任务优先范围段：显式日期范围优先，否则默认「最近变更优先（功能粒度）」。
+
+    规则句在任何情况下都注入（取不到提交清单时给可读降级文案），避免 agent 退回
+    纯功能分级顺序；功能聚类/跨天合并/按功能最近改动日期倒序的细则见流程文档
+    「最近变更与功能合并规则」一节。
+    """
+    df = (task["date_from"] or "").strip()
+    dt = (task["date_to"] or "").strip()
+    if df or dt:
+        return _date_range_priority(project, task)
+    head = ("- 优先范围（最近变更优先）：先按下方「最近变更」清单分析改动涉及的功能，"
+            "按功能聚类并合并同一功能的跨天改动，按功能最近改动日期倒序，"
+            "本轮优先生成并执行变更功能相关的用例；变更功能覆盖完后再按根 INDEX.md"
+            "「功能分级」推进（规则见流程文档「最近变更与功能合并规则」）；"
+            "清单被截断时可用 git log 自行补充。\n")
+    log = lib.git_recent_commits(project["project_dir"], RECENT_COMMIT_LIMIT)
+    commits = (log.get("commits") or []) if log.get("ok") else []
+    if commits:
+        return head + _render_recent_commits(commits)
+    if log.get("ok"):
+        reason = "仓库没有提交记录"
+    else:
+        reason = f"git 摘录失败（{log.get('error') or '未知原因'}）"
+    return head + (f"- 最近变更：{reason}，请自行用 git log 等分析最近改动；"
+                   "无法判断时按功能分级推进。\n")
+
+
 def normal_prompt(project, task):
     """常规测试轮：执行一轮自由风格探索测试（流程文档与模板由平台注入）。
 
@@ -180,7 +238,7 @@ def normal_prompt(project, task):
         scope = ""
     ctx = _project_context(project)
     ctx_block = f"- 项目上下文：\n{ctx}\n" if ctx else ""
-    date_part = _date_range_priority(project, task)
+    date_part = _recent_changes_priority(project, task)
     head = (
         "执行一轮自由风格探索测试，严格按下方《流程文档》与《文件模板》执行，约束如下：\n"
         f"- 案例库根目录：{project['cases_root']}（INDEX.md/ROUNDS.md 不存在则按附带模板初始化）\n"
@@ -653,7 +711,9 @@ def next_round_prompt(round_no, task=None):
         )
     return (
         f"继续执行自由风格探索测试第 {round_no} 轮：换一个 ROUNDS.md 未记录过的"
-        "角度生成新 case，并按根 INDEX.md「功能分级」节从高优先级到低优先级推进"
+        "角度生成新 case；若首轮注入的「最近变更」功能组尚未覆盖完，继续优先覆盖"
+        "这些变更功能组（规则见首轮流程文档「最近变更与功能合并规则」），全部覆盖后"
+        "再按根 INDEX.md「功能分级」节从高优先级到低优先级推进"
         "（高优先级功能域未覆盖时不选边界/异常类细节角度），"
         "约束同首轮（案例库根目录、bug_report 目录、阅读范围、"
         "选项、红线）；只执行这一轮，结束后更新工作目录下 .live/live.json phase=done "

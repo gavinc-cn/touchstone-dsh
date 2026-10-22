@@ -441,3 +441,53 @@ test('跨语言：码点排序与 Python sorted() 相同（emoji / U+E000 / 中�
   assert.equal(proc.status, 0, proc.stderr);
   assert.deepEqual(lib.pySorted(names), JSON.parse(proc.stdout));
 });
+
+// --------------------------------------------------------------------------
+// git 最近提交（`lib.gitRecentCommits`，探索任务「最近变更优先」的取数口）
+// --------------------------------------------------------------------------
+
+/** 在临时仓库执行 git：身份/提交日期内联固定，不依赖全局配置（跨机结果稳定） */
+function git(repo, args, date = '2026-08-01T12:00:00+0000') {
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t',
+    GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t',
+    GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date,
+  };
+  const p = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8', env });
+  assert.equal(p.status, 0, p.stderr);
+  return p;
+}
+
+test('gitRecentCommits：逐条 {hash,date,subject,files}，倒序，limit 只截提交条数', () => {
+  const repo = tmpDir('ts-recent-');
+  git(repo, ['init', '-q']);
+  write(path.join(repo, 'a.txt'), '1');
+  write(path.join(repo, 'b.txt'), '2');
+  git(repo, ['add', 'a.txt', 'b.txt']);
+  git(repo, ['commit', '-q', '-m', 'add a and b'], '2026-08-01T12:00:00+0000');
+  write(path.join(repo, 'c.txt'), '3');
+  git(repo, ['add', 'c.txt']);
+  git(repo, ['commit', '-q', '-m', 'add c'], '2026-09-02T12:00:00+0000');
+  const r = lib.gitRecentCommits(repo);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.commits.map((c) => c.subject), ['add c', 'add a and b']);
+  assert.equal(r.commits[0].date, '2026-09-02');
+  assert.deepEqual(r.commits[0].files, ['c.txt']);
+  assert.equal(r.commits[1].date, '2026-08-01');
+  assert.deepEqual(r.commits[1].files, ['a.txt', 'b.txt']);
+  assert.ok(r.commits[0].hash.length >= 7);
+  const r1 = lib.gitRecentCommits(repo, 1);
+  assert.equal(r1.ok, true);
+  assert.equal(r1.commits.length, 1);
+  assert.equal(r1.commits[0].subject, 'add c');
+});
+
+test('gitRecentCommits：非 git 目录降级为 {ok:false,error}，不抛', () => {
+  const dir = tmpDir('ts-recent-plain-');
+  const r = lib.gitRecentCommits(dir);
+  assert.equal(r.ok, false);
+  assert.ok(r.error);
+});
