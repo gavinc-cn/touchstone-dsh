@@ -176,8 +176,12 @@ def test_bound_flow_unknown_text_routes(monkeypatch):
     feishu._MSG_SEEN_SET.clear()
     feishu.handle_message_event(_evt(mid="m3", text="不认识的指令xyz"))
     assert routed == ["不认识的指令xyz"] and replies == ["已投递到「会话」"]
+    # 2026-10-22 截图支持：image 改走媒体分支——该 evt 的 content 无 image_key ⇒
+    # 回「消息里没有可下载的图片」；「其它类型仍回旧文案」由 file 类型单独钉住
     feishu.handle_message_event(_evt(mid="m4", message_type="image", text=""))
-    assert len(replies) == 2 and "暂不支持" in replies[1]  # 非文本：暂不支持
+    assert replies[-1] == feishu.MEDIA_FAIL_PREFIX + feishu.MEDIA_NO_IMAGE
+    feishu.handle_message_event(_evt(mid="m5", message_type="file", text=""))
+    assert replies[-1] == feishu.MEDIA_TYPE_HINT      # 非文本：旧回执原串
 
 
 # ---------- 意图解析 / 绑定码 ----------

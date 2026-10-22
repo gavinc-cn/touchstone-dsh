@@ -7,6 +7,7 @@ chat 与 feishu 一律**函数内懒 import**（feishu → runner → chat 已�
 """
 import json
 import os
+import secrets
 import sys
 import time
 
@@ -88,8 +89,54 @@ def new_session(binding, title=""):
             f"它也会出现在看板（sync 卡，不占运行位）")
 
 
-def route_text(binding, text, cfg=None):
+def _media_dir(project):
+    """截图落盘目录：项目工作目录 board_media/（与 server.py 看板附件上传同一表达式）。
+
+    工作目录缺省 `<project_dir>/.touchstone`（由 lib.ensure_runtime_dirs 创建并写
+    .gitignore）；这里不另造约定——两处目录/fid 规则一致，现有媒体端点与前端
+    `absToMedia` 才能直接识别飞书存进来的图片。
+    """
+    return os.path.join(project["work_dir"] or
+                        os.path.join(project["project_dir"], ".touchstone"),
+                        "board_media")
+
+
+def _store_images(project, text, images):
+    """把入站下载好的图片存进 board_media 并组装投递文案（契约 §3.5/§3.6）。
+
+    返回 `(composed, "")` 成功 / `("", 失败文案)` 失败。文件名
+    `fid = m<毫秒时间戳>_<10 位 hex>.<ext>`（与看板附件同款正则，现有媒体端点/
+    `absToMedia` 直接可用）；展示名 `飞书截图<序号>.<ext>`（序号 1 起）。
+    OSError ⇒ `MEDIA_SAVE_FAIL_PREFIX + 原因`，调用方**不投递**。
+    """
+    import feishu          # 函数内懒 import：feishu → feishu_conv 是模块级依赖（防环）
+    mdir = _media_dir(project)
+    lines = []
+    try:
+        os.makedirs(mdir, exist_ok=True)
+        for k, img in enumerate(images or [], 1):
+            data = (img or {}).get("data") or b""
+            mime = str((img or {}).get("mime") or "application/octet-stream")
+            ext = feishu.MEDIA_MIME_EXT.get(mime, "bin")
+            fid = f"m{int(time.time() * 1000)}_{secrets.token_hex(5)}.{ext}"
+            path = os.path.join(mdir, fid)
+            with open(path, "wb") as f:
+                f.write(data)
+            lines.append(f"![飞书截图{k}.{ext}]({path})")
+    except OSError as e:
+        return "", feishu.MEDIA_SAVE_FAIL_PREFIX + str(e)
+    header = feishu.MEDIA_HEADER_FMT % len(images) + \
+        ("" if text else feishu.MEDIA_HEADER_NOTE)
+    block = header + "：\n" + "\n".join(lines)
+    return (text + "\n\n" + block) if text else block, ""
+
+
+def route_text(binding, text, cfg=None, images=None):
     """单聊自由文本路由（四分支）：有会话直投 → 无会话按默认项目自动新建 → 投递 → 引导。
+    截图支持（2026-10-22）：`images` 非空表示本次消息带图（元素 `{"data","mime"}`），
+    在**目标项目解析成功之后**（无项目仍回引导、不落盘）存进该项目 board_media/ 并
+    按契约 §3.6 组 `composed`（原文字 + 空行 + header + markdown 绝对路径）再投递；
+    存盘失败回 `MEDIA_SAVE_FAIL_PREFIX+原因` 且**不投递**。既有文字路径一个字节不变。
 
     0. 长度闸：超 `chat.MESSAGE_MAX`（与站点 `POST …/messages` 同一常量）⇒ 直接回
        中文回执并给两条出路（改发文件/附件、或拆成几条），**什么都不提交**；
@@ -132,9 +179,15 @@ def route_text(binding, text, cfg=None):
         db.set_feishu_cur_session(open_id, project["id"], sid, title)
     if not title:
         title = sid[:12]
+    composed = text
+    if images:
+        # 目标项目已解析成功 ⇒ 才落盘（无项目分支在上面已返回，不产生孤儿文件）
+        composed, err = _store_images(project, text or "", images)
+        if err:
+            return err + (("\n" + note) if note else "")
     baseline = _baseline_of(sid)
     try:
-        res = chat.submit(project["id"], sid, text,
+        res = chat.submit(project["id"], sid, composed,
                           family=agents.agent_family(project["agent_path"]),
                           extra_meta={"feishu": {"open_id": open_id,
                                                  "user_id": binding["user_id"],
@@ -144,6 +197,10 @@ def route_text(binding, text, cfg=None):
     except Exception as e:
         _trace(f"投递失败 sid={sid}: {e!r}")
         return f"投递失败：{e}" + (("\n" + note) if note else "")
+    if images:
+        # 真机核对日志（契约 §3.2）：投递成功才打，带上的 sid/project 只在此层可知
+        print(f"[feishu] 截图 {len(images)} 张已存 board_media 并投递 sid={sid}"
+              f"（project={project['id']}）", file=sys.stderr, flush=True)
     state = "排队中" if res.get("queued") else "执行中"
     return f"已投递到「{title}」（{state}），跑完把答复发回这里" + note
 

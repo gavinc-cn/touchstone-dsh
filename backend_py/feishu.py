@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import db
@@ -1144,6 +1145,39 @@ def _rest(method, path, *, params=None, json_body=None, cfg=None, timeout=10):
     raise FeishuRestError(f"REST {method} {path} {err_hint}（已重试 3 次）")
 
 
+def _rest_bytes(method, path, *, params=None, cfg=None, timeout=30):
+    """飞书 REST **二进制**下载（截图资源用）：路径规范化/token 取法与 `_rest` 完全
+    一致，只是返回字节流而不是 JSON；**不重试**（大文件且失败一律由上层回中文文案）。
+    鉴权头只带 Authorization——资源下载接口**不要**带 Content-Type 请求头（契约 §3.4）。
+
+    返回 `(data: bytes, content_type: str)`；HTTP 非 2xx 抛 FeishuRestError：
+    JSON 错误体带业务码（缺权限那三个码由调用方判定），非 JSON 只报 status。
+    """
+    if cfg is None:
+        raise FeishuRestError("应用未配置（app_id/app_secret 缺失）")
+    path = "/" + path.lstrip("/")
+    if not path.startswith("/open-apis"):
+        path = f"/open-apis{path}"
+    url = f"https://open.feishu.cn{path}"
+    try:
+        r = requests.request(
+            method, url, params=params, timeout=timeout,
+            headers={"Authorization": f"Bearer {_tenant_token(cfg)}"})
+    except (OSError, ValueError) as e:
+        raise FeishuRestError(f"REST {method} {path} 失败: {e}") from e
+    if not (200 <= r.status_code < 300):
+        try:
+            out = r.json()
+        except ValueError:
+            out = None
+        if isinstance(out, dict):
+            code = out.get("code")
+            raise FeishuRestError(f"REST {path} code={code} {out.get('msg', '')}",
+                                  code=code)
+        raise FeishuRestError(f"REST {path} status={r.status_code}")
+    return r.content or b"", (r.headers.get("Content-Type") or "")
+
+
 def rest_send_text(open_id, text, cfg):
     """主动发单聊文本（调用方应用维度；open_id 为消息接收方在该应用下的标识）。"""
     _rest("POST", "/open-apis/im/v1/messages",
@@ -1273,6 +1307,10 @@ REQUIRED_SCOPES = (
     ("im:message:send_as_bot", "tenant", "以机器人身份发消息/卡片"),
     ("application:app_slash_command:read", "tenant", "读取斜杠指令"),
     ("application:app_slash_command:write", "tenant", "注册斜杠指令"),
+    # 截图接收（2026-10-22）：下载消息内图片资源要求 im:message / im:message:readonly
+    # / im:message.history:readonly 任一；取较窄的「获取单聊、群组消息」，让「接入」的
+    # 「补齐配置 → 发布」能把它开通（缺权限时下载回 MEDIA_SCOPE_HINT 引导）
+    ("im:message:readonly", "tenant", "读取消息中的图片/文件资源"),
 )
 REQUIRED_EVENTS = (("im.message.receive_v1", "接收消息"),)
 REQUIRED_CALLBACKS = (("card.action.trigger", "卡片按钮回调"),)
@@ -1887,6 +1925,200 @@ def restart_inbound_for(user_id):
 
 
 
+# ---------- 截图接收（2026-10-22，单聊 image/post 消息转投绑定会话） ----------
+# 契约真源：doc_ai/plan/202610/20261022_0837_飞书单聊截图支持（图片与图文消息转投
+# 绑定会话）.md §三（文案/常量/行为顺序双后端逐字一致，测试按此断言）。
+# 链路：入站 image/post → 解析 content（§3.3）→ 逐张下载到内存（§3.4，全有或全无）
+# → feishu_conv.route_text(images=…) 存 <work_dir>/board_media 并按站点会话窗同款
+# markdown 绝对路径投递绑定会话（§3.5/§3.6）→ agent 用 read_image 看图。
+MEDIA_ENV = "TS_FEISHU_MEDIA"           # =0 关闭本功能（回退旧「暂不支持该消息类型」）
+MEDIA_MAX_BYTES = 10 * 1024 * 1024      # 单张图片上限（与看板附件上限同值）
+MEDIA_MAX_COUNT = 9                     # 单条消息最多转几张（多余静默丢弃）
+MEDIA_TYPE_HINT = "暂不支持该消息类型，请发送文字指令"   # 旧回执原串提取为常量
+# 未绑定引导（文字与媒体两条路径共用同一串：§3.2 步骤 4 要求与文字路径逐字一致）
+UNBOUND_DM_MSG = ("尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ 飞书设置，"
+                  "生成绑定码后在这里回复「绑定 <码>」完成绑定")
+
+# 固定长文案（Python 模块级常量；Node 同名导出常量，中文逐字一致）
+MEDIA_SCOPE_HINT = ("截图功能需要飞书应用额外开通「获取单聊、群组消息（im:message:readonly）」"
+                    "权限：在「接入」卡片点「补齐配置」→「发布」，或到开发者后台「权限管理」"
+                    "添加该权限并发布新版本后重试。")
+MEDIA_FAIL_PREFIX = "截图接收失败："          # 后接具体原因
+MEDIA_TOO_LARGE = "图片过大（单张上限 10MB），请压缩后重发"
+MEDIA_NO_IMAGE = "消息里没有可下载的图片"
+MEDIA_SAVE_FAIL_PREFIX = "截图保存失败："      # 后接 OSError 文案（feishu_conv 使用）
+MEDIA_HEADER_FMT = "[飞书截图] 用户从飞书发送了 %d 张截图"
+MEDIA_HEADER_NOTE = "（未附文字说明）"          # 原消息无文字时追加在 header 后
+
+# mime → 落盘扩展名（_download_image 归一后使用；feishu_conv 存盘共用同一份映射）
+MEDIA_MIME_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg",
+                  "image/gif": "gif", "image/webp": "webp"}
+# 下载消息资源缺权限时的飞书业务码（三种都按「缺权限」回 MEDIA_SCOPE_HINT）
+_MEDIA_SCOPE_CODES = (99991640, 99991672, 99991679)
+_MEDIA_LOCALES = ("zh_cn", "en_us", "ja_jp")
+
+
+class MediaTooLarge(Exception):
+    """下载的图片字节数超过 MEDIA_MAX_BYTES（不是网络/权限错误，单独回「过大」文案）。"""
+
+
+def media_enabled():
+    """截图接收总开关（默认开；TS_FEISHU_MEDIA=0 回退旧「暂不支持该消息类型」）。"""
+    return (os.environ.get(MEDIA_ENV) or "").strip() != "0"
+
+
+def _sniff_image_mime(data):
+    """按魔数嗅探图片类型（仅契约列出的 4 种）；识别不了返回空串。
+
+    PNG 89 50 4E 47 / JPEG FF D8 FF / GIF GIF8 / WEBP RIFF....WEBP。
+    """
+    if data[:4] == b"\x89PNG":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:4] == b"GIF8":
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def _media_items(evt):
+    """解析 image/post 消息内容 → `(text, [image_key, ...])`（契约 §3.3）。
+
+    - image：content 取 `image_key`（非空字符串），text 恒空；
+    - post：先解 locale 包裹（zh_cn/en_us/ja_jp 按序取第一个 dict；事件体通常是
+      扁平形态，两种都容忍，locale 包裹主要出现在「查询消息」接口回包）；
+      title（strip 后非空）作第一行；content 为「段落数组的数组」，段内 text/a
+      取显示文字（a 不取 href）、img 追加 image_key、其它 tag 忽略；段落文字用
+      `\n` 连接、空段落不产生空行；
+    - 其它类型 / JSON 非法 / 形状不对 ⇒ `("", [])`。
+    """
+    raw = evt.get("content")
+    if isinstance(raw, str):
+        try:
+            content = json.loads(raw or "{}")
+        except ValueError:
+            return "", []
+    elif isinstance(raw, dict):
+        content = raw
+    else:
+        return "", []
+    if not isinstance(content, dict):
+        return "", []
+    mtype = evt.get("message_type")
+    if mtype == "image":
+        key = content.get("image_key")
+        return "", ([key] if isinstance(key, str) and key else [])
+    if mtype != "post":
+        return "", []
+    post = content
+    for loc in _MEDIA_LOCALES:
+        if isinstance(content.get(loc), dict):
+            post = content[loc]
+            break
+    lines, keys = [], []
+    title = post.get("title")
+    if isinstance(title, str) and title.strip():
+        lines.append(title.strip())
+    paragraphs = post.get("content")
+    if isinstance(paragraphs, list):
+        for para in paragraphs:
+            if not isinstance(para, list):
+                continue
+            buf = []
+            for blk in para:
+                if not isinstance(blk, dict):
+                    continue
+                tag = blk.get("tag")
+                if tag in ("text", "a"):
+                    txt = blk.get("text")
+                    if isinstance(txt, str):
+                        buf.append(txt)
+                elif tag == "img":
+                    key = blk.get("image_key")
+                    if isinstance(key, str) and key:
+                        keys.append(key)
+            line = "".join(buf)
+            if line.strip():        # 空文字/纯图片段落不产生空行
+                lines.append(line)
+    return "\n".join(lines), keys
+
+
+def _download_image(message_id, image_key, cfg):
+    """下载消息内图片资源 → `{"data": bytes, "mime": 归一 mime}`（契约 §3.4）。
+
+    路径 `GET /open-apis/im/v1/messages/<mid>/resources/<key>?type=image`
+    （tenant token 鉴权、不带 Content-Type 头、超时 30s、不重试）。
+    mime 先按 Content-Type 归一（去参数转小写 + MEDIA_MIME_EXT），未知再按魔数嗅探；
+    仍未知按二进制（mime=application/octet-stream，落盘 ext=bin）。
+    字节数 > MEDIA_MAX_BYTES ⇒ 抛 MediaTooLarge；REST 失败抛 FeishuRestError。
+    """
+    path = (f"/open-apis/im/v1/messages/{urllib.parse.quote(str(message_id), safe='')}"
+            f"/resources/{urllib.parse.quote(str(image_key), safe='')}")
+    data, ctype = _rest_bytes("GET", path, params={"type": "image"},
+                              cfg=cfg, timeout=30)
+    if len(data) > MEDIA_MAX_BYTES:
+        raise MediaTooLarge(f"图片 {len(data)} 字节超过上限 {MEDIA_MAX_BYTES} 字节")
+    mime = (ctype or "").split(";")[0].strip().lower()
+    if mime not in MEDIA_MIME_EXT:
+        mime = _sniff_image_mime(data) or "application/octet-stream"
+    return {"data": data, "mime": mime}
+
+
+def _handle_media_message(evt, cfg):
+    """单聊 image/post 消息：解析 → 逐张下载（全有或全无）→ 投递绑定会话（§3.2）。
+
+    判定顺序（与 Node 严格同序）：功能开关 → 类型 → 通用对话开关 → 绑定校验 →
+    解析（post 纯文字当普通文本投递）→ 张数截断 → 逐张下载 → route_text(images=…)。
+    任一张失败就一张都不投递（避免半截图文）；失败一律回中文文案，绝不静默。
+    """
+    mid = evt.get("message_id")
+    mtype = evt.get("message_type")
+    if not media_enabled():
+        rest_reply(mid, MEDIA_TYPE_HINT, cfg)
+        return
+    if mtype not in ("image", "post"):
+        rest_reply(mid, MEDIA_TYPE_HINT, cfg)
+        return
+    if not feishu_conv.enabled():
+        rest_reply(mid, MEDIA_TYPE_HINT, cfg)
+        return
+    sender = evt.get("sender_open_id") or ""
+    binding = db.get_feishu_binding_by_open(sender)
+    if binding is None:
+        rest_reply(mid, UNBOUND_DM_MSG, cfg)
+        return
+    text, keys = _media_items(evt)
+    print(f"feishu inbound: 媒体消息 type={mtype} images={len(keys)}",
+          file=sys.stderr, flush=True)
+    if not keys:
+        if mtype == "post" and text:
+            # post 纯文字（无图）：当普通文本走同一套路由/自动新建/排队语义
+            rest_reply(mid, feishu_conv.route_text(binding, text, cfg), cfg)
+        else:
+            rest_reply(mid, MEDIA_FAIL_PREFIX + MEDIA_NO_IMAGE, cfg)
+        return
+    keys = keys[:MEDIA_MAX_COUNT]
+    images = []
+    for key in keys:
+        try:
+            images.append(_download_image(mid, key, cfg))
+        except MediaTooLarge:
+            rest_reply(mid, MEDIA_FAIL_PREFIX + MEDIA_TOO_LARGE, cfg)
+            return
+        except FeishuRestError as e:
+            if getattr(e, "code", None) in _MEDIA_SCOPE_CODES:
+                rest_reply(mid, MEDIA_SCOPE_HINT, cfg)
+            else:
+                rest_reply(mid, MEDIA_FAIL_PREFIX + str(e), cfg)
+            return
+        except Exception as e:      # 下载异常（非 FeishuRestError）同样要回执
+            rest_reply(mid, MEDIA_FAIL_PREFIX + str(e), cfg)
+            return
+    rest_reply(mid, feishu_conv.route_text(binding, text, cfg, images=images), cfg)
+
+
 def _on_message_event(data, cfg):
     """SDK 事件回调（P2ImMessageReceiveV1）→ 统一 dict → 主流程；异常全吞。
     cfg 为本连接所有者的应用凭据（后续 REST 回复/群聊判定均按此应用）。"""
@@ -1916,10 +2148,11 @@ def _seen_message(mid):
 
 def handle_message_event(evt, cfg=None):
     """入站消息主流程（M2 规则指令全为快路径，内联同步执行；M3 agent 解析需挪线程）：
-    去重 → 群聊 @ 判定（未 @ 静默）→ 文本抽取（剥 @占位符）→ 绑定校验（未绑引导）
-    → 意图解析 → 执行 → reply。**未识别文本**不是一律回帮助：单聊且通用对话开启
-    （`feishu_conv.enabled()`）时走 `feishu_conv.route_text` 投递给绑定的会话；群聊
-    与 `TS_FEISHU_CONV=0` 才回 `HELP_TEXT`（feishu.py:1337-1343）。任何异常吞掉。
+    去重 → 群聊 @ 判定（未 @ 静默）→ 非 text 分流（单聊 image/post 走
+    `_handle_media_message`，群聊媒体消息静默）→ 文本抽取（剥 @占位符）→ 绑定校验
+    （未绑引导）→ 意图解析 → 执行 → reply。**未识别文本**不是一律回帮助：单聊且通用
+    对话开启（`feishu_conv.enabled()`）时走 `feishu_conv.route_text` 投递给绑定的会话；
+    群聊与 `TS_FEISHU_CONV=0` 才回 `HELP_TEXT`。任何异常吞掉。
     cfg = 连接所有者（收到消息的应用）的凭据，供回复/群聊判定使用。"""
     try:
         mid = evt.get("message_id")
@@ -1934,8 +2167,9 @@ def handle_message_event(evt, cfg=None):
                                  for m in evt.get("mentions") or []):
                 return
         if evt.get("message_type") != "text":
-            if evt.get("chat_type") != "group":
-                rest_reply(mid, "暂不支持该消息类型，请发送文字指令", cfg)
+            if evt.get("chat_type") == "group":
+                return          # 旧行为：群聊媒体消息静默（不转发、不回执）
+            _handle_media_message(evt, cfg)
             return
         try:
             content = json.loads(evt.get("content") or "{}")
@@ -1963,8 +2197,7 @@ def handle_message_event(evt, cfg=None):
             rest_reply(mid, "绑定成功，发「帮助」查看可用指令" if err is None else err, cfg)
             return
         if binding is None:
-            rest_reply(mid, "尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ 飞书设置，"
-                            "生成绑定码后在这里回复「绑定 <码>」完成绑定", cfg)
+            rest_reply(mid, UNBOUND_DM_MSG, cfg)
             return
         # M11「接入」：发一张可点的飞书接入操作卡片（换应用/重连/绑定码/自检/补齐/发布），
         # 用**当前这条连接**的应用凭据发——卡片按钮回调会回到同一条连接

@@ -18,7 +18,7 @@ def test_manifest_has_unique_tenant_scopes():
     names = [s[0] for s in feishu.REQUIRED_SCOPES]
     assert names == ["im:message.p2p_msg:readonly", "im:message.group_at_msg:readonly",
                      "im:message:send_as_bot", "application:app_slash_command:read",
-                     "application:app_slash_command:write"]
+                     "application:app_slash_command:write", "im:message:readonly"]
     assert all(t == "tenant" for _, t, _ in feishu.REQUIRED_SCOPES)
     assert all(desc for _, _, desc in feishu.REQUIRED_SCOPES)
     assert len(set(names)) == len(names)
