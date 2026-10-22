@@ -2185,17 +2185,34 @@ export class AgentDriver {
                            permission: state });
   }
 
-  /** `GET /presets?session_id=`：{current, options, default} —— 平台给 UI 渲染选项。 */
+  /**
+   * `GET /presets?session_id=`：{current, options, default} —— 权限档选项（供 UI 渲染）。
+   *
+   * 2026-10-21 起 **`session_id` 可省略**：不带（或空串）时只回**进程级目录**本身
+   * （`current: ''`），不查会话池。用途＝平台项目弹窗「项目默认权限档」下拉——它没有
+   * 具体会话可依附，但目录与默认档是进程级信息。带 sid 时行为不变（池外 404、服务
+   * 不可用 503）。为什么放在这里而不是新端点：目录只有这一个真源，多一个端点会多一份
+   * 契约与自检面。见 doc_ai/spec/dsh_plugin/dsh插件形态.md §8.2。
+   */
   _presets(res, url) {
-    const sid = String(url.searchParams.get('session_id') || '');
-    const entry = this.sessions.get(sid);
-    if (!entry) {
-      this._json(res, 404, { error: `会话不在驱动池中: ${sid}` });
-      return;
-    }
     const svc = this._permissionService();
     if (!svc || typeof svc.catalog !== 'function') {
       this._json(res, 503, { error: 'permissionPresets 服务不可用' });
+      return;
+    }
+    const sid = String(url.searchParams.get('session_id') || '');
+    if (!sid) {
+      const catalog = svc.catalog() || {};
+      this._json(res, 200, {
+        session_id: '', current: '',
+        options: catalog.options || [],
+        default: catalog.defaultPreset || '',
+      });
+      return;
+    }
+    const entry = this.sessions.get(sid);
+    if (!entry) {
+      this._json(res, 404, { error: `会话不在驱动池中: ${sid}` });
       return;
     }
     const catalog = svc.catalog() || {};

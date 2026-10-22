@@ -877,6 +877,13 @@ async function main() {
   check('/presets → current + options（供 UI 渲染）',
     ps.current === 'workspace-write' && ps.options.length === 2
     && ps.options[0].value === 'workspace-write', JSON.stringify(ps.options));
+  // 2026-10-21：免 session_id 只回进程级目录（平台项目弹窗「项目默认权限档」的数据源）
+  const ps0 = await (await call(base, token, 'GET', '/presets')).json();
+  check('/presets 免 session_id → 目录（current 空、不查会话池）',
+    ps0.session_id === '' && ps0.current === '' && ps0.options.length === 2
+    && ps0.default === 'danger-full-access', JSON.stringify(ps0));
+  const ps404 = await call(base, token, 'GET', '/presets?session_id=not-in-pool');
+  check('/presets 带未知 session_id → 仍 404', ps404.status === 404, String(ps404.status));
   const pr2 = await (await call(base, token, 'POST', '/permission',
     { session_id: sid, preset: 'danger-full-access' })).json();
   check('/permission approval=never → 不接管审批',
