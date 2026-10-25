@@ -1,9 +1,13 @@
 // API 封装: 同源 cookie, 401 统一跳登录
 // 同源根: 独立构建 BASE_URL='/'(去尾→''), dsh 插件构建 '/touchstone/'(去尾→'/touchstone');
 // REST/SSE/媒体 URL 统一经它拼前缀——独立形态拼出的路径与原硬编码逐字符一致
+import { getLang } from '../utils/i18n'
+
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '')
 async function request(method, url, body) {
-  const opts = { method, credentials: 'same-origin', headers: {} }
+  // 语言偏好随每次请求上报（服务端据此选 api 文案语言）；EventSource 带不了自定义头，
+  // SSE 端点若需语言只能走 ?lang=（本批审计：现有 SSE 载荷无展示文案，故未追加）
+  const opts = { method, credentials: 'same-origin', headers: { 'X-TS-Lang': getLang() } }
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json'
     opts.body = JSON.stringify(body)
@@ -218,9 +222,10 @@ export const adminApi = {
 // （读/写都仅项目所有者）；install/uninstall 同一动作语义 = 收敛到清单期望状态
 export const builtinAssetApi = {
   list: (target, projectId) => {
-    const t = target === 'project' ? 'project' : 'user'
-    return api.get(`/api/builtin-assets?target=${t}` +
-      (t === 'project' && projectId ? `&project_id=${projectId}` : ''))
+    // scope 归一化：只有明确 project 才读项目级，其余（含空）一律用户级
+    const scope = target === 'project' ? 'project' : 'user'
+    return api.get(`/api/builtin-assets?target=${scope}` +
+      (scope === 'project' && projectId ? `&project_id=${projectId}` : ''))
   },
   install: (id, target, projectId) =>
     api.post(`/api/builtin-assets/${id}/install`,

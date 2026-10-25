@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { meApi } from '../api'
 import { toast } from '../utils/toast'
+import { setLang } from '../utils/i18n'
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
@@ -65,6 +66,8 @@ async function mountSection(section) {
 
 let errs
 beforeEach(() => {
+  // 本用例断言中文源文案与中文 toast（e2e 同样钉 zh）：显式钉桩，避免默认 en 下文案变英文
+  setLang('zh')
   errs = []
   vi.spyOn(console, 'error').mockImplementation((...a) => { errs.push(a.map(String).join(' ')) })
 })
@@ -137,5 +140,67 @@ describe('设置页飞书分区：重连入站按钮（M11.1）', () => {
       await new Promise((r) => setTimeout(r, 30))
     })
     expect(toast).toHaveBeenCalledWith('还没配置自建应用凭据：先填 App ID/App Secret 并保存')
+  })
+})
+
+// 2026-10-22 Task 5 fix round 1：扫码轮询的**成功/失败分支**回归。
+// 既有挂载冒烟只停在 idle 态，照不到 3s 轮询回调里的 `t` 遮蔽：旧代码
+// `const t = setInterval(...)` 盖住 useI18n 的 t，回调里 `t('应用已创建：{app_id}')`
+// 等于拿 interval 句柄当函数调 ⇒ TypeError 被轮询自己的 catch 吞掉 ⇒ 成功 toast 丢失、
+// onCfgChanged 不跑（上方凭据卡不刷新，「生成绑定码」一直禁用）。这里用假时钟推进那一拍。
+describe('设置页飞书分区：扫码轮询分支（t 遮蔽回归）', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  /** 假时钟下挂载设置页飞书分区；0ms 推进只为冲刷 effect 里 load 的微任务 */
+  async function mountWithFakeTimers() {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(createElement(MemoryRouter, { initialEntries: ['/settings/feishu'] },
+        createElement(Routes, null,
+          createElement(Route, { path: '/settings/:section', element: createElement(Settings) }))))
+    })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    return { container, root }
+  }
+
+  /** 扫码供给接口的等待态 / 终态桩（字段与后端契约一致） */
+  function provisionState(state, extra = {}) {
+    return {
+      supported: true, enabled: true, state, url: '', error: '',
+      app_id: '', steps: [], age_s: 0, ...extra,
+    }
+  }
+
+  it('轮询到 success：toast 用插值后的 app_id，且 onCfgChanged 真跑（回读 cfg）', async () => {
+    meApi.feishuProvisionGet
+      .mockResolvedValueOnce(provisionState('waiting', { url: 'https://qr.example/x' }))
+      .mockResolvedValueOnce(provisionState('success', { app_id: 'cli_new' }))
+    toast.mockClear()
+    meApi.feishuCfgGet.mockClear()
+    await mountWithFakeTimers()
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+    // ① 轮询确实打了两拍：挂载时读一次状态 + 3s 后那一拍
+    expect(meApi.feishuProvisionGet).toHaveBeenCalledTimes(2)
+    // ② onCfgChanged = 上方凭据卡的 load；挂载时 1 次 + 成功后 1 次
+    expect(meApi.feishuCfgGet).toHaveBeenCalledTimes(2)
+    // ③ 成功 toast 的文案必须走 i18n 的 t（旧代码这里抛 TypeError，toast 根本不会调）
+    expect(toast).toHaveBeenCalledWith('应用已创建：cli_new')
+  })
+
+  it('轮询到 failed 且后端 error 为空：回落到「扫码创建失败」文案，不静默', async () => {
+    meApi.feishuProvisionGet
+      .mockResolvedValueOnce(provisionState('waiting', { url: 'https://qr.example/x' }))
+      .mockResolvedValueOnce(provisionState('failed', { error: '' }))
+    toast.mockClear()
+    meApi.feishuCfgGet.mockClear()
+    await mountWithFakeTimers()
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+    expect(meApi.feishuProvisionGet).toHaveBeenCalledTimes(2)
+    // 失败档不刷新凭据卡（没有新凭据可回读）
+    expect(meApi.feishuCfgGet).toHaveBeenCalledTimes(1)
+    expect(toast).toHaveBeenCalledWith('扫码创建失败')
   })
 })

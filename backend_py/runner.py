@@ -35,6 +35,7 @@ import dshevents
 import dshdriver
 import export_cases
 import feishu
+import i18n
 import lib
 import loadcase
 import loadgen
@@ -1509,7 +1510,10 @@ class Runner:
                      else "retest_bug")
         tid = db.insert_task(task["project_id"], name, auto_fix=0, retest="不复测",
                              stop_type="rounds", stop_value="1", task_type=task_type,
-                             payload=json.dumps({"bug_dir": bug}, ensure_ascii=False))
+                             payload=json.dumps({"bug_dir": bug}, ensure_ascii=False),
+                             # T13：自动复测任务继承**发起任务**的语言（不是当前请求/
+                             # 默认语言——后台线程没有请求上下文）
+                             lang=i18n.task_lang(task))
         self.submit(tid)
         self._log_task_line(task, f"自动复测：已创建复测任务 #{tid}「{name}」")
 
@@ -1558,7 +1562,8 @@ class Runner:
             bug = self._linked_bug_dir(project, task)
             if bug:
                 self._spawn_retest_task(project, bug, [], log_path, "复测",
-                                        exclude_task_id=task_id)
+                                        exclude_task_id=task_id,
+                                        lang=i18n.task_lang(task))
             db.finish_round(round_id, "done", 0, "前置校验未通过，已回落 agent 复测", log_path)
             db.update_task(task_id, status="done", ended_at=db.now_str())
             return
@@ -1619,7 +1624,8 @@ class Runner:
             elif failed:
                 failed_ids = [cid for cid, c in results if c == 1]
                 self._spawn_retest_task(project, bug, failed_ids, log_path, "复核",
-                                        exclude_task_id=task_id)
+                                        exclude_task_id=task_id,
+                                        lang=i18n.task_lang(task))
         db.update_task(task_id, status="done", ended_at=db.now_str())
 
     def _run_one_script(self, case_dir, env_label):
@@ -1942,11 +1948,12 @@ class Runner:
                           stats={"load_summary": err})
 
     def _spawn_retest_task(self, project, bug, only_cases, log_path, prefix,
-                           exclude_task_id=None):
+                           exclude_task_id=None, lang="zh"):
         """创建 agent 复测/复核任务（retest_bug），带同 bug 去重。
 
         only_cases 非空时写入 payload（失败子集复核）；exclude_task_id 为发起方任务 id
         （script_retest 的升级/回落调用方），去重时跳过。返回任务 id，去重命中返回 None。
+        lang（T13）＝发起任务语言（调用点传 `i18n.task_lang(task)`；缺省 zh 只兜底）。
         """
         for t in db.list_tasks(project["id"]):
             # 排除当前任务自身——升级/回落调用发生在自身置 done 之前，
@@ -1969,7 +1976,8 @@ class Runner:
         name = f"{prefix} {title}"
         tid = db.insert_task(project["id"], name, auto_fix=0, retest="不复测",
                              stop_type="rounds", stop_value="1", task_type="retest_bug",
-                             payload=json.dumps(payload, ensure_ascii=False))
+                             payload=json.dumps(payload, ensure_ascii=False),
+                             lang=lang)
         self.submit(tid)
         extra = f"仅含 {'、'.join(only_cases)}" if only_cases else ""
         append_log(log_path, f"### {prefix}：已创建复测任务 #{tid}「{name}」{extra}\n")

@@ -86,11 +86,20 @@ def balanced_braces(src, open_idx):
     raise AssertionError('花括号没配平（源文件被改坏了？）')
 
 
+def label_text(raw):
+    """按钮文案归一化：i18n 迁移（2026-10-22）后文案包成 `{t('中文原文')}`（英文走词表，
+    zh 原样返回中文），而本守卫的期望表仍按中文原文登记 ⇒ 取出 `t()` 的实参再比对；
+    其他形态（图标 + 文案、含插值等）原样返回，保证守卫不会静默放过新形态。"""
+    m = re.fullmatch(r"\{t\('((?:[^'\\]|\\.)*)'\)\}", raw)
+    return m.group(1) if m else raw
+
+
 def parse_buttons(region):
     """按 `<Button …>标签</Button>` 块解析，返回 `[(按钮文案, disabled 表达式或 None)]`。
 
     标签取「标签闭合 `>` 之后到 `</Button>` 之前」的文本 —— 这样属性里的箭头函数 `=>`
-    与模板串 `${…}` 都不会被误当成标签边界（首版的整标签正则正是死在这里）。
+    与模板串 `${…}` 都不会被误当成标签边界（首版的整标签正则正是死在这里）；
+    文案再经 label_text 归一化（剥掉 i18n 的 t() 包装）。
     """
     out = []
     for m in re.finditer(r'<Button\b', region):
@@ -98,7 +107,7 @@ def parse_buttons(region):
         if close < 0:
             continue
         block = region[m.start():close]
-        label = block[block.rindex('>') + 1:].strip()
+        label = label_text(block[block.rindex('>') + 1:].strip())
         expr = None
         d = block.find('disabled={')
         if d >= 0:

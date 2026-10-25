@@ -26,6 +26,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { gitLogChanges, readText } from '../lib/lib.js';
+import { t as i18nT } from '../lib/i18n.js';
 import * as prompts from '../lib/prompts.js';
 
 // --------------------------------------------------------------------------
@@ -129,6 +130,11 @@ test('_load_asset：读出真实资产全文，缓存键是 "/".join(names)', ()
   const tpl = prompts._load_asset('templates', 'case_template.md');
   assert.ok(tpl.includes('# FS0000_用例名称'));
   assert.equal(prompts._ASSET_CACHE.get('templates/case_template.md'), tpl);
+  // T15：英文模板走 `_load_asset_lang`，与中文键分开缓存（此处只钉「读得到 + 是英文」）
+  const enTpl = prompts._load_asset_lang('en', 'templates', 'case_template.md');
+  assert.ok(enTpl.includes('# FS0000_Case name'));
+  assert.notEqual(enTpl, tpl);
+  assert.equal(prompts._ASSET_CACHE.get('en:templates/case_template.md'), enTpl);
   // `_ASSET_DIR` 推的是仓库根下的 builtin_prompts/free_style（不是 backend/lib/…）
   assert.ok(fs.existsSync(path.join(prompts._ASSET_DIR, 'templates', 'bug_report_template.md')));
 });
@@ -587,4 +593,81 @@ test('next_round_prompt / compact_prompt：续轮分版与常量', () => {
   assert.deepEqual([...prompts.STAGE_ORDER], ['gen_case', 'execute', 'report', 'analyze', 'fix', 'deploy', 'retest']);
   assert.deepEqual(Object.keys(prompts.STAGE_LABELS), [...prompts.STAGE_ORDER]);
   assert.equal(prompts.STAGE_LABELS.fix, '问题修复');
+});
+
+// --------------------------------------------------------------------------
+// 语言指令（T14：zh/en 头部唯一一段；除该段外 prompt 逐字节不变）
+// --------------------------------------------------------------------------
+
+const LANG_HEAD_ZH = '【产出语言】用中文撰写所有产出（用例、报告、日志）。\n\n---\n\n';
+const LANG_HEAD_EN = '【产出语言】Write all deliverables (cases, reports, logs) in English.\n\n---\n\n';
+const LANG_DIRECTIVE = '用中文撰写所有产出（用例、报告、日志）。';
+
+test('prompt 指令词条：i18n prompt ns 的 key=中文原句、en 返回英文句', () => {
+  assert.equal(i18nT('prompt', LANG_DIRECTIVE, 'en'),
+    'Write all deliverables (cases, reports, logs) in English.');
+  assert.equal(i18nT('prompt', LANG_DIRECTIVE, 'zh'), LANG_DIRECTIVE);
+});
+
+test('first_round_prompt：语言指令只加头部，去掉后与 builder 输出逐字节相同', async () => {
+  const wd = tmpDir();
+  const proj = project(wd);
+  for (const [lang, head] of [['zh', LANG_HEAD_ZH], ['en', LANG_HEAD_EN]]) {
+    for (const taskType of ['normal', 'mystery']) {
+      const tk = task({ task_type: taskType, lang });
+      const p = await prompts.first_round_prompt(proj, tk);
+      assert.ok(p.startsWith(head), `${lang}/${taskType}`);
+      assert.equal(p.split('【产出语言】').length - 1, 1);
+      assert.equal(p.slice(head.length), prompts.normal_prompt(proj, tk));
+    }
+  }
+});
+
+test('语言来源走 taskLang：大写/空白识别 en，地区变体/脏值/缺失回落 zh', async () => {
+  const proj = project(tmpDir());
+  for (const lang of [undefined, null, '', 'zh', 'EN-US', 'fr', 'english']) {
+    const p = await prompts.first_round_prompt(proj, task({ lang }));
+    assert.ok(p.startsWith(LANG_HEAD_ZH), String(lang));
+  }
+  for (const lang of ['en', 'EN', ' en ']) {
+    const p = await prompts.first_round_prompt(proj, task({ lang }));
+    assert.ok(p.startsWith(LANG_HEAD_EN), String(lang));
+  }
+});
+
+test('七类首轮都在最外层注入一次语言指令', async () => {
+  const wd = tmpDir();
+  const { proj, bugName } = bugEnv(wd);
+  const payloads = {
+    fix: { bug_dir: bugName },
+    retest_bug: { bug_dir: bugName },
+    reject: { bug_dir: bugName, reason: '误报' },
+    pipeline: { bug_dirs: [bugName] },
+    stress: { brief: '压测登录接口' },
+    regression: {},
+    normal: {},
+  };
+  for (const [taskType, data] of Object.entries(payloads)) {
+    for (const [lang, head] of [['zh', LANG_HEAD_ZH], ['en', LANG_HEAD_EN]]) {
+      const tk = task({
+        task_type: taskType, lang,
+        payload: Object.keys(data).length ? JSON.stringify(data) : '',
+      });
+      const p = await prompts.first_round_prompt(proj, tk);
+      assert.ok(p.startsWith(head), `${taskType}/${lang}`);
+      assert.equal(p.split('【产出语言】').length - 1, 1, `${taskType}/${lang}`);
+    }
+  }
+});
+
+test('next_round_prompt：同注入、task=null 回落 zh、两语言 body 相同；compact 不变', () => {
+  const zh = prompts.next_round_prompt(3);
+  assert.ok(zh.startsWith(LANG_HEAD_ZH));
+  assert.equal(zh.slice(LANG_HEAD_ZH.length), prompts.next_round_prompt(3, task({ lang: 'zh' }))
+    .slice(LANG_HEAD_ZH.length));
+  const en = prompts.next_round_prompt(3, task({ lang: 'en' }));
+  assert.ok(en.startsWith(LANG_HEAD_EN));
+  assert.equal(en.slice(LANG_HEAD_EN.length), zh.slice(LANG_HEAD_ZH.length));
+  assert.ok(prompts.next_round_prompt(3, null).startsWith(LANG_HEAD_ZH));
+  assert.equal(prompts.compact_prompt(), '/compact');
 });

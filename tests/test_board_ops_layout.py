@@ -32,7 +32,7 @@
      - 两个助手组件 `OpsTextButton` / `OpsIconButton` 存在，且带文字按钮内部是
        「board-opwide + board-opicon + board-oplabel」三个兄弟节点；
      - 收档形态下必须有 `aria-label`（读屏可识别）；
-     - 删除按钮（title="删除卡片"）必须排在操作行 JSX 的**最后**（用户要求；且在
+     - 删除按钮（title={t('删除卡片')}）必须排在操作行 JSX 的**最后**（用户要求；且在
        `.board-opbtn` 之外不得再出现 `margin-left: auto` 之类的贴右写法）；
      - `syncOpsFit` 必须在 `useLayoutEffect` 里按每次渲染重测，并挂 ResizeObserver
        兜住「不重渲染但列宽变了」（窗口缩放/侧栏开合）。
@@ -188,13 +188,13 @@ def test_操作行按钮都走助手组件且带_opbtn_类():
 def test_删除按钮排在操作行末位():
     """用户要求：删除按钮放最后一个（窄列折行时它落在末尾，与其它按钮有区隔）。"""
     row = _ops_row_jsx()
-    idx_del = row.find('title="删除卡片"')
+    idx_del = row.find("title={t('删除卡片')}")
     assert idx_del >= 0, "操作行里找不到删除按钮"
     css = _read(CSS_PATH)
     # 删除按钮之后不得再出现其它按钮的渲染（“打开卡片详情/进入主会话/在 dsh 界面打开”）
     tail = row[idx_del:]
-    for later in ('title="打开卡片详情"', 'title={card.session_id ? \'进入主会话\'',
-                  '在 dsh 界面打开该卡片主会话'):
+    for later in ("title={t('打开卡片详情')}", "title={card.session_id ? t('进入主会话')",
+                  "t('在 dsh 界面打开该卡片主会话')"):
         assert later not in tail, f"删除按钮之后仍渲染了「{later}」，应放在最后"
     assert "margin-left: auto" not in row, "删除按钮不得用 marginLeft auto（实测会把它顶到单独一行）"
     for decl in re.findall(r"\.board-(?:card-ops|opbtn|oplabel|opicon|opwide)[^{]*\{([^}]*)\}", css):

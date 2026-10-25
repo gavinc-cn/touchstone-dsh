@@ -8,19 +8,30 @@
 // 存量 v1 布局若仍是 v1 默认序（用户从没拖过序，常见于只隐藏/恢复过标签的旧数据），
 // normTabCfg 会一次性按 v2 默认序呈现；用户自定义过的顺序一律不动。v>=2 的布局不再
 // 迁移，避免覆盖用户之后主动把压测面板拖回旧位置的选择。
+import { t } from './i18n'
 
 export const TAB_CFG_VER = 2
 
-// 主标签页定义（顺序 = 默认顺序；key 与 user_prefs 存储约定，勿改）
+// 主标签页定义（顺序 = 默认顺序；key 与 user_prefs 存储约定，勿改）。
+// 展示名走 tabLabel（函数形式：t 在调用时按当前语言求值）
 export const TABS = [
-  { key: 'board', label: '开发看板' },
-  { key: 'tasks', label: '测试任务' },
-  { key: 'monitor', label: '监控面板' },
-  { key: 'bugs', label: 'Bug 报告' },
-  { key: 'stress', label: '压测面板' },
+  { key: 'board' },
+  { key: 'tasks' },
+  { key: 'monitor' },
+  { key: 'bugs' },
+  { key: 'stress' },
 ]
-export const TAB_KEYS = TABS.map((t) => t.key)
-export const TAB_LABEL = Object.fromEntries(TABS.map((t) => [t.key, t.label]))
+export const TAB_KEYS = TABS.map((tab) => tab.key)
+
+// 标签页 key → 展示名（未知 key 原样返回）
+export function tabLabel(key) {
+  if (key === 'board') return t('开发看板')
+  if (key === 'tasks') return t('测试任务')
+  if (key === 'monitor') return t('监控面板')
+  if (key === 'bugs') return t('Bug 报告')
+  if (key === 'stress') return t('压测面板')
+  return key
+}
 
 // v1 旧默认序（压测面板在第三位）：只用于存量布局迁移判定，勿再作为默认序使用
 export const LEGACY_DEFAULT_ORDER = ['board', 'tasks', 'stress', 'monitor', 'bugs']

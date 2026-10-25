@@ -13,17 +13,20 @@ import SessionView from './SessionView'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
+import { useI18n } from '../utils/i18n'
 
 // 卡片所在列徽标（看板列名，仅卡片会话）：键值同看板 payload 的 column
-// （todo/doing/blocked/review/done）；未下发（''，任务会话/旧后端）不渲染
-const COL_LABEL = { todo: '待开发', doing: '正在开发', blocked: '阻塞',
-                    review: '待审核', done: '已完成' }
+// （todo/doing/blocked/review/done）；未下发（''，任务会话/旧后端）不渲染。
+// 工厂形式：render 时传 t，切换语言即重渲染
+const colLabelOf = (t) => ({ todo: t('待开发'), doing: t('正在开发'), blocked: t('阻塞'),
+                             review: t('待审核'), done: t('已完成') })
 
 function CardColumnChip({ column }) {
-  const label = COL_LABEL[column]
+  const { t } = useI18n()
+  const label = colLabelOf(t)[column]
   if (!label) return null
   return (
-    <span className="sess-colstate" title="卡片当前所在列（看板队列）">{label}</span>
+    <span className="sess-colstate" title={t('卡片当前所在列（看板队列）')}>{label}</span>
   )
 }
 
@@ -34,43 +37,45 @@ function CardColumnChip({ column }) {
 //   （T1 解冻后 answer 态位次也是真实值，同样带「· 第 N 位」）/ server_queued=服务端排队中 /
 //   interaction_pending=等待作答（agent 提问挂起等用户回答）/
 //   foreign_busy=等外部会话 / idle=空闲；state 为空（meta 未下发）不渲染
-const UNIT_STATE_TIP = {
-  running: '该会话所属任务/卡片正在运行',
-  starting: '卡片已交平台启动，等待会话证实运行（启动中）',
-  answer_pending: '答案已被平台收下，等项目空闲送达',
-  interaction_pending: 'agent 向用户提问挂起，等待作答',
-  server_queued: '消息已在 agent 服务端队列排队',
-  foreign_busy: '项目被外部同步会话占用，等其结束后按队列补位',
-}
+const unitStateTipOf = (t) => ({
+  running: t('该会话所属任务/卡片正在运行'),
+  starting: t('卡片已交平台启动，等待会话证实运行（启动中）'),
+  answer_pending: t('答案已被平台收下，等项目空闲送达'),
+  interaction_pending: t('agent 向用户提问挂起，等待作答'),
+  server_queued: t('消息已在 agent 服务端队列排队'),
+  foreign_busy: t('项目被外部同步会话占用，等其结束后按队列补位'),
+})
 
 function UnitStateChip({ state }) {
+  const { t } = useI18n()
   if (!state || !state.kind) return null
   const kind = state.kind
   const pos = state.pos || 0
   const total = state.total || 0
   if (kind === 'idle') {
     return (
-      <span className="sess-qstate" title="不在统一队列中（既未排队也无运行中的单元）">
-        <span className="dot"></span>空闲
+      <span className="sess-qstate" title={t('不在统一队列中（既未排队也无运行中的单元）')}>
+        <span className="dot"></span>{t('空闲')}
       </span>
     )
   }
   // 位次仅 queued_serial/answer_pending 两态展示（pos/total 仍由 meta.unit_state 携带）
   const withPos = (kind === 'queued_serial' || kind === 'answer_pending') && pos > 0
   // 未知枚举降级显示原值 + 默认色（防服务端新版枚举前滚击穿旧前端）
-  const label = QUEUE_STATE_LABEL[kind] || kind
+  const label = QUEUE_STATE_LABEL(t)[kind] || kind
   const tip = withPos
-    ? `统一队列排队中：本项目前面还有 ${Math.max(0, pos - 1)} 个单元`
-      + `（本项目排队 ${total} 个）`
-    : (UNIT_STATE_TIP[kind] || '')
+    ? t('统一队列排队中：本项目前面还有 {n} 个单元', { n: Math.max(0, pos - 1) })
+      + t('（本项目排队 {n} 个）', { n: total })
+    : (unitStateTipOf(t)[kind] || '')
   return (
     <span className={queueStateChipClass(kind, 'sess')} title={tip}>
-      <span className="dot"></span>{label}{withPos ? ` · 第 ${pos} 位` : ''}
+      <span className="dot"></span>{label}{withPos ? t(' · 第 {pos} 位', { pos }) : ''}
     </span>
   )
 }
 
 export default function SessionModal({ task, board, onClose, onSwitchSession }) {
+  const { t } = useI18n()
   const open = !!task || !!board
   const { rzOn, rzStyle, rzStart, rzDragStart, rzReset } = useResizable('ts.sessW')
   // 队列状态（SessionView 上报；关闭/未开时不展示，重开由会话数据重新填）
@@ -95,7 +100,7 @@ export default function SessionModal({ task, board, onClose, onSwitchSession }) 
               mousedown，徽标放进去会误触拖拽）；「卡片队列」在前、「统一队列」在后 */}
           <div className="flex min-w-0 items-center gap-2">
             <DialogTitle className="cursor-move select-none text-sm" onMouseDown={rzDragStart}>
-              会话 · {task?.name || board?.title || board?.sid}
+              {t('会话 · {name}', { name: task?.name || board?.title || board?.sid })}
             </DialogTitle>
             <CardColumnChip column={cardColumn} />
             <UnitStateChip state={unitState} />

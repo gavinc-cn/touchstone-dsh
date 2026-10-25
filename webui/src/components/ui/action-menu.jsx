@@ -18,6 +18,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
+import { t } from '../../utils/i18n'
 
 const MENU_GAP = 4    // 菜单与触发元素的垂直间距（px）
 const MENU_EDGE = 8   // 菜单与视口边缘的最小留白（px）
@@ -62,15 +63,15 @@ export default function ActionMenu({ trigger, items = [], align = 'end' }) {
   // 下方空间不足且上方更宽裕时向上翻；左右都夹在视口内（防溢出屏幕）
   useLayoutEffect(() => {
     if (!open) return
-    const t = trigRef.current?.getBoundingClientRect()
-    if (!t) return
+    const rect = trigRef.current?.getBoundingClientRect()
+    if (!rect) return
     const w = menuRef.current?.offsetWidth || 0
     const h = menuRef.current?.offsetHeight || 0
-    let left = align === 'start' ? t.left : t.right - w
+    let left = align === 'start' ? rect.left : rect.right - w
     left = Math.max(MENU_EDGE, Math.min(left, window.innerWidth - w - MENU_EDGE))
-    let top = t.bottom + MENU_GAP
-    if (h && top + h > window.innerHeight - MENU_EDGE && t.top - MENU_GAP - h >= MENU_EDGE) {
-      top = t.top - MENU_GAP - h
+    let top = rect.bottom + MENU_GAP
+    if (h && top + h > window.innerHeight - MENU_EDGE && rect.top - MENU_GAP - h >= MENU_EDGE) {
+      top = rect.top - MENU_GAP - h
     }
     setPos({ left, top })
     menuRef.current?.focus()      // 打开时焦点移到菜单（Esc/键盘操作可达）
@@ -93,7 +94,7 @@ export default function ActionMenu({ trigger, items = [], align = 'end' }) {
           }}
           className="z-50 min-w-[176px] rounded-md border bg-popover p-1 text-popover-foreground shadow-md outline-none">
           {items.length === 0 && (
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">无可选项</div>)}
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">{t('无可选项')}</div>)}
           {items.map((it) => (
             // disabled 项：button 置 disabled 保证 click 不触发；title 挂在外层 div 上
             // （禁用控件不派发鼠标事件，靠祖先的 title 才能显示原因提示）

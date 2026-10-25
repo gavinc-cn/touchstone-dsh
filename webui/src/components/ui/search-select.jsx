@@ -7,10 +7,11 @@ import { useState, useRef, useEffect } from 'react'
 import { ChevronDown } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
+import { t } from '../../utils/i18n'
 
 export default function SearchSelect({
-  options = [], value, onChange, placeholder = '搜索…',
-  emptyHint = '无匹配项', className, inputClassName,
+  options = [], value, onChange, placeholder = t('搜索…'),
+  emptyHint = t('无匹配项'), className, inputClassName,
 }) {
   const [open, setOpen] = useState(false)   // 面板开合（打开时输入框为搜索态）
   const [query, setQuery] = useState('')    // 搜索关键字（大小写不敏感）

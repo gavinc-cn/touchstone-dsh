@@ -30,7 +30,8 @@ const TASK_JSON_KEYS = [
   'id', 'project_id', 'name', 'auto_fix', 'retest', 'stop_type', 'stop_value', 'task_type',
   'payload', 'start_stage', 'end_stage', 'date_from', 'date_to', 'extra', 'model', 'permission',
   'auto_commit', 'auto_deploy', 'auto_retest', 'new_cases', 'status', 'session_id',
-  'session_title', 'current_round', 'new_bugs', 'created_at', 'started_at', 'ended_at', 'error',
+  'session_title', 'current_round', 'new_bugs', 'lang', 'created_at', 'started_at',
+  'ended_at', 'error',
 ];
 
 // --------------------------------------------------------------------------
@@ -207,6 +208,7 @@ test('/api/projects/<id>/tasks：字段与顺序逐点对齐 _task_json，new_ca
     assert.equal(t.new_cases, 1, '2 个用例 − cases_base(1) = 1');
     assert.equal(t.current_round, 2);
     assert.equal(t.new_bugs, 3);
+    assert.equal(t.lang, 'zh', 'T13：新增 lang（直插行取列默认 zh）');
     assert.equal(t.started_at, '2026-01-01 01:00:00');
     assert.equal(t.ended_at, '2026-01-01 02:00:00');
     assert.equal(t.error, 'oops');
@@ -269,6 +271,7 @@ test('taskJson：缺列老行不抛；派生字段（model/new_cases/标题）�
     assert.equal(out.auto_fix, false);
     assert.equal(out.new_cases, 0, '项目读不到案例库 ⇒ 0');
     assert.equal(out.session_title, '', '无 session_id ⇒ 空串');
+    assert.equal(out.lang, 'zh', '缺 lang 列 ⇒ 读侧归一 zh（T13）');
     assert.deepEqual(Object.keys(out), TASK_JSON_KEYS);
 
     // new_cases 的三种降级：无 stateCache（= Python except 分支）、坏 cases_base、负数归零

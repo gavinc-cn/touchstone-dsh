@@ -15,10 +15,13 @@ import {
 } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { ArrowLeft, LogOut, Plus, Pencil, Trash2, Users } from 'lucide-react'
+import { useI18n } from '../utils/i18n'
 
 export default function Admin() {
   const navigate = useNavigate()
   const auth = useAuthStore()
+  // 文案取 t()：切换语言即时重渲染
+  const { t } = useI18n()
 
   const [users, setUsers] = useState([])
   // 新增用户弹窗（表单在弹窗内填写；密码两次一致校验，错误就地提示）
@@ -54,11 +57,11 @@ export default function Admin() {
 
   async function addUser() {
     setAddErr('')
-    if (add.password !== add.password2) { setAddErr('两次输入的密码不一致'); return }
+    if (add.password !== add.password2) { setAddErr(t('两次输入的密码不一致')); return }
     try {
       await adminApi.createUser({ username: add.username, password: add.password })
       setAddModal(false)
-      toast('新增成功')
+      toast(t('新增成功'))
       await load()
     } catch (e) { setAddErr(e.message) }
   }
@@ -81,7 +84,7 @@ export default function Admin() {
   }
 
   async function delUser(u) {
-    if (!window.confirm(`确认删除用户「${u.username}」？该操作不可恢复`)) return
+    if (!window.confirm(t('确认删除用户「{user}」？该操作不可恢复', { user: u.username }))) return
     try {
       await adminApi.deleteUser(u.id)
       await load()
@@ -100,11 +103,11 @@ export default function Admin() {
           <div className="ts-logo ts-mark size-6 rounded-md text-[calc(11px*var(--fs))]">
             TS
           </div>
-          后台管理 · 用户
+          {t('后台管理 · 用户')}
         </div>
         <span className="ml-auto text-sm text-muted-foreground">{auth.username}</span>
         <Button variant="ghost" size="sm" onClick={logout}>
-          <LogOut /> 登出
+          <LogOut /> {t('登出')}
         </Button>
       </header>
 
@@ -114,7 +117,7 @@ export default function Admin() {
           <div className="sets-page-nav" />
           <div className="sets-page-foot">
             <Button variant="ghost" size="sm" onClick={() => navigate('/app')}>
-              <ArrowLeft /> 返回项目
+              <ArrowLeft /> {t('返回项目')}
             </Button>
           </div>
         </div>
@@ -124,23 +127,23 @@ export default function Admin() {
           <Card className="gap-0 py-0">
             <CardHeader className="border-b border-border/60 px-5 py-4">
               <CardTitle className="flex items-center gap-2 text-sm">
-                <Users className="size-4 text-[var(--star-text)]" /> 用户列表
-                <span className="font-normal text-muted-foreground">{users.length} 人</span>
+                <Users className="size-4 text-[var(--star-text)]" /> {t('用户列表')}
+                <span className="font-normal text-muted-foreground">{t('{n} 人', { n: users.length })}</span>
                 <Button variant="outline" size="sm" className="ml-auto" onClick={openAdd}>
-                  <Plus /> 新增用户
+                  <Plus /> {t('新增用户')}
                 </Button>
               </CardTitle>
             </CardHeader>
             <CardContent className="px-3 pb-3">
-              {!users.length ? <div className="px-2 py-6 text-sm text-muted-foreground">暂无用户</div> : (
+              {!users.length ? <div className="px-2 py-6 text-sm text-muted-foreground">{t('暂无用户')}</div> : (
                 <Table>
                   <TableHeader>
                     <TableRow className="hover:bg-transparent">
                       <TableHead className="px-3">ID</TableHead>
-                      <TableHead className="px-3">用户名</TableHead>
-                      <TableHead className="px-3">创建时间</TableHead>
-                      <TableHead className="px-3">角色</TableHead>
-                      <TableHead className="px-3 text-right">操作</TableHead>
+                      <TableHead className="px-3">{t('用户名')}</TableHead>
+                      <TableHead className="px-3">{t('创建时间')}</TableHead>
+                      <TableHead className="px-3">{t('角色')}</TableHead>
+                      <TableHead className="px-3 text-right">{t('操作')}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -151,17 +154,17 @@ export default function Admin() {
                         <TableCell className="px-3 font-mono text-xs text-muted-foreground">{u.created_at}</TableCell>
                         <TableCell className="px-3">
                           {u.is_admin
-                            ? <Badge variant="outline" className="border-[var(--admin-badge)] text-[var(--admin-badge)]">管理员</Badge>
-                            : <Badge variant="secondary">普通用户</Badge>}
+                            ? <Badge variant="outline" className="border-[var(--admin-badge)] text-[var(--admin-badge)]">{t('管理员')}</Badge>
+                            : <Badge variant="secondary">{t('普通用户')}</Badge>}
                         </TableCell>
                         <TableCell className="px-3">
                           <div className="flex justify-end gap-1.5">
                             <Button variant="ghost" size="sm" onClick={() => openEdit(u)}>
-                              <Pencil /> 编辑
+                              <Pencil /> {t('编辑')}
                             </Button>
                             {!u.is_admin && (
                               <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={() => delUser(u)}>
-                                <Trash2 /> 删除
+                                <Trash2 /> {t('删除')}
                               </Button>
                             )}
                           </div>
@@ -185,31 +188,31 @@ export default function Admin() {
         >
           <RzHandles start={addRzStart} reset={addRzReset} />
           <DialogHeader className="text-left">
-            <DialogTitle className="cursor-move select-none text-sm" onMouseDown={addRzDragStart}>新增用户</DialogTitle>
+            <DialogTitle className="cursor-move select-none text-sm" onMouseDown={addRzDragStart}>{t('新增用户')}</DialogTitle>
           </DialogHeader>
           <div className="grid gap-4">
             <div className="grid gap-2">
-              <Label className="text-xs text-muted-foreground">用户名</Label>
+              <Label className="text-xs text-muted-foreground">{t('用户名')}</Label>
               <Input value={add.username} onChange={(e) => { setAdd({ ...add, username: e.target.value.trim() }); setAddErr('') }}
-                placeholder="2-32 位字母数字或 _ . -" />
+                placeholder={t('2-32 位字母数字或 _ . -')} />
             </div>
             <div className="grid grid-cols-[1fr_1fr] gap-3">
               <div className="grid gap-2">
-                <Label className="text-xs text-muted-foreground">密码</Label>
+                <Label className="text-xs text-muted-foreground">{t('密码')}</Label>
                 <Input value={add.password} onChange={(e) => setAdd({ ...add, password: e.target.value })}
-                  type="password" placeholder="至少 6 位" />
+                  type="password" placeholder={t('至少 6 位')} />
               </div>
               <div className="grid gap-2">
-                <Label className="text-xs text-muted-foreground">确认</Label>
+                <Label className="text-xs text-muted-foreground">{t('确认')}</Label>
                 <Input value={add.password2} onChange={(e) => setAdd({ ...add, password2: e.target.value })}
-                  type="password" placeholder="至少 6 位" />
+                  type="password" placeholder={t('至少 6 位')} />
               </div>
             </div>
             {addErr && <div className="text-sm text-destructive">{addErr}</div>}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setAddModal(false)}>取消</Button>
-            <Button onClick={addUser}>新增用户</Button>
+            <Button variant="outline" onClick={() => setAddModal(false)}>{t('取消')}</Button>
+            <Button onClick={addUser}>{t('新增用户')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -223,22 +226,22 @@ export default function Admin() {
         >
           <RzHandles start={rzStart} reset={rzReset} />
           <DialogHeader className="text-left">
-            <DialogTitle className="cursor-move select-none text-sm" onMouseDown={rzDragStart}>编辑用户</DialogTitle>
+            <DialogTitle className="cursor-move select-none text-sm" onMouseDown={rzDragStart}>{t('编辑用户')}</DialogTitle>
           </DialogHeader>
           <div className="grid gap-4">
             <div className="grid gap-2">
-              <Label className="text-xs text-muted-foreground">用户名</Label>
+              <Label className="text-xs text-muted-foreground">{t('用户名')}</Label>
               <Input value={edit.username} onChange={(e) => { setEdit({ ...edit, username: e.target.value.trim() }); setEditErr('') }} />
             </div>
             <div className="grid gap-2">
-              <Label className="text-xs text-muted-foreground">重置密码</Label>
-              <Input value={edit.password} onChange={(e) => setEdit({ ...edit, password: e.target.value })} type="password" placeholder="留空则不修改" />
+              <Label className="text-xs text-muted-foreground">{t('重置密码')}</Label>
+              <Input value={edit.password} onChange={(e) => setEdit({ ...edit, password: e.target.value })} type="password" placeholder={t('留空则不修改')} />
             </div>
             {editErr && <div className="text-sm text-destructive">{editErr}</div>}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setEditModal(false)}>取消</Button>
-            <Button onClick={saveEdit}>保存</Button>
+            <Button variant="outline" onClick={() => setEditModal(false)}>{t('取消')}</Button>
+            <Button onClick={saveEdit}>{t('保存')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

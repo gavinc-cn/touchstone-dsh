@@ -29,6 +29,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import i18n
+
 # 由 dsh 插件注入的驱动连接信息（独立形态下两者皆空 → 驱动不可用）
 URL_ENV = "TS_AGENT_DRIVER_URL"
 TOKEN_ENV = "TS_AGENT_DRIVER_TOKEN"
@@ -50,6 +52,10 @@ STREAM_IDLE_TIMEOUT = 90
 # timed out object")，实测重试不可行），所以改为旁路线程在 stop 置位时
 # shutdown 连接唤醒阻塞读（见 _stop_watcher），阻塞读仍保持原 idle_timeout。
 STOP_WATCH_INTERVAL = 0.25
+
+
+# 未配置驱动时的统一文案（镜像 Node `UNCONFIGURED_MESSAGE`；固定文案即词条 key）
+UNCONFIGURED_MESSAGE = "未配置 dsh agent 驱动（非插件形态或插件未下发驱动地址）"
 
 
 class DshDriverError(RuntimeError):
@@ -94,14 +100,16 @@ def _split_url():
     """把驱动地址拆成 (host, port, base_path)，供 http.client 直连使用。"""
     parsed = urllib.parse.urlsplit(driver_url())
     if parsed.scheme != "http" or not parsed.hostname:
-        raise DshDriverError(-1, f"驱动地址不可用: {driver_url() or '(空)'}")
+        raw = driver_url() or "(空)"
+        raise i18n.localizable(DshDriverError(-1, f"驱动地址不可用: {raw}"),
+                               "驱动地址不可用: {raw}", {"raw": raw})
     return parsed.hostname, parsed.port or 80, parsed.path.rstrip("/")
 
 
 def _request(method, path, payload=None, timeout=REQUEST_TIMEOUT):
     """向驱动端点发一次 JSON 请求，返回解析后的 dict（失败抛 DshDriverError）。"""
     if not configured():
-        raise DshDriverError(-1, "未配置 dsh agent 驱动（非插件形态或插件未下发驱动地址）")
+        raise DshDriverError(-1, UNCONFIGURED_MESSAGE)
     body = None
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -116,15 +124,31 @@ def _request(method, path, payload=None, timeout=REQUEST_TIMEOUT):
             detail = json.loads(e.read().decode("utf-8", errors="replace")).get("error", "")
         except (ValueError, OSError, AttributeError):
             detail = ""
-        raise DshDriverError(e.code, detail or f"驱动返回 HTTP {e.code}") from e
+        if detail:
+            # 有驱动正文时用单占位符词条 `{driver_detail}`：中文渲染 = detail 本身
+            # （旧输出逐字节不变），英文包装成 Driver returned HTTP {status}: {detail}。
+            # 与 Node T10 fix round 2 的 dshdriver 修法逐字对应。
+            # 非字符串 detail（对象/数组）先按 JS `String()` 口径强制转换：否则 i18n
+            # 插值对对象会保留 `{driver_detail}` 占位符原样输出（Node 的 httpErrorDetail
+            # 对非字符串 detail 走 String() coercion 后再包装）。
+            detail = i18n.js_string(detail)
+            raise i18n.localizable(
+                DshDriverError(e.code, detail), "{driver_detail}",
+                {"driver_detail": detail, "status": e.code}) from e
+        raise i18n.localizable(
+            DshDriverError(e.code, f"驱动返回 HTTP {e.code}"),
+            "驱动返回 HTTP {status}", {"status": e.code}) from e
     except (urllib.error.URLError, OSError) as e:
-        raise DshDriverError(-2, f"驱动不可达: {e}") from e
+        raise i18n.localizable(DshDriverError(-2, f"驱动不可达: {e}"),
+                               "驱动不可达: {detail}", {"detail": str(e)}) from e
     if not raw.strip():
         return {}
     try:
         return json.loads(raw)
     except ValueError as e:
-        raise DshDriverError(-2, f"驱动响应不是 JSON: {raw[:200]}") from e
+        detail = raw[:200]
+        raise i18n.localizable(DshDriverError(-2, f"驱动响应不是 JSON: {detail}"),
+                               "驱动响应不是 JSON: {detail}", {"detail": detail}) from e
 
 
 # ---------- 探活与状态 ----------
@@ -690,7 +714,7 @@ def _stream_events(query, on_frame, since=0, stop=None, idle_timeout=STREAM_IDLE
     DshDriverError(-2, 事件流空闲超时…)，等待方据此收口。
     """
     if not configured():
-        raise DshDriverError(-1, "未配置 dsh agent 驱动（非插件形态或插件未下发驱动地址）")
+        raise DshDriverError(-1, UNCONFIGURED_MESSAGE)
     host, port, base = _split_url()
     conn = http.client.HTTPConnection(host, port, timeout=idle_timeout)
     frames = 0
@@ -707,8 +731,9 @@ def _stream_events(query, on_frame, since=0, stop=None, idle_timeout=STREAM_IDLE
         sock = conn.sock
         resp = conn.getresponse()
         if resp.status != 200:
-            detail = resp.read().decode("utf-8", errors="replace")
-            raise DshDriverError(resp.status, f"事件流被拒: {detail[:200]}")
+            detail = resp.read().decode("utf-8", errors="replace")[:200]
+            raise i18n.localizable(DshDriverError(resp.status, f"事件流被拒: {detail}"),
+                                   "事件流被拒: {detail}", {"detail": detail})
         # 连接与响应头阶段用完整 idle_timeout；进入流式读之后挂 stop 看门线程
         if stop is not None:
             threading.Thread(target=_stop_watcher, args=(stop, sock, stop_done),
@@ -725,18 +750,27 @@ def _stream_events(query, on_frame, since=0, stop=None, idle_timeout=STREAM_IDLE
             except socket.timeout as e:
                 if stop is not None and stop():      # 与主动断开同时到期：按主动处理
                     break
-                raise DshDriverError(-2, f"事件流空闲超时（>{idle_timeout}s 无数据）") from e
+                # 旧 f-string 对 float 输出 "1.0"（如测试传 idle_timeout=1.0），而 i18n
+                # 插值按 JS String 口径会把 1.0 渲染成 "1"。无头中文必须逐字节不变，
+                # 故先按旧口径 str() 预格式化 seconds 再插值（int 90 仍是 "90"）。
+                seconds = str(idle_timeout)
+                raise i18n.localizable(
+                    DshDriverError(-2, f"事件流空闲超时（>{idle_timeout}s 无数据）"),
+                    "事件流空闲超时（>{seconds}s 无数据）",
+                    {"seconds": seconds}) from e
             except (OSError, http.client.HTTPException) as e:
                 # shutdown 唤醒的阻塞读可能以 OSError（连接被断）或 IncompleteRead
                 # （chunked 流被截断）形式回来：主动断开不算链路异常
                 if stop is not None and stop():
                     break
-                raise DshDriverError(-2, f"事件流读取失败: {e}") from e
+                raise i18n.localizable(DshDriverError(-2, f"事件流读取失败: {e}"),
+                                       "事件流读取失败: {detail}",
+                                       {"detail": str(e)}) from e
             if not chunk:
                 # shutdown 让 recv 返回 EOF（b""）：主动断开同样不算异常
                 if stop is not None and stop():
                     break
-                raise DshDriverError(-2, "事件流被对端关闭")
+                raise i18n.localizable(DshDriverError(-2, "事件流被对端关闭"), "事件流被对端关闭")
             buffer += chunk.decode("utf-8", errors="replace")
             while "\n\n" in buffer:
                 block, buffer = buffer.split("\n\n", 1)

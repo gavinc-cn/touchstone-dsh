@@ -434,7 +434,7 @@ async function adminRagSet(ctx) {
     }
   } catch (e) {
     if (e instanceof rag.ValueError) {
-      ctx.errorSpaced(400, String(e.message));   // Python `str(exc)`
+      ctx.errorSpaced(400, e);                  // Python `str(exc)`；key+vars 走 i18nKey
       return;
     }
     throw e;

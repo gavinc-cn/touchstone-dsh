@@ -73,6 +73,13 @@ import { cancelQueueAction, injectMsg } from './sessions.js';
 /** 卡片附件子目录名 + 单文件上限（上限只写路径侧用到，M5 上传端点才校验） */
 const BOARD_MEDIA_SUBDIR = 'board_media';
 
+/**
+ * 驱动 409 但没带第二参时的兜底文案（Python `e.args[1] if len(e.args) > 1 else …`）。
+ * 提成常量供覆盖门禁按「同文件中文常量」登记——调用点写三元表达式会让静态检查
+ * 无法区分「词条 key」与「运行时拼接」。
+ */
+const BUSY_FALLBACK = '会话运行中，稍后重试';
+
 /** MIME → 扩展名（`_api_board_upload_media` / `_api_board_get_media` 共用；逐项照抄） */
 const BOARD_MEDIA_EXTS = {
   'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
@@ -619,7 +626,9 @@ async function apiBoardCardAction(ctx, projectId, cardId, action) {
     const blockTextRaw = pyGet(body, 'block_text');
     const blockText = cpSlice(pyTruthy(blockTextRaw) ? pyStrScalar(blockTextRaw) : '', 2000);
     const [cardDict, err] = await board.moveCard(row, cardId, target, blockText, beforeId,
-      pyTruthy(pyGet(body, 'merge_ack')), { db: ctx.db });
+      // T13 修复轮 1：拖列进 doing / 强制运行手势都会起会话，请求语言随之下传
+      // （由 board.enterDoing 在门禁之后冻结）
+      pyTruthy(pyGet(body, 'merge_ack')), ctx.lang, { db: ctx.db });
     if (err) {
       if ('blocked' in err || 'merge_pending' in err) { ctx.json(200, err); return; }
       ctx.errorSpaced(400, err.error ?? '');
@@ -640,7 +649,9 @@ async function apiBoardCardAction(ctx, projectId, cardId, action) {
     return;
   }
   const [cardDict, err] = await board.startIntoDoing(row, card, opinion,
-    pyTruthy(pyGet(body, 'force')), pyTruthy(pyGet(body, 'worktree')), false, { db: ctx.db });
+    // T13：卡片语言首轮冻结＝本条请求语言（与 Python `self._request_lang()` 同源）
+    pyTruthy(pyGet(body, 'force')), pyTruthy(pyGet(body, 'worktree')), false, ctx.lang,
+    { db: ctx.db });
   if (err) {
     if ('blocked' in err) { ctx.json(200, err); return; }   // 父任务拦截：不算错误
     ctx.errorSpaced(400, err.error ?? '');
@@ -675,13 +686,13 @@ async function apiBoardSendComment(ctx, projectId, cardId, commentId) {
     if (e instanceof DshDriverError) {
       // 409 = 会话运行中（deliver_comment 的忙拒绝）；其余 code 按 500
       if (Array.isArray(e.args) && e.args[0] === 409) {
-        ctx.errorSpaced(409, e.args.length > 1 ? e.args[1] : '会话运行中，稍后重试');
+        ctx.errorSpaced(409, e.args.length > 1 ? e.args[1] : BUSY_FALLBACK);
       } else {
-        ctx.errorSpaced(500, `agent 调用失败: ${pyStrErr(e)}`);
+        ctx.errorSpaced(500, 'agent 调用失败: {detail}', { detail: pyStrErr(e) });
       }
       return;
     }
-    ctx.errorSpaced(400, pyStrErr(e));         // Python `except RuntimeError` ⇒ 400（顺序照抄）
+    ctx.errorSpaced(400, e);                  // Python `except RuntimeError` ⇒ 400（顺序照抄）
   }
   if (rec === undefined) return;
   ctx.json(200, { ok: true, queued: Boolean(rec && rec.queued), msg_id: (rec || {}).id || '' });
@@ -713,7 +724,7 @@ async function apiBoardSessionOp(ctx, projectId, cardId, op) {
     const newSid = await board.forkSession(row, card, sid, { db: ctx.db });
     ctx.json(200, { ok: true, new_sid: newSid });
   } catch (e) {
-    ctx.errorSpaced(400, pyStrErr(e));         // Python `except RuntimeError` ⇒ 400
+    ctx.errorSpaced(400, e);                  // Python `except RuntimeError` ⇒ 400
   }
 }
 
@@ -734,8 +745,10 @@ async function apiBoardWorktreeCleanup(ctx, projectId, cardId) {
 async function apiBoardWorktreeMerge(ctx, projectId, cardId) {
   const [row, card] = boardOwned(ctx, projectId, cardId);
   if (row === null) return;
-  const [cardDict, err] = await board.handoffWorktreeMerge(row, card, { db: ctx.db });
-  if (err) { ctx.errorSpaced(400, err.error ?? pyStrErr(err)); return; }
+  // T13 修复轮 1：合并回交会起会话，冻结本条请求语言
+  const [cardDict, err] = await board.handoffWorktreeMerge(row, card, ctx.lang,
+    { db: ctx.db });
+  if (err) { ctx.errorSpaced(400, err.error ?? err); return; }
   ctx.json(200, { card: cardDict });
 }
 
@@ -982,7 +995,8 @@ async function apiBoardSessionProfile(ctx, projectId, sid) {
     return;
   }
   if (effort === null) {
-    ctx.errorSpaced(400, `思考等级非法（${DSH_EFFORT_LEVELS.join('/')} 或留空）`);
+    ctx.errorSpaced(400, '思考等级非法（{levels} 或留空）',
+      { levels: DSH_EFFORT_LEVELS.join('/') });
     return;
   }
   if (!model && !pmode && !effort) {
@@ -1004,7 +1018,7 @@ async function apiBoardSessionProfile(ctx, projectId, sid) {
       await dshdriver.setModel(sid, model, '', effort);
     }
   } catch (e) {
-    if (e instanceof DshDriverError) { ctx.errorSpaced(502, pyStrErr(e)); return; }
+    if (e instanceof DshDriverError) { ctx.errorSpaced(502, e); return; }
     throw e;
   }
   // 回执给**映射后的 canonical preset**（真正下发的值），便于前端乐观回显对齐
@@ -1046,7 +1060,7 @@ async function apiBoardSessionRewind(ctx, projectId, sid) {
     await dshdriver.ensureSession(newSid, row.project_dir, `rewind-${sid.slice(0, 8)}`);
   } catch (e) {
     if (e instanceof DshDriverError) {
-      ctx.errorSpaced(502, `回退失败：${pyStrErr(e)}`);
+      ctx.errorSpaced(502, '回退失败：{detail}', { detail: pyStrErr(e) });
       return;
     }
     throw e;

@@ -12,6 +12,7 @@
 // ⚠ 回填的文本必须来自**服务端回带的全文**（`chat.cancel_queued_detail` /
 // `chat.cancelQueuedDetail`）：排队行展示文本被截到 120 字（`msgsOfSid`），拿它回填
 // 会把长消息静默截断。
+import { t } from './i18n'
 
 /** 多段文本之间的分隔（草稿与还原文本之间、批量还原的每条之间） */
 export const RESTORE_SEP = '\n\n'
@@ -44,8 +45,8 @@ export function cancellableRow(row) {
  */
 export function mergeRestoreText(prev, texts) {
   const body = (texts || [])
-    .map((t) => (t === null || t === undefined ? '' : String(t)))
-    .filter((t) => t.trim() !== '')
+    .map((x) => (x === null || x === undefined ? '' : String(x)))
+    .filter((x) => x.trim() !== '')
   const cur = prev === null || prev === undefined ? '' : String(prev)
   if (!body.length) return cur
   const joined = body.join(RESTORE_SEP)
@@ -64,7 +65,7 @@ export function mergeRestoreText(prev, texts) {
  * @returns {string}
  */
 export function cancelQueueToast(count, single) {
-  if (!count) return '消息已不在排队中（可能已开始发送）'
-  if (single) return '已取消排队，原文已放回输入框'
-  return `已取消 ${count} 条排队消息，原文已放回输入框`
+  if (!count) return t('消息已不在排队中（可能已开始发送）')
+  if (single) return t('已取消排队，原文已放回输入框')
+  return t('已取消 {n} 条排队消息，原文已放回输入框', { n: count })
 }

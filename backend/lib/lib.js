@@ -49,6 +49,8 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { messageVars } from './i18n.js';
+
 // --------------------------------------------------------------------------
 // Python 字符串语义的小工具
 // --------------------------------------------------------------------------
@@ -305,29 +307,240 @@ const FIELD_RE = new RegExp(`^${PY_WS}*(?:-${PY_WS}*)?\\*\\*([^\\n]+?)\\*\\*${PY
 /** bug_report.md 里的关联用例编号（`FS0001`） */
 export const FS_ID_RE = /FS\d{4}/g;
 
+// --------------------------------------------------------------------------
+// 机器契约双语别名表（T14；设计 §5.4）
+//
+// 机器契约 = status.md / case.md / bug_report.md 的字段名与状态值。英文模板只换 IO 层
+// 写法，**内部 canonical 永远是现有中文常量**（消费方一行不用改）；解析时先归一到中文，
+// 写回时再按文件已有语言翻回去。
+//
+// FIELD_ALIASES：字段名（中文 canonical 或英文写法）→ 中文 canonical 键；中文键映射到自身，
+// 保证存量中文文件解析逐字段不变。T15 的英文模板字段名取 FIELD_EN 右列。
+// STATUS_ALIASES：状态值（中文 canonical 或英文写法）→ 中文 canonical 值；英文写法覆盖
+// T15 模板与平台/webui 既有英文（dataLabels.js），ASCII 大小写不敏感。
+// 两份表在 backend_py/lib.py 有逐字镜像；任何一端改表都要同步另一端。
+// --------------------------------------------------------------------------
+
+const FIELD_ALIASES = {
+  // status.md
+  状态: '状态',
+  Status: '状态',
+  最近执行时间: '最近执行时间',
+  'Last run time': '最近执行时间',
+  'Last run': '最近执行时间',
+  执行环境: '执行环境',
+  'Execution environment': '执行环境',
+  执行轮次: '执行轮次',
+  Round: '执行轮次',
+  'Execution round': '执行轮次',
+  失败原因: '失败原因',
+  'Failure reason': '失败原因',
+  '关联 bug_report': '关联 bug_report',
+  'Related bug_report': '关联 bug_report',
+  'Related bug report': '关联 bug_report',
+  结果摘要: '结果摘要',
+  'Result summary': '结果摘要',
+  // case.md
+  '用例 ID': '用例 ID',
+  'Case ID': '用例 ID',
+  接口: '接口',
+  Interface: '接口',
+  分类: '分类',
+  Category: '分类',
+  '所属模块/功能': '所属模块/功能',
+  'Module / Function': '所属模块/功能',
+  'Module/Function': '所属模块/功能',
+  测试目标: '测试目标',
+  'Test objective': '测试目标',
+  'Test goal': '测试目标',
+  依据代码: '依据代码',
+  'Code reference': '依据代码',
+  脚本: '脚本',
+  Script: '脚本',
+  测试方法: '测试方法',
+  'Test method': '测试方法',
+  输入参数: '输入参数',
+  'Input parameters': '输入参数',
+  预期输出: '预期输出',
+  'Expected output': '预期输出',
+  输出获取方式: '输出获取方式',
+  'Output retrieval': '输出获取方式',
+  验证逻辑: '验证逻辑',
+  'Verification logic': '验证逻辑',
+  备注: '备注',
+  Note: '备注',
+  // bug_report.md
+  严重程度: '严重程度',
+  Severity: '严重程度',
+  报告时间: '报告时间',
+  'Reported at': '报告时间',
+  'Report time': '报告时间',
+  错误签名: '错误签名',
+  'Error signature': '错误签名',
+  用例名称: '用例名称',
+  'Case name': '用例名称',
+};
+
+/** 中文 canonical 字段名 → 写回英文文件时优先使用的英文键（set_md_field 用；与上表互补） */
+const FIELD_EN = {
+  状态: 'Status',
+  最近执行时间: 'Last run time',
+  执行环境: 'Execution environment',
+  执行轮次: 'Round',
+  失败原因: 'Failure reason',
+  '关联 bug_report': 'Related bug_report',
+  结果摘要: 'Result summary',
+  '用例 ID': 'Case ID',
+  接口: 'Interface',
+  分类: 'Category',
+  '所属模块/功能': 'Module / Function',
+  测试目标: 'Test objective',
+  依据代码: 'Code reference',
+  脚本: 'Script',
+  测试方法: 'Test method',
+  输入参数: 'Input parameters',
+  预期输出: 'Expected output',
+  输出获取方式: 'Output retrieval',
+  验证逻辑: 'Verification logic',
+  备注: 'Note',
+  严重程度: 'Severity',
+  报告时间: 'Reported at',
+  错误签名: 'Error signature',
+  用例名称: 'Case name',
+};
+
+/** 中文 canonical 字段名集合（文件主语言判定用） */
+const FIELD_ZH_NAMES = new Set(
+  Object.keys(FIELD_ALIASES).filter((k) => FIELD_ALIASES[k] === k));
+
+const STATUS_ALIASES = {
+  // 中文 canonical → 自身（存量中文文件零变化）
+  未执行: '未执行',
+  通过: '通过',
+  失败: '失败',
+  跳过: '跳过',
+  需要复测: '需要复测',
+  待分析: '待分析',
+  '已分析，待修复': '已分析，待修复',
+  '已修复（未验证）': '已修复（未验证）',
+  复测通过: '复测通过',
+  已拒绝: '已拒绝',
+  已分析: '已分析',
+  '已修复（复测通过）': '已修复（复测通过）',
+  复测未通过: '复测未通过',
+  '修复完成，待复测': '修复完成，待复测',
+  已修复: '已修复',
+  // 英文 → 中文 canonical（Case / status.md）
+  'Not run': '未执行',
+  'Not started': '未执行',
+  Pass: '通过',
+  Passed: '通过',
+  Fail: '失败',
+  Failed: '失败',
+  Skip: '跳过',
+  Skipped: '跳过',
+  'Need retest': '需要复测',
+  'Needs retest': '需要复测',
+  Retest: '需要复测',
+  'Retest needed': '需要复测',
+  'Pending retest': '需要复测',
+  // 英文 → 中文 canonical（bug_report.md；与 webui/src/utils/dataLabels.js 既有英文对齐）
+  'To analyze': '待分析',
+  'Analyzed, to fix': '已分析，待修复',
+  'Analyzed, pending fix': '已分析，待修复',
+  'Analyzed, to be fixed': '已分析，待修复',
+  'Fixed (unverified)': '已修复（未验证）',
+  'Retest passed': '复测通过',
+  Rejected: '已拒绝',
+  'Rejected (false positive, not a defect)': '已拒绝',
+  'Rejected (false positive)': '已拒绝',
+  Analyzed: '已分析',
+  'Fixed (retest passed)': '已修复（复测通过）',
+  'Retest failed': '复测未通过',
+  'Fix complete, pending retest': '修复完成，待复测',
+  Fixed: '已修复',
+};
+
+/** ASCII 大小写不敏感索引（`Pass`/`pass` 都认；中文键不参与，避免改变中文匹配语义） */
+const STATUS_ALIASES_LOWER = Object.create(null);
+for (const [key, value] of Object.entries(STATUS_ALIASES)) {
+  if (/^[\x00-\x7f]*$/.test(key)) STATUS_ALIASES_LOWER[key.toLowerCase()] = value;
+}
+
+/** 中文 canonical 状态值 → 写回英文文件时的英文写法（set_md_field 用） */
+const STATUS_EN = {
+  未执行: 'Not run',
+  通过: 'Pass',
+  失败: 'Failed',
+  跳过: 'Skipped',
+  需要复测: 'Needs retest',
+  待分析: 'To analyze',
+  '已分析，待修复': 'Analyzed, to fix',
+  '已修复（未验证）': 'Fixed (unverified)',
+  复测通过: 'Retest passed',
+  已拒绝: 'Rejected',
+  已分析: 'Analyzed',
+  '已修复（复测通过）': 'Fixed (retest passed)',
+  复测未通过: 'Retest failed',
+  '修复完成，待复测': 'Fix complete, pending retest',
+  已修复: 'Fixed',
+};
+
+/** 字段名 → 内部中文 canonical 键；未登记字段名原样返回（不丢字段） */
+function canonicalField(name) {
+  return Object.hasOwn(FIELD_ALIASES, name) ? FIELD_ALIASES[name] : name;
+}
+
 /**
- * `lib.parse_fields`：把 `- **字段**: 值` 列表解析成对象。
- * 同名键后者覆盖前者（Python dict 推导同）；键值都按 Python `str.strip()` 归整。
+ * 状态值 → 中文 canonical；中文 canonical 原样返回；未知值原样返回（不丢）。
+ *
+ * 精确匹配优先，其次 ASCII 大小写不敏感（`Pass`/`pass`）；不做前缀/模糊匹配，免得把
+ * 未知自定义状态误判成平台枚举。
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function canonicalStatusValue(value) {
+  if (typeof value !== 'string') return value;
+  const text = pyStrip(value);
+  if (!text) return value;
+  if (Object.hasOwn(STATUS_ALIASES, text)) return STATUS_ALIASES[text];
+  const lowered = text.toLowerCase();
+  return Object.hasOwn(STATUS_ALIASES_LOWER, lowered) ? STATUS_ALIASES_LOWER[lowered] : value;
+}
+
+/**
+ * `lib.parse_fields`：把 `- **字段**: 值` 列表解析成对象（键统一为内部中文 canonical）。
+ *
+ * - 英文/中文字段名都识别，归一到中文 canonical 键（同键混写时后者覆盖前者）；
+ * - `状态` 字段的英文枚举值归一到中文 canonical（中文/未知值原样）；
+ * - 其他字段的值不做任何翻译（用例正文按任务语言书写，原样透传）。
+ * 键值都按 Python `str.strip()` 归整；同名键后者覆盖前者（Python dict 赋值同）。
  * @param {string} text
  * @returns {Record<string, string>}
  */
 export function parseFields(text) {
   const out = {};
   for (const m of String(text == null ? '' : text).matchAll(FIELD_RE)) {
-    out[pyStrip(m[1])] = pyStrip(m[2]);
+    const key = canonicalField(pyStrip(m[1]));
+    let value = pyStrip(m[2]);
+    if (key === '状态') value = canonicalStatusValue(value);
+    out[key] = value;
   }
   return out;
 }
 
 /**
  * `lib.norm_status`：状态字段归一化（模板未填写时是 `未执行 / 通过 / ...`，取第一项）。
+ *
+ * 第一段再经 `STATUS_ALIASES` 归一（英文 `Not run / Pass / ...` 同样取第一项并映射回
+ * 中文 canonical）；未知值保留第一段原文，不丢失。
  * @param {unknown} value
  * @returns {string}
  */
 export function normStatus(value) {
   const text = value == null ? '' : String(value);
   if (!text) return '未执行';
-  return pyStrip(text.split('/')[0]);
+  return canonicalStatusValue(pyStrip(text.split('/')[0]));
 }
 
 /**
@@ -783,23 +996,86 @@ function escapeRegExp(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** 文件主语言：按已登记字段行的语言计数（英文写法 vs 中文 canonical），平局按 zh。 */
+function fieldLang(text) {
+  let zh = 0;
+  let en = 0;
+  for (const m of String(text).matchAll(FIELD_RE)) {
+    const name = pyStrip(m[1]);
+    if (FIELD_ZH_NAMES.has(name)) {
+      zh += 1;
+    } else if (Object.hasOwn(FIELD_ALIASES, name) && FIELD_ZH_NAMES.has(FIELD_ALIASES[name])) {
+      en += 1;
+    }
+  }
+  return en > zh ? 'en' : 'zh';
+}
+
+/**
+ * 目标字段的写回语言与实际字段名。
+ *
+ * 优先级：目标字段只在英文写法里出现 → en；只在中文写法里出现 → zh；两边都有 / 都不存在
+ * （混写或缺失）→ 文件主语言 `fieldLang`（平局按 zh）。英文侧返回文件里实际使用的写法
+ * （保留作者用词），字段缺失时用 `FIELD_EN` 的规范英文键。
+ * @param {string} text
+ * @param {string} canonical 中文 canonical 字段名
+ * @returns {[('zh'|'en'), string]} `[语言, 实际写回的字段名]`
+ */
+function targetFieldLang(text, canonical) {
+  let zhHit = false;
+  let enHit = false;
+  let enName = '';
+  for (const m of String(text).matchAll(FIELD_RE)) {
+    const name = pyStrip(m[1]);
+    if (name === canonical) {
+      zhHit = true;
+    } else if (Object.hasOwn(FIELD_ALIASES, name) && FIELD_ALIASES[name] === canonical) {
+      enHit = true;
+      enName = name;
+    }
+  }
+  if (enHit && !zhHit) return ['en', enName];
+  if (zhHit && !enHit) return ['zh', canonical];
+  if (fieldLang(text) === 'en') return ['en', enName || FIELD_EN[canonical] || canonical];
+  return ['zh', canonical];
+}
+
+/** 状态值按目标语言写回：先归一到中文 canonical，再取 zh/en 写法；未知值原样。 */
+function statusValueInLang(value, lang) {
+  const canonical = canonicalStatusValue(value);
+  if (Object.hasOwn(STATUS_EN, canonical)) {
+    return lang === 'en' ? STATUS_EN[canonical] : canonical;
+  }
+  return value;
+}
+
 /**
  * `lib.set_md_field`：改写 md 里 `- **字段**: 值` 一行；行不存在时在文末追加。
- * 返回**是否命中已有行**（Python 同）。`read_text` 读空时直接 false（不建文件）。
+ *
+ * 字段名先经 `FIELD_ALIASES` 归一到内部中文 canonical；写回语言跟随**目标字段已有写法**
+ * （英文行 → 英文键 + 英文状态值；中文行 → 中文键 + 中文值）。目标字段缺失或中英两种
+ * 写法并存时跟随文件主语言（`fieldLang`，平局按 zh）。只有 `状态` 字段的值做语言换算
+ * （其他字段值原样写入：时间/环境标签/摘要等）。行不存在时按目标语言在文末追加。
+ * 保留原行前缀/格式/编码/换行。返回是否写入成功（文件不存在/读空返回 false）。
  *
  * 与 Python 的唯一形态差异（**实际不可达**，备案）：Python 的 `pattern.sub(new_line, text)`
  * 会把替换串里的 `\1` 当组引用解释；这里用回调（`prefix + value`），值里的反斜杠是字面量。
- * 本口的值只有「已拒绝」「需要复测」两个固定串，故无分叉。
+ * 本口的值只有状态/时间/环境标签/摘要，且状态值不含反斜杠，故无分叉。
  */
 export function setMdField(filePath, field, value) {
   const text = readText(filePath);
   if (!text) return false;
+  const canonical = Object.hasOwn(FIELD_ALIASES, field) ? FIELD_ALIASES[field] : field;
+  const [lang, writeField] = targetFieldLang(text, canonical);
+  const writeValue = canonical === '状态' && typeof value === 'string'
+    ? statusValueInLang(value, lang)
+    : value;
   const pattern = new RegExp(
-    `^(\\s*(?:-\\s*)?\\*\\*${escapeRegExp(field)}\\*\\*\\s*[:：]\\s*).*$`, 'm',
+    `^(\\s*(?:-\\s*)?\\*\\*${escapeRegExp(writeField)}\\*\\*\\s*[:：]\\s*).*$`, 'm',
   );
   const out = pattern.test(text)
-    ? text.replace(pattern, (matched, prefix) => prefix + String(value))
-    : `${text.replace(/\n+$/, '')}\n\n- **${field}**: ${value}\n`;
+    ? text.replace(pattern, (matched, prefix) => prefix + String(writeValue))
+    : `${text.replace(/\n+$/, '')}\n\n- **${writeField}**: ${writeValue}\n`;
   try {
     fs.writeFileSync(filePath, out, 'utf8');
     return true;
@@ -937,7 +1213,10 @@ export function pathLastSegment(pathValue) {
  * `fs_mkdir(raw_path, raw_name)`：在指定目录下新建一个子目录（目录选择对话框「新建文件夹」）。
  * 对齐 `server.py:968`，返回**二元组** `[data, err]`：
  *   - 成功 `[{name, path}, null]`；`path` 是新目录的绝对路径（realpath）
- *   - 失败 `[null, 原因文本]`——直接展示给用户，故文案逐字照抄 Python（中文）
+ *   - 失败 `[null, 原因]`——直接展示给用户，故文案逐字照抄 Python（中文）。
+ *     固定文案是**字符串**（本身即词条 key）；`新建失败：<OS 原因>` 是**插值文案**，
+ *     返回 `messageVars('新建失败：{detail}', {detail})` 的 `{message, vars}` 对象
+ *     （T10 R18 契约；路由层原样交给 `ctx.errorSpaced` 按请求语言渲染）。
  *
  * 逐条对齐的判据（顺序也照抄，先父目录后名称）：
  *   1. 父目录：`(raw_path or "").strip()` 为空、或 `realpath` 后不是目录 ⇒ 拒；
@@ -961,7 +1240,7 @@ export function pathLastSegment(pathValue) {
  *     路径的近似差异见本文件头「已知有意保留的差异」。
  * @param {unknown} rawPath 父目录（可为前端传来的相对/带尾斜杠形态）
  * @param {unknown} rawName 新目录名（单级）
- * @returns {[{name: string, path: string}|null, string|null]}
+ * @returns {[{name: string, path: string}|null, string|{message: string, vars: object|null}|null]}
  */
 export function fsMkdir(rawPath, rawName) {
   let parent = pyStrip(pyOrEmpty(rawPath));
@@ -985,7 +1264,8 @@ export function fsMkdir(rawPath, rawName) {
   try {
     fs.mkdirSync(target);
   } catch (e) {                                // 无写权限/名称过长等，回给用户看原因
-    return [null, `新建失败：${e && e.message ? e.message : e}`];
+    const detail = e && e.message ? e.message : e;
+    return [null, messageVars('新建失败：{detail}', { detail })];
   }
   return [{ name, path: realpathOrResolve(target) }, null];
 }

@@ -278,7 +278,7 @@
     },
     {
       "name": "tasks",
-      "ddl": "CREATE TABLE tasks (\n    id           INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id   INTEGER NOT NULL,\n    name         TEXT NOT NULL,\n    auto_fix     INTEGER NOT NULL DEFAULT 0,\n    retest       TEXT NOT NULL DEFAULT '不复测',\n    stop_type    TEXT NOT NULL DEFAULT 'rounds',\n    stop_value   TEXT NOT NULL DEFAULT '1',\n    task_type    TEXT NOT NULL DEFAULT 'normal',\n    start_stage  TEXT NOT NULL DEFAULT '',\n    end_stage    TEXT NOT NULL DEFAULT '',\n    payload      TEXT NOT NULL DEFAULT '',\n    extra        TEXT NOT NULL DEFAULT '',\n    status       TEXT NOT NULL DEFAULT 'queued',\n    session_id   TEXT NOT NULL DEFAULT '',\n    model        TEXT NOT NULL DEFAULT '',\n    permission   TEXT NOT NULL DEFAULT '',\n    auto_commit  INTEGER NOT NULL DEFAULT 0,\n    auto_deploy  INTEGER NOT NULL DEFAULT 0,\n    auto_retest  INTEGER NOT NULL DEFAULT 0,\n    cases_base   INTEGER NOT NULL DEFAULT 0,\n    fresh_prompt INTEGER NOT NULL DEFAULT 0,\n    current_round INTEGER NOT NULL DEFAULT 0,\n    new_bugs     INTEGER NOT NULL DEFAULT 0,\n    date_from    TEXT NOT NULL DEFAULT '',\n    date_to      TEXT NOT NULL DEFAULT '',\n    -- 复压标记（2026-10-06）：1=下一次执行只跑发压运行（跳过 agent 轮），用后即清\n    load_rerun   INTEGER NOT NULL DEFAULT 0,\n    created_at   TEXT NOT NULL,\n    started_at   TEXT,\n    ended_at     TEXT,\n    error        TEXT NOT NULL DEFAULT ''\n)",
+      "ddl": "CREATE TABLE tasks (\n    id           INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id   INTEGER NOT NULL,\n    name         TEXT NOT NULL,\n    auto_fix     INTEGER NOT NULL DEFAULT 0,\n    retest       TEXT NOT NULL DEFAULT '不复测',\n    stop_type    TEXT NOT NULL DEFAULT 'rounds',\n    stop_value   TEXT NOT NULL DEFAULT '1',\n    task_type    TEXT NOT NULL DEFAULT 'normal',\n    start_stage  TEXT NOT NULL DEFAULT '',\n    end_stage    TEXT NOT NULL DEFAULT '',\n    payload      TEXT NOT NULL DEFAULT '',\n    extra        TEXT NOT NULL DEFAULT '',\n    status       TEXT NOT NULL DEFAULT 'queued',\n    session_id   TEXT NOT NULL DEFAULT '',\n    model        TEXT NOT NULL DEFAULT '',\n    permission   TEXT NOT NULL DEFAULT '',\n    auto_commit  INTEGER NOT NULL DEFAULT 0,\n    auto_deploy  INTEGER NOT NULL DEFAULT 0,\n    auto_retest  INTEGER NOT NULL DEFAULT 0,\n    cases_base   INTEGER NOT NULL DEFAULT 0,\n    fresh_prompt INTEGER NOT NULL DEFAULT 0,\n    current_round INTEGER NOT NULL DEFAULT 0,\n    new_bugs     INTEGER NOT NULL DEFAULT 0,\n    date_from    TEXT NOT NULL DEFAULT '',\n    date_to      TEXT NOT NULL DEFAULT '',\n    -- 复压标记（2026-10-06）：1=下一次执行只跑发压运行（跳过 agent 轮），用后即清\n    load_rerun   INTEGER NOT NULL DEFAULT 0,\n    -- 界面语言（T13，2026-10-23）：任务创建时冻结（'zh'/'en'），存量行 DEFAULT 'zh'；\n    -- 读侧一律经 i18n.task_lang 归一，创建后不可改（不在 update_task 白名单）。\n    lang         TEXT NOT NULL DEFAULT 'zh',\n    created_at   TEXT NOT NULL,\n    started_at   TEXT,\n    ended_at     TEXT,\n    error        TEXT NOT NULL DEFAULT ''\n)",
       "columns": [
         {
           "name": "id",
@@ -463,6 +463,13 @@
           "pk": 0
         },
         {
+          "name": "lang",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'zh'",
+          "pk": 0
+        },
+        {
           "name": "created_at",
           "type": "TEXT",
           "notnull": 1,
@@ -601,7 +608,7 @@
     },
     {
       "name": "board_cards",
-      "ddl": "CREATE TABLE board_cards (\n    id             INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id     INTEGER NOT NULL,\n    title          TEXT NOT NULL,\n    description    TEXT NOT NULL DEFAULT '',\n    column_key     TEXT NOT NULL DEFAULT 'todo',\n    sort_order     INTEGER NOT NULL DEFAULT 0,\n    session_id     TEXT NOT NULL DEFAULT '',\n    sessions       TEXT NOT NULL DEFAULT '[]',\n    block_kind     TEXT,\n    block_text     TEXT NOT NULL DEFAULT '',\n    parent_card_id INTEGER,\n    readonly       INTEGER NOT NULL DEFAULT 0,\n    model          TEXT NOT NULL DEFAULT '',\n    scheduled_at   INTEGER,\n    worktree       TEXT NOT NULL DEFAULT '',\n    jira_key       TEXT NOT NULL DEFAULT '',\n    last_error     TEXT NOT NULL DEFAULT '',\n    last_error_at  INTEGER,\n    origin         TEXT,\n    done_at        TEXT,\n    trashed        INTEGER NOT NULL DEFAULT 0,\n    trashed_at     TEXT,\n    created_at     TEXT NOT NULL,\n    updated_at     TEXT NOT NULL,\n    -- 2026-10-07 起：卡片状态（列）被平台/agent 改动、而用户还没打开过卡片 ⇒ 1\n    -- （前端卡面打「有更新」标记，用户打开卡片详情即清 0）。用户自己拖列/点按钮\n    -- 造成的列变化不置位（见 update_board_card 的 mark_unread 形参）。\n    unread         INTEGER NOT NULL DEFAULT 0\n)",
+      "ddl": "CREATE TABLE board_cards (\n    id             INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id     INTEGER NOT NULL,\n    title          TEXT NOT NULL,\n    description    TEXT NOT NULL DEFAULT '',\n    column_key     TEXT NOT NULL DEFAULT 'todo',\n    sort_order     INTEGER NOT NULL DEFAULT 0,\n    session_id     TEXT NOT NULL DEFAULT '',\n    sessions       TEXT NOT NULL DEFAULT '[]',\n    block_kind     TEXT,\n    block_text     TEXT NOT NULL DEFAULT '',\n    parent_card_id INTEGER,\n    readonly       INTEGER NOT NULL DEFAULT 0,\n    model          TEXT NOT NULL DEFAULT '',\n    scheduled_at   INTEGER,\n    worktree       TEXT NOT NULL DEFAULT '',\n    jira_key       TEXT NOT NULL DEFAULT '',\n    last_error     TEXT NOT NULL DEFAULT '',\n    last_error_at  INTEGER,\n    origin         TEXT,\n    done_at        TEXT,\n    trashed        INTEGER NOT NULL DEFAULT 0,\n    trashed_at     TEXT,\n    -- 界面语言（T13，2026-10-23）：卡片**新建时为 ''=未冻结**，首次 start 才写入\n    -- 请求语言（之后不覆盖）；存量行 DEFAULT 'zh'。读侧一律经 i18n.card_lang 归一。\n    lang           TEXT NOT NULL DEFAULT 'zh',\n    created_at     TEXT NOT NULL,\n    updated_at     TEXT NOT NULL,\n    -- 2026-10-07 起：卡片状态（列）被平台/agent 改动、而用户还没打开过卡片 ⇒ 1\n    -- （前端卡面打「有更新」标记，用户打开卡片详情即清 0）。用户自己拖列/点按钮\n    -- 造成的列变化不置位（见 update_board_card 的 mark_unread 形参）。\n    unread         INTEGER NOT NULL DEFAULT 0\n)",
       "columns": [
         {
           "name": "id",
@@ -755,6 +762,13 @@
           "type": "TEXT",
           "notnull": 0,
           "dflt": null,
+          "pk": 0
+        },
+        {
+          "name": "lang",
+          "type": "TEXT",
+          "notnull": 1,
+          "dflt": "'zh'",
           "pk": 0
         },
         {

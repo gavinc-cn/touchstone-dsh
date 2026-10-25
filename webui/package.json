@@ -8,7 +8,8 @@
     "build": "node node_modules/vite/bin/vite.js build",
     "build:plugin": "node node_modules/vite/bin/vite.js build --mode plugin",
     "preview": "node node_modules/vite/bin/vite.js preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "i18n:scan": "node scripts/i18n-scan.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.23",

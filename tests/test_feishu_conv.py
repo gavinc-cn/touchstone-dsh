@@ -167,7 +167,7 @@ def test_route_text_auto_new_when_unbound(monkeypatch):
     db.set_feishu_binding("ou_r2", uid)
     db.set_feishu_default_project("ou_r2", pid)
     monkeypatch.setattr(feishu_conv, "_create_in_project",
-                        lambda b, p, title: ("session-new", ""))
+                        lambda b, p, title, lang="zh": ("session-new", ""))
     monkeypatch.setattr(feishu_conv, "_baseline_of", lambda sid: 0)
     monkeypatch.setattr(chat, "submit", lambda *a, **k: {"id": "m2", "state": "queued",
                                                          "queued": False})
@@ -197,7 +197,7 @@ def test_route_text_stale_session_unbinds_and_notes(monkeypatch):
     db.set_feishu_cur_session("ou_r4", pid, "session-gone", "旧会话")
     monkeypatch.setattr(feishu_conv.sessparse, "session_exists", lambda fam, sid: False)
     monkeypatch.setattr(feishu_conv, "_create_in_project",
-                        lambda b, p, title: ("session-fresh", ""))
+                        lambda b, p, title, lang="zh": ("session-fresh", ""))
     monkeypatch.setattr(feishu_conv, "_baseline_of", lambda sid: 0)
     monkeypatch.setattr(chat, "submit", lambda *a, **k: {"id": "m4", "state": "queued",
                                                          "queued": False})
@@ -212,7 +212,7 @@ def test_route_text_driver_unavailable(monkeypatch):
     db.set_feishu_binding("ou_r5", uid)
     db.set_feishu_default_project("ou_r5", pid)
     monkeypatch.setattr(feishu_conv, "_create_in_project",
-                        lambda b, p, title: ("", "该功能需要 dsh 插件形态"))
+                        lambda b, p, title, lang="zh": ("", "该功能需要 dsh 插件形态"))
     reply = feishu_conv.route_text(db.get_feishu_binding_by_open("ou_r5"), "在吗")
     assert "dsh 插件形态" in reply
 
@@ -312,7 +312,7 @@ def test_conv_intent_current_and_new(monkeypatch):
     db.set_feishu_default_project("ou_r10", pid)
     binding = db.get_feishu_binding_by_open("ou_r10")
     monkeypatch.setattr(feishu_conv, "_create_in_project",
-                        lambda b, p, title: ("session-ci", ""))
+                        lambda b, p, title, lang="zh": ("session-ci", ""))
     assert feishu_conv.conv_intent(binding, "current", [None], "ou_r10") == \
         feishu_conv.current_text(binding)
     assert "已新建并绑定" in feishu_conv.conv_intent(binding, "new", ["ci 标题"], "ou_r10")

@@ -107,6 +107,7 @@ import {
   snapshot as eventSnapshot, stats as eventStats, subscribe as eventSubscribe,
   waitConnected,
 } from './dshevents.js';
+import { cardLang, localizable, messageVars } from './i18n.js';
 import { ensureRuntimeDirs, pyIntOr, pyJoin, runtimeDir } from './lib.js';
 import { pyJsonDumps } from './pyjson.js';
 
@@ -334,6 +335,9 @@ export function cardJson(row, opts = {}, options = {}) {
     answer_pending: answer,
     msg_queued: msgQueued,
     queue_state: qs,
+    // T13：卡片语言（首 start 冻结；未冻结/未知 → 读侧归一 zh）。末位键序与
+    // Python `card_json` 逐字一致（payload 对拍会比解析后的结构）。
+    lang: cardLang(row),
   };
 }
 
@@ -1308,17 +1312,22 @@ export const _set_parent = setParent;
  * 非 doing 列卡移列防御性停会话；手动进 blocked 记 `block_kind='manual'`；
  * 进 done 前先过「待合并提交闸」与归档同步（归档先行，失败即整体放弃）。
  *
+ * `lang`（T13 修复轮 1）＝本条 HTTP 请求语言：拖列进 doing 与 doing→doing 强制运行
+ * 手势都会起会话，请求语言随之下传（由 `enterDoing` 在门禁之后冻结）；默认空串＝
+ * 无请求上下文（内部调用/测试），保持未冻结。
+ *
  * @param {object} project 项目行
  * @param {number} cardId
  * @param {string} target 目标列
  * @param {string} [blockText] 手动阻塞文本
  * @param {number|string|null} [beforeId] 目标位置卡（manual 列才生效）
  * @param {boolean} [mergeAck] 「仅通过」= 跳过待合并闸
+ * @param {string} [lang] 本条请求语言（''=无请求上下文）
  * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
  * @returns {[object|null, object|null]}
  */
 export async function moveCard(project, cardId, target, blockText = '', beforeId = null,
-  mergeAck = false, options = {}) {
+  mergeAck = false, lang = '', options = {}) {
   const card = dbmod.getBoardCard(cardId, options);
   if (card === null || card === undefined) return [null, { error: 'card not found' }];
   if (!COLUMNS.includes(target)) return [null, { error: 'bad column' }];
@@ -1326,7 +1335,8 @@ export async function moveCard(project, cardId, target, blockText = '', beforeId
   if (src === target) {
     if (target !== 'doing') return [cardJson(card, {}, options), null];
     // doing→doing 同列拖放：手势映射（force / 停止 / 调序 / no-op 四分支）
-    return doingGesture(project, card, beforeId, options);
+    // lang：强制运行手势会起会话，请求语言随之带入（F1 修复轮 1）
+    return doingGesture(project, card, beforeId, lang, options);
   }
   if (src === 'doing' && target === 'todo') {
     return [null, { error: 'doing 不可直接拖回 todo' }];
@@ -1354,13 +1364,14 @@ export async function moveCard(project, cardId, target, blockText = '', beforeId
   }
   if (target === 'doing') {
     // 形参照 Python `_enter_doing(project, card, extra="", force=False, worktree=False,
-    // queueWorktree=False, options)` **逐位对齐**（7 个位置，一个都不能少）：
+    // queueWorktree=False, lang="", options)` **逐位对齐**（8 个位置，一个都不能少）：
     //   · 首版误用对象形态（`{options}` 当第 3 参）⇒ 落进 `extra`，量具照出
     //     `wait_items.meta.extra === '[object Object]'`（gate_move 246 处差异的主因）；
     //   · 中途漏传一位（只给 6 参）⇒ `options` 落进 `queueWorktree`，实现内层拿不到 `{db}`
     //     而**回落缺省库路径**：单测因此写到了生产库（第三起误写事故）。
     // 两处都是量具/单测抓出来的真事故；`m3fixture.freshDb` 的进程级 env 兜底闸是第二道防线。
-    return hook('enterDoing')(project, card, '', false, false, false, options);
+    // lang 由请求层传入（''=无请求上下文），在 `enterDoing` 门禁之后冻结（F1 修复轮 1）。
+    return hook('enterDoing')(project, card, '', false, false, false, lang, options);
   }
   const fields = { column_key: target };
   if (target === 'blocked') {
@@ -1475,9 +1486,11 @@ export const _waiting_cards_above = waitingCardsAbove;
  * 运行卡落等待区深处 = 停止手势（递归 `moveCard(…, 'review')`）；等待卡落等待区 =
  * 调序（`waitq.reposition`）；运行卡落运行位 = no-op。非队列卡（sync/idle/answer
  * 占位）不参与手势，原样返回 200。
+ * `lang`（T13 修复轮 1）＝本条请求语言：force 手势会起会话，随 `enterDoing` 下传。
+ * @param {string} [lang]
  * @returns {[object|null, object|null]}
  */
-export async function doingGesture(project, card, beforeId, options = {}) {
+export async function doingGesture(project, card, beforeId, lang = '', options = {}) {
   const dragRow = getActive(KIND_CARD, card.id, options);
   const dragRun = dragRow === null || dragRow === undefined
     ? gestureRunPosition(card.id, options)
@@ -1519,13 +1532,14 @@ export async function doingGesture(project, card, beforeId, options = {}) {
       return [cardJson(card, {}, options), null];
     }
     // 停止手势：复用「离开 doing 先停后释放」路径落待审核（递归一层，幂等）
-    return moveCard(project, card.id, 'review', '', null, false, options);
+    return moveCard(project, card.id, 'review', '', null, false, '', options);
   }
   if (beforeRun) {
     // force 手势：跨过运行位往上拖 = 强制运行（落哪算哪，v2 §2.2 例外）
-    // 形参逐位对齐 Python `_enter_doing(project, card, extra, force, worktree, ...)`（见 moveCard 同款注释）
+    // 形参逐位对齐 Python `_enter_doing(project, card, extra, force, worktree,
+    // queueWorktree, lang, options)`（见 moveCard 同款注释）；lang 随请求下传。
     const [newCard, err] = await hook('enterDoing')(project, dbmod.getBoardCard(card.id, options),
-      '', true, false, false, options);
+      '', true, false, false, lang, options);
     if (err !== null && err !== undefined) return [null, err];
     const row = getActive(KIND_CARD, card.id, options);
     if (row !== null && row !== undefined && beforeSeq !== null) {
@@ -1733,7 +1747,7 @@ export async function dequeueCard(cardId, { reason = '', toColumn = null, markUn
   // `finish` 是同步的（见 M5-2 段「异步口径」），但它是**钩子**：await 一次性把
   // 「钩子返回 thenable」的形态收口，防未处理的拒绝打穿事件循环。
   //
-  // **形参口径（与 `enterDoing`/`stopCard` 的 7 位/2 位形态同一批约定）**：第 3 参是
+  // **形参口径（与 `enterDoing` 的 8 位 / `stopCard` 的 2 位形态同一批约定）**：第 3 参是
   // 「收尾 opts」＝ `{toColumn, markUnread, ...options}`——db 连接袋**平铺**进来，不再
   // 嵌套一层 `options`。嵌套会让收尾实现拿不到 `{db}` 而静默回落生产库（第三起误写生产库
   // 事故的同一条根因，见 `doc_ai/bug_report/20261012-Node单测误写生产库…/`）。
@@ -1846,6 +1860,20 @@ function errText(err) {
   if (err === null || err === undefined) return '';
   if (err instanceof Error) return String(err.message ?? err);
   return String(err);
+}
+
+/**
+ * 异常 → 交给 `ctx.error*` 的用户可见错误值（key+vars 契约的桥）。
+ *
+ * `localizable()` 标记过的错误（`.i18nKey` 是未渲染的中文词条 key）转成 `{message, vars}`，
+ * 让路由层按请求语言整条渲染；其余错误保持 `str(e)` 口径——固定文案的 `.message` 本身就
+ * 是词条 key，英文模式仍可命中词典。**只用于响应**，日志/`last_error` 继续用 `errText`。
+ */
+function userErrText(err) {
+  if (err !== null && typeof err === 'object' && typeof err.i18nKey === 'string') {
+    return messageVars(err.i18nKey, err.i18nVars);
+  }
+  return errText(err);
 }
 
 /** `os.path.abspath` 的对应物（不解析符号链接；`path.resolve` 依赖 cwd） */
@@ -2255,6 +2283,13 @@ export const _start_ext_recover_after_connect = startExtRecoverAfterConnect;
  * `enterDoingWorktree`（不写 `wait_items` 行）；`queueWorktree=true` 是唯一例外
  * （合并回交，必须与项目内其他单元串行）。
  *
+ * `lang`（T13 修复轮 1）＝本条请求语言（默认 ''=无请求上下文）：
+ * **在全部前置门禁通过之后、入队/直起之前**调用 `setBoardCardLang`（卡 lang 为空才写，
+ * 先到先得；二次 start 不覆盖）。门禁包括退场族、归档、worktree 转交、队列幂等、
+ * 在管预检、父依赖——被拒绝的起跑意图不钉语言。带请求上下文的入口（start 端点 /
+ * 拖列进 doing / 强制运行手势 / 合并回交）由路由层解析后传入；定时开工
+ * （`watchOnce`）与队列拾起（`dequeueStart`）无请求上下文，不传（保持未冻结）。
+ *
  * **async**（内部要 await 驱动起会话）；「Python 持锁期间做 DB 写」的段落全部保持同步，
  * await 只落在锁外（`extRefresh` / worktree 创建 / 起会话三处）。
  *
@@ -2264,11 +2299,12 @@ export const _start_ext_recover_after_connect = startExtRecoverAfterConnect;
  * @param {boolean} [force]
  * @param {boolean} [worktree] 用户下拉选「在新 worktree 中开始」
  * @param {boolean} [queueWorktree] worktree 卡也走统一队列（合并回交）
+ * @param {string} [lang] 本条请求语言（''=无请求上下文）
  * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
  * @returns {Promise<[object|null, object|null]>}
  */
 export async function enterDoing(project, card, extra = '', force = false, worktree = false,
-  queueWorktree = false, options = {}) {
+  queueWorktree = false, lang = '', options = {}) {
   if (webFamily(project) === null) return [null, { error: RETIRED_MSG }];
   // 归档同步：从「已完成」起跑先取消归档（本入口是「离开已完成→doing」的单一写点，
   // `moveCard` 对该目标不再重复调用）。失败即整体放弃（列不动）并 400。
@@ -2277,12 +2313,16 @@ export async function enterDoing(project, card, extra = '', force = false, workt
     const err = await hook('archiveCardSessions')(card, false, '离开已完成', { options });
     if (err) return [null, { error: err }];
   }
-  // 独立 worktree 模式（见 docstring）：queue_worktree 时走下面的排队路径
+  // 独立 worktree 模式（见 docstring）：queue_worktree 时走下面的排队路径；
+  // lang 随之下传，冻结点在 worktree 创建等门禁之后（F1 修复轮 1）
   if (!queueWorktree && (worktree || String(cardOpt(card, 'worktree') || '').trim())) {
-    return enterDoingWorktree(project, card, extra, force, Boolean(worktree), options);
+    return enterDoingWorktree(project, card, extra, force, Boolean(worktree), lang, options);
   }
   if (card.column_key === 'doing' && card.block_kind === 'queue' && !force) {
     // 幂等：已在队列（P4 单态：占位仅 doing+queue）。防御性补一次入队（自身幂等）
+    // 重按开始也是「带语言的起跑意图」：卡可能在无请求上下文的定时路径下入队
+    // （lang 仍空），这里补一次冻结——先到先得，已有语言不覆盖（F1 修复轮 1）
+    if (lang) dbmod.setBoardCardLang(card.id, lang, options);
     withRunner((inst) => inst.submitCard(card.id, '', '', false, options));
     return [cardJson(card, {}, options), null];
   }
@@ -2306,6 +2346,10 @@ export async function enterDoing(project, card, extra = '', force = false, workt
       }
     }
   }
+  // 语言冻结（T13 修复轮 1，F1/F3）：**全部前置门禁之后、入队/直起之前**——
+  // 退场族/归档/在管/父依赖/worktree 创建失败拒绝的起跑意图一律不钉语言。
+  // 先到先得：setBoardCardLang 的 SQL 谓词只在卡 lang 为空时写（二次不覆盖）。
+  if (lang) dbmod.setBoardCardLang(card.id, lang, options);
   if (!force && wantQueue) {
     queued = true;
   } else {
@@ -2334,7 +2378,7 @@ export async function enterDoing(project, card, extra = '', force = false, workt
     return [cardJson(dbmod.getBoardCard(card.id, options), {}, options), null];
   }
   try {
-    await startCard(project, dbmod.getBoardCard(card.id, options), extra, options);
+    await startCard(project, dbmod.getBoardCard(card.id, options), extra, '', options);
   } catch (e) {
     // 与 runner 队列拾起（dequeueStart）对撞落败：对方已起跑成功（在管条目在场），
     // 放弃回滚、按当前态返回——否则会把对方落好的 doing 踩回原列
@@ -2350,7 +2394,7 @@ export async function enterDoing(project, card, extra = '', force = false, workt
       block_kind: card.block_kind,
       block_text: card.block_text || '',
     }, options);
-    return [null, { error: errText(e) }];
+    return [null, { error: userErrText(e) }];
   }
   // 直起路径落表占住运行位（v3d 去占用后无第二登记：行即占位），reason 按实参分标签
   if (inst !== null) {
@@ -2370,11 +2414,16 @@ export const _enter_doing = enterDoing;
 
 /**
  * start 端点专用（Python `start_into_doing`）：语义全部由 `enterDoing` 承载。
+ *
+ * `lang`（T13）＝本条请求语言：**由 `enterDoing` 在门禁之后冻结**（修复轮 1 从本函数
+ * 入口下沉；入口先写会让被 parent-not-done 拒绝的 start 也钉语言）。排队路径同样在
+ * 用户按下开始这一刻定语言（worker 拾起时已无请求上下文）。
+ * 空串 = 无请求上下文（定时开工/队列拾起/内部调用），保持未冻结。
  * @returns {Promise<[object|null, object|null]>}
  */
 export function startIntoDoing(project, card, extra = '', force = false, worktree = false,
-  queueWorktree = false, options = {}) {
-  return enterDoing(project, card, extra, force, worktree, queueWorktree, options);
+  queueWorktree = false, lang = '', options = {}) {
+  return enterDoing(project, card, extra, force, worktree, queueWorktree, lang, options);
 }
 
 /** `start_into_doing` 的 Python 名别名。 */
@@ -2412,11 +2461,16 @@ export const _wt_start_end = wtStartEnd;
  * worktree 路径；父依赖门禁与 `enterDoing` 同口径（worktree 只免排队，不免依赖）；起会话
  * 失败回原列 + 保留 `card.worktree` 标记（路径已建，重按开始即复用）。
  *
+ * `lang`（T13 修复轮 1）＝本条请求语言：**在 D10/在管/父依赖/worktree 创建等全部门禁
+ * 通过之后、落列与起会话之前**冻结（卡 lang 为空才写，先到先得）；空串＝无请求上下文
+ * （内部调用），保持未冻结。
+ *
  * **async**：内部 await `startCard`（驱动）。
+ * @param {string} [lang]
  * @returns {Promise<[object|null, object|null]>}
  */
 export async function enterDoingWorktree(project, card, extra = '', force = false,
-  want = false, options = {}) {
+  want = false, lang = '', options = {}) {
   const cardId = card.id;
   const cardWt = String(cardOpt(card, 'worktree') || '').trim();
   if (want && !cardWt && String(card.session_id || '').trim()) {
@@ -2449,6 +2503,9 @@ export async function enterDoingWorktree(project, card, extra = '', force = fals
       if (cur === null || cur === undefined) return [null, { error: '卡片不存在' }];
       return [cardJson(cur, {}, options), null];
     }
+    // 语言冻结（T13 修复轮 1）：所有门禁（D10/在管/父依赖/worktree 创建/并发复检）
+    // 都已通过，落列与起会话之前定格；失败回滚不回退语言
+    if (lang) dbmod.setBoardCardLang(cardId, lang, options);
     // 清可能残留的排队态（用户先点了「开始（入队）」又选 worktree 开始）
     cancelCardWait(cardId, 'worktree 直起', options);
     const fields = {
@@ -2458,7 +2515,7 @@ export async function enterDoingWorktree(project, card, extra = '', force = fals
     dbmod.updateBoardCard(cardId, false, fields, options);   // 用户本人操作：不置未读
     let logPath;
     try {
-      logPath = await startCard(project, dbmod.getBoardCard(cardId, options), extra, options);
+      logPath = await startCard(project, dbmod.getBoardCard(cardId, options), extra, '', options);
     } catch (e) {
       // 与并发起跑对撞落败：对方已起跑成功，不动列、直接按当前态返回
       if (sessionInFlight(cardId)) {
@@ -2470,7 +2527,7 @@ export async function enterDoingWorktree(project, card, extra = '', force = fals
         block_kind: card.block_kind,
         block_text: card.block_text || '',
       }, options);
-      return [null, { error: errText(e) }];
+      return [null, { error: userErrText(e) }];
     }
     // 起跑行落一份 worktree 证据（与 `_start_web` 的会话日志同文件，便于事后核对）
     runnerMod.appendLog(logPath, `### worktree 直起 path=${p} branch=${branch}\n`);
@@ -2553,18 +2610,25 @@ export const _build_merge_instruction = buildMergeInstruction;
  *
  * 前置校验：无主会话（没会话就没上下文可投递）/ 无法判定 / 无待合并提交 ⇒ 直接报错。
  *
+ * `lang`（T13 修复轮 1）＝本条 HTTP 请求语言：合并回交同样会起会话，语言随
+ * `startIntoDoing` 下传，由 `enterDoing` 在门禁之后冻结（默认 ''=内部调用）。
+ *
  * **async**（经 `startIntoDoing`）。
+ * @param {string} [lang]
  * @returns {Promise<[object|null, object|null]>}
  */
-export function handoffWorktreeMerge(project, card, options = {}) {
+export function handoffWorktreeMerge(project, card, lang = '', options = {}) {
   if (!String(card.session_id || '').trim()) {
     return Promise.resolve([null, { error: '该卡片尚无主会话，无法交给 agent 合并' }]);
   }
   const st = mergeStatus(project, card);
-  if (!st.ok) return Promise.resolve([null, { error: `无法判定待合并提交：${st.error}` }]);
+  if (!st.ok) {
+    return Promise.resolve([null,
+      { error: messageVars('无法判定待合并提交：{detail}', { detail: st.error }) }]);
+  }
   if (st.ahead <= 0) return Promise.resolve([null, { error: '该卡片没有待合并的提交（可直接通过）' }]);
   const instruction = buildMergeInstruction(project, card, st);
-  return startIntoDoing(project, card, instruction, false, false, true, options);
+  return startIntoDoing(project, card, instruction, false, false, true, lang, options);
 }
 
 /** `handoff_worktree_merge` 的 Python 名别名。 */
@@ -2594,7 +2658,7 @@ export async function dequeueStart(project, card, options = {}) {
   dbmod.updateBoardCard(card.id, true,
     { column_key: 'doing', block_kind: null, block_text: '', last_error: '' }, options);
   try {
-    await startCard(project, dbmod.getBoardCard(card.id, options), extra, options);
+    await startCard(project, dbmod.getBoardCard(card.id, options), extra, '', options);
   } catch {
     // 与 force 直起对撞落败：对方已起跑成功，放弃回滚（回滚会把对方落好的 doing 踩回原列）
     if (sessionInFlight(card.id)) return true;
@@ -2841,7 +2905,8 @@ export async function startWeb(project, card, family, extra = '', options = {}) 
   } catch (e) {
     dbmod.updateBoardCard(card.id, true,
       { last_error: `会话启动失败: ${errText(e)}`, last_error_at: nowMs() }, options);
-    throw new Error(`会话启动失败: ${errText(e)}`);
+    throw localizable(new Error(`会话启动失败: ${errText(e)}`),
+      '会话启动失败: {detail}', { detail: errText(e) });
   }
   // 续接路径 sid 本就在库（归并写法幂等）；此处兜建会话后卡片被删等边角
   if (!saveCardSid(card.id, sid, options)) {
@@ -2887,9 +2952,20 @@ export const _start_web = startWeb;
  * （worker 拾取起跑路径自持 starting 行）。退场族 ⇒ 记 `last_error` 后抛 `RETIRED_MSG`。
  *
  * **async**。
+ *
+ * `lang`（T13）＝本次起会话的请求语言。**本函数是「直起/飞书打回」入口，语义是
+ * 「起跑意图即冻结」**：入口先写（卡 lang 为空才写；二次 start 不覆盖），因此即使随后因
+ * 「会话在途/退场族/启动失败」抛错，语言也已按首轮请求定格——用户重按开始/重试时不会
+ * 因为一次失败的首跑丢掉已表达的语言偏好（F3 保留此位置，语义由
+ * `startCard 入口冻结（失败路径也已冻结，二次不覆盖）` 用例钉住）。HTTP start / 拖列进
+ * doing / 强制运行 / 合并回交这些**请求入口**则统一走 `enterDoing`，在门禁之后冻结
+ * （F1 修复轮 1；被 parent-not-done 等门禁拒绝的意图不钉语言）。空串 = 无语言来源
+ * （队列拾起/内部调用），不改卡。
+ * @param {string} [lang]
  * @returns {Promise<string>} 会话日志路径
  */
-export async function startCard(project, card, extra = '', options = {}) {
+export async function startCard(project, card, extra = '', lang = '', options = {}) {
+  if (lang) dbmod.setBoardCardLang(card.id, lang, options);
   if (sessionInFlight(card.id)) throw new Error('会话运行中，请等待完成或先停止');
   const family = webFamily(project);
   if (family === null) {
@@ -3013,7 +3089,8 @@ export async function deliverNow(project, card, commentRow, text, inject = false
       if (before !== null) before(sid, options);
       await webSend(family, project, sid, text, '', Boolean(inject), options);
     } catch (e) {
-      throw new Error(`评论投递失败: ${errText(e)}`);
+      throw localizable(new Error(`评论投递失败: ${errText(e)}`),
+        '评论投递失败: {detail}', { detail: errText(e) });
     }
     dbmod.updateBoardComment(commentRow.id, { sent: 1, session_id: sid, sent_text: text },
       options);
@@ -3163,7 +3240,8 @@ export async function compactSession(project, card, sid, options = {}) {
       break;
     }
   }
-  throw new Error(`compact 失败: ${last}`);
+  throw localizable(new Error(`compact 失败: ${last}`),
+    'compact 失败: {detail}', { detail: last });
 }
 
 /** `compact_session` 的 Python 名别名。 */
@@ -3192,7 +3270,8 @@ export async function forkCompactSession(project, card, sid, options = {}) {
     }
   } catch (e) {
     if (e instanceof Error && String(e.message).startsWith('压缩新建失败')) throw e;
-    throw new Error(`压缩新建失败: ${errText(e)}`);
+    throw localizable(new Error(`压缩新建失败: ${errText(e)}`),
+      '压缩新建失败: {detail}', { detail: errText(e) });
   }
   return [newSid, true];
 }
@@ -3224,7 +3303,8 @@ export async function forkSession(project, card, sid, options = {}) {
     }
   } catch (e) {
     if (e instanceof Error && String(e.message).startsWith('fork 失败')) throw e;
-    throw new Error(`fork 失败: ${errText(e)}`);
+    throw localizable(new Error(`fork 失败: ${errText(e)}`),
+      'fork 失败: {detail}', { detail: errText(e) });
   }
   return newSid;
 }
@@ -5387,11 +5467,11 @@ export async function deliverPendingAnswerNow(cardId, options = {}) {
       // 「问题已不存在」对齐执行体口径：立即放弃不空转重试 3 次
       markFailed(row.id, errText(e), options);
       dbmod.updateBoardCard(cardId, true, { block_kind: null, block_text: '' }, options);
-      return [false, `回答失败：${errText(e)}`];
+      return [false, messageVars('回答失败：{detail}', { detail: errText(e) })];
     }
     returnToWaiting(row.id, 0.0, false, options);
     if (inst !== null) inst.submitAnswer(cardId, options);
-    return [false, `回答失败：${errText(e)}`];
+    return [false, messageVars('回答失败：{detail}', { detail: errText(e) })];
   }
   markDone(row.id, options);
   // 「立即送达」同队列送达路径口径：用户作答引发的回列不置「有更新」标记
@@ -5524,7 +5604,8 @@ export async function answerInteraction(proj, card, qid, answers, options = {}) 
   if (cardId === null || cardId === undefined) {
     const drv = boardDriver();
     if (webFamily(proj) !== 'dsh_plugin') {
-      return `回答失败：${RETIRED_MSG}`;      // 退场族无作答通道（单族化）
+      // 退场族无作答通道（单族化）；固定整句词条（不让英文模式夹中文的 RETIRED_MSG）
+      return '回答失败：该智能体族已下线，请在项目设置里改绑 dsh 插件';
     }
     await watchBeforeDelivery(sid);
     try {
@@ -5532,7 +5613,7 @@ export async function answerInteraction(proj, card, qid, answers, options = {}) 
         return '回答失败：提问不存在或已过期';
       }
     } catch (e) {
-      return `回答失败：${errText(e)}`;
+      return messageVars('回答失败：{detail}', { detail: errText(e) });
     }
     iwClear(sid);
     return null;
@@ -5568,7 +5649,9 @@ export async function answerApproval(proj, card, approvalId, decision, scope = '
   scope = String(scope || '');
   if (scope !== '' && scope !== 'session') return '审批范围非法';
   const fam = agentFamily(proj.agent_path || '');
-  if (fam !== 'dsh_plugin') return `审批失败：${RETIRED_MSG}`;
+  if (fam !== 'dsh_plugin') {
+    return '审批失败：该智能体族已下线，请在项目设置里改绑 dsh 插件';
+  }
   if (scope === 'session') {
     return 'dsh 不支持「本会话内批准」（宿主无 session 级放行语义）';
   }
@@ -5579,7 +5662,7 @@ export async function answerApproval(proj, card, approvalId, decision, scope = '
     try {
       await boardDriver().answerApproval(sid, approvalId, dshOutcome);
     } catch (e) {
-      return `审批失败：${errText(e)}`;
+      return messageVars('审批失败：{detail}', { detail: errText(e) });
     }
     iwClear(sid);
     return null;
@@ -5817,7 +5900,7 @@ export async function watchOnce(options = {}) {
   for (const r of rows) {
     const proj = dbmod.getProject(r.project_id, options);
     if (proj === null || proj === undefined || proj.archived) continue;   // 归档项目不自动开工
-    const [, err] = await enterDoing(proj, r, '', false, false, false, options);
+    const [, err] = await enterDoing(proj, r, '', false, false, false, '', options);
     if (err !== null && err !== undefined && String(err.blocked || '').includes('blocked')) {
       // 父任务未 done：清定时记错误（不再每 30s 重试点燃）
       dbmod.updateBoardCard(r.id, true, { scheduled_at: null,
@@ -6201,7 +6284,7 @@ export const _jira_import = jiraImport;
 // ══════════════════════════════════════════════════════════════════════════
 
 setBoardHooks({
-  enterDoing,          // `_enter_doing`（board.py:1040）——M5-2；7 位：(project, card, extra, force, worktree, queueWorktree, options)
+  enterDoing,          // `_enter_doing`（board.py:1040）——M5-2；8 位：(project, card, extra, force, worktree, queueWorktree, lang, options)
   stopCard,            // `stop_card`（board.py:2191）——M5-2；2 位：(cardId, options)
   finish,              // `finish`（board.py:2411）——M5-2（**同步**，见其 docstring）
   archiveCardSessions, // `_archive_card_sessions`（board.py:3314）——M5-3；4 位：(card, archived, reason, {strict, options})

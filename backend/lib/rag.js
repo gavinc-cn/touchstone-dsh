@@ -91,6 +91,7 @@ import { pathToFileURL } from 'node:url';
 // 分支 Detected unsettled top-level await + exit 13）。入口改成 main().then(...) 后环消失，
 // 私有副本删掉，改回下面这行 import（重复实现归零）。
 import { scanCases } from './export-cases.js';
+import { localizable } from './i18n.js';
 import { pyJoin, pyMtimeFloat, pyStrCompare, pyStrip, readText } from './lib.js';
 import { pyJsonDumps, pyJsonDumpsIndent } from './pyjson.js';
 
@@ -526,11 +527,15 @@ export function _cfg_int(value, def, upper, name) {
     n = pyInt(value);
   } catch (exc) {
     if (exc instanceof TypeError || exc instanceof ValueError) {
-      throw new ValueError(`${name} 须为正整数`);
+      throw localizable(new ValueError(`${name} 须为正整数`),
+        '{name} 须为正整数', { name });
     }
     throw exc;
   }
-  if (n < 1 || n > upper) throw new ValueError(`${name} 须在 1~${upper} 之间`);
+  if (n < 1 || n > upper) {
+    throw localizable(new ValueError(`${name} 须在 1~${upper} 之间`),
+      '{name} 须在 1~{upper} 之间', { name, upper });
+  }
   return n;
 }
 

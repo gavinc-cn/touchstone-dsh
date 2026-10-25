@@ -11,8 +11,9 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useAppStore } from '../stores/app'
 import { taskApi } from '../api'
-import { ST_LABEL, fmtTime } from '../utils/renderMd'
+import { fmtTime, stLabel } from '../utils/renderMd'
 import { toast } from '../utils/toast'
+import { t, useI18n } from '../utils/i18n'
 import { Button } from './ui/button'
 import LoadPlanTab from './LoadPlanTab'
 import LoadLogTab from './LoadLogTab'
@@ -22,11 +23,13 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs'
 const TERMINAL = ['done', 'failed', 'stopped', 'interrupted']
 
 export default function StressTab() {
+  // 订阅语言切换（lang 变化即重渲染；文案用模块级 t 按当前语言求值）
+  useI18n()
   const store = useAppStore()
   const project = store.currentProject
   // 当前项目的压测任务（新建在前）；useMemo 防每次渲染新数组导致选中项 effect 抖动
   const list = useMemo(() => store.tasks
-    .filter((t) => t.project_id === project?.id && t.task_type === 'stress')
+    .filter((task) => task.project_id === project?.id && task.task_type === 'stress')
     .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')),
     [store.tasks, project?.id])
   const [selId, setSelId] = useState(null)
@@ -36,7 +39,7 @@ export default function StressTab() {
   const [runs, setRuns] = useState([])   // 选中任务的运行列表（头部计数/门禁用）
   const [act, setAct] = useState('')     // 进行中的动作（防连点）
 
-  const sel = list.find((t) => t.id === selId) || null
+  const sel = list.find((task) => task.id === selId) || null
   const selStatus = sel?.status
   const terminal = TERMINAL.includes(selStatus)
   const busyStatus = selStatus === 'running' || selStatus === 'queued'
@@ -62,10 +65,10 @@ export default function StressTab() {
       else if (kind === 'diagnose') await taskApi.loadDiagnose(sel.id)
       else if (kind === 'restart') await taskApi.restart(sel.id)
       toast({
-        rerun: '已入队复压（同一方案再压一次），等待执行',
-        stop: '已请求停止',
-        diagnose: '已把运行现场发给 agent（项目忙时排队）',
-        restart: '已清空运行记录并重启（从第 1 轮重跑）',
+        rerun: t('已入队复压（同一方案再压一次），等待执行'),
+        stop: t('已请求停止'),
+        diagnose: t('已把运行现场发给 agent（项目忙时排队）'),
+        restart: t('已清空运行记录并重启（从第 1 轮重跑）'),
       }[kind])
     } catch (e) {
       toast(e.message)
@@ -75,12 +78,12 @@ export default function StressTab() {
   }
 
   function doRerun() {
-    if (!window.confirm(`用现有方案包再压一次「${sel.name}」？\n（跳过 agent 出方案，直接发压并生成新一份报告/曲线）`)) return
+    if (!window.confirm(t('用现有方案包再压一次「{name}」？\n（跳过 agent 出方案，直接发压并生成新一份报告/曲线）', { name: sel.name }))) return
     runAction('rerun')
   }
 
   function doRestart() {
-    if (!window.confirm(`重启「${sel.name}」将清空全部运行记录，从第 1 轮重跑（agent 重新出方案）。\n历史报告文件仍留在 load/report/ 目录。继续？`)) return
+    if (!window.confirm(t('重启「{name}」将清空全部运行记录，从第 1 轮重跑（agent 重新出方案）。\n历史报告文件仍留在 load/report/ 目录。继续？', { name: sel.name }))) return
     runAction('restart')
   }
 
@@ -88,19 +91,19 @@ export default function StressTab() {
   // 默认选中最新一条；选中项被删除后回落到第一条
   useEffect(() => {
     if (!list.length) { setSelId(null); return }
-    if (!list.some((t) => t.id === selId)) setSelId(list[0].id)
+    if (!list.some((task) => task.id === selId)) setSelId(list[0].id)
   }, [list, selId])
 
   // 列表项方案标记：状态变化时才重新拉（跑完会新产出方案包）
   useEffect(() => {
-    const todo = list.filter((t) => {
-      const key = `${t.id}:${t.status}`
+    const todo = list.filter((task) => {
+      const key = `${task.id}:${task.status}`
       return !metaRef.current[key]
     })
     if (!todo.length) return
-    todo.forEach((t) => { metaRef.current[`${t.id}:${t.status}`] = true })
-    Promise.all(todo.map((t) => taskApi.loadCaseMeta(t.id)
-      .then((d) => [t.id, d]).catch(() => [t.id, null])))
+    todo.forEach((task) => { metaRef.current[`${task.id}:${task.status}`] = true })
+    Promise.all(todo.map((task) => taskApi.loadCaseMeta(task.id)
+      .then((d) => [task.id, d]).catch(() => [task.id, null])))
       .then((pairs) => {
         setMeta((prev) => {
           const next = { ...prev }
@@ -115,40 +118,40 @@ export default function StressTab() {
       {/* 左侧压测任务列表 */}
       <aside className="flex w-[300px] flex-none flex-col border-r border-border">
         <div className="flex-none px-3 pt-3 pb-1 font-mono text-[calc(10px*var(--fs))] uppercase tracking-[0.14em] text-muted-foreground">
-          压测任务（{list.length}）
+          {t('压测任务（{n}）', { n: list.length })}
         </div>
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
-          {list.map((t) => {
-            const m = meta[t.id]
+          {list.map((task) => {
+            const m = meta[task.id]
             return (
-              <button key={t.id} type="button"
-                className={'load-item' + (selId === t.id ? ' on' : '')}
-                onClick={() => setSelId(t.id)}>
-                <div className="truncate text-[calc(13px*var(--fs))] font-semibold" title={t.name}>{t.name}</div>
+              <button key={task.id} type="button"
+                className={'load-item' + (selId === task.id ? ' on' : '')}
+                onClick={() => setSelId(task.id)}>
+                <div className="truncate text-[calc(13px*var(--fs))] font-semibold" title={task.name}>{task.name}</div>
                 <div className="mt-1.5 flex items-center gap-1.5 text-[calc(11px*var(--fs))] text-muted-foreground">
-                  <span className={'badge st-' + t.status}><span className="dot"></span>{ST_LABEL[t.status] || t.status}</span>
-                  <span>轮 {t.current_round}</span>
-                  <span className="ml-auto">{fmtTime(t.created_at)}</span>
+                  <span className={'badge st-' + task.status}><span className="dot"></span>{stLabel(task.status)}</span>
+                  <span>{t('轮 {n}', { n: task.current_round })}</span>
+                  <span className="ml-auto">{fmtTime(task.created_at)}</span>
                 </div>
                 {m && (
                   <div className="lp-marks">
-                    {m.plan_found && <span className="lp-chip sm">方案 ✓</span>}
-                    {m.driver === 'script' && <span className="lp-chip sm">脚本</span>}
-                    {m.driver === 'scenario' && <span className="lp-chip sm">场景</span>}
-                    {m.driver === 'legacy_scenario' && <span className="lp-chip sm">存量场景</span>}
-                    {!m.found && <span className="lp-chip sm off">无方案</span>}
-                    {m.has_html && <span className="lp-chip sm">自定义视图</span>}
+                    {m.plan_found && <span className="lp-chip sm">{t('方案 ✓')}</span>}
+                    {m.driver === 'script' && <span className="lp-chip sm">{t('脚本')}</span>}
+                    {m.driver === 'scenario' && <span className="lp-chip sm">{t('场景')}</span>}
+                    {m.driver === 'legacy_scenario' && <span className="lp-chip sm">{t('存量场景')}</span>}
+                    {!m.found && <span className="lp-chip sm off">{t('无方案')}</span>}
+                    {m.has_html && <span className="lp-chip sm">{t('自定义视图')}</span>}
                   </div>
                 )}
-                {t.error && (
-                  <div className="mt-1 truncate text-[calc(11px*var(--fs))]" style={{ color: 'var(--fail)' }} title={t.error}>{t.error}</div>
+                {task.error && (
+                  <div className="mt-1 truncate text-[calc(11px*var(--fs))]" style={{ color: 'var(--fail)' }} title={task.error}>{task.error}</div>
                 )}
               </button>
             )
           })}
           {!list.length && (
             <div className="p-2 text-xs leading-relaxed text-muted-foreground">
-              暂无压测任务。在「测试任务」页新建类型为「压力测试」的任务（填写压测说明）后，会自动显示在这里。
+              {t('暂无压测任务。在「测试任务」页新建类型为「压力测试」的任务（填写压测说明）后，会自动显示在这里。')}
             </div>
           )}
         </div>
@@ -158,48 +161,48 @@ export default function StressTab() {
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         {!sel ? (
           <div className="mt-16 text-center text-sm text-muted-foreground">
-            ← 从左侧选择一个压测任务查看方案与指标
+            {t('← 从左侧选择一个压测任务查看方案与指标')}
           </div>
         ) : (
           <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col">
             <div className="flex flex-none flex-wrap items-center gap-2 px-4 pt-3">
               <h3 className="m-0 font-serif text-[calc(15px*var(--fs))] font-semibold">{sel.name}</h3>
-              <span className={'badge st-' + sel.status}><span className="dot"></span>{ST_LABEL[sel.status] || sel.status}</span>
-              <span className="lp-chip sm">已跑 {runCount} 次</span>
+              <span className={'badge st-' + sel.status}><span className="dot"></span>{stLabel(sel.status)}</span>
+              <span className="lp-chip sm">{t('已跑 {n} 次', { n: runCount })}</span>
               <TabsList className="ml-2 h-8">
-                <TabsTrigger value="plan" className="px-3">压测方案</TabsTrigger>
-                <TabsTrigger value="log" className="px-3">压测日志</TabsTrigger>
+                <TabsTrigger value="plan" className="px-3">{t('压测方案')}</TabsTrigger>
+                <TabsTrigger value="log" className="px-3">{t('压测日志')}</TabsTrigger>
               </TabsList>
               <span className="ml-auto font-mono text-[calc(11px*var(--fs))] text-muted-foreground">
-                创建 {fmtTime(sel.created_at)}{sel.started_at ? ` · 开始 ${fmtTime(sel.started_at)}` : ''}{sel.ended_at ? ` · 结束 ${fmtTime(sel.ended_at)}` : ''}
+                {t('创建 {time}', { time: fmtTime(sel.created_at) })}{sel.started_at ? t(' · 开始 {time}', { time: fmtTime(sel.started_at) }) : ''}{sel.ended_at ? t(' · 结束 {time}', { time: fmtTime(sel.ended_at) }) : ''}
               </span>
             </div>
 
             {/* 动作区：压测面板是复压的唯一入口（语义区分复压 / 重启 / 诊断） */}
             <div className="flex flex-none flex-wrap items-center gap-2 px-4 pt-2">
               <Button size="sm" variant="outline" disabled={!terminal || !!act}
-                title="跳过 agent，用现有方案包再压一次（生成新一份报告与曲线）"
-                onClick={doRerun}>复压</Button>
+                title={t('跳过 agent，用现有方案包再压一次（生成新一份报告与曲线）')}
+                onClick={doRerun}>{t('复压')}</Button>
               {busyStatus && (
                 <Button size="sm" variant="outline" disabled={!!act}
-                  title="停止当前运行（先落 stop 文件，宽限 10s 后杀进程树）"
-                  onClick={() => runAction('stop')}>停止</Button>
+                  title={t('停止当前运行（先落 stop 文件，宽限 10s 后杀进程树）')}
+                  onClick={() => runAction('stop')}>{t('停止')}</Button>
               )}
               <Button size="sm" variant="outline" disabled={!sel.session_id || busyStatus || !!act}
                 title={sel.session_id
-                  ? '把最近一次运行的现场（退出码/指标摘要/日志尾）发给该任务的 agent 会话'
-                  : '会话尚未生成（首轮执行后才有）'}
-                onClick={() => runAction('diagnose')}>诊断</Button>
+                  ? t('把最近一次运行的现场（退出码/指标摘要/日志尾）发给该任务的 agent 会话')
+                  : t('会话尚未生成（首轮执行后才有）')}
+                onClick={() => runAction('diagnose')}>{t('诊断')}</Button>
               <Button size="sm" variant="outline" disabled={!terminal || !!act}
-                title="清空运行记录，从第 1 轮重跑（agent 重新出方案）——与「复压」不同"
-                onClick={doRestart}>重启（换方案）</Button>
-              {act && <span className="hint">处理中…</span>}
+                title={t('清空运行记录，从第 1 轮重跑（agent 重新出方案）——与「复压」不同')}
+                onClick={doRestart}>{t('重启（换方案）')}</Button>
+              {act && <span className="hint">{t('处理中…')}</span>}
               {!terminal && busyStatus && (
-                <span className="hint">运行中：结束后可复压 / 诊断 / 重启</span>
+                <span className="hint">{t('运行中：结束后可复压 / 诊断 / 重启')}</span>
               )}
             </div>
             {sel.error && (
-              <div className="px-4 pt-1 text-xs" style={{ color: 'var(--fail)' }}>错误：{sel.error}</div>
+              <div className="px-4 pt-1 text-xs" style={{ color: 'var(--fail)' }}>{t('错误：{msg}', { msg: sel.error })}</div>
             )}
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
               <TabsContent value="plan"><LoadPlanTab task={sel} /></TabsContent>

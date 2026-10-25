@@ -569,7 +569,8 @@ def test_deliver_now_failure_keeps_pending(monkeypatch):
 
     monkeypatch.setattr(board.dshdriver, "answer_question", boom)
     ok, err = board.deliver_pending_answer_now(1)
-    assert ok is False and "gone" in err
+    # key+vars 契约（T11）：插值文案不预渲染，detail 放在 vars 里
+    assert ok is False and err["vars"]["detail"] == "gone"
     row = waitq.get_item(i)
     assert row["state"] == "waiting" and row["retries"] == 0
     assert json.loads(row["meta"])["sid"] == "s-1"
@@ -589,7 +590,7 @@ def test_deliver_now_question_gone_fails_fast(monkeypatch):
 
     monkeypatch.setattr(board.dshdriver, "answer_question", gone)
     ok, err = board.deliver_pending_answer_now(1)
-    assert ok is False and "回答失败" in err
+    assert ok is False and err["message"].startswith("回答失败")
     row = waitq.get_item(i)
     assert row["state"] == "failed" and row["retries"] == 0
     (cid, kw), = calls["upd"]
@@ -622,6 +623,10 @@ def test_deliver_answer_endpoint_codes(monkeypatch):
         def _board_owned(self, pid, cid):
             return {"id": pid}, {"id": cid}
 
+        _request_lang = server.Handler._request_lang
+        _localize_error = server.Handler._localize_error
+        _error = server.Handler._error
+        _error_spaced = server.Handler._error_spaced
         def _respond(self, code, body=b"", ctype=""):
             codes.append(code)
 
@@ -646,6 +651,10 @@ def test_answer_endpoint_queued_true(monkeypatch):
         def _board_owned(self, pid, cid):
             return {"id": pid, "agent_path": "dsh-plugin:/x"}, {"id": cid}
 
+        _request_lang = server.Handler._request_lang
+        _localize_error = server.Handler._localize_error
+        _error = server.Handler._error
+        _error_spaced = server.Handler._error_spaced
         def _respond(self, code, body=b"", ctype=""):
             codes.append(code)
             bodies.append(body)

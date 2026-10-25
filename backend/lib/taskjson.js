@@ -29,6 +29,7 @@
  */
 import { agentFamily } from './agents.js';
 import { getProject } from './db.js';
+import { taskLang } from './i18n.js';
 import { isFile, readText } from './lib.js';
 import { dsh_title as dshTitle } from './sessparse.js';
 import { effectiveModel, sessFamily } from './servercaps.js';
@@ -294,6 +295,9 @@ export function taskJson(row, { db, stateCache } = {}) {
     session_title: sessionTitle(row, { db }),
     current_round: raw('current_round'),
     new_bugs: raw('new_bugs'),
+    // T13：任务语言（创建时冻结；读侧统一归一，未知/空值 → zh）。键序与
+    // Python `_task_json` 逐字一致（响应体 json.dumps 后会对拍）。
+    lang: taskLang(row),
     created_at: raw('created_at'),
     started_at: raw('started_at'),
     ended_at: raw('ended_at'),

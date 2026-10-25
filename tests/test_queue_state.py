@@ -160,12 +160,15 @@ def test_queue_states_batch_includes_starting():
 
 
 def test_card_json_carries_queue_state_last():
-    """card_json 返回值新增 queue_state 字段（最后一枚键，既有键序不动）；
+    """card_json 返回值新增 queue_state 字段（既有键序不动；T13 起末尾再追加 lang）；
     缺省按四参现算（hidden sites 调用点零改动），显式传入时与 answer_pending 同源。"""
     cid = _mk_card()
     row = db.get_board_card(cid)
     d = board.card_json(row)
-    assert list(d.keys())[-1] == "queue_state"
+    # T13（2026-10-23）：语言字段 `lang` 追加在 queue_state 之后（最后一个键）；
+    # 既有键的相对顺序与「queue_state 收尾既有字段」的旧契约保持。
+    assert list(d.keys())[-2:] == ["queue_state", "lang"]
+    assert d["lang"] == "zh"
     assert d["queue_state"] == "idle"
     waitq.enqueue(waitq.KIND_ANSWER, cid, 1)
     d = board.card_json(row)

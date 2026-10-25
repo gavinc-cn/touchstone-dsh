@@ -199,9 +199,15 @@ def test_deliver_comment_wires_inject_for_dsh_plugin(monkeypatch):
 # ---------- server：_inject_msg（归属/族校验与状态码） ----------
 
 def _fake_handler(calls):
-    """仅实现 _respond 的假 handler（_inject_msg 只用到它）。"""
-    return type("F", (), {"_respond": lambda self, code, body=b"", ctype="":
-                          calls.append((code, body))})()
+    """仅实现 _respond（+ 错误响应三件套）的假 handler（_inject_msg 只用到它们）。"""
+    import server
+    return type("F", (), {
+        "_request_lang": server.Handler._request_lang,
+        "_localize_error": server.Handler._localize_error,
+        "_error": server.Handler._error,
+        "_error_spaced": server.Handler._error_spaced,
+        "_respond": lambda self, code, body=b"", ctype="": calls.append((code, body)),
+    })()
 
 
 def _info(sid="s-1", project_id=9, task_id=3, state="queued"):

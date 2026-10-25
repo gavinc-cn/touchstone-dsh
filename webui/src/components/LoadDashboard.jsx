@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { taskApi } from '../api'
 import { createStore } from '../utils/loadMetrics'
+import { t, useI18n } from '../utils/i18n'
 import { PanelView } from './loadpanels/LoadPanels'
 import LoadEscapeHatch from './LoadEscapeHatch'
 
@@ -16,6 +17,8 @@ const FETCH_LIMIT = 20000      // 全量拉取单页条数（与服务端上限�
 const MAX_PAGES = 20           // 分页上限（防异常文件把浏览器拖死）
 
 export default function LoadDashboard({ task, run = '', live }) {
+  // 订阅语言切换（lang 变化即重渲染；文案用模块级 t 按当前语言求值）
+  useI18n()
   const [charts, setCharts] = useState(null)
   const [chartsError, setChartsError] = useState('')
   const [hasHtml, setHasHtml] = useState(false)
@@ -81,11 +84,11 @@ export default function LoadDashboard({ task, run = '', live }) {
   return (
     <div className="lp-dash">
       {chartsError && (
-        <div className="hint lp-warn">图表声明不合法，已回退默认面板：{chartsError}</div>
+        <div className="hint lp-warn">{t('图表声明不合法，已回退默认面板：{msg}', { msg: chartsError })}</div>
       )}
-      {err && <div className="hint lp-warn">指标加载失败：{err}</div>}
+      {err && <div className="hint lp-warn">{t('指标加载失败：{msg}', { msg: err })}</div>}
       {loading && !panels.length ? (
-        <div className="hint">正在读取方案包…</div>
+        <div className="hint">{t('正在读取方案包…')}</div>
       ) : (
         <div className="lp-grid">
           {panels.map((p) => (

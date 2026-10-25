@@ -31,6 +31,7 @@ import db
 import dshevents
 import dshdriver
 import feishu
+import i18n
 import lib
 import runner
 import sessparse
@@ -165,7 +166,10 @@ def card_json(row, running=False, busy=False, msg_queued=False, queue_state=None
             "running": running, "busy": busy,
             "answer_pending": answer,
             "msg_queued": msg_queued,
-            "queue_state": queue_state}
+            "queue_state": queue_state,
+            # T13：卡片语言（首 start 冻结；未冻结/未知 → 读侧归一 zh）。放末位是为了
+            # 与 Node `cardJson` 的键序逐字一致（payload 对拍会比解析后的结构）。
+            "lang": i18n.card_lang(row)}
 
 
 def comment_json(row):
@@ -313,7 +317,7 @@ def set_parent(project_id, card_id, parent_id):
 
 
 def move_card(project, card_id, target, block_text="", before_id=None,
-              merge_ack=False):
+              merge_ack=False, lang=""):
     """移列总入口（服务端仲裁）。返回 (card_dict, None) 或 (None, err_dict)。
 
     err_dict 三种：{"error": "..."}（硬错误，列未变——含进 doing 起会话失败回滚原列）；
@@ -343,6 +347,9 @@ def move_card(project, card_id, target, block_text="", before_id=None,
     ⇒ 改动在 `ts/card-<id>` 分支上、主分支一无所知；`merge_ack=False`（默认）时先
     查有没有待合并提交，有则返回 `{"merge_pending": ...}` **不动列**，由用户决定
     「交给 agent 合并」还是「仅通过」（后者由前端带 `merge_ack=true` 再来一次）。
+    lang（T13 修复轮 1）= 本条 HTTP 请求语言：拖列进 doing 与 doing→doing 强制运行
+    手势都会起会话，**必须把请求语言带进起跑入口**（`_enter_doing` 在门禁之后冻结）；
+    默认空串＝无请求上下文（内部调用/测试），保持未冻结。
     """
     card = db.get_board_card(card_id)
     if card is None:
@@ -355,7 +362,8 @@ def move_card(project, card_id, target, block_text="", before_id=None,
             return card_json(card), None
         # doing→doing 同列拖放：手势映射（v2c T1，裁决 R10；此前直接返回、
         # before_id 被丢弃）。force/停止/调序/no-op 四分支见 _doing_gesture
-        return _doing_gesture(project, card, before_id)
+        # lang：强制运行手势会起会话，请求语言随之带入（F1 修复轮 1）
+        return _doing_gesture(project, card, before_id, lang)
     if src == "doing" and target == "todo":
         return None, {"error": "doing 不可直接拖回 todo"}
     # 待合并提交闸（2026-10-07 批次）：独立 worktree 卡进「已完成」前先问一句——
@@ -379,7 +387,9 @@ def move_card(project, card_id, target, block_text="", before_id=None,
         if err:
             return None, {"error": err}
     if target == "doing":
-        return _enter_doing(project, card)
+        # 拖列进 doing 会起会话（排队或直起）：请求语言随之下传，由 _enter_doing
+        # 在门禁之后冻结（F1 修复轮 1；以前这里不传 lang，en 用户拖进来永远是 zh）
+        return _enter_doing(project, card, lang=lang)
     fields = {"column_key": target}
     if target == "blocked":
         fields["block_kind"] = "manual"
@@ -491,7 +501,7 @@ def _waiting_cards_above(project_id, next_seq):
     return n
 
 
-def _doing_gesture(project, card, before_id):
+def _doing_gesture(project, card, before_id, lang=""):
     """doing→doing 同列拖放的手势映射（v2c T1，裁决 R10；v2 §2.4）。
 
     分区判据=卡片持有面（活跃 c: 行 ∪ 在管条目；`_gesture_run_position`）：
@@ -563,8 +573,9 @@ def _doing_gesture(project, card, before_id):
         return move_card(project, card["id"], "review")
     if before_run:
         # force 手势：跨过运行位往上拖=强制运行（落哪算哪，v2 §2.2 例外）
+        # lang 随请求下传：强制运行会起会话，语言在 _enter_doing 门禁之后冻结
         new_card, err = _enter_doing(project, db.get_board_card(card["id"]),
-                                     force=True)
+                                     force=True, lang=lang)
         if err is not None:
             return None, err
         # at=落点 seq 区间：把起跑行挪到目标运行行之前（best-effort；落点卡无活跃
@@ -1038,7 +1049,7 @@ def start_ext_recover_after_connect(timeout=EXT_RECOVER_WAIT_SECONDS):
 
 
 def _enter_doing(project, card, extra="", force=False, worktree=False,
-                 queue_worktree=False):
+                 queue_worktree=False, lang=""):
     """进 doing 统一入口（start 端点 / 拖入 doing / 定时开工共用）。
 
     force=true：跳过父依赖与排队直接起会话（用户自担风险），reason 标签按实参分
@@ -1080,6 +1091,14 @@ def _enter_doing(project, card, extra="", force=False, worktree=False,
     例外（2026-10-07 批次）：`queue_worktree=True` 时**不转交**，worktree 卡照常走
     统一队列。唯一调用方是 `handoff_worktree_merge`（把合并任务交给 agent）——合并
     要动主仓库工作区，必须与项目内其他单元串行，免排队语义在这里有害。
+
+    lang（T13 修复轮 1）= 本条请求语言（默认空串＝无请求上下文）：
+    **在全部前置门禁通过之后、入队/直起之前**调用 `db.set_board_card_lang`
+    （卡 lang 为空才写，先到先得；二次 start 不覆盖）。门禁包括退场族、归档、
+    worktree 转交、队列幂等、在管预检、父依赖——被拒绝的起跑意图不钉语言。
+    带请求上下文的入口（start 端点 / 拖列进 doing / 强制运行手势 / 合并回交）
+    由 server 层解析后传入；定时开工（`_watch_once`）与队列拾起（`dequeue_start`）
+    无请求上下文，不传（保持未冻结）。
     """
     if _web_family(project) is None:
         # 退场族防呆（见 docstring）：不建行、不入队、不动列——直接明确报错
@@ -1099,13 +1118,19 @@ def _enter_doing(project, card, extra="", force=False, worktree=False,
     # queue_worktree=True（合并回交，2026-10-07）是唯一例外：走下面的排队路径，
     # 合并要动主仓库工作区，必须与项目内其他单元串行。
     if not queue_worktree and (worktree or (_card_opt(card, "worktree") or "").strip()):
+        # lang 随之下传：worktree 直起同样在请求里发生（F1 修复轮 1）；
+        # 冻结点在 worktree 创建等门禁之后（见 _enter_doing_worktree）
         return _enter_doing_worktree(project, card, extra, force=force,
-                                     want=bool(worktree))
+                                     want=bool(worktree), lang=lang)
     if card["column_key"] == "doing" \
             and card["block_kind"] == "queue" and not force:
         # 幂等：已在队列（P4 单态：占位仅 doing+queue，存量 blocked+queue 由启动
         # 迁移归位）。防御性补一次入队（submit_card 自身幂等不重复；行已在则
         # enqueue_card 幂等复用），用户重按开始即可自愈
+        # 重按开始也是「带语言的起跑意图」：卡可能在无请求上下文的定时路径下入队
+        # （lang 仍空），这里补一次冻结——先到先得，已有语言不覆盖（F1 修复轮 1）
+        if lang:
+            db.set_board_card_lang(card["id"], lang)
         if runner.INSTANCE is not None:
             runner.INSTANCE.submit_card(card["id"])
         return card_json(card), None
@@ -1131,6 +1156,11 @@ def _enter_doing(project, card, extra="", force=False, worktree=False,
                 parent = db.get_board_card(parent_id)
                 if parent is not None and parent["column_key"] != "done":
                     return None, {"blocked": "parent-not-done"}
+        # 语言冻结（T13 修复轮 1，F1/F3）：**全部前置门禁之后、入队/直起之前**——
+        # 退场族/归档/在管/父依赖/worktree 创建失败拒绝的起跑意图一律不钉语言。
+        # 先到先得：`set_board_card_lang` 的 SQL 谓词只在卡 lang 为空时写（二次不覆盖）。
+        if lang:
+            db.set_board_card_lang(card["id"], lang)
         if not force and want_queue:
             # 落列与入队统一走锁外 waitq.enqueue_card 单事务（R6）；锁内判定/
             # 父依赖门禁不变。排队占位落「正在开发」列（2026-09-06 设计：排队卡
@@ -1203,6 +1233,11 @@ def _enter_doing(project, card, extra="", force=False, worktree=False,
                              column_key=card["column_key"],
                              block_kind=card["block_kind"],
                              block_text=card["block_text"] or "")
+        # 带 i18n_key 的异常（起会话失败等插值文案）转成 key+vars 载体，供响应层
+        # 按请求语言渲染（镜像 Node board.js 的 userErrText 桥）；普通 RuntimeError
+        # 保持旧的 str(e) 字符串契约（含日志/既有断言）
+        if getattr(e, "i18n_key", None):
+            return None, {"error": i18n.message_vars(e.i18n_key, e.i18n_vars)}
         return None, {"error": str(e)}
     # 直起路径（force / runner 缺位退化）落表占住运行位（v3d 去占用后无第二登记：
     # 行即占位），reason 按实参分标签：
@@ -1227,13 +1262,17 @@ def _enter_doing(project, card, extra="", force=False, worktree=False,
 
 
 def start_into_doing(project, card, extra="", force=False, worktree=False,
-                     queue_worktree=False):
+                     queue_worktree=False, lang=""):
     """start 端点专用：语义全部由 _enter_doing 承载（保留函数名，server 调用点不动）。
 
     worktree=True = 用户在下拉里选「🌿 在新 worktree 中开始」（2026-10-06 批次）。
     queue_worktree=True = worktree 卡也走统一队列（合并回交，2026-10-07 批次）。
+    lang（T13）= 本条请求语言：**由 _enter_doing 在门禁之后冻结**（修复轮 1 从本函数
+    入口下沉；入口先写会让被 parent-not-done 拒绝的 start 也钉语言）。排队路径同样在
+    用户按下开始这一刻定语言，不能等 worker 拾起（那时已无请求）。空串 = 无语言来源
+    （定时开工/队列拾起/内部调用），保持未冻结。
     """
-    return _enter_doing(project, card, extra, force, worktree, queue_worktree)
+    return _enter_doing(project, card, extra, force, worktree, queue_worktree, lang)
 
 
 # ---------- 独立 worktree 卡起跑（2026-10-06 批次） ----------
@@ -1264,7 +1303,8 @@ def _wt_start_end(card_id):
         _WT_STARTING.discard(card_id)
 
 
-def _enter_doing_worktree(project, card, extra="", force=False, want=False):
+def _enter_doing_worktree(project, card, extra="", force=False, want=False,
+                          lang=""):
     """独立 worktree 起跑（plan D1/D3/D10；**不经统一队列**）。
 
     与 `_enter_doing` 的队列/force 分支并列的第二条起跑路径：
@@ -1288,7 +1328,10 @@ def _enter_doing_worktree(project, card, extra="", force=False, want=False):
     父依赖门禁与 `_enter_doing` 同口径（worktree 不豁免依赖，只豁免排队）；
     force 语义沿用（跳过父依赖）。起会话失败：回原列 + `last_error`（既有语义），
     `card.worktree` 标记保留（路径已建，重按开始即复用，不留无主工作树）。
-    返回 (card_dict, None) | (None, err_dict)，与 `_enter_doing` 一致。
+    lang（T13 修复轮 1）= 本条请求语言：**在 D10/在管/父依赖/worktree 创建等全部
+    门禁通过之后、落列与起会话之前**冻结（卡 lang 为空才写，先到先得）；空串＝无
+    请求上下文（内部调用），保持未冻结。返回 (card_dict, None) | (None, err_dict)，
+    与 `_enter_doing` 一致。
     """
     card_id = card["id"]
     card_wt = (_card_opt(card, "worktree") or "").strip()
@@ -1323,6 +1366,10 @@ def _enter_doing_worktree(project, card, extra="", force=False, want=False):
                 if cur is None:
                     return None, {"error": "卡片不存在"}
                 return card_json(cur), None
+            # 语言冻结（T13 修复轮 1）：所有门禁（D10/在管/父依赖/worktree 创建/
+            # 并发复检）都已通过，落列与起会话之前定格；失败回滚不回退语言
+            if lang:
+                db.set_board_card_lang(card_id, lang)
             # 清可能残留的排队态（用户先点了「开始（入队）」又选 worktree 开始；
             # 或 recover 重建时入过队）——行+占位单事务取消，防 worker 随后拾起对撞
             waitq.cancel_card_wait(card_id, "worktree 直起")
@@ -1345,6 +1392,8 @@ def _enter_doing_worktree(project, card, extra="", force=False, want=False):
                                  column_key=card["column_key"],
                                  block_kind=card["block_kind"],
                                  block_text=card["block_text"] or "")
+            if getattr(e, "i18n_key", None):
+                return None, {"error": i18n.message_vars(e.i18n_key, e.i18n_vars)}
             return None, {"error": str(e)}
         # 起跑行落一份 worktree 证据（与 _start_web 的会话日志同文件，便于事后核对）
         runner.append_log(log_path, f"### worktree 直起 path={path} branch={branch}\n")
@@ -1479,7 +1528,7 @@ def build_merge_instruction(project, card, st):
     return "\n".join(head + [""] + steps)[:PROMPT_MAX]
 
 
-def handoff_worktree_merge(project, card):
+def handoff_worktree_merge(project, card, lang=""):
     """把「合并 worktree 改动回主分支」交给卡片会话（回统一队列排队）。
 
     返回 (card_dict, None) 或 (None, err_dict)。平台**只投递不执行**：判定有
@@ -1487,16 +1536,22 @@ def handoff_worktree_merge(project, card):
     （`queue_worktree=True` 让 worktree 卡走排队路径而不是免排队直起）——轮到该卡
     时才起会话，agent 干完这轮卡片自动回待审核，用户再点「通过」即完成。
     前置校验：无待合并提交 / 无主会话（没会话就没上下文可投递）直接报错。
+    lang（T13 修复轮 1）= 本条 HTTP 请求语言：合并回交同样会起会话，语言随
+    `start_into_doing` 下传，由 `_enter_doing` 在门禁之后冻结（默认空串＝内部调用）。
     """
     if not (card["session_id"] or "").strip():
         return None, {"error": "该卡片尚无主会话，无法交给 agent 合并"}
     st = worktree.merge_status(project, card)
     if not st["ok"]:
-        return None, {"error": f"无法判定待合并提交：{st['error']}"}
+        # key+vars 载体（不预渲染）：中文插值结果与旧 f-string 逐字节相同，
+        # 英文侧查共享词条（Node board.js messageVars 同 key）
+        return None, {"error": i18n.message_vars(
+            "无法判定待合并提交：{detail}", {"detail": st["error"]})}
     if st["ahead"] <= 0:
         return None, {"error": "该卡片没有待合并的提交（可直接通过）"}
     instruction = build_merge_instruction(project, card, st)
-    return start_into_doing(project, card, instruction, queue_worktree=True)
+    return start_into_doing(project, card, instruction, queue_worktree=True,
+                            lang=lang)
 
 
 def dequeue_start(project, card):
@@ -1986,7 +2041,9 @@ def _start_web(project, card, family, extra=""):
     except (dshdriver.DshDriverError, OSError) as e:
         db.update_board_card(card["id"], last_error=f"会话启动失败: {e}",
                              last_error_at=int(time.time() * 1000))
-        raise RuntimeError(f"会话启动失败: {e}")
+        # 抛出物同时带 .message（渲染后中文，日志/既有断言口径不变）与 i18n_key/vars
+        raise i18n.localizable(RuntimeError(f"会话启动失败: {e}"),
+                               "会话启动失败: {detail}", {"detail": str(e)})
     # 续接路径 sid 本就在库（归并写法幂等）；此处兜建会话后卡片被删等边角（m4）
     if not _save_card_sid(card["id"], sid):
         runner.append_log(log_path, "### 卡片已被删除，会话启动放弃\n")
@@ -2015,7 +2072,7 @@ def _start_web(project, card, family, extra=""):
     return log_path
 
 
-def start_card(project, card, extra=""):
+def start_card(project, card, extra="", lang=""):
     """开始开发 / 打回续改：起 dsh 插件实时会话（见 _start_web）。
 
     提示词选择见 build_start_prompt：有可续接的主会话只发「继续」，
@@ -2031,7 +2088,17 @@ def start_card(project, card, extra=""):
     调用方（_enter_doing / dequeue_start）按既有 RuntimeError 分支回滚并透出
     4xx JSON。
     启动失败：记 last_error 并抛 RuntimeError。
+    lang（T13）= 本次起会话的请求语言。**本函数是「直起/飞书打回」入口，语义是
+    「起跑意图即冻结」**：入口先写（卡 lang 为空才写；二次 start 不覆盖），因此即使
+    随后因「会话在途/退场族/启动失败」抛错，语言也已按首轮请求定格——用户重按开始
+    /重试时不会因为一次失败的首跑丢掉已表达的语言偏好（F3 保留此位置，语义由
+    `test_start_card_entry_freezes_lang` 钉住）。HTTP start / 拖列进 doing / 强制运行
+    / 合并回交这些**请求入口**则统一走 `_enter_doing`，在门禁之后冻结（F1 修复轮 1；
+    被 parent-not-done 等门禁拒绝的意图不钉语言）。空串 = 无语言来源（队列拾起/
+    内部调用），不改卡。
     """
+    if lang:
+        db.set_board_card_lang(card["id"], lang)
     if _session_in_flight(card["id"]):
         raise RuntimeError("会话运行中，请等待完成或先停止")
     family = _web_family(project)
@@ -2172,7 +2239,8 @@ def _deliver_now(project, card, comment_row, text, inject=False):
             # 统一走 _web_send（单族投递唯一出口，测试打桩面也在此）
             _web_send(family, project, sid, text, inject=bool(inject))
         except dshdriver.DshDriverError as e:
-            raise RuntimeError(f"评论投递失败: {e}")
+            raise i18n.localizable(RuntimeError(f"评论投递失败: {e}"),
+                                   "评论投递失败: {detail}", {"detail": str(e)})
         db.update_board_comment(comment_row["id"], sent=1, session_id=sid,
                                 sent_text=text)
         return
@@ -2353,7 +2421,8 @@ def compact_session(project, card, sid):
                       flush=True)
                 continue
             break
-    raise RuntimeError(f"compact 失败: {last}")
+    raise i18n.localizable(RuntimeError(f"compact 失败: {last}"),
+                           "compact 失败: {detail}", {"detail": str(last)})
 
 
 def fork_compact_session(project, card, sid):
@@ -2386,7 +2455,8 @@ def fork_compact_session(project, card, sid):
             except dshdriver.DshDriverError:
                 pass
     except dshdriver.DshDriverError as e:
-        raise RuntimeError(f"压缩新建失败: {e}")
+        raise i18n.localizable(RuntimeError(f"压缩新建失败: {e}"),
+                               "压缩新建失败: {detail}", {"detail": str(e)})
     return new_sid, True
 
 
@@ -2422,7 +2492,8 @@ def fork_session(project, card, sid):
             except dshdriver.DshDriverError:
                 pass                      # 标题失败不影响 fork 主流程
     except dshdriver.DshDriverError as e:
-        raise RuntimeError(f"fork 失败: {e}")
+        raise i18n.localizable(RuntimeError(f"fork 失败: {e}"),
+                               "fork 失败: {detail}", {"detail": str(e)})
     return new_sid
 
 
@@ -5036,11 +5107,11 @@ def deliver_pending_answer_now(card_id):
             # 「问题已不存在」对齐执行体口径（必带①）：立即放弃不空转重试 3 次
             waitq.mark_failed(row["id"], str(e))
             db.update_board_card(card_id, block_kind=None, block_text="")
-            return False, f"回答失败：{e}"
+            return False, i18n.message_vars("回答失败：{detail}", {"detail": str(e)})
         waitq.return_to_waiting(row["id"])
         if inst is not None:
             inst.submit_answer(card_id)
-        return False, f"回答失败：{e}"
+        return False, i18n.message_vars("回答失败：{detail}", {"detail": str(e)})
     waitq.mark_done(row["id"])
     # 「立即送达」同队列送达路径口径：用户作答引发的回列不置「有更新」标记
     db.update_board_card(card_id, column_key="doing", mark_unread=False,
@@ -5223,7 +5294,7 @@ def answer_interaction(proj, card, qid, answers):
     if card_id is None:
         if _web_family(proj) != "dsh_plugin":
             # 退场族无作答通道（单族化）：不落已删除的 kimi 配送段
-            return f"回答失败：{agents.RETIRED_MSG}"
+            return "回答失败：该智能体族已下线，请在项目设置里改绑 dsh 插件"
         # 送达前重声明看管（T7 评审 Important，控制器裁定 2026-10-10）：任务会话
         # 宿主重载后会被驱动以 owned:false 上报（= 池外），而本直送分支不经
         # `_answer_deliver`；不补声明就撞「未看管」404，用户看到「回答失败：…」。
@@ -5235,7 +5306,7 @@ def answer_interaction(proj, card, qid, answers):
             if not dshdriver.answer_question(sid, qid, _dsh_answers(out)):
                 return "回答失败：提问不存在或已过期"
         except Exception as e:
-            return f"回答失败：{e}"
+            return i18n.message_vars("回答失败：{detail}", {"detail": str(e)})
         _iw_clear(sid)
         return None
     _queue_answer_unit(proj, card_id, sid,
@@ -5272,7 +5343,7 @@ def answer_approval(proj, card, approval_id, decision, scope=""):
     # 故 scope=session 明确拒绝而不是静默降级。
     fam = runner.agent_family(proj["agent_path"] or "")
     if fam != "dsh_plugin":
-        return f"审批失败：{agents.RETIRED_MSG}"
+        return "审批失败：该智能体族已下线，请在项目设置里改绑 dsh 插件"
     if scope == "session":
         return "dsh 不支持「本会话内批准」（宿主无 session 级放行语义）"
     dsh_outcome = {"approved": "allowed-once", "rejected": "rejected"}[decision]
@@ -5290,7 +5361,7 @@ def answer_approval(proj, card, approval_id, decision, scope=""):
         try:
             dshdriver.answer_approval(sid, approval_id, dsh_outcome)
         except Exception as e:                      # noqa: BLE001
-            return f"审批失败：{e}"
+            return i18n.message_vars("审批失败：{detail}", {"detail": str(e)})
         _iw_clear(sid)
         return None
     meta = {"sid": sid, "approval_id": str(approval_id),

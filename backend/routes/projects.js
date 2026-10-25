@@ -143,7 +143,8 @@ async function apiRejectBug(ctx, projectId, bugDirRaw) {
   }
   const reason = pyStrip(pyStrOrEmpty(body.reason));
   if (!reason) {
-    ctx.text(400, '{"error":"请填写拒绝理由"}', 'application/json; charset=utf-8');
+    // 错误体走 ctx.error（紧凑形态与旧字面量逐字节相同）才会按请求语言本地化
+    ctx.error(400, '请填写拒绝理由');
     return;
   }
   const reportPath = pyJoin(dirPath, 'bug_report.md');
@@ -188,6 +189,8 @@ async function apiRejectBug(ctx, projectId, bugDirRaw) {
       taskType: 'reject',
       payload: pyJsonDumps({ bug_dir: bugDir, reason }),
       casesBase,
+      // T13：修例任务语言＝本请求语言（与 Python `_api_reject_bug` 同源）
+      lang: ctx.lang,
     }, { db: ctx.db });
     runner.INSTANCE.submit(tid);
   }
@@ -554,13 +557,21 @@ function isProjectNameConflict(error) {
 }
 
 /**
- * 非重名的数据库约束错文案（action: 创建/保存；Python 侧同模板同文）。
- * @param {string} action
+ * 非重名的数据库约束错（Python 侧同模板同文）。
+ *
+ * 动态细节（数据库约束原文）走 `{detail}` 占位符：中文侧插值后与旧文案逐字节相同；
+ * 英文侧用两条按动作分开的词条（英文动词不插入中文动作词）。
+ * @param {object} ctx
+ * @param {string} action 「创建」或「保存」
  * @param {any} error
- * @returns {string}
  */
-function projectConstraintErrorText(action, error) {
-  return `项目${action}失败（数据库约束: ${String((error && error.message) || error)}）`;
+function respondProjectConstraintError(ctx, action, error) {
+  const detail = String((error && error.message) || error);
+  if (action === '创建') {
+    ctx.errorSpaced(400, '项目创建失败（数据库约束: {detail}）', { detail });
+    return;
+  }
+  ctx.errorSpaced(400, '项目保存失败（数据库约束: {detail}）', { detail });
 }
 
 /** `{name, project_dir}` 至少出现一个键（空体守卫；`body` 恒是普通对象） */
@@ -649,7 +660,8 @@ function makedirsProjectDirs(workDir) {
 
 /** `except OSError as e: 400 {"error": f"工作目录不可用: {e}"}`（建/改项目共用，带空格口径） */
 function respondWorkDirUnavailable(ctx, failure) {
-  ctx.errorSpaced(400, `工作目录不可用: ${pyOsErrorText(failure.error, failure.path)}`);
+  ctx.errorSpaced(400, '工作目录不可用: {detail}',
+    { detail: pyOsErrorText(failure.error, failure.path) });
 }
 
 // ---------- 处理器 ----------
@@ -725,7 +737,7 @@ async function apiCreateProject(ctx) {
         return;
       }
       console.error(`touchstone-node: 建项目撞数据库约束（非重名）: ${String(error && error.message)}`);
-      ctx.errorSpaced(400, projectConstraintErrorText('创建', error));
+      respondProjectConstraintError(ctx, '创建', error);
       return;
     }
     throw error;
@@ -797,7 +809,7 @@ async function apiUpdateProject(ctx, projectId) {
         return;
       }
       console.error(`touchstone-node: 改项目撞数据库约束（非重名）: ${String(error && error.message)}`);
-      ctx.errorSpaced(400, projectConstraintErrorText('保存', error));
+      respondProjectConstraintError(ctx, '保存', error);
       return;
     }
     throw error;

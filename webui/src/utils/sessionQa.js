@@ -15,8 +15,11 @@
 // agent 提问的工具名（比对时统一小写；dsh 侧恒为 snake_case）
 export const ASK_TOOL = 'ask_user_question'
 
-// ask 项无回答时的占位文案（侧栏 240px 窄栏，不渲染整段题目）
-export const ASK_PLACEHOLDER = { pending: '等待回答…', error: '未作答（已中断）' }
+// ask 项无回答时的占位文案（侧栏 240px 窄栏，不渲染整段题目）。
+// 工厂形式：render 时传 t，切换语言即重渲染；t 必传（占位文案由 t 产出）。
+export function askPlaceholder(t) {
+  return { pending: t('等待回答…'), error: t('未作答（已中断）') }
+}
 
 /** JSON 文本 → 对象或 null（非法 JSON / 非对象一律 null，截断的 args 不炸调用方）。 */
 function _obj(text) {
@@ -127,22 +130,26 @@ export function buildQuestionIndex(entries) {
   return out
 }
 
-/** 侧栏条目显示文案：user=提问原文；ask 已答=回答，未答/中断=占位文案。 */
-export function questionLabel(q) {
+/** 侧栏条目显示文案：user=提问原文；ask 已答=回答，未答/中断=占位文案。
+ *  t 必传（调用方在 render 时传 useI18n 的 t）。 */
+export function questionLabel(q, t) {
   if (!q) return ''
   if (q.kind !== 'ask') return q.text || ''
+  const ph = askPlaceholder(t)
   return q.state === 'answered' ? (q.text || '')
-    : (ASK_PLACEHOLDER[q.state] || ASK_PLACEHOLDER.pending)
+    : (ph[q.state] || ph.pending)
 }
 
-/** 悬浮提示：user 保持原文（与旧行为一致）；ask = 「agent 提问：题目…」+ 回答/占位。 */
-export function questionTitle(q) {
+/** 悬浮提示：user 保持原文（与旧行为一致）；ask = 「agent 提问：题目…」+ 回答/占位。
+ *  t 必传（「agent 提问：{q}」「回答：{a}」需要插值）。 */
+export function questionTitle(q, t) {
   if (!q || q.kind !== 'ask') return (q && q.text) || ''
   const parts = (q.ask || [])
-    .map((x) => (x.header ? x.header + '：' : '') + (x.question || ''))
+    .map((x) => (x.header ? x.header + t('：') : '') + (x.question || ''))
     .filter(Boolean)
-  const base = parts.length ? 'agent 提问：' + parts.join(' / ') : 'agent 提问'
-  const tail = q.state === 'answered' ? '回答：' + q.text
-    : (ASK_PLACEHOLDER[q.state] || ASK_PLACEHOLDER.pending)
+  const base = parts.length ? t('agent 提问：{q}', { q: parts.join(' / ') }) : t('agent 提问')
+  const ph = askPlaceholder(t)
+  const tail = q.state === 'answered' ? t('回答：{a}', { a: q.text })
+    : (ph[q.state] || ph.pending)
   return base + '\n' + tail
 }

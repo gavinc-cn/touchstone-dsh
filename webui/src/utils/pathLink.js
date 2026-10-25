@@ -1,3 +1,5 @@
+import { t } from './i18n'
+
 // 会话正文里的文件路径识别：把 agent 回答中出现的路径渲染成可点链接（点击弹出预览）
 // 背景：回答里常写「已更新 doc_ai/spec/foo.md」，用户希望直接点开看内容。
 // 取舍：宁可漏识别不可误伤——误判会产出打不开的链接（点击报错），漏识别只是维持纯文本。
@@ -57,9 +59,11 @@ function isFilePath(core, bare) {
   return bare && KNOWN_EXT.has(extOf(seg))               // 裸文件名：仅 bare 模式 + 白名单
 }
 
-/** 生成路径链接标记（data-path 供点击时取原始路径） */
+/** 生成路径链接标记（data-path 供点击时取原始路径）。
+ *  链接 title 是用户可见文案：本文件虽以内容解析为主，但这一处是真展示文案，
+ *  故导入 t 直接翻译（其余 CJK 标点只用于分词，保持原样）。 */
 function anchor(p) {
-  return `<a class="md-path" data-path="${p}" title="点击预览：${p}">${p}</a>`
+  return `<a class="md-path" data-path="${p}" title="${t('点击预览：{path}', { path: p })}">${p}</a>`
 }
 
 /**

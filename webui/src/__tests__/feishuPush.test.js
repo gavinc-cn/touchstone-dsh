@@ -3,11 +3,15 @@
 // - 服务端没回 push_enabled（存量配置/旧后端）⇒ 按**开**处理，页面不能静默把用户停掉
 // - push_enabled 与旧 enabled 是两个独立开关（后者只管默认 webhook 回落），互不牵连
 // - 只有用户动过复选框才在保存时下发该键（缺省=不改，与卡内其他字段同口径）
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
   buildCfgBody, isPushEnabled, pushStatusText, withPushEnabled,
 } from '../utils/feishuPush'
+
+import { setLang } from '../utils/i18n'
+// 文案断言按中文跑（zh 直接返回中文 key）
+beforeEach(() => setLang('zh'))
 
 describe('isPushEnabled', () => {
   it('缺键/undefined/null ⇒ 开（存量配置升级后行为不变）', () => {

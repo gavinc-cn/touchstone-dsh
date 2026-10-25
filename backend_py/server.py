@@ -45,6 +45,7 @@ import chat
 import db
 import dshevents
 import dshdriver
+import i18n
 import localbus
 import feishu
 import lib
@@ -923,8 +924,18 @@ def is_project_name_conflict(exc):
 
 
 def project_constraint_error_text(action, exc):
-    """非重名的数据库约束错文案（action: 创建/保存；Node 侧同模板同文）。"""
-    return f"项目{action}失败（数据库约束: {exc}）"
+    """非重名的数据库约束错文案（action: 创建/保存；Node 侧同模板同文）。
+
+    返回 `i18n.message_vars()` 的 key+vars 载体（**不预渲染**）：中文侧插值结果与旧
+    f-string 逐字节相同，英文侧按 `项目创建失败（数据库约束: {detail}）` /
+    `项目保存失败（数据库约束: {detail}）` 查同一份共享词典（Node T10 已有词条）。
+    """
+    detail = str(exc)
+    if action == "创建":
+        return i18n.message_vars("项目创建失败（数据库约束: {detail}）",
+                                 {"detail": detail})
+    return i18n.message_vars("项目保存失败（数据库约束: {detail}）",
+                             {"detail": detail})
 
 
 def fs_roots():
@@ -1102,7 +1113,9 @@ def fs_mkdir(raw_path, raw_name):
     try:
         os.mkdir(target)
     except OSError as e:  # 无写权限/名称为系统保留字等，一律回给用户看原因
-        return None, f"新建失败：{e.strerror or e}"
+        # key+vars 载体（不预渲染）：中文侧插值结果与旧 f-string 逐字节相同，
+        # 英文侧查共享词条 `新建失败：{detail}`（Node lib.js:fsMkdir 同 key）
+        return None, i18n.message_vars("新建失败：{detail}", {"detail": e.strerror or str(e)})
     return {"name": name, "path": os.path.realpath(target)}, None
 
 
@@ -1129,14 +1142,18 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/"):
             user = self._current_user()
             if not user:
-                self._respond(401, b'{"error":"unauthorized"}', "application/json; charset=utf-8")
+                self._error(401, "unauthorized")
                 return
+            self._request_user = user      # 语言解析复用本条请求已取到的用户（免二次查库）
             if self._must_change_pw_blocked(user, path):
                 return
         self._route_get(path, parsed)
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        # 本条请求的用户：公开端点（登录/注册）为 None，鉴权分支取到后登记，
+        # 供 _request_lang 读 user_prefs 时复用（与 Node requestLang 的 user 入参同源）
+        self._request_user = None
         if path == "/api/auth/login":
             self._api_login()
             return
@@ -1146,8 +1163,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/"):
             user = self._current_user()
             if not user:
-                self._respond(401, b'{"error":"unauthorized"}', "application/json; charset=utf-8")
+                self._error(401, "unauthorized")
                 return
+            self._request_user = user
             if self._must_change_pw_blocked(user, path):
                 return
         if path == "/api/auth/logout":
@@ -1337,13 +1355,15 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             self._api_session_chat_stop(int(m.group(1)), body)
             return
-        self._respond(404, b'{"error":"not found"}', "application/json; charset=utf-8")
+        self._error(404, 'not found')
 
     def do_PATCH(self):
         path = self.path.split("?", 1)[0]
-        if not self._current_user():
-            self._respond(401, b'{"error":"unauthorized"}', "application/json; charset=utf-8")
+        user = self._current_user()
+        if not user:
+            self._error(401, "unauthorized")
             return
+        self._request_user = user
         m = re.match(r"^/api/projects/(\d+)$", path)
         if m:
             self._api_update_project(int(m.group(1)), self._read_json() or {})
@@ -1376,13 +1396,15 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             self._api_feishu_hook_set(int(m.group(1)), self._read_json() or {})
             return
-        self._respond(404, b'{"error":"not found"}', "application/json; charset=utf-8")
+        self._error(404, 'not found')
 
     def do_DELETE(self):
         path = self.path.split("?", 1)[0]
-        if not self._current_user():
-            self._respond(401, b'{"error":"unauthorized"}', "application/json; charset=utf-8")
+        user = self._current_user()
+        if not user:
+            self._error(401, "unauthorized")
             return
+        self._request_user = user
         m = re.match(r"^/api/me/feishu$", path)
         if m:
             self._api_me_feishu_delete()
@@ -1417,7 +1439,7 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             self._api_board_delete_comment(int(m.group(1)), int(m.group(2)), int(m.group(3)))
             return
-        self._respond(404, b'{"error":"not found"}', "application/json; charset=utf-8")
+        self._error(404, 'not found')
 
     # ---------- 路由分发 ----------
 
@@ -1486,8 +1508,7 @@ class Handler(BaseHTTPRequestHandler):
             # 会话实时事件流（P4 事件化；替代会话窗口 2s 轮询）
             self._api_board_session_stream(int(m.group(1)), unquote(m.group(2)))
         elif path == "/api/tasks":
-            self._respond(200, b'{"error":"task id required"}',
-                          "application/json; charset=utf-8")
+            self._error(200, 'task id required')
         else:
             m = re.match(r"^/api/projects/(\d+)$", path)
             if m:
@@ -1601,7 +1622,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._api_session_media(int(m.group(1)), m.group(2), parsed)
                 return
             if path.startswith("/api/"):
-                self._respond(404, b'{"error":"not found"}', "application/json; charset=utf-8")
+                self._error(404, 'not found')
             else:
                 self._serve_static(path)
             return
@@ -1611,8 +1632,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_login(self):
         ip = self.client_address[0]
         if not self.limiter.allow(ip):
-            self._respond(429, '{"error":"尝试过于频繁，请稍后再试"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(429, '尝试过于频繁，请稍后再试')
             return
         data = self._read_json() or {}
         username = _req_str(data.get("username", ""))
@@ -1620,8 +1640,7 @@ class Handler(BaseHTTPRequestHandler):
         row = db.get_user_by_name(username)
         self.limiter.record(ip)
         if row is None or not auth.verify_password(password, row["pass_hash"], row["salt"]):
-            self._respond(401, '{"error":"用户名或密码错误"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(401, '用户名或密码错误')
             return
         token = auth.new_token()
         db.create_session(row["id"], token, auth.session_expiry())
@@ -1665,19 +1684,16 @@ class Handler(BaseHTTPRequestHandler):
         username = _req_str(data.get("username")).strip()
         password = _pw_str(data.get("password"))
         if not USERNAME_RE.match(username):
-            self._respond(400, '{"error":"用户名须为 2-32 位字母数字或 _ . -"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '用户名须为 2-32 位字母数字或 _ . -')
             return
         if len(password) < 6:
-            self._respond(400, '{"error":"密码至少 6 位"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '密码至少 6 位')
             return
         pw_hash, salt = auth.md5_password(password)
         try:
             user_id = db.insert_user(username, pw_hash, salt)
         except sqlite3.IntegrityError:
-            self._respond(400, '{"error":"用户名已存在"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '用户名已存在')
             return
         # 注册成功自动登录（发会话 cookie），前端直接进主界面
         token = auth.new_token()
@@ -1707,12 +1723,10 @@ class Handler(BaseHTTPRequestHandler):
         new_pw = _pw_str(data.get("new_password"))
         if not self._trusted_admin_request() and \
                 not auth.verify_password(old_pw, user["pass_hash"], user["salt"]):
-            self._respond(400, '{"error":"原密码错误"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '原密码错误')
             return
         if len(new_pw) < 6:
-            self._respond(400, '{"error":"新密码至少 6 位"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '新密码至少 6 位')
             return
         pw_hash, salt = auth.md5_password(new_pw)
         db.change_password(user["id"], pw_hash, salt)
@@ -1728,8 +1742,7 @@ class Handler(BaseHTTPRequestHandler):
     def _require_admin(self):
         """非管理员统一返回 403；已由通用鉴权保证已登录。"""
         if not self._is_admin():
-            self._respond(403, '{"error":"仅管理员可操作"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(403, '仅管理员可操作')
             return False
         return True
 
@@ -1751,19 +1764,16 @@ class Handler(BaseHTTPRequestHandler):
         username = _req_str(body.get("username")).strip()
         password = _pw_str(body.get("password"))
         if not USERNAME_RE.match(username):
-            self._respond(400, '{"error":"用户名须为 2-32 位字母数字或 _ . -"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '用户名须为 2-32 位字母数字或 _ . -')
             return
         if len(password) < 6:
-            self._respond(400, '{"error":"密码至少 6 位"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '密码至少 6 位')
             return
         pw_hash, salt = auth.md5_password(password)
         try:
             user_id = db.insert_user(username, pw_hash, salt)
         except sqlite3.IntegrityError:
-            self._respond(400, '{"error":"用户名已存在"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '用户名已存在')
             return
         self._respond(200, json.dumps({"id": user_id}, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
@@ -1774,23 +1784,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         row = db.get_user_by_id(user_id)
         if row is None:
-            self._respond(404, b'{"error":"user not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'user not found')
             return
         username = _req_str(body.get("username") or row["username"]).strip()
         if row["username"] == "admin" and username != "admin":
-            self._respond(400, '{"error":"管理员账号不允许改名"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '管理员账号不允许改名')
             return
         if not USERNAME_RE.match(username):
-            self._respond(400, '{"error":"用户名须为 2-32 位字母数字或 _ . -"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '用户名须为 2-32 位字母数字或 _ . -')
             return
         new_pw = _pw_str(body.get("password"))
         if new_pw != "":
             if len(new_pw) < 6:
-                self._respond(400, '{"error":"密码至少 6 位"}'.encode("utf-8"),
-                              "application/json; charset=utf-8")
+                self._error(400, '密码至少 6 位')
                 return
             pw_hash, salt = auth.md5_password(new_pw)
         else:
@@ -1798,8 +1804,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             db.update_user(user_id, username, pw_hash, salt)
         except sqlite3.IntegrityError:
-            self._respond(400, '{"error":"用户名已存在"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '用户名已存在')
             return
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
 
@@ -1809,17 +1814,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         row = db.get_user_by_id(user_id)
         if row is None:
-            self._respond(404, b'{"error":"user not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'user not found')
             return
         if row["username"] == "admin":
-            self._respond(400, '{"error":"管理员账号不允许删除"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '管理员账号不允许删除')
             return
         user = self._current_user()
         if user["id"] == user_id:
-            self._respond(400, '{"error":"不能删除当前登录用户"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '不能删除当前登录用户')
             return
         db.delete_user(user_id)
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
@@ -1880,7 +1882,8 @@ class Handler(BaseHTTPRequestHandler):
         显式空串=清除；凭据齐全时拉起入站长连接并**即时快检**）。
         响应 = 既有字段 + verify（快检结果；凭据不全时 null）——前端据此即时提示对错。"""
         user = self._current_user()
-        out = feishu.save_user_config(user["id"], body)
+        out = feishu.save_user_config(user["id"], body,
+                                      lang=self._request_lang())
         self._respond(200, json.dumps(
             {"ok": True, **out},
             ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
@@ -1888,9 +1891,10 @@ class Handler(BaseHTTPRequestHandler):
     def _api_me_feishu_provision_get(self):
         """扫码建应用流程现状（设置页轮询口，只读）：能力/总闸/状态/确认链接/步骤。"""
         user = self._current_user()
-        self._respond(200, json.dumps(feishu.provision_status(user["id"]),
-                                      ensure_ascii=False).encode("utf-8"),
-                      "application/json; charset=utf-8")
+        self._respond(200, json.dumps(
+            feishu.provision_status(user["id"], lang=self._request_lang()),
+            ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8")
 
     def _api_me_feishu_provision_set(self, body):
         """扫码建应用四动作（全部返回 200 + 摘要，页面据此渲染引导；非法 action 400）：
@@ -1899,22 +1903,22 @@ class Handler(BaseHTTPRequestHandler):
         user = self._current_user()
         action = str(body.get("action") or "")
         uid = user["id"]
+        lang = self._request_lang()
         if action == "start":
-            out = feishu.provision_start(uid, force=bool(body.get("force")))
+            out = feishu.provision_start(uid, force=bool(body.get("force")),
+                                         lang=lang)
         elif action == "cancel":
-            out = feishu.provision_cancel(uid)
+            out = feishu.provision_cancel(uid, lang=lang)
         elif action == "apply":
-            out = feishu.provision_apply(uid)
+            out = feishu.provision_apply(uid, lang=lang)
         elif action == "publish":
             out = feishu.provision_publish(uid,
                                            version=str(body.get("version") or "") or None,
                                            remark=str(body.get("remark") or ""),
-                                           changelog=str(body.get("changelog") or ""))
+                                           changelog=str(body.get("changelog") or ""),
+                                           lang=lang)
         else:
-            self._respond(400, json.dumps(
-                {"error": "action 仅支持 start / cancel / apply / publish"},
-                ensure_ascii=False).encode("utf-8"),
-                "application/json; charset=utf-8")
+            self._error_spaced(400, 'action 仅支持 start / cancel / apply / publish')
             return
         self._respond(200, json.dumps(out, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
@@ -1922,7 +1926,8 @@ class Handler(BaseHTTPRequestHandler):
     def _api_me_feishu_doctor(self, body):
         """配置自检（八项）：只读为主；send_probe=true 时额外发一条测试消息（60s 频控）。"""
         user = self._current_user()
-        out = feishu.doctor(user["id"], send_probe=bool(body.get("send_probe")))
+        out = feishu.doctor(user["id"], send_probe=bool(body.get("send_probe")),
+                            data_lang=self._request_lang())
         self._respond(200, json.dumps(out, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
 
@@ -1975,10 +1980,7 @@ class Handler(BaseHTTPRequestHandler):
         user = self._current_user()
         action = str(body.get("action") or "sync")
         if action not in ("sync", "clear", "notify"):
-            self._respond(400, json.dumps(
-                {"error": "action 仅支持 sync / clear / notify"},
-                ensure_ascii=False).encode("utf-8"),
-                "application/json; charset=utf-8")
+            self._error_spaced(400, 'action 仅支持 sync / clear / notify')
             return
         if action == "notify":
             ok, err = feishu.send_slash_perm_card(user["id"])
@@ -2032,8 +2034,7 @@ class Handler(BaseHTTPRequestHandler):
                                  "timeout_s": body.get("timeout_s"),
                                  "batch_size": body.get("batch_size")})
         except ValueError as exc:
-            self._respond(400, json.dumps({"error": str(exc)}, ensure_ascii=False)
-                          .encode("utf-8"), "application/json; charset=utf-8")
+            self._error_spaced(400, exc)
             return
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
 
@@ -2064,26 +2065,18 @@ class Handler(BaseHTTPRequestHandler):
         """
         if target == "user":
             if write and not self._is_admin():
-                self._respond(403, json.dumps(
-                    {"error": "用户级安装影响本机所有项目，仅管理员可操作"},
-                    ensure_ascii=False).encode("utf-8"),
-                    "application/json; charset=utf-8")
+                self._error_spaced(403, '用户级安装影响本机所有项目，仅管理员可操作')
                 return False, "", None
             return True, "", None
         if target != "project":
-            self._respond(400, json.dumps(
-                {"error": "target 必须是 user 或 project"}, ensure_ascii=False).encode("utf-8"),
-                "application/json; charset=utf-8")
+            self._error_spaced(400, 'target 必须是 user 或 project')
             return False, "", None
         if not isinstance(project_id, int) or isinstance(project_id, bool):
-            self._respond(400, json.dumps(
-                {"error": "项目级操作需要 project_id"}, ensure_ascii=False).encode("utf-8"),
-                "application/json; charset=utf-8")
+            self._error_spaced(400, '项目级操作需要 project_id')
             return False, "", None
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return False, "", None
         return True, row["project_dir"], row["id"]
 
@@ -2103,8 +2096,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             assets = builtin_assets.list_assets(target, project_dir)
         except builtin_assets.AssetError as e:
-            self._respond(e.code, json.dumps({"error": e.message}, ensure_ascii=False)
-                          .encode("utf-8"), "application/json; charset=utf-8")
+            self._error_spaced(e.code, e)
             return
         can_install = self._is_admin() if target == "user" else True
         self._respond(200, json.dumps(
@@ -2126,9 +2118,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         asset = builtin_assets.get_asset(asset_id)
         if asset is None:
-            self._respond(404, json.dumps({"error": f"未知资产：{asset_id}"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(404, '未知资产：{id}', {"id": asset_id})
             return
         try:
             if action == "install":
@@ -2136,13 +2126,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 result = builtin_assets.uninstall(asset, target, project_dir)
         except builtin_assets.AssetError as e:
-            self._respond(e.code, json.dumps({"error": e.message}, ensure_ascii=False)
-                          .encode("utf-8"), "application/json; charset=utf-8")
+            self._error_spaced(e.code, e)
             return
         except OSError as e:
             # 磁盘异常（权限/空间）统一 500，带原因供前端 toast
-            self._respond(500, json.dumps({"error": f"操作失败：{e}"}, ensure_ascii=False)
-                          .encode("utf-8"), "application/json; charset=utf-8")
+            self._error_spaced(500, '操作失败：{detail}', {"detail": str(e)})
             return
         self._respond(200, json.dumps(result, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
@@ -2150,8 +2138,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_feishu_hook_get(self, project_id):
         """项目推送绑定读取（_owned_project 隔离；webhook 打码、secret 只回布尔）。"""
         if self._owned_project(project_id) is None:
-            self._respond(404, b'{"error":"not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'not found')
             return
         row = db.get_feishu_hook(project_id)
         if row is None:
@@ -2173,8 +2160,7 @@ class Handler(BaseHTTPRequestHandler):
         """项目推送绑定更新（_owned_project 隔离）：字段缺省=不改当前值，
         events 白名单校验；webhook/secret 空串=清除。"""
         if self._owned_project(project_id) is None:
-            self._respond(404, b'{"error":"not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'not found')
             return
         row = db.get_feishu_hook(project_id)
         cur_url = (row["webhook_url"] if row is not None else "")
@@ -2192,8 +2178,7 @@ class Handler(BaseHTTPRequestHandler):
         if "events" in body:
             req = body["events"]
             if not isinstance(req, list) or not set(req) <= set(feishu.FEISHU_EVENTS):
-                self._respond(400, '{"error":"events 含非法事件"}'.encode("utf-8"),
-                              "application/json; charset=utf-8")
+                self._error(400, 'events 含非法事件')
                 return
             cur_events = req
         if "enabled" in body:
@@ -2220,8 +2205,7 @@ class Handler(BaseHTTPRequestHandler):
             req_events = body["events"]
             if not isinstance(req_events, list) \
                     or not set(req_events) <= set(feishu.FEISHU_EVENTS):
-                self._respond(400, '{"error":"events 含非法事件"}'.encode("utf-8"),
-                              "application/json; charset=utf-8")
+                self._error(400, 'events 含非法事件')
                 return
         names, skipped = [], 0
         for proj in db.list_projects(user["id"]):
@@ -2314,8 +2298,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_get_project(self, project_id):
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         pj = self._project_json(row)
         # 同列表端点：refreshProject 用单项目端点替换列表项时保持计数一致
@@ -2360,9 +2343,7 @@ class Handler(BaseHTTPRequestHandler):
         # 2026-10-21 桌面端事故：dsh-app 协议把 POST 重放成 chunked，旧 _read_json 只认
         # Content-Length ⇒ 体被当空 ⇒ 整片命中这条死路（根因/证据见 debug_runtime 文档）。
         if "name" not in body and "project_dir" not in body:
-            self._respond(400, json.dumps(
-                {"error": ERR_PROJECT_BODY_MISSING}, ensure_ascii=False).encode("utf-8"),
-                "application/json; charset=utf-8")
+            self._error_spaced(400, ERR_PROJECT_BODY_MISSING)
             return
         project_dir = (body.get("project_dir") or "").strip() or os.path.expanduser("~")
         # 项目名称留空时自动取项目路径最后一段（前端已先行填充, 此处兜底）
@@ -2385,9 +2366,7 @@ class Handler(BaseHTTPRequestHandler):
         reasoning_effort = normalize_effort(body.get("reasoning_effort"))
         permission_mode = normalize_permission_mode(body.get("permission_mode"))
         if reasoning_effort is None or permission_mode is None:
-            self._respond(400, json.dumps(
-                {"error": "思考等级或权限档非法"}, ensure_ascii=False).encode("utf-8"),
-                "application/json; charset=utf-8")
+            self._error_spaced(400, '思考等级或权限档非法')
             return
         try:
             # 工作目录 + 两个派生子目录一并创建（幂等）
@@ -2414,14 +2393,12 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 message = project_constraint_error_text("创建", e)
                 print(f"[server] 建项目撞数据库约束（非重名）: {e}", file=sys.stderr)
-            self._respond(400, json.dumps({"error": message}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, message)
             return
         except OSError as e:
             # work_dir 等路径已存在同名普通文件时 exist_ok 不适用（只容忍同名目录），
             # makedirs 抛 OSError，这里转 400 而不是未处理异常断连
-            self._respond(400, json.dumps({"error": f"工作目录不可用: {e}"}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, '工作目录不可用: {detail}', {"detail": str(e)})
             return
         self._respond(200, json.dumps({"id": project_id}, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
@@ -2429,8 +2406,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_update_project(self, project_id, body):
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         # 项目级会话默认值：未带键＝保持存量值；带了非法值报 400（不静默丢弃）。
         # permission_mode 的 existing 传存量值（§5.3）：PATCH 未变值直通，防止宿主
@@ -2440,9 +2416,7 @@ class Handler(BaseHTTPRequestHandler):
         permission_mode = normalize_permission_mode(
             body.get("permission_mode", row["permission_mode"]), row["permission_mode"])
         if reasoning_effort is None or permission_mode is None:
-            self._respond(400, json.dumps(
-                {"error": "思考等级或权限档非法"}, ensure_ascii=False).encode("utf-8"),
-                "application/json; charset=utf-8")
+            self._error_spaced(400, '思考等级或权限档非法')
             return
         try:
             new_dir = (body.get("project_dir") or row["project_dir"]).strip()
@@ -2477,13 +2451,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 message = project_constraint_error_text("保存", e)
                 print(f"[server] 改项目撞数据库约束（非重名）: {e}", file=sys.stderr)
-            self._respond(400, json.dumps({"error": message}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, message)
             return
         except OSError as e:
             # 新工作目录指向已存在的普通文件等情形，makedirs 抛 OSError，转 400
-            self._respond(400, json.dumps({"error": f"工作目录不可用: {e}"}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, '工作目录不可用: {detail}', {"detail": str(e)})
             return
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
 
@@ -2495,19 +2467,14 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         if not row["archived"]:
-            self._respond(400, json.dumps({"error": "仅已归档的项目可删除，请先归档"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, '仅已归档的项目可删除，请先归档')
             return
         body = self._read_json() or {}
         if (body.get("confirm_name") or "").strip() != row["name"]:
-            self._respond(400, json.dumps({"error": "确认名称与项目名不一致"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, '确认名称与项目名不一致')
             return
         db.delete_project(project_id)
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
@@ -2516,9 +2483,7 @@ class Handler(BaseHTTPRequestHandler):
         """目录浏览：返回当前目录的子目录列表 + 服务端平台 + 根列表（供目录选择对话框）。"""
         data = fs_browse(parsed.get("path", [""])[0])
         if data is None:
-            self._respond(400, json.dumps({"error": "目录不存在或不可读"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, '目录不存在或不可读')
             return
         self._respond(200, json.dumps(data, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
@@ -2527,8 +2492,7 @@ class Handler(BaseHTTPRequestHandler):
         """新建目录：在 body.path 下创建子目录 body.name（供目录选择对话框「新建文件夹」）。"""
         data, err = fs_mkdir(body.get("path") or "", body.get("name"))
         if data is None:
-            self._respond(400, json.dumps({"error": err}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, err)
             return
         self._respond(200, json.dumps(data, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
@@ -2550,8 +2514,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         path, root_key, err = resolve_project_file(row, parsed.get("path", [""])[0])
         messages = {
@@ -2562,8 +2525,7 @@ class Handler(BaseHTTPRequestHandler):
         }
         if err in messages:
             code, msg = messages[err]
-            self._respond(code, json.dumps({"error": msg}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(code, msg)
             return
         if parsed.get("inline", ["0"])[0] in ("1", "true", "yes"):
             self._send_project_file_inline(path)
@@ -2575,9 +2537,7 @@ class Handler(BaseHTTPRequestHandler):
             text, size, truncated, binary = read_text_preview(path)
             mtime = int(os.path.getmtime(path))
         except OSError:
-            self._respond(404, json.dumps({"error": messages["missing"][1]},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(404, messages["missing"][1])
             return
         root_dir = (row["project_dir"] if root_key == "project" else row["work_dir"]) or ""
         rel = os.path.relpath(path, root_dir).replace(os.sep, "/") if root_dir else path
@@ -2598,14 +2558,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             size = os.path.getsize(path)
         except OSError:
-            self._respond(404, json.dumps({"error": "文件不存在或不可读"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(404, '文件不存在或不可读')
             return
         if size > FILE_RAW_MAX:
-            self._respond(413, json.dumps({"error": "文件过大，无法按原文打开"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(413, '文件过大，无法按原文打开')
             return
         name = os.path.basename(path)
         try:
@@ -2647,21 +2603,15 @@ class Handler(BaseHTTPRequestHandler):
         ext = os.path.splitext(path)[1].lstrip(".").lower()
         ctype = PROJECT_INLINE_IMAGE_TYPES.get(ext)
         if ctype is None:
-            self._respond(400, json.dumps({"error": "该类型不支持内联显示"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, '该类型不支持内联显示')
             return
         try:
             size = os.path.getsize(path)
         except OSError:
-            self._respond(404, json.dumps({"error": "文件不存在或不可读"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(404, '文件不存在或不可读')
             return
         if size > FILE_RAW_MAX:
-            self._respond(413, json.dumps({"error": "文件过大，无法内联显示"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(413, '文件过大，无法内联显示')
             return
         self.send_response(200)
         self.send_header("Content-Type", ctype)
@@ -2686,8 +2636,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         db.set_project_archived(project_id, archived)
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
@@ -2699,16 +2648,14 @@ class Handler(BaseHTTPRequestHandler):
         project_id 缺省按 0（跨项目全局，预留）；给定时须为本人项目（多用户隔离）。"""
         user = self._current_user()
         if user is None:
-            self._respond(401, b'{"error":"unauthorized"}',
-                          "application/json; charset=utf-8")
+            self._error(401, 'unauthorized')
             return
         try:
             pid = int((parsed.get("project_id") or ["0"])[0] or 0)
         except ValueError:
             pid = 0
         if pid and self._owned_project(pid) is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         self._respond(200, json.dumps({"prefs": db.get_user_prefs(user["id"], pid)},
                                       ensure_ascii=False).encode("utf-8"),
@@ -2720,13 +2667,11 @@ class Handler(BaseHTTPRequestHandler):
         （前端布局类数据很小，超限视为异常请求）。"""
         user = self._current_user()
         if user is None:
-            self._respond(401, b'{"error":"unauthorized"}',
-                          "application/json; charset=utf-8")
+            self._error(401, 'unauthorized')
             return
         key = str(body.get("key") or "").strip()
         if not re.fullmatch(r"[a-z_]{1,64}", key):
-            self._respond(400, '{"error":"key 非法"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, 'key 非法')
             return
         value = body.get("value")
         try:
@@ -2734,16 +2679,14 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             text = None
         if text is None or len(text) > 16384:
-            self._respond(400, '{"error":"value 非法"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, 'value 非法')
             return
         try:
             pid = int(body.get("project_id") or 0)
         except (TypeError, ValueError):
             pid = 0
         if pid and self._owned_project(pid) is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         db.set_user_pref(user["id"], pid, key, value)
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
@@ -2779,6 +2722,8 @@ class Handler(BaseHTTPRequestHandler):
                 # 会话标题（dsh 读标题事件；无标题概念的族留空）
                 "session_title": self._session_title(row),
                 "current_round": row["current_round"], "new_bugs": row["new_bugs"],
+                # T13：任务语言（创建时冻结；读侧统一归一，未知/空值 → zh）
+                "lang": i18n.task_lang(row),
                 "created_at": row["created_at"], "started_at": row["started_at"],
                 "ended_at": row["ended_at"], "error": row["error"]}
 
@@ -2801,8 +2746,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_list_tasks(self, project_id):
         if self._owned_project(project_id) is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         rows = db.list_tasks(project_id)
         self._respond(200, json.dumps([self._task_json(r) for r in rows],
@@ -2812,13 +2756,11 @@ class Handler(BaseHTTPRequestHandler):
     def _api_create_task(self, project_id, body):
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         task_type = body.get("task_type", "normal")
         if task_type not in TASK_TYPES:
-            self._respond(400, '{"error":"task_type 非法"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, 'task_type 非法')
             return
         # 提交日期范围（复测/探索可选）：YYYY-MM-DD；首轮 prompt 注入该范围内
         # git 提交与变更文件；复测任务（retest_bug）带日期范围时可不绑定 bug 报告
@@ -2826,8 +2768,7 @@ class Handler(BaseHTTPRequestHandler):
         date_to = str(body.get("date_to", "") or "").strip()
         date_from, date_to, date_err = _norm_date_range(date_from, date_to)
         if date_err:
-            self._respond(400, '{"error":"日期范围非法"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '日期范围非法')
             return
         # 阶段范围解析：探索/回归/修复按 STAGE_MATRIX 校验终点；复测范围来自
         # retest_scope 三选一（缺省 retest_only=仅复测，兼容旧客户端/复测按钮）
@@ -2835,25 +2776,21 @@ class Handler(BaseHTTPRequestHandler):
         if task_type == "retest_bug":
             scope = str(body.get("retest_scope") or "retest_only").strip()
             if scope not in RETEST_SCOPES:
-                self._respond(400, '{"error":"retest_scope 非法"}'.encode("utf-8"),
-                              "application/json; charset=utf-8")
+                self._error(400, 'retest_scope 非法')
                 return
             start_stage, end_stage = RETEST_SCOPES[scope]
         else:
             start_stage, end_stage, err = _resolve_stages(task_type, body)
             if err:
-                self._respond(400, '{"error":"end_stage 非法"}'.encode("utf-8"),
-                              "application/json; charset=utf-8")
+                self._error(400, 'end_stage 非法')
                 return
         # pipeline 为平台自动创建的后段任务，不接受外部直接创建
         if task_type == "pipeline":
-            self._respond(400, '{"error":"pipeline 为平台自动创建的后段任务，不支持手动创建"}'
-                          .encode("utf-8"), "application/json; charset=utf-8")
+            self._error(400, 'pipeline 为平台自动创建的后段任务，不支持手动创建')
             return
         # 回归任务：重跑指令（extra）必填——agent 按指令决定重跑哪些用例
         if task_type == "regression" and not str(body.get("extra") or "").strip():
-            self._respond(400, '{"error":"请填写重跑指令"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '请填写重跑指令')
             return
         # fix / retest_bug / reject / script_retest 绑定一枚 bug 报告（目录名），固定只跑一轮；
         # retest_bug 带日期范围（date_from/date_to）时不绑定报告（无报告复测，LLM 判影响面）
@@ -2863,8 +2800,7 @@ class Handler(BaseHTTPRequestHandler):
             if not bug_dir and task_type == "retest_bug" and (date_from or date_to):
                 pass  # 日期范围复测：无需 bug 报告
             elif not bug_dir or not os.path.isdir(os.path.join(row["bug_dir"], bug_dir)):
-                self._respond(400, '{"error":"bug 报告目录不存在"}'.encode("utf-8"),
-                              "application/json; charset=utf-8")
+                self._error(400, 'bug 报告目录不存在')
                 return
             else:
                 payload_obj = {"bug_dir": bug_dir}
@@ -2872,8 +2808,7 @@ class Handler(BaseHTTPRequestHandler):
                     # 拒绝理由随任务固化：修例 prompt 的依据，重启重跑仍携带
                     reason = (body.get("reason") or "").strip()
                     if not reason:
-                        self._respond(400, '{"error":"请填写拒绝理由"}'.encode("utf-8"),
-                                      "application/json; charset=utf-8")
+                        self._error(400, '请填写拒绝理由')
                         return
                     payload_obj["reason"] = reason
                 payload = json.dumps(payload_obj, ensure_ascii=False)
@@ -2900,8 +2835,7 @@ class Handler(BaseHTTPRequestHandler):
         stop_type = body.get("stop_type", "rounds")
         stop_value = str(body.get("stop_value", "1"))
         if stop_type not in ("rounds", "bugs", "deadline", "duration"):
-            self._respond(400, '{"error":"stop_type 非法"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, 'stop_type 非法')
             return
         # 压测任务：压测说明入 payload（agent 首轮与前端详情共用）；
         # 轮次条件固定 1 轮 agent（发压轮由平台直接追加），不接受其他停止条件
@@ -2932,12 +2866,14 @@ class Handler(BaseHTTPRequestHandler):
             cases_base = state["library"]["stats"].get("total", 0)
         except Exception:
             cases_base = 0
+        # T13：本请求语言只解析一次，父任务与 pipeline 后段共用同一冻结值
+        lang = self._request_lang()
         task_id = db.insert_task(project_id, name, auto_fix, retest, stop_type,
                                  stop_value, task_type, payload, extra, model,
                                  permission, auto_commit, auto_deploy,
                                  auto_retest=auto_retest, cases_base=cases_base,
                                  start_stage=start_stage, end_stage=end_stage,
-                                 date_from=date_from, date_to=date_to)
+                                 date_from=date_from, date_to=date_to, lang=lang)
         runner_instance.submit(task_id)
         # 探索/回归终点在「生成报告」之后：连带创建后段任务（单轮，报告分析→终点），
         # 同项目 FIFO 保证其排在前段之后执行
@@ -2948,7 +2884,7 @@ class Handler(BaseHTTPRequestHandler):
                 project_id, f"{name}·后段", auto_fix=0, retest="不复测",
                 stop_type="rounds", stop_value="1", task_type="pipeline",
                 payload=json.dumps({"parent_task_id": task_id}, ensure_ascii=False),
-                start_stage="analyze", end_stage=end_stage)
+                start_stage="analyze", end_stage=end_stage, lang=lang)
             runner_instance.submit(pipeline_id)
         self._respond(200, json.dumps({"id": task_id, "pipeline_id": pipeline_id},
                                       ensure_ascii=False).encode("utf-8"),
@@ -2957,8 +2893,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_list_bugs(self, project_id):
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         self._respond(200, json.dumps(list_project_bugs(row), ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
@@ -2970,15 +2905,13 @@ class Handler(BaseHTTPRequestHandler):
         任一失败已响应 404 并返回 (None, None)。"""
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return None, None
         if card_id is None:
             return row, None
         card = db.get_board_card(card_id)
         if card is None or card["project_id"] != row["id"]:
-            self._respond(404, b'{"error":"card not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'card not found')
             return None, None
         return row, card
 
@@ -2996,8 +2929,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_get_board(self, project_id):
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         payload = board.board_payload(row["id"], board.running_map())
         # 项目级 agent 族与能力声明（前端看板按 capabilities 泛化门控，同 session 窗口先例）
@@ -3018,8 +2950,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_board_create_card(self, project_id, body):
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         # 允许空标题建卡（用户先建空卡再单击打开详情编辑，标题在详情内补）
         title = body.get("title")
@@ -3057,24 +2988,20 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         mime = str(body.get("mime") or "application/octet-stream")[:100]
         name = str(body.get("name") or "file")[:200]
         try:
             data = base64.b64decode(str(body.get("data") or ""))
         except (ValueError, TypeError):
-            self._respond(400, b'{"error":"bad base64"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'bad base64')
             return
         if not data:
-            self._respond(400, b'{"error":"empty file"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'empty file')
             return
         if len(data) > self.BOARD_MEDIA_MAX:
-            self._respond(400, b'{"error":"file too large"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'file too large')
             return
         ext = self.BOARD_MEDIA_EXTS.get(mime, "bin")
         fid = f"m{int(time.time() * 1000)}_{secrets.token_hex(5)}.{ext}"
@@ -3086,9 +3013,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.path.join(mdir, fid), "wb") as f:
                 f.write(data)
         except OSError as e:
-            self._respond(500, json.dumps({"error": f"save failed: {e}"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(500, f"save failed: {e}")
             return
         self._respond(200, json.dumps({"fid": fid,
                                        "url": f"/api/projects/{project_id}/board/media/{fid}",
@@ -3101,12 +3026,10 @@ class Handler(BaseHTTPRequestHandler):
         """卡片附件读取：_owned_project 鉴权 + fid 白名单（防路径穿越）。"""
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         if not re.match(r"^m\d+_[0-9a-f]{10}\.[A-Za-z0-9]{1,10}$", fid):
-            self._respond(400, b'{"error":"bad fid"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'bad fid')
             return
         mdir = os.path.join(row["work_dir"] or
                             os.path.join(row["project_dir"], ".touchstone"),
@@ -3122,8 +3045,7 @@ class Handler(BaseHTTPRequestHandler):
         if row is None:
             return
         if "title" in body and not str(body["title"]).strip():
-            self._respond(400, b'{"error":"title required"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'title required')
             return
         fields = {}
         newly_bound = ""   # 本次真正新增的绑定会话（done 卡需同步归档，见文件尾）
@@ -3136,8 +3058,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 fields["scheduled_at"] = int(v) if v else None
             except (TypeError, ValueError):
-                self._respond(400, b'{"error":"bad scheduled_at"}',
-                              "application/json; charset=utf-8")
+                self._error(400, 'bad scheduled_at')
                 return
         if "session_id" in body:  # 设主会话（须已在 sessions 列表内）
             sid = str(body["session_id"])
@@ -3162,8 +3083,7 @@ class Handler(BaseHTTPRequestHandler):
         if "parent_card_id" in body:
             err = board.set_parent(row["id"], card_id, body["parent_card_id"])
             if err:
-                self._respond(400, b'{"error":"\xe5\xbe\xaa\xe7\x8e\xaf\xe4\xbe\x9d\xe8\xb5\x96\xe6\x88\x96\xe7\x88\xb6\xe4\xbb\xbb\xe5\x8a\xa1\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8"}',
-                              "application/json; charset=utf-8")
+                self._error(400, '循环依赖或父任务不存在')
                 return
         if fields:
             db.update_board_card(card_id, **fields)
@@ -3215,8 +3135,7 @@ class Handler(BaseHTTPRequestHandler):
         """回收站列表（项目卡片按删除时间倒序）。"""
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         cards = [board.card_json(r, bool(board.running_map().get(r["id"])))
                  for r in db.list_trashed_cards(row["id"])]
@@ -3229,8 +3148,7 @@ class Handler(BaseHTTPRequestHandler):
         if row is None:
             return
         if not card["trashed"]:
-            self._respond(400, b'{"error":"card not in trash"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'card not in trash')
             return
         db.restore_board_card(card_id)
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
@@ -3241,8 +3159,7 @@ class Handler(BaseHTTPRequestHandler):
         if row is None:
             return
         if not card["trashed"]:
-            self._respond(400, b'{"error":"card not in trash"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'card not in trash')
             return
         board.delete_card_cleanup(card_id)  # 幂等兜底：真删前清平台侧残留占用
         db.purge_board_card(card_id)
@@ -3252,8 +3169,7 @@ class Handler(BaseHTTPRequestHandler):
         """清空项目回收站（全部真删，不可恢复）。"""
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         db.purge_trashed_cards(row["id"])
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
@@ -3266,14 +3182,12 @@ class Handler(BaseHTTPRequestHandler):
         模式判定与落点语义收口 board.reorder_card，本端点只做参数整形。"""
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         try:
             card_id = int(body.get("card_id"))
         except (TypeError, ValueError):
-            self._respond(400, b'{"error":"card_id required"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'card_id required')
             return
         try:
             before_id = int(body["before_id"]) if body.get("before_id") is not None else None
@@ -3281,8 +3195,7 @@ class Handler(BaseHTTPRequestHandler):
             before_id = None
         err = board.reorder_card(row["id"], card_id, before_id)
         if err:
-            self._respond(400, json.dumps({"error": err}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, err)
             return
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
 
@@ -3335,15 +3248,20 @@ class Handler(BaseHTTPRequestHandler):
             card_dict, err = board.move_card(row, card_id, target,
                                              (body.get("block_text") or "")[:2000],
                                              before_id=before_id,
-                                             merge_ack=bool(body.get("merge_ack")))
+                                             merge_ack=bool(body.get("merge_ack")),
+                                             # T13 修复轮 1：拖列进 doing / 强制运行
+                                             # 手势都会起会话，请求语言随之下传（由
+                                             # board._enter_doing 在门禁之后冻结）
+                                             lang=self._request_lang())
             if err:
                 if "blocked" in err or "merge_pending" in err:
                     # 父任务拦截 / 合并询问：前端弹确认框，不算错误（列未变）
                     self._respond(200, json.dumps(err, ensure_ascii=False).encode("utf-8"),
                                   "application/json; charset=utf-8")
                     return
-                self._respond(400, json.dumps(err, ensure_ascii=False).encode("utf-8"),
-                              "application/json; charset=utf-8")
+                # err 是 lib 的 {"error": 词条 key / key+vars 载体}：交给 _error_spaced
+                # 按请求语言渲染（不能 json.dumps 整个 dict，否则英文模式查不到词）
+                self._error_spaced(400, err.get("error"))
                 return
             self._respond(200, json.dumps({"card": card_dict}, ensure_ascii=False).encode("utf-8"),
                           "application/json; charset=utf-8")
@@ -3351,8 +3269,7 @@ class Handler(BaseHTTPRequestHandler):
         # start：归档项目禁止；门禁+起会话+落列原子化走 board.start_into_doing
         # （queue 落 doing 排队占位与成功落 doing 均清 scheduled_at，防陈旧定时被调度线程点燃）
         if row["archived"]:
-            self._respond(400, b'{"error":"\xe9\xa1\xb9\xe7\x9b\xae\xe5\xb7\xb2\xe5\xbd\x92\xe6\xa1\xa3"}',
-                          "application/json; charset=utf-8")
+            self._error(400, '项目已归档')
             return
         opinion = (body.get("opinion") or "")[:20000]
         # doing+queue 排队占位卡放行 start（2026-09-06 起占位落 doing 列）：
@@ -3362,19 +3279,19 @@ class Handler(BaseHTTPRequestHandler):
         # 会话只发「继续」，见 board.build_start_prompt），完成后再走待审核。
         if card["column_key"] not in ("todo", "review", "blocked", "done") and not \
                 (card["column_key"] == "doing" and card["block_kind"] == "queue"):
-            self._respond(400, b'{"error":"\xe5\xbd\x93\xe5\x89\x8d\xe7\x8a\xb6\xe6\x80\x81\xe4\xb8\x8d\xe5\x8f\xaf\xe5\xbc\x80\xe5\xa7\x8b"}',
-                          "application/json; charset=utf-8")
+            self._error(400, '当前状态不可开始')
             return
         card_dict, err = board.start_into_doing(row, card, opinion,
                                                 force=bool(body.get("force")),
-                                                worktree=bool(body.get("worktree")))
+                                                worktree=bool(body.get("worktree")),
+                                                # T13：卡片语言首轮冻结＝本条请求语言
+                                                lang=self._request_lang())
         if err:
             if "blocked" in err:  # 父任务拦截：前端弹确认框，不算错误
                 self._respond(200, json.dumps(err).encode("utf-8"),
                               "application/json; charset=utf-8")
                 return
-            self._respond(400, json.dumps(err, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, err.get("error"))
             return
         # queue 形态同样走这里：card.column=='blocked' 正常返回
         self._respond(200, json.dumps({"card": card_dict}, ensure_ascii=False).encode("utf-8"),
@@ -3404,14 +3321,11 @@ class Handler(BaseHTTPRequestHandler):
         if row is None:
             return
         if board.running_map().get(card_id):
-            self._respond(409, json.dumps({"error": "会话运行中，请先停止卡片再清理 worktree"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(409, '会话运行中，请先停止卡片再清理 worktree')
             return
         ok, err = board.cleanup_card_worktree(row, card)
         if not ok:
-            self._respond(400, json.dumps({"error": err}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, err)
             return
         self._respond(200, b'{"ok": true}', "application/json; charset=utf-8")
 
@@ -3429,10 +3343,12 @@ class Handler(BaseHTTPRequestHandler):
         row, card = self._board_owned(project_id, card_id)
         if row is None:
             return
-        card_dict, err = board.handoff_worktree_merge(row, card)
+        card_dict, err = board.handoff_worktree_merge(row, card,
+                                                      # T13 修复轮 1：合并回交会起
+                                                      # 会话，冻结本条请求语言
+                                                      lang=self._request_lang())
         if err:
-            self._respond(400, json.dumps(err, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, err.get("error"))
             return
         self._respond(200, json.dumps({"card": card_dict}, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
@@ -3445,18 +3361,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         sid = str(body.get("sid") or card["session_id"] or "").strip()
         if not sid:
-            self._respond(400, b'{"error":"sid required"}', "application/json; charset=utf-8")
+            self._error(400, 'sid required')
             return
         if board.running_map().get(card_id):
-            self._respond(409, json.dumps({"error": "会话运行中，稍后再试"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(409, '会话运行中，稍后再试')
             return
         try:
             board.compact_session(row, card, sid)
         except RuntimeError as e:
-            self._respond(400, json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, e)
             return
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
 
@@ -3472,18 +3385,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         sid = str(body.get("sid") or card["session_id"] or "").strip()
         if not sid:
-            self._respond(400, b'{"error":"sid required"}', "application/json; charset=utf-8")
+            self._error(400, 'sid required')
             return
         if board.running_map().get(card_id):
-            self._respond(409, json.dumps({"error": "会话运行中，稍后再试"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(409, '会话运行中，稍后再试')
             return
         try:
             new_sid, compact_ok = board.fork_compact_session(row, card, sid)
         except RuntimeError as e:
-            self._respond(400, json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, e)
             return
         self._respond(200, json.dumps({"ok": True, "new_sid": new_sid,
                                        "compact_ok": compact_ok},
@@ -3500,18 +3410,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         sid = str(body.get("sid") or card["session_id"] or "").strip()
         if not sid:
-            self._respond(400, b'{"error":"sid required"}', "application/json; charset=utf-8")
+            self._error(400, 'sid required')
             return
         if board.running_map().get(card_id):
-            self._respond(409, json.dumps({"error": "会话运行中，稍后再试"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(409, '会话运行中，稍后再试')
             return
         try:
             new_sid = board.fork_session(row, card, sid)
         except RuntimeError as e:
-            self._respond(400, json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, e)
             return
         self._respond(200, json.dumps({"ok": True, "new_sid": new_sid},
                                       ensure_ascii=False).encode("utf-8"),
@@ -3523,8 +3430,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         text = (body.get("text") or "").strip()
         if not text:
-            self._respond(400, b'{"error":"text required"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'text required')
             return
         mid = db.insert_board_comment(card_id, text[:20000])
         row_c = [c for c in db.list_board_comments(row["id"]) if c["id"] == mid][0]
@@ -3542,8 +3448,7 @@ class Handler(BaseHTTPRequestHandler):
                 target = c
                 break
         if target is None:
-            self._respond(404, b'{"error":"comment not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'comment not found')
             return
         try:
             # inject=true 时立即注入运行中的当前轮（dsh 等 steer 能力会话生效）；
@@ -3556,18 +3461,15 @@ class Handler(BaseHTTPRequestHandler):
         except dshdriver.DshDriverError as e:
             # 409 = 会话运行中（deliver_comment 的忙拒绝）；其余 code 按 500
             if e.args and e.args[0] == 409:
-                self._respond(409, json.dumps(
-                    {"error": e.args[1] if len(e.args) > 1 else "会话运行中，稍后重试"},
-                    ensure_ascii=False).encode("utf-8"),
-                    "application/json; charset=utf-8")
+                if len(e.args) > 1:
+                    self._error_spaced(409, e)
+                else:
+                    self._error_spaced(409, "会话运行中，稍后重试")
             else:
-                self._respond(500, json.dumps({"error": f"agent 调用失败: {e}"},
-                                              ensure_ascii=False).encode("utf-8"),
-                              "application/json; charset=utf-8")
+                self._error_spaced(500, 'agent 调用失败: {detail}', {"detail": str(e)})
             return
         except RuntimeError as e:
-            self._respond(400, json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, e)
             return
         self._respond(200, json.dumps(
             {"ok": True, "queued": bool(rec and rec.get("queued")),
@@ -3585,8 +3487,7 @@ class Handler(BaseHTTPRequestHandler):
                 target = c
                 break
         if target is None:
-            self._respond(404, b'{"error":"comment not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'comment not found')
             return
         db.delete_board_comment(comment_id)
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
@@ -3594,8 +3495,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_board_update_settings(self, project_id, body):
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         s = board.settings_of(row["id"])
         # 并行模式白名单（serial/parallel 两档；readonly-parallel 2026-09-17 删档，
@@ -3614,12 +3514,10 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(body.get("sort"), dict):
             for col, mode in body["sort"].items():
                 if col not in board.COLUMNS or mode not in board.SORT_MODES:
-                    self._respond(400, b'{"error":"bad sort"}',
-                                  "application/json; charset=utf-8")
+                    self._error(400, 'bad sort')
                     return
                 if mode == "entered_desc" and col != "done":
-                    self._respond(400, b'{"error":"bad sort"}',
-                                  "application/json; charset=utf-8")
+                    self._error(400, 'bad sort')
                     return
                 s["sort"][col] = mode
         db.set_board_settings(row["id"], s)
@@ -3630,8 +3528,7 @@ class Handler(BaseHTTPRequestHandler):
         """Jira：test 用请求体里的配置试连；import 用已保存设置导入。"""
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         if action == "test":
             cfg = {"url": str(body.get("url") or ""), "user": str(body.get("user") or ""),
@@ -3648,8 +3545,7 @@ class Handler(BaseHTTPRequestHandler):
         bound=已在任一卡片 sessions 内（前端下拉置灰）。"""
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         family = _sess_family(runner.agent_family(row["agent_path"]))
         items = sessparse.list_sessions(family, row["project_dir"])
@@ -3667,26 +3563,22 @@ class Handler(BaseHTTPRequestHandler):
         """看板卡片会话只读查看（sessparse 按 family+sid 直读，不经任务）。"""
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         sid = parsed.get("sid", [""])[0]
         try:
             after = int(parsed.get("after", ["0"])[0] or 0)
         except (TypeError, ValueError):
-            self._respond(400, b'{"error":"bad after"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'bad after')
             return
         if not sid:
-            self._respond(400, b'{"error":"sid required"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'sid required')
             return
         # sid 必须落在本项目全部卡片的会话并集内（防跨项目读任意会话）；
         # 归属卡片行留用（id → running 判定/队列键，column_key → 标题行「卡片队列」徽标）
         owner = self._board_owns_sid(row, sid)
         if owner is None:
-            self._respond(404, b'{"error":"session not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'session not found')
             return
         owner_cid = owner["id"]
         family = runner.agent_family(row["agent_path"])
@@ -3776,17 +3668,14 @@ class Handler(BaseHTTPRequestHandler):
         归属口径与 _api_board_session_messages 相同，防跨项目读任意会话）。"""
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         sid = parsed.get("sid", [""])[0]
         if not sid:
-            self._respond(400, b'{"error":"sid required"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'sid required')
             return
         if self._board_owns_sid(row, sid) is None:
-            self._respond(404, b'{"error":"session not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'session not found')
             return
         agent = parsed.get("agent", ["main"])[0] or "main"
         # dsh_plugin 的会话即 dsh 宿主会话，sessparse 调用统一经 _sess_family 归一
@@ -3794,8 +3683,7 @@ class Handler(BaseHTTPRequestHandler):
             _sess_family(runner.agent_family(row["agent_path"])),
             sid, agent, unquote(media_id))
         if resolved is None:
-            self._respond(404, b'{"error":"media not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'media not found')
             return
         data, ctype = resolved
         self._respond(200, data, ctype)
@@ -3823,12 +3711,10 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         if self._board_owns_sid(row, sid) is None:
-            self._respond(404, b'{"error":"session not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'session not found')
             return
         fam = runner.agent_family(row["agent_path"])
         model = str(body.get("model") or "")
@@ -3838,25 +3724,16 @@ class Handler(BaseHTTPRequestHandler):
         pmode = dshdriver.LEGACY_PERMISSION_ALIASES.get(pmode_raw, pmode_raw)
         effort = normalize_effort(body.get("reasoning_effort")) if "reasoning_effort" in body else ""
         if fam != "dsh_plugin":
-            self._respond(400, json.dumps({"error": "该 agent 族不支持会话级配置"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, '该 agent 族不支持会话级配置')
             return
         if effort is None:
-            self._respond(400, json.dumps(
-                {"error": f"思考等级非法（{'/'.join(DSH_EFFORT_LEVELS)} 或留空）"},
-                ensure_ascii=False).encode("utf-8"),
-                "application/json; charset=utf-8")
+            self._error_spaced(400, '思考等级非法（{levels} 或留空）', {"levels": "/".join(DSH_EFFORT_LEVELS)})
             return
         if not model and not pmode and not effort:
-            self._respond(400, b'{"error":"model/permission_mode/reasoning_effort required"}',
-                          "application/json; charset=utf-8")
+            self._error(400, 'model/permission_mode/reasoning_effort required')
             return
         if pmode and pmode not in _permission_catalog_values():
-            self._respond(400, json.dumps(
-                {"error": "权限档非法（宿主权限目录里没有该档位）"},
-                ensure_ascii=False).encode("utf-8"),
-                "application/json; charset=utf-8")
+            self._error_spaced(400, '权限档非法（宿主权限目录里没有该档位）')
             return
         try:
             if pmode:
@@ -3867,8 +3744,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 只改思考等级时 model 传空串：插件从会话当前模型选择回读 provider/model
                 dshdriver.set_model(sid, model, reasoning_effort=effort)
         except dshdriver.DshDriverError as e:
-            self._respond(502, json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(502, e)
             return
         self._respond(200, json.dumps({"ok": True, "model": model,
                                        "permission_mode": pmode,      # canonical preset
@@ -3891,32 +3767,22 @@ class Handler(BaseHTTPRequestHandler):
         """
         task, project, family = self._session_context(task_id)
         if task is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         for unsupported in ("model", "permission_mode"):
             if str(body.get(unsupported) or ""):
-                self._respond(400, json.dumps(
-                    {"error": f"任务会话不支持 {unsupported}（仅看板卡会话支持）"},
-                    ensure_ascii=False).encode("utf-8"),
-                    "application/json; charset=utf-8")
+                self._error_spaced(400, '任务会话不支持 {kind}（仅看板卡会话支持）', {"kind": unsupported})
                 return
         if family != "dsh_plugin":
-            self._respond(400, json.dumps({"error": "该 agent 族不支持会话级配置"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, '该 agent 族不支持会话级配置')
             return
         effort = normalize_effort(body.get("reasoning_effort"))
         if effort is None:
-            self._respond(400, json.dumps(
-                {"error": f"思考等级非法（{'/'.join(DSH_EFFORT_LEVELS)} 或留空）"},
-                ensure_ascii=False).encode("utf-8"),
-                "application/json; charset=utf-8")
+            self._error_spaced(400, '思考等级非法（{levels} 或留空）', {"levels": "/".join(DSH_EFFORT_LEVELS)})
             return
         sid = task["session_id"] or ""
         if not sid:
-            self._respond(409, '{"error":"会话尚未生成（首轮执行后才有）"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(409, '会话尚未生成（首轮执行后才有）')
             return
         # 模型取任务/项目口径（与 runner 起轮一致）：只改思考等级时插件也能自己回读
         # 会话当前模型，这里传上是为了「档位与模型不匹配」时宿主能给出准确报错
@@ -3926,8 +3792,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             dshdriver.set_model(sid, mid, provider=provider, reasoning_effort=effort)
         except dshdriver.DshDriverError as e:
-            self._respond(502, json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(502, e)
             return
         self._respond(200, json.dumps({"ok": True, "reasoning_effort": effort},
                                       ensure_ascii=False).encode("utf-8"),
@@ -3955,9 +3820,7 @@ class Handler(BaseHTTPRequestHandler):
         # 路线 A 打通（2026-10-03 P1）：作答走插件 `/answer`，审批分支在 dsh 上
         # 由 board 抛 40005（不代答），错误信息由既有错误响应透出。
         if fam != "dsh_plugin":
-            self._respond(400, json.dumps({"error": "该 agent 族不支持回答问题"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, '该 agent 族不支持回答问题')
             return
         if body.get("approval_id"):
             err = board.answer_approval(row, card,
@@ -3967,14 +3830,12 @@ class Handler(BaseHTTPRequestHandler):
         else:
             qid = str(body.get("qid") or "")
             if not qid:
-                self._respond(400, b'{"error":"qid/approval_id required"}',
-                              "application/json; charset=utf-8")
+                self._error(400, 'qid/approval_id required')
                 return
             err = board.answer_interaction(
                 row, card, qid, body.get("answers") or [])
         if err:
-            self._respond(400, json.dumps({"error": err}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, err)
             return
         queued = board.is_answer_pending(card["id"])
         self._respond(200, json.dumps({"ok": True, "queued": queued}).encode("utf-8"),
@@ -3990,8 +3851,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         ok, err = board.deliver_pending_answer_now(card_id)
         if not ok:
-            self._respond(400, json.dumps({"error": err}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, err)
             return
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
 
@@ -4002,12 +3862,10 @@ class Handler(BaseHTTPRequestHandler):
         （白名单，防跨会话/跨项目注入他人消息）。"""
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         if self._board_owns_sid(row, sid) is None:
-            self._respond(404, b'{"error":"session not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'session not found')
             return
         self._inject_msg(row, sid, body)
 
@@ -4015,13 +3873,11 @@ class Handler(BaseHTTPRequestHandler):
         """把任务会话排队中的平台消息立即注入（不等统一队列；dsh_plugin 族）。"""
         task, project, family = self._session_context(task_id)
         if task is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         sid = task["session_id"] or ""
         if not sid:
-            self._respond(409, '{"error":"会话尚未生成（首轮执行后才有）"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(409, '会话尚未生成（首轮执行后才有）')
             return
         self._inject_msg(project, sid, body, task_id=task_id)
 
@@ -4036,30 +3892,22 @@ class Handler(BaseHTTPRequestHandler):
         # 单族世界：`chat.inject_now` 只对 dsh_plugin 开放（运行中注入当前轮 =
         # steer，空闲即起轮）；已退场族 400。
         if fam != "dsh_plugin":
-            self._respond(400, json.dumps({"error": "该 agent 族不支持立即注入"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, '该 agent 族不支持立即注入')
             return
         info = chat.msg_info(str(body.get("msg_id") or ""))
         if info is None or info["sid"] != sid or info["project_id"] != project["id"] \
                 or (task_id is not None and info["task_id"] != task_id):
-            self._respond(404, json.dumps({"error": "消息不存在或不在该会话下"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(404, '消息不存在或不在该会话下')
             return
         try:
             chat.inject_now(info["id"])
         except chat.InjectRefused as e:
             # 被拒（已被 worker 拾起/不可注入）：消息仍在队列，不改状态
-            self._respond(400, json.dumps({"error": str(e)},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, e)
             return
         except Exception as e:
             # 投递失败：消息已按原位次退回排队（chat.inject_now 内），此处只报错
-            self._respond(502, json.dumps({"error": f"注入失败：{e}"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(502, '注入失败：{detail}', {"detail": str(e)})
             return
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
 
@@ -4070,12 +3918,10 @@ class Handler(BaseHTTPRequestHandler):
         见 _rewind_session_dsh）。"""
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         if self._board_owns_sid(row, sid) is None:
-            self._respond(404, b'{"error":"session not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'session not found')
             return
         self._rewind_session(row, sid, body)
 
@@ -4083,13 +3929,11 @@ class Handler(BaseHTTPRequestHandler):
         """把任务会话回退到某条用户提问之前（dsh_plugin 族）。"""
         task, project, family = self._session_context(task_id)
         if task is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         sid = task["session_id"] or ""
         if not sid:
-            self._respond(409, '{"error":"会话尚未生成（首轮执行后才有）"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(409, '会话尚未生成（首轮执行后才有）')
             return
         self._rewind_session(project, sid, body, task=task)
 
@@ -4102,9 +3946,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         fam = runner.agent_family(project["agent_path"])
         if fam != "dsh_plugin":
-            self._respond(400, json.dumps({"error": "该 agent 族不支持会话回退"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, '该 agent 族不支持会话回退')
             return
         self._rewind_session_dsh(project, sid, body, task=task)
 
@@ -4121,10 +3963,7 @@ class Handler(BaseHTTPRequestHandler):
         mid = str(body.get("mid") or "")
         boundary = sessparse.dsh_fork_boundary(sid, mid)
         if boundary is None:
-            self._respond(409, json.dumps(
-                {"error": "该提问已被回退或会话已变化，请刷新后重试"},
-                ensure_ascii=False).encode("utf-8"),
-                "application/json; charset=utf-8")
+            self._error_spaced(409, '该提问已被回退或会话已变化，请刷新后重试')
             return
         try:
             new_sid = str((dshdriver.fork(sid, at_seq=boundary) or {})
@@ -4139,9 +3978,7 @@ class Handler(BaseHTTPRequestHandler):
             if task is not None:
                 db.update_task(task["id"], session_id=new_sid)
         except dshdriver.DshDriverError as e:
-            self._respond(502, json.dumps({"error": f"回退失败：{e}"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(502, '回退失败：{detail}', {"detail": str(e)})
             return
         self._respond(200, json.dumps({"ok": True, "new_session_id": new_sid,
                                        "boundary": boundary,
@@ -4157,20 +3994,16 @@ class Handler(BaseHTTPRequestHandler):
         """
         task, project, family = self._session_context(task_id)
         if task is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         # 单族世界：任务侧作答同样走 dsh_plugin——任务侧直送（queued=false），
         # 底层 `board.answer_interaction` 的 dsh 分支已就绪（方案 §2.1 #6）。
         if family != "dsh_plugin":
-            self._respond(400, json.dumps({"error": "该 agent 族不支持回答问题"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, '该 agent 族不支持回答问题')
             return
         sid = task["session_id"] or ""
         if not sid:
-            self._respond(409, '{"error":"会话尚未生成（首轮执行后才有）"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(409, '会话尚未生成（首轮执行后才有）')
             return
         board.interaction_probe(family, project, sid)
         card = {"session_id": sid}
@@ -4182,14 +4015,12 @@ class Handler(BaseHTTPRequestHandler):
         else:
             qid = str(body.get("qid") or "")
             if not qid:
-                self._respond(400, b'{"error":"qid/approval_id required"}',
-                              "application/json; charset=utf-8")
+                self._error(400, 'qid/approval_id required')
                 return
             err = board.answer_interaction(project, card, qid,
                                            body.get("answers") or [])
         if err:
-            self._respond(400, json.dumps({"error": err}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, err)
             return
         self._respond(200, b'{"ok":true,"queued":false}', "application/json; charset=utf-8")
 
@@ -4197,14 +4028,12 @@ class Handler(BaseHTTPRequestHandler):
         """单枚 bug 报告详情：全文 + 关联 case 的当前状态 + 最近任务。"""
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         bug_dir = unquote(bug_dir)
         dir_path = os.path.join(row["bug_dir"], bug_dir)
         if not os.path.isdir(dir_path):
-            self._respond(404, b'{"error":"bug not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'bug not found')
             return
         content, case_ids = lib.bug_cases(dir_path)
         fields = parse_fields(content)
@@ -4236,19 +4065,16 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         bug_dir = unquote(bug_dir).strip().strip("/")
         dir_path = os.path.join(row["bug_dir"], bug_dir)
         if not os.path.isdir(dir_path):
-            self._respond(404, b'{"error":"bug not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'bug not found')
             return
         reason = str(body.get("reason") or "").strip()
         if not reason:
-            self._respond(400, '{"error":"请填写拒绝理由"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '请填写拒绝理由')
             return
         report_path = os.path.join(dir_path, "bug_report.md")
         # 状态 → 已拒绝；理由追加到「拒绝记录」小节（重复拒绝累加，最新在最上）
@@ -4276,7 +4102,7 @@ class Handler(BaseHTTPRequestHandler):
             tid = db.insert_task(row["id"], name, 0, "不复测", "rounds", "1", "reject",
                                  json.dumps({"bug_dir": bug_dir, "reason": reason},
                                             ensure_ascii=False),
-                                 cases_base=cases_base)
+                                 cases_base=cases_base, lang=self._request_lang())
             runner_instance.submit(tid)
         self._respond(200, json.dumps({"ok": True, "task_id": tid},
                                       ensure_ascii=False).encode("utf-8"),
@@ -4313,8 +4139,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_get_task(self, task_id):
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         self._respond(200, json.dumps(self._task_json(row), ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
@@ -4322,8 +4147,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_task_action(self, task_id, action):
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         if action == "stop":
             runner_instance.stop(task_id)
@@ -4332,8 +4156,7 @@ class Handler(BaseHTTPRequestHandler):
             # starting（claimed 已被 starting 吸收，v2a T1），restart 的 enqueue
             # 幂等复用该行、旧跑 finally 把行落 done，
             # 任务 queued 且无活跃行=永不拾取的幽灵（对齐 continue 端点同款门禁）
-            self._respond(400, '{"error":"任务运行中或排队中，请先停止"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '任务运行中或排队中，请先停止')
             return
         else:
             runner_instance.restart(task_id)
@@ -4349,21 +4172,17 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         if (row["task_type"] or "normal") in ("stress", "pipeline"):
-            self._respond(400, '{"error":"该任务类型不支持继续（重启可从第一轮重跑）"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '该任务类型不支持继续（重启可从第一轮重跑）')
             return
         if row["status"] in ("running", "queued"):
-            self._respond(400, '{"error":"任务运行中或排队中，请先停止"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '任务运行中或排队中，请先停止')
             return
         stop_type = body.get("stop_type", row["stop_type"])
         if stop_type not in ("rounds", "bugs", "deadline", "duration"):
-            self._respond(400, '{"error":"stop_type 非法"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, 'stop_type 非法')
             return
         stop_value = str(body.get("stop_value", row["stop_value"]) or "").strip()
         try:
@@ -4372,8 +4191,7 @@ class Handler(BaseHTTPRequestHandler):
             elif stop_type == "bugs":
                 stop_value = str(int(row["new_bugs"] or 0) + int(stop_value or "1"))
         except ValueError:
-            self._respond(400, '{"error":"stop_value 非法"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, 'stop_value 非法')
             return
         name = str(body.get("name", row["name"]) or "").strip() or row["name"]
         db.update_task(task_id, name=name,
@@ -4389,12 +4207,10 @@ class Handler(BaseHTTPRequestHandler):
         """删除任务：运行中的任务拒绝删除（先停止）；排队中的任务先从队列移除。"""
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         if row["status"] == "running":
-            self._respond(400, '{"error":"任务运行中，请先停止再删除"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '任务运行中，请先停止再删除')
             return
         runner_instance.remove(task_id)
         db.delete_task(task_id)
@@ -4405,8 +4221,7 @@ class Handler(BaseHTTPRequestHandler):
         （修改后需重启任务生效；extra=用户附加要求，修复弹窗的意见经此写入）。"""
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         fields = {}
         if "model" in body:
@@ -4424,15 +4239,13 @@ class Handler(BaseHTTPRequestHandler):
         if "start_stage" in body:
             val = str(body["start_stage"] or "").strip()
             if val and val not in STAGES:
-                self._respond(400, '{"error":"start_stage 非法"}'.encode("utf-8"),
-                              "application/json; charset=utf-8")
+                self._error(400, 'start_stage 非法')
                 return
             fields["start_stage"] = val
         if "end_stage" in body:
             val = str(body["end_stage"] or "").strip()
             if val and val not in STAGES:
-                self._respond(400, '{"error":"end_stage 非法"}'.encode("utf-8"),
-                              "application/json; charset=utf-8")
+                self._error(400, 'end_stage 非法')
                 return
             fields["end_stage"] = val
         if fields:
@@ -4443,8 +4256,7 @@ class Handler(BaseHTTPRequestHandler):
         """任务对话流：解析全部轮次日志为结构化条目，供「修复过程」标签渲染。"""
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         entries = runner.read_dialogue(db.list_rounds(task_id))
         self._respond(200, json.dumps({
@@ -4456,8 +4268,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_list_rounds(self, task_id):
         if self._owned_task(task_id) is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         rows = db.list_rounds(task_id)
         self._respond(200, json.dumps([dict(r) for r in rows], ensure_ascii=False).encode("utf-8"),
@@ -4466,15 +4277,13 @@ class Handler(BaseHTTPRequestHandler):
     def _api_task_log(self, task_id, parsed):
         """返回某轮日志尾部（tail 行），2s 轮询由 UI 控制。"""
         if self._owned_task(task_id) is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         round_no = parsed.get("round", ["0"])[0]
         tail = min(int(parsed.get("tail", ["300"])[0]), 5000)
         row = db.get_log_round(task_id, int(round_no) if round_no.isdigit() else 0)
         if row is None:
-            self._respond(404, b'{"error":"log not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'log not found')
             return
         if row["log_path"] and os.path.isfile(row["log_path"]):
             content = runner.read_log_tail(row["log_path"], tail)
@@ -4612,8 +4421,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         try:
             after = max(0, int((parsed.get("after") or ["0"])[0]))
@@ -4656,8 +4464,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         project = db.get_project(row["project_id"])
         assets = loadcase.read_assets(project["cases_root"], task_id)
@@ -4680,21 +4487,18 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         project = db.get_project(row["project_id"])
         path = loadcase.resolve(project["cases_root"], task_id)["html_path"]
         if not path:
-            self._respond(404, b'{"error":"custom view not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'custom view not found')
             return
         try:
             with open(path, "rb") as f:
                 body = f.read()
         except OSError:
-            self._respond(404, b'{"error":"custom view unreadable"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'custom view unreadable')
             return
         self._respond(200, body, "text/html; charset=utf-8",
                       {"X-Content-Type-Options": "nosniff",
@@ -4709,8 +4513,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         run = ((parsed or {}).get("run") or [""])[0]
         run_row = self._load_run_row(row, run)
@@ -4732,8 +4535,7 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 found = ""
         if run and not os.path.isfile(found):
-            self._respond(404, b'{"error":"run not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'run not found')
             return
         if not found or not os.path.isfile(found):
             self._respond(200, b'{"found":false}',
@@ -4760,8 +4562,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         project = db.get_project(row["project_id"])
         work_dir = project["work_dir"]
@@ -4832,16 +4633,13 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         if (row["task_type"] or "normal") != "stress":
-            self._respond(400, '{"error":"仅压测任务支持复压"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '仅压测任务支持复压')
             return
         if row["status"] in ("running", "queued"):
-            self._respond(400, '{"error":"任务运行中或排队中，请先停止"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, '任务运行中或排队中，请先停止')
             return
         runner_instance.rerun_load(task_id)
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
@@ -4856,8 +4654,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         text = self._load_diagnose_text(row)
         self._api_session_chat(task_id, {"message": text})
@@ -4911,8 +4708,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_task(task_id)
         if row is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         path, _legacy = self._load_metrics_source(
             row, ((parsed or {}).get("run") or [""])[0])
@@ -5040,8 +4836,7 @@ class Handler(BaseHTTPRequestHandler):
         """session 原始对话内容（一次性拉取；?agent=&after= 增量）。"""
         task, project, family = self._session_context(task_id)
         if task is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         agent = parsed.get("agent", ["main"])[0]
         after_s = parsed.get("after", ["0"])[0]
@@ -5058,8 +4853,7 @@ class Handler(BaseHTTPRequestHandler):
         无需重开弹窗）；探测出的会话被真实 sid 纠正时增量基点归零、全量重发。"""
         task, project, family = self._session_context(task_id)
         if task is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         agent = parsed.get("agent", ["main"])[0]
         after_s = parsed.get("after", [""])[0]
@@ -5147,15 +4941,13 @@ class Handler(BaseHTTPRequestHandler):
         """session 图片字节（dsh 附件 id → 驱动 /media 取字节，见 sessparse.resolve_media）。"""
         task, _project, family = self._session_context(task_id)
         if task is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         agent = parsed.get("agent", ["main"])[0]
         resolved = sessparse.resolve_media(_sess_family(family), task["session_id"] or "", agent,
                                            unquote(media_id))
         if resolved is None:
-            self._respond(404, b'{"error":"media not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'media not found')
             return
         data, ctype = resolved
         self._respond(200, data, ctype)
@@ -5170,53 +4962,43 @@ class Handler(BaseHTTPRequestHandler):
         """
         task, project, family = self._session_context(task_id)
         if task is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         message = str(body.get("message") or "").strip()
         if not message:
-            self._respond(400, '{"error":"message 不能为空"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, 'message 不能为空')
             return
         if len(message) > chat.MESSAGE_MAX:
-            self._respond(400, '{"error":"message 过长"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(400, 'message 过长')
             return
         if family not in chat.CHAT_FAMILIES:
-            self._respond(409, '{"error":"该 agent 暂不支持对话"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(409, '该 agent 暂不支持对话')
             return
         sid = task["session_id"] or ""
         if not sid:
-            self._respond(409, '{"error":"会话尚未生成（首轮执行后才有）"}'.encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error(409, '会话尚未生成（首轮执行后才有）')
             return
         try:
             rec = chat.start(task, project, message, inject=bool(body.get("inject")))
         except dshdriver.DshDriverError as e:
             # 409 = 会话运行中（chat.start 的忙拒绝，竞态兜底）；其余按 500
             if e.args and e.args[0] == 409:
-                self._respond(409, json.dumps(
-                    {"error": e.args[1] if len(e.args) > 1 else "会话运行中，稍后重试"},
-                    ensure_ascii=False).encode("utf-8"),
-                    "application/json; charset=utf-8")
+                if len(e.args) > 1:
+                    self._error_spaced(409, e)
+                else:
+                    self._error_spaced(409, "会话运行中，稍后重试")
             else:
-                self._respond(500, json.dumps({"error": f"agent 调用失败: {e}"},
-                                              ensure_ascii=False).encode("utf-8"),
-                              "application/json; charset=utf-8")
+                self._error_spaced(500, 'agent 调用失败: {detail}', {"detail": str(e)})
             return
         except OSError as e:
-            self._respond(500, json.dumps({"error": f"agent 调用失败: {e}"},
-                                          ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(500, 'agent 调用失败: {detail}', {"detail": str(e)})
             return
         except RuntimeError as e:
             # 投递前置闸拒投（chat.DeliveryRefused：外部会话前提不成立，C 批 T5/T8）——
             # 消息未入队、未落行，回 400 + 闸的中文文案（口径同 _api_board_session_comment）。
             # 必须排在 dshdriver.DshDriverError 之后：它也是 RuntimeError 子类，先命中 409/500；
             # 裸 RuntimeError 若逃逸，do_POST 无兜底 ⇒ 用户拿到连接重置而不是要求的明确文案。
-            self._respond(400, json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(400, e)
             return
         self._respond(200, json.dumps(
             {"ok": True, "queued": bool(rec.get("queued")),
@@ -5232,8 +5014,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         task, _project, _family = self._session_context(task_id)
         if task is None:
-            self._respond(404, b'{"error":"task not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'task not found')
             return
         sid = task["session_id"] or ""
         if ((body or {}).get("mode") or "") == "cancel_queue":
@@ -5265,9 +5046,7 @@ class Handler(BaseHTTPRequestHandler):
                     or (project_id is not None and info.get("project_id") != project_id)
                     or (card_id is not None and info.get("card_id") != card_id)
                     or (task_id is not None and info.get("task_id") != task_id)):
-                self._respond(404, json.dumps({"error": "消息不存在或不在该会话下"},
-                                              ensure_ascii=False).encode("utf-8"),
-                              "application/json; charset=utf-8")
+                self._error_spaced(404, '消息不存在或不在该会话下')
                 return
         out = chat.cancel_queued_detail(sid=sid or None, card_id=card_id,
                                         msg_id=msg_id or None)
@@ -5292,8 +5071,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_state(self, parsed):
         project = self._resolve_project(parsed)
         if project is None:
-            self._respond(200, json.dumps({"error": "no project"}, ensure_ascii=False).encode("utf-8"),
-                          "application/json; charset=utf-8")
+            self._error_spaced(200, 'no project')
             return
         state = self.state_cache.get(project["id"], project["cases_root"],
                                      project["bug_dir"], project["work_dir"])
@@ -5317,8 +5095,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         project = self._owned_project(project_id)
         if project is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         topic = localbus.board_topic(project_id)
         self.send_response(200)
@@ -5384,13 +5161,11 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = self._owned_project(project_id)
         if row is None:
-            self._respond(404, b'{"error":"project not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'project not found')
             return
         card = self._board_owns_sid(row, sid)
         if card is None:
-            self._respond(404, b'{"error":"session not found"}',
-                          "application/json; charset=utf-8")
+            self._error(404, 'session not found')
             return
         topic = localbus.session_topic(sid)
         self.send_response(200)
@@ -5492,8 +5267,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         if path in MUST_CHANGE_PW_ALLOW:
             return False
-        self._respond(403, '{"error":"请先修改初始口令"}'.encode("utf-8"),
-                      "application/json; charset=utf-8")
+        self._error(403, '请先修改初始口令')
         return True
 
     def _trusted_admin_request(self):
@@ -5585,6 +5359,116 @@ class Handler(BaseHTTPRequestHandler):
             chunks.append(self.rfile.read(size))
             self.rfile.read(2)             # 每块数据后的 CRLF
         return b"".join(chunks)
+
+    # ---------- 错误响应：按请求语言本地化（Node `ctx.error*` 的 Python 镜像） ----------
+    #
+    # 契约（与 `backend/routes/index.js:makeContext` 的 `localize` 逐条对应，T10 → T11）：
+    #   - `message` 为字符串：直接当 `t('api', …)` 的词条 key（固定文案即中文原文）；
+    #   - `message` 为 `{"message", "vars"}`（`i18n.message_vars()` 返回的 lib 值载体）：
+    #     按 key+vars 渲染；
+    #   - `message` 为异常对象：key 取 `i18n.localizable()` 附加的 `i18n_key`，变量取
+    #     `i18n_vars`；两者缺失时回落 `str(message)`（= 旧 `str(e)` 口径，语义不变）；
+    #   - 其余非字符串走 `i18n.js_string()`（严格镜像 Node 的 `String(message)`：
+    #     null → "null"、布尔 → "true"/"false"、数字按 JS 最短表示、数组逗号连接、
+    #     普通对象 → "[object Object]"，自定义 `__str__`/toString 照用）。
+    # 两种正文形状按写点逐处保持（不能统一！）：`_error` 对应 Python 里 112 处字节串
+    # 字面量 + 50 处 `'…'.encode()`（紧凑 `{"error":"…"}`）；`_error_spaced` 对应 67 处
+    # `json.dumps({"error": …})`（带空格 `{"error": "…"}`）。`_respond` 未改，故
+    # Content-Type/Length 也不变。
+    # 语言解析与用户偏好的读取顺序见 `_request_lang`（每请求一次，惰性）。
+    def _request_lang(self):
+        """解析本条请求的界面语言：X-TS-Lang → ?lang= → 用户偏好 → "zh"。
+
+        **读库顺序**（与 Node `requestLang` 一致）：先解析头/query 两档显式信号，命中
+        就直接返回、不读 user_prefs；只有两者都缺席（且 TS_I18N≠0）才读一次偏好。
+        `TS_I18N=0` 时连偏好都不读（回滚开关）。读库失败按「没有偏好」处理——错误响应
+        不能因为偏好读不到再抛错。结果缓存在实例属性上（Handler 每请求一个实例）。
+        """
+        cached = getattr(self, "_lang_cache", None)
+        if cached is not None:
+            return cached
+        lang = "zh"
+        try:
+            # getattr 兜底：单测里的最小 handler 替身只实现端点方法 + `_respond`
+            path = getattr(self, "path", "") or ""
+            query = path.split("?", 1)[1] if "?" in path else ""
+            signal = i18n.resolve_lang_signal(getattr(self, "headers", None), query)
+            if signal is not None:
+                lang = signal
+            elif not i18n.is_i18n_disabled():
+                user_pref = None
+                try:
+                    if hasattr(self, "_request_user"):
+                        # 入口已登记：None 表示公开端点（登录/注册）——按「无用户」处理，
+                        # 不再查库（与 Node requestLang 的 user 入参同口径）
+                        user = self._request_user
+                    else:
+                        user = self._current_user()   # 替身/非常规入口兜底，失败按无偏好
+                    if user is not None:
+                        prefs = db.get_user_prefs(user["id"], 0)
+                        if isinstance(prefs, dict):
+                            user_pref = prefs.get("lang")
+                except Exception:  # noqa: BLE001 —— 偏好读不到按「没有偏好」处理
+                    user_pref = None
+                lang = i18n.resolve_lang(user_pref=user_pref)
+        except Exception:  # noqa: BLE001 —— 语言解析绝不能影响响应
+            lang = "zh"
+        self._lang_cache = lang
+        return lang
+
+    def _localize_error(self, message, vars=None):
+        """把错误值渲染成当前请求语言的文本（key+vars 契约的唯一渲染点）。"""
+        lang = self._request_lang()
+        key = None
+        merged = vars
+        if isinstance(message, str):
+            key = message
+        elif isinstance(message, dict) and isinstance(message.get("message"), str):
+            key = message["message"]
+            if merged is None:
+                merged = message.get("vars")
+        else:
+            i18n_key = getattr(message, "i18n_key", None)
+            if isinstance(i18n_key, str):
+                key = i18n_key
+                if merged is None:
+                    merged = getattr(message, "i18n_vars", None)
+            elif isinstance(message, BaseException):
+                # 固定文案的异常（DeliveryRefused/InjectRefused/AssetError 等）：
+                # str(e) 本身就是中文词条 key（与 Node 用 err.message 当 key 同口径）
+                key = str(message)
+        if key is not None:
+            try:
+                return i18n.t("api", key, lang, **(merged or {}))
+            except Exception:  # noqa: BLE001 —— 渲染失败回落中文 key
+                return key
+        # Node 在 localize 之后由 respondError/respondErrorSpaced 做 `String(message)`；
+        # Python 的 `str()` 在 None/布尔/对象上会输出 "None"/"True"/"{'a': 1}"，与 Node
+        # 分叉。统一走 js_string（js_string 自身已兜底，绝不抛错）。
+        return i18n.js_string(message)
+
+    def _error(self, code, message, vars=None):
+        """紧凑错误体 `{"error":"…"}`（Python 里硬编码字节串口径的收口点）。
+
+        正文按 utf-8 编码后用 `_respond` 发出；无语言信号时与旧硬编码字节串逐字节相同
+        （旧写点本身就是字节串字面量 `{"error":"…"}` / `'…'.encode("utf-8")`）。
+        """
+        text = self._localize_error(message, vars)
+        # 与 Node `respondError` 的 `jsonBody(String(message))` 同口径：JSON 转义字符串
+        # 再手工拼外层括号/冒号。中文（无引号/反斜杠）时与旧硬编码字节串逐字节相同；
+        # 英文译文里的 `"` 也能正确转义（否则会拼出非法 JSON）。
+        body = ('{"error":' + json.dumps(text, ensure_ascii=False) + '}').encode("utf-8")
+        self._respond(code, body, "application/json; charset=utf-8")
+
+    def _error_spaced(self, code, message, vars=None):
+        """带空格错误体 `{"error": "…"}`（`json.dumps({"error": …})` 口径的收口点）。
+
+        拼装方式与旧写点一致（`json.dumps(..., ensure_ascii=False)`），故正文/头部字节
+        形状不变；无语言信号时逐字节仍是旧中文。
+        """
+        text = self._localize_error(message, vars)
+        body = json.dumps({"error": text}, ensure_ascii=False).encode("utf-8")
+        self._respond(code, body, "application/json; charset=utf-8")
 
     def _respond(self, code, body, content_type, extra_headers=None):
         self.send_response(code)

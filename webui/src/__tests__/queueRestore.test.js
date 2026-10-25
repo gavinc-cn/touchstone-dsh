@@ -4,11 +4,15 @@
 // 为什么这几条要钉死：用户报障的预期就是「取消的消息应重新显示在输入框中」，而回填的
 // 边界（空输入框不留前导换行、有草稿不覆盖、批量按序连接、空白段丢弃）一旦写错，
 // 用户丢的是**自己刚打的字**——比原 bug 更糟。
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
   RESTORE_SEP, cancelQueueToast, cancellableRow, mergeRestoreText,
 } from '../utils/queueRestore'
+
+import { setLang } from '../utils/i18n'
+// 文案断言按中文跑（zh 直接返回中文 key）
+beforeEach(() => setLang('zh'))
 
 describe('cancellableRow：只有平台排队行可取消', () => {
   it('queued / pending（乐观 chip）带 msgId ⇒ 可取消', () => {

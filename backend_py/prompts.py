@@ -17,10 +17,28 @@
 
 import json
 import os
+import sys
 
 import export_cases
+import i18n
 import lib
 import rag
+
+
+# 产出语言指令（T14，设计 §5.2）：只放**头部**一段，包装文案保持中文（D5 精简版）。
+# 中文原句即词典 key（i18n/en.json 的 prompt ns 存英文句）；两种语言的任务都注入同一
+# 段位，只有 directive 句随任务语言切换。zh 任务只新增这一段，其余段落与改前逐字节一致。
+OUTPUT_LANG_DIRECTIVE = "用中文撰写所有产出（用例、报告、日志）。"
+
+
+def _output_lang_head(task):
+    """prompt 头部的产出语言指令段（`【产出语言】…` + 分隔线）。
+
+    语言一律经 `i18n.task_lang`（兼容 sqlite Row/dict；缺失/空/脏值 → zh），
+    不在调用点直接读 `task['lang']`。
+    """
+    directive = i18n.t("prompt", OUTPUT_LANG_DIRECTIVE, i18n.task_lang(task))
+    return f"【产出语言】{directive}\n\n---\n\n"
 
 # 内置提示词资产目录：<仓库>/builtin_prompts/free_style/（流程文档 + 文件模板；
 # 资产留在仓库根——Node 后端 backend/lib/prompts.js 读的是同一个真实目录）
@@ -28,6 +46,9 @@ _ASSET_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
                           "builtin_prompts", "free_style")
 # 资产读取缓存（进程内只读一次磁盘）
 _ASSET_CACHE = {}
+# 英文模板缺失的告警去重（每资产每进程只 warning 一次；键=英文资产逻辑名，如
+# `templates/status_template.md`）。只影响告警频次，不影响回落行为。
+_EN_ASSET_WARNED = set()
 
 # 探索任务「最近变更优先」的取数口径（prompt 预算上限，不是时间窗口）：
 # 最近 N 条提交 + 每条提交最多列 M 个变更文件；功能聚类/新旧合并/按天倒序交给 agent。
@@ -57,22 +78,62 @@ def _load_asset(*names):
     return _ASSET_CACHE[key]
 
 
-def _free_style_doc():
+def _en_asset_name(name):
+    """中文资产名 → 英文版文件名：`x.md` → `x.en.md`（无 .md 后缀时直接追加 `.en.md`）。"""
+    return (name[:-3] if name.endswith(".md") else name) + ".en.md"
+
+
+def _load_asset_lang(lang, *names):
+    """按语言读取内置提示词资产：`en` 优先英文版，其余语言与 `_load_asset` 等价。
+
+    - `lang == "en"`：先读 `<name>.en.md`（如 `templates/case_template.en.md`），存在即用；
+      英文版缺失/为空时**回落中文版**并每资产 warn 一次（stderr，进程内只警告一次，
+      绝不抛错——宁可给出中文模板，也不让整个任务失败）；
+    - `zh` 或其它（含 None/未知值）：**直接走旧的 `_load_asset`**，逐字节相同、零警告；
+    - 缓存键与中文区分：英文键为 `"en:" + "/".join(names)`，不污染旧 `_ASSET_CACHE`
+      的 zh 键语义（`"/".join(names)`）。缺失回落的英文键不入缓存，下次仍会尝试读盘
+      （文件一旦补上即生效），告警仍只出一次。
+    """
+    if lang != "en":
+        return _load_asset(*names)
+    key = "en:" + "/".join(names)
+    if key not in _ASSET_CACHE:
+        # `templates/case_template.md` → `templates/case_template.en.md`（.en 插在 .md 前）
+        en_names = names[:-1] + (_en_asset_name(names[-1]),)
+        en_path = os.path.join(_ASSET_DIR, *en_names)
+        text = lib.read_text(en_path)
+        if not text:
+            if key not in _EN_ASSET_WARNED:
+                _EN_ASSET_WARNED.add(key)
+                print(f"[prompts] 英文资产缺失或为空，已回落中文版: {en_path}",
+                      file=sys.stderr)
+            return _load_asset(*names)
+        _ASSET_CACHE[key] = text
+    return _ASSET_CACHE[key]
+
+
+def _free_style_doc(lang="zh"):
     """拼接自由风格测试流程文档与全部文件模板（首轮 prompt 注入用）。
 
     模板依次附在流程文档之后，用分隔线隔开；flow.md 末尾的「附带文件模板」
-    一节与该拼接顺序一一对应。
+    一节与该拼接顺序一一对应。`lang` 只决定 4 份模板走中文版还是英文版
+    （`_load_asset_lang`）：`zh`（默认）与改前逐字节相同；`flow.md` 本身保持
+    中文单份（D5），不参与语言选择。
     """
     parts = [_load_asset("flow.md")]
     for name in ("case_template.md", "status_template.md", "index_template.md",
                  "bug_report_template.md"):
-        parts.append("\n\n---\n\n" + _load_asset("templates", name))
+        parts.append("\n\n---\n\n" + _load_asset_lang(lang, "templates", name))
     return "".join(parts)
 
 
 def first_round_prompt(project, task, log=None):
     """构建首轮 prompt。project/task: sqlite Row；log 可选任务日志回调
-    （日期范围复测的 RAG 检索统计行，见 retest_range_prompt）。"""
+    （日期范围复测的 RAG 检索统计行，见 retest_range_prompt）。
+
+    返回内容**最前**是产出语言指令段（`_output_lang_head`，按 task.lang 取 zh/en）：
+    只在分派层注入这一次，各 builder 自身不拼该段（避免重复/漏加）。
+    """
     task_type = task["task_type"] or "normal"
     if task_type == "fix":
         prompt = fix_prompt(project, task)
@@ -98,7 +159,7 @@ def first_round_prompt(project, task, log=None):
     if extra:
         prompt += ("\n\n---\n用户附加要求（平台转达，务必遵守；如与上面约束冲突以本段为准）:\n"
                    + extra + "\n")
-    return prompt
+    return _output_lang_head(task) + prompt
 
 
 def _project_context(project):
@@ -225,6 +286,10 @@ def normal_prompt(project, task):
 
     end_stage 收窄每轮范围：gen_case 只生成用例不执行；execute 执行回状态不写
     bug 报告；report 及以后为现状完整行为（后续阶段由平台创建的后段任务承接）。
+
+    注入的 4 份文件模板按 `i18n.task_lang(task)` 选择语言（en 任务用英文模板，
+    缺失回落中文）；流程文档与约束块保持中文（D5）。语言一律经 `task_lang` 读，
+    不在调用点直接读 `task['lang']`。
     """
     auto_fix = "开" if task["auto_fix"] else "关"
     end = task["end_stage"] or "report"
@@ -255,19 +320,21 @@ def normal_prompt(project, task):
         "- 项目红线：不编译、不部署、不 git 提交\n"
         "- 最后用一行输出本轮摘要：'ROUND_DONE 轮次N 新增X通过Y失败Z新bug'\n"
     )
-    return head + "\n---\n\n" + _free_style_doc() + "\n"
+    return head + "\n---\n\n" + _free_style_doc(i18n.task_lang(task)) + "\n"
 
 
-def _stress_doc():
+def _stress_doc(lang="zh"):
     """拼接压测流程文档与方案包模板（stress 首轮 prompt 注入用）。
 
     模板以 --- 分隔线跟在流程文档后；顺序与 load_test.md 正文的引用一致
-    （方案文档 → 图表声明 → 场景 → INDEX）。
+    （方案文档 → 图表声明 → 场景 → INDEX）。`lang` 只决定 4 份模板走中文版还是
+    英文版（`_load_asset_lang`）：`zh`（默认）与改前逐字节相同；`load_test.md`
+    本身保持中文单份（D5），不参与语言选择。
     """
     parts = [_load_asset("load_test.md")]
     for name in ("load_plan_template.md", "load_charts_template.md",
                  "load_scenario_template.md", "load_index_template.md"):
-        parts.append("\n\n---\n\n" + _load_asset("templates", name))
+        parts.append("\n\n---\n\n" + _load_asset_lang(lang, "templates", name))
     return "".join(parts)
 
 
@@ -277,6 +344,7 @@ def stress_prompt(project, task):
     方案包固定落在 <案例库根>/load/task_<任务id>/（平台按任务 id 直接定位，不经
     INDEX 解析）；用户压测说明（payload.brief）是目标地址与关注接口的权威来源。
     本轮只写文件不发请求，发压由平台第 2 步以统一脚本驱动执行。
+    注入的 4 份模板按 `i18n.task_lang(task)` 选语言（en 任务用英文模板，缺失回落中文）。
     """
     brief = _task_payload(task).get("brief", "") or "（未填写，按案例库与项目信息自行确定）"
     cdir = f"{project['cases_root']}/load/task_{task['id']}"
@@ -306,7 +374,7 @@ def stress_prompt(project, task):
         "不部署、不 git 提交；不在方案包目录之外写文件；发压由平台在第 2 步自动执行；\n"
         f"- 写完文件后更新 {project['work_dir']}/.live/live.json 的 "
         "phase=done，并输出一行摘要：'STRESS_DONE 方案要点（目标/驱动/面板数）'。"
-    ) + "\n---\n\n" + _stress_doc() + "\n"
+    ) + "\n---\n\n" + _stress_doc(i18n.task_lang(task)) + "\n"
 
 
 def fix_prompt(project, task):
@@ -701,15 +769,20 @@ def pipeline_prompt(project, task):
 
 
 def next_round_prompt(round_no, task=None):
-    """续轮短 prompt（同会话）：探索/回归分版（回归续轮同样不生成新用例）。"""
+    """续轮短 prompt（同会话）：探索/回归分版（回归续轮同样不生成新用例）。
+
+    头部同样注入产出语言指令（task=None 时按 zh）；compact 不是自然语言 prompt，
+    保持字面 `/compact` 不变（见 `compact_prompt`）。
+    """
     if task is not None and (task["task_type"] or "normal") == "regression":
-        return (
+        body = (
             f"继续执行存量用例回归第 {round_no} 轮：仍严禁生成任何新用例，按首轮"
             "「重跑范围指令」继续选取未重跑的用例执行并回写状态，约束同首轮"
             "（重跑指令、终点范围、红线）；只执行这一轮，结束后更新工作目录下 "
             ".live/live.json phase=done 并输出 'REGRESSION_DONE 重跑X通过Y失败Z' 摘要行。"
         )
-    return (
+        return _output_lang_head(task) + body
+    body = (
         f"继续执行自由风格探索测试第 {round_no} 轮：换一个 ROUNDS.md 未记录过的"
         "角度生成新 case；若首轮注入的「最近变更」功能组尚未覆盖完，继续优先覆盖"
         "这些变更功能组（规则见首轮流程文档「最近变更与功能合并规则」），全部覆盖后"
@@ -719,9 +792,15 @@ def next_round_prompt(round_no, task=None):
         "选项、红线）；只执行这一轮，结束后更新工作目录下 .live/live.json phase=done "
         "并输出 'ROUND_DONE ...' 摘要行。"
     )
+    return _output_lang_head(task) + body
 
 
 def compact_prompt():
-    """轮次开始前的上下文压缩提示（kimi 支持，其余 agent 日志注明跳过）。"""
+    """轮次开始前的上下文压缩提示（kimi 支持，其余 agent 日志注明跳过）。
+
+    返回字面 slash 命令 `/compact`：T14 计划曾考虑在头部注入语言指令，但 slash 命令
+    加自然语言前缀会破坏命令语义（agent/CLI 按首个 token 识别），且当前仓库**无生产
+    调用方**（仅测试钉住）。故保持命令本身不变；若未来接线，在调用方单独拼接指令段。
+    """
     return "/compact"
 

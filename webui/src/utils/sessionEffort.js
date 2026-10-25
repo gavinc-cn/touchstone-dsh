@@ -41,13 +41,15 @@ function effortsOf(model) {
  *
  * @param {object} modelOpts 模型目录 `{models:[{name,display_name,efforts,default_effort}], default}`
  * @param {string} modelValue 当前选中的模型值（`provider/模型 id`；空=智能体默认）
+ * @param {Function} t 翻译函数（useI18n 的 t；**必传**——title 带 {id} 插值，
+ *   identity 兜底会把占位符原样漏给界面）
  * @returns {{options: Array<{value:string,label:string,title:string}>, defaultEffort:string,
  *            fromCatalog:boolean}}
  *   - options：档位选项（按升序排列；不含「默认」项——由调用方按 Radix 哨兵约定加）
  *   - defaultEffort：该模型的宿主默认档（可能为空＝无默认档，走 provider 默认）
  *   - fromCatalog：档位是否来自模型目录（false=回落内置全档表）
  */
-export function effortChoices(modelOpts, modelValue) {
+export function effortChoices(modelOpts, modelValue, t) {
   const models = (modelOpts && modelOpts.models) || []
   const picked = findModel(models, modelValue)
   let ids = effortsOf(picked)
@@ -68,7 +70,7 @@ export function effortChoices(modelOpts, modelValue) {
     options: ordered.map((id) => ({
       value: id,
       label: effortLabel(id),          // 原始字段值（不做中文映射）
-      title: `思考等级 ${id}`,          // 悬停提示也只报字段值，避免两套叫法
+      title: t('思考等级 {id}', { id }),  // 悬停提示也只报字段值，避免两套叫法
     })),
     defaultEffort: (picked && picked.default_effort) || '',
     fromCatalog,
@@ -80,10 +82,13 @@ export function effortChoices(modelOpts, modelValue) {
  *
  * @param {string} value 当前档位 id（'' = 未显式指定）
  * @param {string} defaultEffort 模型目录给的默认档（可空）
+ * @param {Function} t 翻译函数（**必传**——「默认（{name}）」需要插值）
  */
-export function effortText(value, defaultEffort = '') {
+export function effortText(value, defaultEffort = '', t) {
   if (!value) {
-    return defaultEffort ? `默认（${effortLabel(defaultEffort)}）` : '默认'
+    return defaultEffort
+      ? t('默认（{name}）', { name: effortLabel(defaultEffort) })
+      : t('默认')
   }
   return effortLabel(value)
 }

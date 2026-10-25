@@ -13,6 +13,7 @@
 // 未存过偏好时: 插件形态默认 'auto', 独立打开默认 'dsh-dark'。
 // 选择持久化到 localStorage, 刷新后保持; 入口在设置页「外观主题」分区。
 import { resolveDark, subscribeHostTheme } from './dshTheme'
+import { t } from './i18n'
 
 const KEY = 'ts_skin'
 
@@ -22,12 +23,13 @@ export const AUTO = 'auto'
 /** 独立形态(不在宿主里)缺省皮肤。 */
 const DEFAULT_SKIN = 'dsh-dark'
 
-// 皮肤注册表: preview 是设置页选择卡上的两格色样(面板底/主色), 取值与 theme.css 对应皮肤变量一致
+// 皮肤注册表: preview 是设置页选择卡上的两格色样(面板底/主色), 取值与 theme.css 对应皮肤变量一致;
+// 展示名见 skinLabel(函数形式: t 在调用时按当前语言求值)
 export const SKINS = [
-  { id: 'dsh-dark', label: 'DSH 深色', preview: ['#1b1b1c', '#f9fafb'] },
-  { id: 'dsh-light', label: 'DSH 浅色', preview: ['#f9fafb', '#0f1115'] },
-  { id: 'starlight', label: '星夜金', preview: ['#141E36', '#E8B86D'] },
-  { id: 'classic', label: '经典蓝', preview: ['#151b23', '#58a6ff'] },
+  { id: 'dsh-dark', preview: ['#1b1b1c', '#f9fafb'] },
+  { id: 'dsh-light', preview: ['#f9fafb', '#0f1115'] },
+  { id: 'starlight', preview: ['#141E36', '#E8B86D'] },
+  { id: 'classic', preview: ['#151b23', '#58a6ff'] },
 ]
 
 /** 「跟随 DSH」选择卡的色样(浅色格 + 深色格, 表达「两套都会用到」)。 */
@@ -122,6 +124,10 @@ export function nextSkin(cur) {
 
 /** 选择值 → 展示名(auto 有独立文案); 未知值原样返回 id。 */
 export function skinLabel(id) {
-  if (id === AUTO) return '跟随 DSH'
-  return SKINS.find((s) => s.id === id)?.label || id
+  if (id === AUTO) return t('跟随 DSH')
+  if (id === 'dsh-dark') return t('DSH 深色')
+  if (id === 'dsh-light') return t('DSH 浅色')
+  if (id === 'starlight') return t('星夜金')
+  if (id === 'classic') return t('经典蓝')
+  return id
 }

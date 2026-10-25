@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
 import { test } from 'node:test';
 
+import * as board from '../lib/board.js';
 import { dispatch, makeContext } from '../routes/index.js';
 import { freshDb, insertCard, insertProject } from './m3fixture.mjs';
 
@@ -39,10 +40,12 @@ function fakeRes() {
 }
 
 /** 「像 IncomingMessage」的请求：有 headers + 一次性 body 流（`readJsonBody` 的调用面） */
-function fakeReq(method, body) {
+function fakeReq(method, body, headers = {}) {
   const text = body === undefined ? '' : Buffer.from(JSON.stringify(body), 'utf8');
   const stream = Readable.from(text.length ? [text] : [], { objectMode: false });
-  stream.headers = text.length ? { 'content-length': String(text.length) } : {};
+  stream.headers = text.length
+    ? { 'content-length': String(text.length), ...headers }
+    : { ...headers };
   stream.method = method;
   return stream;
 }
@@ -61,10 +64,10 @@ function setup(tag = 'board-route-write') {
 }
 
 /** 走真路由表发一次请求 */
-async function call(env, method, target, { body, user } = {}) {
+async function call(env, method, target, { body, user, headers = {} } = {}) {
   const { res, cap } = fakeRes();
   const ctx = makeContext({
-    req: fakeReq(method, body),
+    req: fakeReq(method, body, headers),
     res,
     db: env.db,
     user: user === undefined ? env.admin : user,
@@ -469,4 +472,54 @@ test('POST /board/cards/<cid>/worktree/merge：无主会话 ⇒ 400 中文原因
   assert.equal(r.status, 400);
   assert.equal(r.text(), '{"error": "该卡片尚无主会话，无法交给 agent 合并"}');
   s.close();
+});
+
+// --------------------------------------------------------------------------
+// 英文模式（T10 审查 Important 1）：lib 层错误文案端到端英文化
+// --------------------------------------------------------------------------
+
+test('X-TS-Lang: en：拖排/移列/开始/清理 worktree 的 lib 错误都是英文', async () => {
+  const s = setup('i18n-en');
+  try {
+    // 拖排：非 manual 列
+    const a = insertCard(s.db, s.pid, { title: 'A', columnKey: 'review' });
+    s.db.prepare('INSERT OR REPLACE INTO board_settings(project_id, json) VALUES(?,?)')
+      .run(s.pid, JSON.stringify({ sort: { review: 'updated_desc' } }));
+    const reorder = await call(s, 'POST', `/api/projects/${s.pid}/board/reorder`,
+      { body: { card_id: a, before_id: null }, headers: { 'X-TS-Lang': 'en' } });
+    assert.equal(reorder.status, 400);
+    assert.equal(reorder.text(),
+      '{"error": "This column does not use manual ordering, so drag reordering is unavailable"}');
+
+    // 移列：doing → todo 硬错误
+    const doing = insertCard(s.db, s.pid, { title: 'D', columnKey: 'doing' });
+    const move = await call(s, 'POST', `/api/projects/${s.pid}/board/cards/${doing}/move`,
+      { body: { column: 'todo' }, headers: { 'X-TS-Lang': 'en' } });
+    assert.equal(move.status, 400);
+    assert.equal(move.text(), '{"error": "A card cannot be dragged directly from doing back to todo"}');
+
+    // 开始：运行位在场（runningMap 有条目）⇒ 忙拒绝
+    const busy = insertCard(s.db, s.pid, { title: 'B', columnKey: 'todo' });
+    board.runRegistry.set(busy, { proc: null });
+    const start = await call(s, 'POST', `/api/projects/${s.pid}/board/cards/${busy}/start`,
+      { body: {}, headers: { 'X-TS-Lang': 'en' } });
+    assert.equal(start.status, 400);
+    assert.equal(start.text(),
+      '{"error": "The session is running; wait for it to finish or stop it first"}');
+
+    // 清理 worktree：运行中 ⇒ 409
+    const cleanup = await call(s, 'DELETE', `/api/projects/${s.pid}/board/cards/${busy}/worktree`,
+      { headers: { 'X-TS-Lang': 'en' } });
+    assert.equal(cleanup.status, 409);
+    assert.equal(cleanup.text(),
+      '{"error": "The session is running; stop the card before cleaning up the worktree"}');
+    board.runRegistry.delete(busy);
+
+    // 无头请求仍是中文（对拍/老客户端红线）
+    const zh = await call(s, 'POST', `/api/projects/${s.pid}/board/reorder`,
+      { body: { card_id: a, before_id: null } });
+    assert.equal(zh.text(), '{"error": "当前列排序方案非手动，不可拖排"}');
+  } finally {
+    s.close();
+  }
 });

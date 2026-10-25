@@ -28,8 +28,14 @@
  *   缺省 `false`（公开端点分支显式传 `false`）
  * - `path`：**不含查询串**的路径；`query`：`parseQs()` 结果（Python `parse_qs` 口径）
  * - `q(name, def)`：`parsed.get(name, [def])[0]` 的对应物
- * - `json(status, obj)` / `error(status, msg)` / `text(status, body, type)` /
- *   `file(path, type)` / `redirect(loc)` / `sse(opts)`：响应写口（口径全在 `lib/http.js`）
+ * - `lang`：本条请求的界面语言（`'zh'|'en'`，见 `requestLang()`；首次读取时才解析并缓存）
+ * - `json(status, obj)` / `error(status, msg, vars?)` / `text(status, body, type)` /
+ *   `file(path, type)` / `redirect(loc)` / `sse(opts)`：响应写口（口径全在 `lib/http.js`）。
+ *   `error` / `errorSpaced` 会把字符串文案按 `ctx.lang` 过一遍 `t('api', …)`（缺失回落中文），
+ *   两种正文的字节形状不变；第三个参数 `vars` 供带 `{name}` 占位符的词条插值。
+ *   **lib 错误透传契约（T10 R18）**：`error`/`errorSpaced` 也接受 `backend/lib/*` 的
+ *   `Error`（按 `.i18nKey`/`.i18nVars` 本地化）与 `messageVars()` 返回的
+ *   `{message, vars}` 对象；路由层把 lib 的错误值原样传进来即可，不要再先 `String()`。
  * - `ownedProject(id)` / `ownedTask(id)`：Python `_owned_project` / `_owned_task`，
  *   不存在或越权时**已经回过 404**，返回 `null`，调用方直接 return（多用户隔离红线）
  *
@@ -44,6 +50,7 @@ import { openSse, readJsonBody, respond, respondError, respondErrorSpaced, respo
 import { agentFamily } from '../lib/agents.js';
 import { StateCache } from '../lib/casescan.js';
 import * as dbmod from '../lib/db.js';
+import { isI18nDisabled, resolveLang, resolveLangSignal, t } from '../lib/i18n.js';
 import { parseQs, qsGet } from '../lib/query.js';
 
 import { routes as adminRoutes } from './admin.js';
@@ -131,6 +138,50 @@ export function isPublicRoute(method, path) {
 export const STATE_CACHE = new StateCache();
 
 /**
+ * 解析本条请求的界面语言：`X-TS-Lang` → `?lang=` → 用户偏好 → `'zh'`（见 `lib/i18n.js`）。
+ *
+ * 用户偏好是 T2 落库的形状：`user_prefs(project_id=0, key='lang', value={"v":"zh"|"en"})`，
+ * `resolveLang` 内部认 `{v}` 包装。**读库顺序（T10 审查 Minor 3）**：先解析头/query 两档
+ * 显式信号；命中就直接返回，**不读库**；只有两者都缺席（且 `TS_I18N≠0`）才读一次偏好。
+ * 这样错误路径也不会为「已经由请求头决定语言」的调用多付一条索引查询。
+ * 读库失败按「没有偏好」处理（错误响应不能因为偏好读不到再抛错）。
+ *
+ * 导出供 `server.js` 的「强制改密」403 使用：那条写点在 ctx 构造之前，必须回同一个语言。
+ *
+ * @param {{req?: object, db?: object, user?: object, search?: string}} parts
+ * @returns {'zh'|'en'}
+ */
+export function requestLang({ req, db, user, search }) {
+  const signal = resolveLangSignal({ headers: req && req.headers, query: search });
+  if (signal !== null) return signal;
+  if (isI18nDisabled()) return 'zh';          // 回滚开关：连偏好都不读
+  let userPref = null;
+  if (db && user && user.id !== undefined && user.id !== null) {
+    try {
+      const prefs = dbmod.getUserPrefs(user.id, 0, { db });
+      userPref = prefs !== null && typeof prefs === 'object' ? prefs.lang : null;
+    } catch {
+      userPref = null;
+    }
+  }
+  return resolveLang({ userPref });
+}
+
+/**
+ * 「强制改密」403 的响应写点（`server.py:_must_change_pw_blocked` 的响应半边）。
+ *
+ * 为什么抽成导出函数：那条闸在 `makeContext` 之前（不能为它提前建 ctx），但语言解析与
+ * 错误正文必须与 `ctx.error` **单一口径**。`server.js` 只负责判定与时机，响应拼装留在
+ * 这里，单测就能用真 `requestLang` 钉住「头/query/偏好/回滚开关」四个维度。
+ *
+ * @param {object} res `node:http` 响应对象（`respondError` 的调用面）
+ * @param {{req?: object, db?: object, user?: object, search?: string}} parts
+ */
+export function respondMustChangePassword(res, parts) {
+  respondError(res, 403, t('api', '请先修改初始口令', requestLang(parts)));
+}
+
+/**
  * 构造一次请求的 ctx（见文件头契约）。
  * @param {{req: object, res: object, db: object, user: object, path: string, search: string,
  *          stateCache?: object, trusted?: boolean}} parts
@@ -139,6 +190,42 @@ export function makeContext({ req, res, db, user, path, search, stateCache = STA
   trusted = false }) {
   const query = parseQs(search);
   let bodyPromise = null;
+  // 语言按请求惰性解析一次：见 requestLang() 的「成功路径零额外查询」说明。
+  // 解析本身无副作用（只读 user_prefs），结果缓存在闭包里，同一条请求恒定。
+  let langCache = null;
+  /** 取（并按请求缓存）本条请求的界面语言；绝不抛错。 */
+  const langOf = () => {
+    if (langCache === null) langCache = requestLang({ req, db, user, search });
+    return langCache;
+  };
+  /**
+   * 错误文案本地化（T10 R18 扩展后的 key+vars 契约）：
+   *   - 字符串：直接当 `t('api', …)` 的词条 key（固定文案即中文原文）；
+   *   - 错误对象（`Error`）：词条 key 取 `i18nKey`（lib 用 `localizable()` 附加）或
+   *     `.message`（固定文案），变量取 `i18nVars`；这样 lib 抛出的用户可见错误可整条
+   *     英文化，而 `.message` 仍是渲染后的中文供日志使用；
+   *   - `{message, vars}` 普通对象（lib 用 `messageVars()` 返回）：同样按 key+vars 渲染；
+   *   - 其余非字符串原样返回，由 `respondError` 继续做既有的 `String(message)` 强制转换
+   *     （语义不能变）。
+   * @param {unknown} message
+   * @param {object=} vars 占位符插值变量（显式传入时压过对象自带的 vars）
+   * @returns {unknown}
+   */
+  const localize = (message, vars) => {
+    if (typeof message === 'string') return t('api', message, langOf(), vars);
+    if (message !== null && typeof message === 'object') {
+      const isError = message instanceof Error;
+      const carriesVars = Object.prototype.hasOwnProperty.call(message, 'vars');
+      if ((isError || carriesVars) && typeof message.message === 'string') {
+        const key = typeof message.i18nKey === 'string' ? message.i18nKey : message.message;
+        const merged = vars !== undefined
+          ? vars
+          : (message.i18nVars !== undefined ? message.i18nVars : message.vars);
+        return t('api', key, langOf(), merged);
+      }
+    }
+    return message;
+  };
   const ctx = {
     req,
     res,
@@ -149,6 +236,10 @@ export function makeContext({ req, res, db, user, path, search, stateCache = STA
     query,
     q: (name, def = '') => qsGet(query, name, def),
     stateCache,
+    /** 本条请求的界面语言；getter 保证「首次读/首次发错误」时只解析一次。 */
+    get lang() {
+      return langOf();
+    },
     /**
      * 读请求体（记忆化：一次请求只读一次，重复调用返回**同一个对象**）。
      *
@@ -174,8 +265,10 @@ export function makeContext({ req, res, db, user, path, search, stateCache = STA
     // 错误体两种形态，按 Python 该写点的实际写法选（不能统一！见 lib/http.js 的说明）：
     //   error       = 硬编码字节串口径 `{"error":"..."}`（无空格，Python 里 112 处）
     //   errorSpaced = `json.dumps({"error": ...})` 口径 `{"error": "..."}`（带空格，49 处）
-    error: (status, message) => respondError(res, status, message),
-    errorSpaced: (status, message) => respondErrorSpaced(res, status, message),
+    // 本地化只换 message 的值：两个 respond* 的拼装方式不变，故正文/头部的字节形状不变。
+    error: (status, message, vars) => respondError(res, status, localize(message, vars)),
+    errorSpaced: (status, message, vars) =>
+      respondErrorSpaced(res, status, localize(message, vars)),
     text: (status, body, type = 'text/plain; charset=utf-8', extraHeaders = null) =>
       respond(res, status, body, type, extraHeaders || undefined),
     file: (filePath, type) => sendFile(res, filePath, type),

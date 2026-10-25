@@ -21,7 +21,8 @@
  *
  * 零 npm 依赖（只用 `./feishu_cfg.js` 与 `./feishu_rest.js`）。
  */
-import { appConfig } from './feishu_cfg.js';
+import { appConfig, userLang } from './feishu_cfg.js';
+import * as i18n from './i18n.js';
 import { FeishuRestError, rest, tenantToken } from './feishu_rest.js';
 
 /** Python `str(x)` 的可用子集（文案里逐字出现：`None` / `True` / `2`） */
@@ -95,23 +96,26 @@ function logStderr(line) {
  * @returns {Promise<{ok: boolean, detail: string}>}
  */
 export async function verifyCredentials(userId, options = {}) {
+  const lang = options.lang;
+  const t = (key, vars) => i18n.t('api', key, lang, vars);
   const cfg = appConfig(userId, options);
   if (cfg === null || cfg === undefined) {
-    return { ok: false, detail: '应用凭据未配置（App ID / App Secret）' };
+    return { ok: false, detail: t('应用凭据未配置（App ID / App Secret）') };
   }
   try {
     await tenantToken(cfg);                     // 第一步：凭据正确性（失败码 10003/10014 等）
     const out = await rest('GET', '/open-apis/bot/v3/info', { cfg });
     // /bot/v3/info 的 bot 在响应**顶层**（无 data 包裹，同 botOpenId 的读法）
     const bot = (out && out.bot) || {};
-    const name = pyTruthy(bot.app_name) ? bot.app_name : '（未命名）';
+    const name = pyTruthy(bot.app_name) ? bot.app_name : t('（未命名）');
     const act = bot.activate_status;
-    const tail = act === 2 ? '已启用' : `启用状态=${pyStr(act)}（可能未发布/未启用）`;
-    return { ok: true, detail: `凭据可用：机器人 ${name}（${tail}）` };
+    const tail = act === 2 ? t('已启用')
+      : t('启用状态={act}（可能未发布/未启用）', { act: pyStr(act) });
+    return { ok: true, detail: t('凭据可用：机器人 {name}（{tail}）', { name, tail }) };
   } catch (error) {
     if (error instanceof FeishuRestError) return { ok: false, detail: error.message };
     // 兜底：网络/形态异常一律转文案，不抛到 HTTP 层
-    return { ok: false, detail: `探测失败: ${errRepr(error)}` };
+    return { ok: false, detail: t('探测失败: {error}', { error: errRepr(error) }) };
   }
 }
 
@@ -413,7 +417,9 @@ async function _provisionWorker(userId, cancel, options = {}) {
     logStderr(`feishu provision: 用户 ${userId} 长连接启动异常: ${errRepr(error)}`);
   }
 
-  const applied = await provisionApply(userId, options);
+  // canonical（中文）落库：status 读侧再按请求语言映射 steps（T12d），
+  // 这样切换页面语言不会让已跑完的步骤语言错乱。
+  const applied = await provisionApply(userId, { ...options, lang: 'zh', dataLang: undefined });
   st.steps = applied.steps || [];
   st.state = 'success';
   st.error = applied.ok ? ''
@@ -455,14 +461,16 @@ function startProvisionWorker(userId, cancel, options) {
  * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
  */
 export async function provisionApply(userId, options = {}) {
+  const lang = options.lang;
+  const t = (key, vars) => i18n.t('api', key, lang, vars);
   if (!provisionEnabled(envOf(options))) {
     return { ok: false, need_patch_scope: false, steps: [],
-      error: `配置自动化已关闭（${PROVISION_ENV}=0）` };
+      error: t('配置自动化已关闭（{env}=0）', { env: PROVISION_ENV }) };
   }
   const cfg = appConfig(userId, options);
   if (cfg === null || cfg === undefined) {
     return { ok: false, need_patch_scope: false, steps: [],
-      error: '应用凭据未配置（App ID / App Secret），请先保存凭据' };
+      error: t('应用凭据未配置（App ID / App Secret），请先保存凭据') };
   }
   const appId = cfg.app_id;
   const steps = [];
@@ -470,12 +478,14 @@ export async function provisionApply(userId, options = {}) {
   try {
     await rest('PATCH', sprintf(_APP_ABILITY_API, appId),
       { jsonBody: { bot: { enable: true } }, cfg });
-    steps.push({ key: 'ability', label: '开启机器人能力', ok: true, detail: '已开启' });
+    steps.push({ key: 'ability', label: t('开启机器人能力'), ok: true,
+      detail: t('已开启') });
   } catch (error) {
     if (!(error instanceof FeishuRestError)) throw error;      // oracle 只吞 FeishuRestError
-    steps.push({ key: 'ability', label: '开启机器人能力', ok: false, detail: error.message });
+    steps.push({ key: 'ability', label: t('开启机器人能力'), ok: false,
+      detail: error.message });
     return { ok: false, need_patch_scope: _needScope(error),
-      error: applyError(error), steps };
+      error: applyError(error, lang), steps };
   }
   // ② 权限 + 订阅方式（长连接）+ 事件 + 回调（一次 PATCH，减少请求与半生效窗口）
   const body = {
@@ -486,13 +496,14 @@ export async function provisionApply(userId, options = {}) {
   };
   try {
     await rest('PATCH', sprintf(_APP_CONFIG_API, appId), { jsonBody: body, cfg });
-    steps.push({ key: 'config', label: '权限 / 长连接订阅 / 事件 / 回调', ok: true,
-      detail: '已写入（需发布新版本后生效）' });
+    steps.push({ key: 'config', label: t('权限 / 长连接订阅 / 事件 / 回调'), ok: true,
+      detail: t('已写入（需发布新版本后生效）') });
   } catch (error) {
     if (!(error instanceof FeishuRestError)) throw error;
-    steps.push({ key: 'config', label: '权限 / 长连接订阅 / 事件 / 回调', ok: false,
+    steps.push({ key: 'config', label: t('权限 / 长连接订阅 / 事件 / 回调'), ok: false,
       detail: error.message });
-    return { ok: false, need_patch_scope: _needScope(error), error: applyError(error), steps };
+    return { ok: false, need_patch_scope: _needScope(error),
+      error: applyError(error, lang), steps };
   }
   return { ok: true, need_patch_scope: false, error: '', steps };
 }
@@ -503,8 +514,8 @@ function sprintf(template, value) {
 }
 
 /** `feishu._apply_error`(feishu.py:2708-2712)：缺 patch 权限给精确引导，其余原样透出 */
-function applyError(error) {
-  if (_needScope(error)) return _PATCH_SCOPE_HINT;
+function applyError(error, lang) {
+  if (_needScope(error)) return i18n.t('api', _PATCH_SCOPE_HINT, lang);
   return error.message;
 }
 
@@ -527,20 +538,22 @@ export function _docItem(key, label, state, detail, hint = '') {
  *   app_id: inboundThreadAppId()}` —— 两者来自不同访问口，见 feishu_cfg.js 的形状说明
  * @param {object} cfg 该用户的应用配置（读 `app_id`）
  */
-export function inboundWsItem(st, cfg) {
+export function inboundWsItem(st, cfg, lang = 'zh') {
+  const t = (key, vars) => i18n.t('api', key, lang, vars);
   const thread = pyTruthy(st && st.thread);
   const cfgApp = (cfg && cfg.app_id) || '';
   const threadApp = (st && st.app_id) || '';
   if (thread && cfgApp && threadApp && threadApp !== cfgApp) {
-    return _docItem('inbound_ws', '入站长连接（长连接）', 'warn',
-      `连接线程仍绑在 ${threadApp}（配置已改为 ${cfgApp}）`,
-      '在机器人私聊发「接入」点「换用新应用」即可免重启切换；仍不生效再重启站点');
+    return _docItem('inbound_ws', t('入站长连接（长连接）'), 'warn',
+      t('连接线程仍绑在 {thread}（配置已改为 {cfg}）',
+        { thread: threadApp, cfg: cfgApp }),
+      t('在机器人私聊发「接入」点「换用新应用」即可免重启切换；仍不生效再重启站点'));
   }
-  return _docItem('inbound_ws', '入站长连接（长连接）',
+  return _docItem('inbound_ws', t('入站长连接（长连接）'),
     thread ? 'ok' : 'fail',
-    thread ? '连接线程运行中' : '未运行',
+    thread ? t('连接线程运行中') : t('未运行'),
     thread ? ''
-      : '凭据保存后自动连接；仍不启动看站点日志，并确认事件订阅方式为「长连接」');
+      : t('凭据保存后自动连接；仍不启动看站点日志，并确认事件订阅方式为「长连接」'));
 }
 
 /**
@@ -550,108 +563,127 @@ export function inboundWsItem(st, cfg) {
  * slash_scope / send_scope / webhook；summary 键序 ok/fail/warn/skip。
  * **无凭据档是唯一两侧确定可比的档**（其余七项都可能因 `inbound_ws` 线程态/网络返回时变——
  * 已登记未验）。`send_probe=true` 只有在「凭据可用 + 已绑定」时才可能走到真发消息（60s 频控）。
+ * 语言两个维度（别混）：
+ *   - `options.lang`（T12b）：真发那条测试 DM 的**收件人**语言（缺省读绑定用户偏好；
+ *     不探测 / 被频控拦下时不读偏好）；
+ *   - `options.dataLang`（T12d）：八项 label/detail/hint 的**请求语言**（缺省/zh ⇒ 存量
+ *     中文逐字节不变）。
  * @param {number} userId
  * @param {boolean} [sendProbe]
- * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
+ * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv, lang?: string,
+ *          dataLang?: string}} [options]
  */
 export async function doctor(userId, sendProbe = false, options = {}) {
+  const dataLang = options.dataLang;
+  const t = (key, vars) => i18n.t('api', key, dataLang, vars);
   const cfg = { ...(userConfig(userId, options) || {}) };
   const hasCreds = pyTruthy(cfg.app_id) && pyTruthy(cfg.app_secret);
   const items = [_docItem(
-    'creds', '应用凭据（App ID / App Secret）',
+    'creds', t('应用凭据（App ID / App Secret）'),
     hasCreds ? 'ok' : 'fail',
-    hasCreds ? '已配置' : '未配置',
-    hasCreds ? '' : '在「飞书机器人配置」填入 App ID 与 App Secret 并保存')];
+    hasCreds ? t('已配置') : t('未配置'),
+    hasCreds ? '' : t('在「飞书机器人配置」填入 App ID 与 App Secret 并保存'))];
 
   let tokenOk = false;
   if (!hasCreds) {
-    items.push(_docItem('token', '凭据有效性（tenant_access_token）', 'skip', '凭据未配置，跳过', ''));
+    items.push(_docItem('token', t('凭据有效性（tenant_access_token）'), 'skip',
+      t('凭据未配置，跳过'), ''));
   } else {
     try {
       await tenantToken(cfg);
       tokenOk = true;
-      items.push(_docItem('token', '凭据有效性（tenant_access_token）', 'ok',
-        'token 获取成功', ''));
+      items.push(_docItem('token', t('凭据有效性（tenant_access_token）'), 'ok',
+        t('token 获取成功'), ''));
     } catch (error) {
       if (error instanceof FeishuRestError) {
-        items.push(_docItem('token', '凭据有效性（tenant_access_token）', 'fail', error.message,
-          '核对取值：开发者后台 → 凭证与基础信息 的 App ID / App Secret'));
+        // 上游错误原文（动态/诊断值）按现状透传，不翻译
+        items.push(_docItem('token', t('凭据有效性（tenant_access_token）'), 'fail',
+          error.message,
+          t('核对取值：开发者后台 → 凭证与基础信息 的 App ID / App Secret')));
       } else {
-        items.push(_docItem('token', '凭据有效性（tenant_access_token）', 'fail',
-          `探测失败: ${errRepr(error)}`, '检查站点到 open.feishu.cn 的网络'));
+        items.push(_docItem('token', t('凭据有效性（tenant_access_token）'), 'fail',
+          t('探测失败: {error}', { error: errRepr(error) }),
+          t('检查站点到 open.feishu.cn 的网络')));
       }
     }
   }
 
   if (!tokenOk) {
-    items.push(_docItem('bot', '机器人能力与启用状态', 'skip', '凭据未通过，跳过', ''));
+    items.push(_docItem('bot', t('机器人能力与启用状态'), 'skip',
+      t('凭据未通过，跳过'), ''));
   } else {
     try {
       const out = await rest('GET', '/open-apis/bot/v3/info', { cfg });
       const bot = out.bot || {};
       const act = bot.activate_status;
-      const name = pyTruthy(bot.app_name) ? bot.app_name : '（未命名）';
+      const name = pyTruthy(bot.app_name) ? bot.app_name : t('（未命名）');
       const ok = act === 2;
-      items.push(_docItem('bot', '机器人能力与启用状态', ok ? 'ok' : 'warn',
-        `${name}（activate_status=${pyStr(act)}）`,
-        ok ? '' : '应用能力 → 添加「机器人」，并在版本管理与发布里发布后生效'));
+      items.push(_docItem('bot', t('机器人能力与启用状态'), ok ? 'ok' : 'warn',
+        t('{name}（activate_status={act}）', { name, act: pyStr(act) }),
+        ok ? '' : t('应用能力 → 添加「机器人」，并在版本管理与发布里发布后生效')));
     } catch (error) {
       if (error instanceof FeishuRestError) {
-        items.push(_docItem('bot', '机器人能力与启用状态', 'fail', error.message,
-          '应用能力 → 添加应用能力 → 机器人，然后创建版本发布'));
+        items.push(_docItem('bot', t('机器人能力与启用状态'), 'fail', error.message,
+          t('应用能力 → 添加应用能力 → 机器人，然后创建版本发布')));
       } else {
-        items.push(_docItem('bot', '机器人能力与启用状态', 'fail',
-          `探测失败: ${errRepr(error)}`, '稍后重试'));
+        items.push(_docItem('bot', t('机器人能力与启用状态'), 'fail',
+          t('探测失败: {error}', { error: errRepr(error) }), t('稍后重试')));
       }
     }
   }
 
   const st = inboundStatus(userId, options);
   if (!hasCreds) {
-    items.push(_docItem('inbound_ws', '入站长连接（长连接）', 'skip', '凭据未配置，跳过', ''));
+    items.push(_docItem('inbound_ws', t('入站长连接（长连接）'), 'skip',
+      t('凭据未配置，跳过'), ''));
   } else {
     // 「线程绑的 app」走独立访问口（不进 `inboundStatus` 的形状，见 feishu_cfg.js 的说明）
-    items.push(inboundWsItem({ thread: st.thread, app_id: inboundThreadAppId(userId) }, cfg));
+    items.push(inboundWsItem({ thread: st.thread, app_id: inboundThreadAppId(userId) },
+      cfg, dataLang));
   }
 
   const lastEv = _LAST_EVENT_TS.get(userId);
   if (!hasCreds) {
-    items.push(_docItem('inbound_event', '事件订阅（真实收到过消息）', 'skip',
-      '凭据未配置，跳过', ''));
+    items.push(_docItem('inbound_event', t('事件订阅（真实收到过消息）'), 'skip',
+      t('凭据未配置，跳过'), ''));
   } else if (lastEv && (Date.now() / 1000 - lastEv) <= EVENT_FRESH_S) {
-    items.push(_docItem('inbound_event', '事件订阅（真实收到过消息）', 'ok',
-      `${Math.trunc(Date.now() / 1000 - lastEv)} 秒前收到过事件`, ''));
+    items.push(_docItem('inbound_event', t('事件订阅（真实收到过消息）'), 'ok',
+      t('{n} 秒前收到过事件', { n: Math.trunc(Date.now() / 1000 - lastEv) }), ''));
   } else {
-    items.push(_docItem('inbound_event', '事件订阅（真实收到过消息）', 'warn',
-      lastEv ? '最近一次事件已超过 5 分钟' : '尚未收到过事件',
-      '给机器人**发一条消息**验证：开发者后台 → 事件与回调 → 订阅方式选「长连接」'
-      + '并添加 im.message.receive_v1（按钮交互还需回调 card.action.trigger）'));
+    items.push(_docItem('inbound_event', t('事件订阅（真实收到过消息）'), 'warn',
+      lastEv ? t('最近一次事件已超过 5 分钟') : t('尚未收到过事件'),
+      t('给机器人**发一条消息**验证：开发者后台 → 事件与回调 → 订阅方式选「长连接」'
+        + '并添加 im.message.receive_v1（按钮交互还需回调 card.action.trigger）')));
   }
 
   if (!tokenOk) {
-    items.push(_docItem('slash_scope', '斜杠指令权限', 'skip', '凭据未通过，跳过', ''));
+    items.push(_docItem('slash_scope', t('斜杠指令权限'), 'skip',
+      t('凭据未通过，跳过'), ''));
   } else {
     let sl = null;
     try {
-      sl = await slashStatus(userId, options);
+      // T12d：slash 诊断也跟随请求语言（固定引导有 api 词条，上游原文透传）
+      sl = await slashStatus(userId, { ...options, lang: dataLang });
     } catch (error) {
       // slash_status 只吞 FeishuRestError；响应形态意外（如 data 非 dict）会漏出其他异常
       // —— doctor 承诺绝不外抛，这里降级为该项 fail。
-      items.push(_docItem('slash_scope', '斜杠指令权限', 'fail', `探测失败: ${errRepr(error)}`,
-        '稍后重试；仍失败可在「快捷指令」卡手动「注册 / 同步」看具体报错'));
+      items.push(_docItem('slash_scope', t('斜杠指令权限'), 'fail',
+        t('探测失败: {error}', { error: errRepr(error) }),
+        t('稍后重试；仍失败可在「快捷指令」卡手动「注册 / 同步」看具体报错')));
       sl = null;
     }
     if (sl !== null) {
       if (pyTruthy(sl.need_scope)) {
-        items.push(_docItem('slash_scope', '斜杠指令权限', 'fail',
-          pyTruthy(sl.error) ? sl.error : '缺权限',
-          '权限管理 添加 application:app_slash_command:read 与 write，'
-          + '并创建版本发布；开通后回设置页点「注册 / 同步到飞书」'));
+        items.push(_docItem('slash_scope', t('斜杠指令权限'), 'fail',
+          pyTruthy(sl.error) ? sl.error : t('缺权限'),
+          t('权限管理 添加 application:app_slash_command:read 与 write，'
+            + '并创建版本发布；开通后回设置页点「注册 / 同步到飞书」')));
       } else if (pyTruthy(sl.error)) {
-        items.push(_docItem('slash_scope', '斜杠指令权限', 'warn', String(sl.error),
-          '可在设置页「快捷指令」卡重试'));
+        items.push(_docItem('slash_scope', t('斜杠指令权限'), 'warn', String(sl.error),
+          t('可在设置页「快捷指令」卡重试')));
       } else {
-        items.push(_docItem('slash_scope', '斜杠指令权限', 'ok', '权限可用', ''));
+        items.push(_docItem('slash_scope', t('斜杠指令权限'), 'ok',
+          t('权限可用'), ''));
       }
     }
   }
@@ -663,37 +695,42 @@ export async function doctor(userId, sendProbe = false, options = {}) {
     binding = null;
   }
   if (!tokenOk || !binding) {
-    items.push(_docItem('send_scope', '发消息权限（可选探测）', 'skip',
-      binding ? '凭据未通过，跳过' : '未绑定飞书账号，跳过',
-      binding ? '' : '先在下方生成绑定码并在飞书里发「绑定 <码>」'));
+    items.push(_docItem('send_scope', t('发消息权限（可选探测）'), 'skip',
+      binding ? t('凭据未通过，跳过') : t('未绑定飞书账号，跳过'),
+      binding ? '' : t('先在下方生成绑定码并在飞书里发「绑定 <码>」')));
   } else if (!sendProbe) {
-    items.push(_docItem('send_scope', '发消息权限（可选探测）', 'skip',
-      '未探测（勾选「发送测试消息」后重跑自检）', ''));
+    items.push(_docItem('send_scope', t('发消息权限（可选探测）'), 'skip',
+      t('未探测（勾选「发送测试消息」后重跑自检）'), ''));
   } else if ((Date.now() / 1000 - (_LAST_PROBE_TS.get(userId) || 0)) < SEND_PROBE_MIN_S) {
-    items.push(_docItem('send_scope', '发消息权限（可选探测）', 'skip',
-      `${SEND_PROBE_MIN_S} 秒内已发过测试消息，稍后再试`, ''));
+    items.push(_docItem('send_scope', t('发消息权限（可选探测）'), 'skip',
+      t('{n} 秒内已发过测试消息，稍后再试', { n: SEND_PROBE_MIN_S }), ''));
   } else {
     try {
+      // 真要发这条 DM 才解析语言（无探测/被频控时不读偏好）
+      const lang = (options.lang === null || options.lang === undefined)
+        ? userLang(userId, options) : options.lang;
       await restSendText(binding.open_id,
-        '🔍 Touchstone 配置自检：收到这条消息说明「发消息」权限已开通。', cfg);
+        i18n.t('api', '🔍 Touchstone 配置自检：收到这条消息说明「发消息」权限已开通。',
+          lang), cfg);
       _LAST_PROBE_TS.set(userId, Date.now() / 1000);
-      items.push(_docItem('send_scope', '发消息权限（可选探测）', 'ok',
-        '测试消息已发送，去飞书查看', ''));
+      items.push(_docItem('send_scope', t('发消息权限（可选探测）'), 'ok',
+        t('测试消息已发送，去飞书查看'), ''));
     } catch (error) {
       if (error instanceof FeishuRestError) {
-        items.push(_docItem('send_scope', '发消息权限（可选探测）', 'fail', error.message,
-          '权限管理 添加 im:message:send_as_bot 并创建版本发布'));
+        items.push(_docItem('send_scope', t('发消息权限（可选探测）'), 'fail',
+          error.message,
+          t('权限管理 添加 im:message:send_as_bot 并创建版本发布')));
       } else {
-        items.push(_docItem('send_scope', '发消息权限（可选探测）', 'fail',
-          `探测失败: ${errRepr(error)}`, '稍后重试'));
+        items.push(_docItem('send_scope', t('发消息权限（可选探测）'), 'fail',
+          t('探测失败: {error}', { error: errRepr(error) }), t('稍后重试')));
       }
     }
   }
 
   const hook = cfg.default_webhook || '';
-  items.push(_docItem('webhook', '默认推送 Webhook', pyTruthy(hook) ? 'ok' : 'warn',
-    pyTruthy(hook) ? '已配置' : '未配置（不影响机器人对话，只影响阻塞事件推送）',
-    pyTruthy(hook) ? '' : '群设置 → 群机器人 → 添加自定义机器人，把 Webhook 填到设置页'));
+  items.push(_docItem('webhook', t('默认推送 Webhook'), pyTruthy(hook) ? 'ok' : 'warn',
+    pyTruthy(hook) ? t('已配置') : t('未配置（不影响机器人对话，只影响阻塞事件推送）'),
+    pyTruthy(hook) ? '' : t('群设置 → 群机器人 → 添加自定义机器人，把 Webhook 填到设置页')));
 
   const summary = { ok: 0, fail: 0, warn: 0, skip: 0 };
   for (const it of items) summary[it.state] = (summary[it.state] || 0) + 1;
@@ -710,7 +747,36 @@ export async function doctor(userId, sendProbe = false, options = {}) {
  * @param {number} userId
  * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
  */
+/** 把 `_PROVISION` 里的 canonical（中文）steps 映射到请求语言（key/ok 机器值不动）。 */
+function provisionSteps(steps, lang) {
+  return (steps || []).map((s) => ({
+    ...s,
+    label: i18n.t('api', s.label || '', lang),
+    detail: i18n.t('api', s.detail || '', lang),
+  }));
+}
+
+/** `status.error` 的已知文案映射；上游/动态错误原文原样透传（白名单）。 */
+function provisionErrorText(error, lang) {
+  if (!error) return error;
+  if (error === '扫码流程未返回应用凭据（可能超时或未确认），可重新发起') {
+    return i18n.t('api', error, lang);
+  }
+  for (const [prefix, key] of [
+    ['扫码创建失败: ', '扫码创建失败: {error}'],
+    ['应用已创建，但配置补齐未完成：', '应用已创建，但配置补齐未完成：{error}'],
+  ]) {
+    if (error.startsWith(prefix)) {
+      let inner = error.slice(prefix.length);
+      if (inner === _PATCH_SCOPE_HINT) inner = i18n.t('api', inner, lang);
+      return i18n.t('api', key, lang, { error: inner });
+    }
+  }
+  return error;
+}
+
 export function provisionStatus(userId, options = {}) {
+  const lang = options.lang;
   const st = _PROVISION.get(userId) || {};
   // `st.get("state", "idle")`：**键在就取键值**（哪怕空串），只有键缺席才回落 idle
   let state = st.state === undefined ? 'idle' : st.state;
@@ -718,7 +784,7 @@ export function provisionStatus(userId, options = {}) {
   const now = Date.now() / 1000;
   if (state === 'waiting' && (now - (st.started_at || 0)) > PROVISION_TTL) {
     state = 'failed';
-    error = error || '确认链接已超时（10 分钟有效），可重新发起';
+    error = error || i18n.t('api', '确认链接已超时（10 分钟有效），可重新发起', lang);
   }
   const cfgAppId = (userConfig(userId, options) || {}).app_id;
   const appId = pyTruthy(st.app_id) ? st.app_id : (pyTruthy(cfgAppId) ? cfgAppId : '');
@@ -727,9 +793,9 @@ export function provisionStatus(userId, options = {}) {
     enabled: provisionEnabled(envOf(options)),
     state,
     url: st.url || '',
-    error,
+    error: provisionErrorText(error, lang),
     app_id: appId,
-    steps: st.steps || [],
+    steps: provisionSteps(st.steps, lang),
     age_s: st.started_at ? Math.trunc(now - st.started_at) : 0,
   };
 }
@@ -750,12 +816,15 @@ export function provisionStatus(userId, options = {}) {
  * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
  */
 export async function provisionStart(userId, force = false, options = {}) {
+  const lang = options.lang;
+  const t = (key, vars) => i18n.t('api', key, lang, vars);
   if (!provisionEnabled(envOf(options))) {
-    return { ok: false, state: 'idle', url: '', error: `配置自动化已关闭（${PROVISION_ENV}=0）` };
+    return { ok: false, state: 'idle', url: '',
+      error: t('配置自动化已关闭（{env}=0）', { env: PROVISION_ENV }) };
   }
   if (!provisionSupported()) {
     return { ok: false, state: 'idle', url: '',
-      error: '本机 lark-oapi 版本过低（register_app 需 ≥1.5.5），请升级依赖后重试' };
+      error: t('本机 lark-oapi 版本过低（register_app 需 ≥1.5.5），请升级依赖后重试') };
   }
   return withProvisionLock(async () => {
     const cur = _PROVISION.get(userId) || {};
@@ -766,7 +835,7 @@ export async function provisionStart(userId, force = false, options = {}) {
     const cfg = appConfig(userId, options);
     if (cfg !== null && cfg !== undefined && !force) {
       return { ok: false, state: 'idle', url: '',
-        error: `已配置应用 ${cfg.app_id}；如需换应用请确认后重试` };
+        error: t('已配置应用 {app_id}；如需换应用请确认后重试', { app_id: cfg.app_id }) };
     }
     const cancel = createCancelEvent();
     _PROVISION.set(userId, {
@@ -782,11 +851,11 @@ export async function provisionStart(userId, force = false, options = {}) {
  * 取消进行中的扫码流程（`feishu.provision_cancel`(feishu.py:3035-3043)）。
  * 键序 `ok/state/error`（**没有 url**）；无进行中流程时 `state` 取当前态（缺省 idle）。
  */
-export function provisionCancel(userId) {
+export function provisionCancel(userId, options = {}) {
   const st = _PROVISION.get(userId) || {};
   if (st.state !== 'waiting') {
     return { ok: false, state: st.state === undefined ? 'idle' : st.state,
-      error: '当前没有进行中的扫码流程' };
+      error: i18n.t('api', '当前没有进行中的扫码流程', options.lang) };
   }
   st.cancel.set();
   st.state = 'cancelled';
@@ -848,14 +917,16 @@ function tupleGt(a, b) {
  *          db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
  */
 export async function provisionPublish(userId, options = {}) {
+  const lang = options.lang;
+  const t = (key, vars) => i18n.t('api', key, lang, vars);
   if (!provisionEnabled(envOf(options))) {
     return { ok: false, version: '', version_id: '', need_patch_scope: false,
-      error: `配置自动化已关闭（${PROVISION_ENV}=0）` };
+      error: t('配置自动化已关闭（{env}=0）', { env: PROVISION_ENV }) };
   }
   const cfg = appConfig(userId, options);
   if (cfg === null || cfg === undefined) {
     return { ok: false, version: '', version_id: '', need_patch_scope: false,
-      error: '应用凭据未配置（App ID / App Secret），请先保存凭据' };
+      error: t('应用凭据未配置（App ID / App Secret），请先保存凭据') };
   }
   const appId = cfg.app_id;
   let ver = pyStrip(pyStr(options.version || ''));
@@ -879,10 +950,10 @@ export async function provisionPublish(userId, options = {}) {
   } catch (error) {
     if (error instanceof FeishuRestError) {
       return { ok: false, version: ver, version_id: '', need_patch_scope: _needScope(error),
-        error: applyError(error) };
+        error: applyError(error, lang) };
     }
     return { ok: false, version: ver, version_id: '', need_patch_scope: false,
-      error: `发布失败: ${errRepr(error)}` };
+      error: t('发布失败: {error}', { error: errRepr(error) }) };
   }
 }
 

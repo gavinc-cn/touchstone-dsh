@@ -4,18 +4,22 @@
 //   ② v1 旧默认序（压测面板在第三位）的存量布局一次性迁移到新默认序，隐藏态原样保留；
 //   ③ 用户自定义过的顺序（含迁到 v2 后主动把压测面板拖回旧位置）不被覆盖，
 //      未知 key 丢弃、缺失 key 按新默认序补尾。
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
-  LEGACY_DEFAULT_ORDER, TAB_CFG_VER, TAB_KEYS, TAB_LABEL, normTabCfg,
+  LEGACY_DEFAULT_ORDER, TAB_CFG_VER, TAB_KEYS, normTabCfg, tabLabel,
 } from '../utils/tabCfg'
+
+import { setLang } from '../utils/i18n'
+// 文案断言按中文跑（zh 直接返回中文 key）
+beforeEach(() => setLang('zh'))
 
 const NEW_DEFAULT = ['board', 'tasks', 'monitor', 'bugs', 'stress']
 
 describe('tabCfg：标签页默认顺序与布局规范化', () => {
   it('默认序把压测面板排在最后', () => {
     expect(TAB_KEYS).toEqual(NEW_DEFAULT)
-    expect(TAB_LABEL.stress).toBe('压测面板')
+    expect(tabLabel('stress')).toBe('压测面板')
   })
 
   it('无布局/坏布局时回落新默认序，全可见', () => {

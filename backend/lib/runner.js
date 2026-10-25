@@ -352,6 +352,7 @@ import {
   status as driverStatus,
 } from './dshdriver.js';
 import { matchLevel, scanCases } from './export-cases.js';
+import { taskLang } from './i18n.js';
 import * as loadcase from './loadcase.js';
 import { strftime_local as strftime } from './loadgen.js';
 import {
@@ -2867,6 +2868,8 @@ export class Runner {
     const tid = insertTask(task.project_id, {
       name, autoFix: 0, retest: '不复测', stopType: 'rounds', stopValue: '1',
       taskType, payload: pyJsonDumps({ bug_dir: bug }),
+      // T13：自动复测任务继承**发起任务**的语言（后台线程没有请求上下文）
+      lang: taskLang(task),
     }, opts);
     this.submit(tid, opts);
     this.logTaskLine(task, `自动复测：已创建复测任务 #${tid}「${name}」`, opts);
@@ -2975,7 +2978,7 @@ export class Runner {
       appendLog(logPath, '### 存在未固化/解析不到的用例，本任务不执行，改建 agent 复测任务\n');
       const bug = this.linkedBugDir(project, task, opts);
       if (bug) {
-        this.spawnRetestTask(project, bug, [], logPath, '复测',
+        this.spawnRetestTask(project, bug, [], logPath, '复测', taskLang(task),
           { ...opts, exclude_task_id: taskId });
       }
       finishRound(roundId, 'done', 0, '前置校验未通过，已回落 agent 复测', logPath, opts);
@@ -3049,7 +3052,7 @@ export class Runner {
         appendLog(logPath, '### 关联用例全部通过，bug 状态 → 已修复（复测通过）\n');
       } else if (failed) {
         const failedIds = results.filter(([, c]) => c === 1).map(([cid]) => cid);
-        this.spawnRetestTask(project, bug, failedIds, logPath, '复核',
+        this.spawnRetestTask(project, bug, failedIds, logPath, '复核', taskLang(task),
           { ...opts, exclude_task_id: taskId });
       }
     }
@@ -3560,16 +3563,20 @@ export class Runner {
    * script_retest 的升级/回落调用方，**进 options 袋、名字照 Python 关键字参数**）在去重时
    * 跳过。返回任务 id，去重命中返回 `null`。
    *
+   * `lang`（T13）＝发起任务语言（调用点传 `taskLang(task)`；缺省 `'zh'` 只兜底），
+   * 与 Python `_spawn_retest_task(..., lang="zh")` 同缺省。
+   *
    * @param {object} project
    * @param {string} bug
    * @param {string[]} onlyCases
    * @param {string} logPath
    * @param {string} prefix
+   * @param {string} [lang]
    * @param {{exclude_task_id?: number, db?: object, dbPath?: string,
    *   env?: NodeJS.ProcessEnv}} [options]
    * @returns {number|null}
    */
-  spawnRetestTask(project, bug, onlyCases, logPath, prefix, options = null) {
+  spawnRetestTask(project, bug, onlyCases, logPath, prefix, lang = 'zh', options = null) {
     const opts = this.opt(options);
     const excludeTaskId = opts.exclude_task_id === undefined ? null : opts.exclude_task_id;
     for (const t of listTasks(project.id, opts)) {
@@ -3594,7 +3601,7 @@ export class Runner {
     // db.insertTask 的字段袋是 camelCase（见文件头差异㉗）
     const tid = insertTask(project.id, {
       name, autoFix: 0, retest: '不复测', stopType: 'rounds', stopValue: '1',
-      taskType: 'retest_bug', payload: pyJsonDumps(payload),
+      taskType: 'retest_bug', payload: pyJsonDumps(payload), lang,
     }, opts);
     this.submit(tid, opts);
     const extra = (onlyCases && onlyCases.length) ? `仅含 ${onlyCases.join('、')}` : '';

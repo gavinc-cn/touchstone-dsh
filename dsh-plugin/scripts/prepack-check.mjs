@@ -44,6 +44,9 @@ const REQUIRED = [
   'backend/schema/schema.json',
   'backend/schema/migrations.json',
   'builtin_prompts',
+  // 词典唯一真源（T15）：`backend/lib/i18n.js` / `backend_py/i18n.py` 运行时读
+  // `<repo>/i18n/en.json`；缺了它 en 请求静默回落中文（用户可见 bug），必须在自检里挡住。
+  'i18n/en.json',
   'extensions/dsh-autocommit/asset.json',
   'webui/dist-plugin/index.html',
   'dsh-plugin/cordis.patch.yml',

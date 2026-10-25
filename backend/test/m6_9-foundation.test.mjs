@@ -355,8 +355,10 @@ test('fsMkdir：os.mkdir 抛 OSError 时回 "新建失败：…"（Node 无 stre
   const parent = tempDir(t);
   // ENAMETOOLONG 在 root 下同样触发（无写权限那条会被 root 旁路，故不用它）
   const [, err] = fsMkdir(parent, 'x'.repeat(300));
-  assert.ok(err !== null && err.startsWith('新建失败：'), `实际：${JSON.stringify(err)}`);
-  assert.ok(err.length > '新建失败：'.length, '前缀之后应有原因文本');
+  // 插值文案走 key+vars 契约（T10 R18）：{message, vars} 而不是预渲染字符串
+  assert.equal(err.message, '新建失败：{detail}');
+  assert.equal(typeof err.vars.detail, 'string');
+  assert.ok(err.vars.detail.length > 0, 'detail 应有原因文本');
   // 失败后不留下半成品
   assert.equal(fs.readdirSync(parent).length, 0);
 });

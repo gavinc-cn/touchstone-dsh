@@ -16,16 +16,20 @@
 // 前端三处消费面：看板卡片徽标（BoardTab）/ 会话弹窗标题「队列」徽标（SessionModal）/
 // 输入区占位文案（ComposerBar）——全部由本文件的映射函数出文案，不再拼条件。
 
-// 八枚举文案（全站唯一出处；idle 空串 = 不渲染徽标）
-export const QUEUE_STATE_LABEL = {
-  idle: '',
-  queued_serial: '排队中',
-  answer_pending: '已作答·待送达',
-  interaction_pending: '等待作答',
-  server_queued: '服务端排队中',
-  foreign_busy: '等外部会话',
-  starting: '启动中',
-  running: '会话运行中',
+// 八枚举文案（全站唯一出处；idle 空串 = 不渲染徽标）。
+// 返回「枚举 → 文案」映射函数：调用方在 render 时传 t，切换语言即重渲染；
+// 缺省 identity 仅供不关心语言的纯逻辑/单测调用（归一化后仍是中文原文）。
+export function QUEUE_STATE_LABEL(t = (s) => s) {
+  return {
+    idle: '',
+    queued_serial: t('排队中'),
+    answer_pending: t('已作答·待送达'),
+    interaction_pending: t('等待作答'),
+    server_queued: t('服务端排队中'),
+    foreign_busy: t('等外部会话'),
+    starting: t('启动中'),
+    running: t('会话运行中'),
+  }
 }
 
 // 语义色名（两族徽标 class 的公共语义；族内 class 名差异由下方两张表吸收）
@@ -77,30 +81,30 @@ export function queueStateChipClass(state, family = 'board') {
 // 「本单元 idle + 项目被他单元占用」组合——会话级 queue_state 对本单元 idle 恒回 idle，
 // 输入区排队预测需项目忙信号兜底（与 P6 前旧链 busy=taskRunning||projectBusy 一致；
 // 服务端行为不变，消息照常进统一队列，此处只是预测性文案）
-export function queueStatePlaceholder(state, ctx = {}) {
+export function queueStatePlaceholder(state, ctx = {}, t = (s) => s) {
   const { found = true, board = false, canQueue = false, chatRunning = false,
           projectBusy = false } = ctx
-  if (!found) return '会话不可用'
+  if (!found) return t('会话不可用')
   if (state === 'foreign_busy') {
-    return board ? '外部会话运行中：Enter 排队，空闲后自动投递'
-                 : '外部会话运行中：Enter 排队，空闲后自动发送'
+    return board ? t('外部会话运行中：Enter 排队，空闲后自动投递')
+                 : t('外部会话运行中：Enter 排队，空闲后自动发送')
   }
   if (state === 'interaction_pending') {
     // 提问挂起（等用户作答）：徽标不亮「会话运行中」，占位文案同步换等待口径
-    return board ? 'agent 等待你作答：回答上方提问，或 Enter 排队继续对话'
-                 : 'agent 等待你作答：回答上方提问'
+    return board ? t('agent 等待你作答：回答上方提问，或 Enter 排队继续对话')
+                 : t('agent 等待你作答：回答上方提问')
   }
   // 非空闲态（interaction_pending 已在上方分流）或项目被他单元占用都算「忙」
   //（idle/未知枚举 + 项目空闲 → false）
   const busy = !!CHIP_TONE[state] || projectBusy
   if (busy && canQueue) {
-    return board ? '会话运行中：Enter 排队，排队行「立即注入」可插入当前轮'
-                 : '任务运行中：Enter 排队，排队行「立即注入」可插入当前轮'
+    return board ? t('会话运行中：Enter 排队，排队行「立即注入」可插入当前轮')
+                 : t('任务运行中：Enter 排队，排队行「立即注入」可插入当前轮')
   }
   if (busy) {
-    return board ? '项目忙：Enter 排队，空闲后自动投递'
-                 : '项目忙：Enter 排队，空闲后自动发送'
+    return board ? t('项目忙：Enter 排队，空闲后自动投递')
+                 : t('项目忙：Enter 排队，空闲后自动发送')
   }
-  if (chatRunning) return '对话进行中：Enter 排队，等当前轮结束发送'
-  return '向该会话继续发消息…（Enter 发送，Shift+Enter 换行）'
+  if (chatRunning) return t('对话进行中：Enter 排队，等当前轮结束发送')
+  return t('向该会话继续发消息…（Enter 发送，Shift+Enter 换行）')
 }

@@ -205,7 +205,7 @@ test('回归：worktree 直起必须真建出工作树（修复前 ReferenceErro
     const cid = insertCard(h.db, pid, { title: 'WT', columnKey: 'todo' });
     const project = db.getProject(pid, { db: h.db });
     const card = db.getBoardCard(cid, { db: h.db });
-    const [cur, info] = await board.enterDoingWorktree(project, card, '', false, true,
+    const [cur, info] = await board.enterDoingWorktree(project, card, '', false, true, '',
       { db: h.db });
 
     const wtPath = path.join(fx.work, 'worktrees', `card_${cid}`);
@@ -216,7 +216,13 @@ test('回归：worktree 直起必须真建出工作树（修复前 ReferenceErro
     assert.equal(db.getBoardCard(cid, { db: h.db }).worktree, wtPath);
     // ③ 测试进程没配驱动 ⇒ 起会话失败：返回错误串（不是抛异常），列回滚原列
     assert.equal(cur, null);
-    assert.match(String(info?.error ?? ''), /未配置 dsh agent 驱动/);
+    // 起会话失败的文案按 key+vars 契约承载（会话启动失败: {detail}）；
+    // 路由层渲染后 HTTP 形状不变，这里按契约取 detail。
+    const startErr = info?.error;
+    const startText = typeof startErr === 'string'
+      ? startErr
+      : `${startErr?.message ?? ''} ${startErr?.vars?.detail ?? ''}`;
+    assert.match(startText, /未配置 dsh agent 驱动/);
     assert.equal(db.getBoardCard(cid, { db: h.db }).column_key, 'todo', '起会话失败 ⇒ 回原列');
   } finally {
     h.close();

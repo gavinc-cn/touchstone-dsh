@@ -58,6 +58,7 @@ export const RUNTIME_RESOURCES = Object.freeze({
   ]),
   dirs: Object.freeze([
     { rel: 'builtin_prompts/free_style', why: 'backend/lib/prompts.js:237 _ASSET_DIR，运行时读流程文档与文件模板' },
+    { rel: 'i18n', why: 'backend/lib/i18n.js:28 DICT_PATH / backend_py/i18n.py:37 _DICT_PATH，运行时读 <repo>/i18n/en.json' },
     { rel: 'extensions', why: 'backend/lib/builtin-assets.js:262 DEFAULT_EXT_DIR，资产清单扫描根（routes/assets.js 的端点）' },
     { rel: 'webui/dist-plugin', why: 'server 静态服务目录（薄壳启动参数 --web-dir 传的就是它，dsh-plugin/lib/index.js）' },
   ]),

@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+import i18n
 import lib
 import prompts
 import rag
@@ -666,5 +667,82 @@ def test_builtin_assets_present_and_required():
                 "templates/load_scenario_template.md", "templates/load_index_template.md"):
         text = prompts._load_asset(*rel.split("/"))
         assert text.strip(), rel
+    # T15：8 个英文模板齐备（en 任务用；缺失会静默回落中文，此例防「漏发 .en.md」）
+    for rel in ("case_template.md", "status_template.md", "index_template.md",
+                "bug_report_template.md", "load_charts_template.md",
+                "load_index_template.md", "load_plan_template.md",
+                "load_scenario_template.md"):
+        assert prompts._load_asset_lang("en", "templates", rel).strip(), rel
     with pytest.raises(RuntimeError, match="内置提示词资产缺失或为空"):
         prompts._load_asset("__不存在的资产__.md")
+
+
+# ---------- 11. 产出语言指令（T14：zh/en 头部一段，其余逐字节不变） ----------
+
+_LANG_HEAD_ZH = "【产出语言】用中文撰写所有产出（用例、报告、日志）。\n\n---\n\n"
+_LANG_HEAD_EN = "【产出语言】Write all deliverables (cases, reports, logs) in English.\n\n---\n\n"
+_LANG_DIRECTIVE = "用中文撰写所有产出（用例、报告、日志）。"
+
+
+def test_prompt_directive_dictionary_entry():
+    """指令文本存 `i18n/en.json` 的 prompt ns：key=中文原句，en 返回英文句。"""
+    assert i18n.t("prompt", _LANG_DIRECTIVE, "en") == \
+        "Write all deliverables (cases, reports, logs) in English."
+    assert i18n.t("prompt", _LANG_DIRECTIVE, "zh") == _LANG_DIRECTIVE
+
+
+def test_language_directive_head_zh_en_and_body_unchanged(tmp_path):
+    """首轮 prompt 最前注入唯一一段语言指令；去掉该段后与直接 builder 输出逐字节相同
+    （指令只加头部、不改既有段落）。"""
+    proj = _project(tmp_path)
+    for lang, head in (("zh", _LANG_HEAD_ZH), ("en", _LANG_HEAD_EN)):
+        for task_type in ("normal", "mystery"):
+            task = _task(task_type=task_type, lang=lang)
+            p = prompts.first_round_prompt(proj, task)
+            assert p.startswith(head), (lang, task_type)
+            assert p.count("【产出语言】") == 1
+            assert p[len(head):] == prompts.normal_prompt(proj, task)
+
+
+def test_language_directive_reads_task_lang_normalized(tmp_path):
+    """语言来源一律 `i18n.task_lang`：大写/空白可识别，地区变体/脏值回落 zh。"""
+    proj = _project(tmp_path)
+    for lang in (None, "", "zh", "EN-US", "fr", "english"):
+        p = prompts.first_round_prompt(proj, _task(lang=lang))
+        assert p.startswith(_LANG_HEAD_ZH), lang
+    for lang in ("en", "EN", " en "):
+        p = prompts.first_round_prompt(proj, _task(lang=lang))
+        assert p.startswith(_LANG_HEAD_EN), lang
+
+
+def test_language_directive_head_for_all_task_types(tmp_path):
+    """七类首轮都只在最外层注入一次（fix/retest/stress/regression/pipeline/reject/normal）。"""
+    proj, bug = _bug_env(tmp_path)
+    payload = {
+        "fix": {"bug_dir": bug},
+        "retest_bug": {"bug_dir": bug},
+        "reject": {"bug_dir": bug, "reason": "误报"},
+        "pipeline": {"bug_dirs": [bug]},
+        "stress": {"brief": "压测登录接口"},
+        "regression": {},
+        "normal": {},
+    }
+    for task_type, data in payload.items():
+        for lang, head in (("zh", _LANG_HEAD_ZH), ("en", _LANG_HEAD_EN)):
+            task = _task(task_type=task_type, lang=lang,
+                         payload=json.dumps(data, ensure_ascii=False) if data else "")
+            p = prompts.first_round_prompt(proj, task)
+            assert p.startswith(head), (task_type, lang)
+            assert p.count("【产出语言】") == 1, (task_type, lang)
+
+
+def test_language_directive_sqlite_row_and_next_round():
+    """sqlite Row 的 lang 列同样生效；续轮同注入；task=None 回落 zh；compact 不变。"""
+    task_row = _sqlite_row(_task(lang="en"))
+    assert prompts.next_round_prompt(3, task_row).startswith(_LANG_HEAD_EN)
+    zh_body = prompts.next_round_prompt(3)[len(_LANG_HEAD_ZH):]
+    en_body = prompts.next_round_prompt(3, _task(lang="en"))[len(_LANG_HEAD_EN):]
+    assert zh_body == en_body == prompts.next_round_prompt(3, _task(lang="zh"))[
+        len(_LANG_HEAD_ZH):]
+    assert prompts.next_round_prompt(3, None).startswith(_LANG_HEAD_ZH)
+    assert prompts.compact_prompt() == "/compact"

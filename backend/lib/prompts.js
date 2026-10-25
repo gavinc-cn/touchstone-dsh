@@ -77,19 +77,45 @@
  *    TypeError、进而被外层 `except Exception` 吞成 `[]`；JS 侧 `String(...)` 化后照常判断。
  *    `rag.retrieve_detail` 的 `via` 恒为 str（`bm25`/`kw`/`vec`/`bm25+vec`），该形态不可达。
  *
- * 零 npm 依赖：只用 `node:path` / `node:url` 与本仓库内的 `lib.js` / `export-cases.js` / `rag.js`。
+ * 零 npm 依赖：只用 `node:path` / `node:url` 与本仓库内的 `lib.js` / `export-cases.js` /
+ * `rag.js` / `i18n.js`。
  */
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // `export_cases.scan_cases`（M6-2 已落）与 `lib` 的读侧子集（含 M6-4 新落的 `gitLogChanges`）
 import { scanCases } from './export-cases.js';
+import { t as i18nT, taskLang } from './i18n.js';
 import { bugCases, findCaseDirs, gitLogChanges, gitRecentCommits, pyJoin, pyStrip, readText } from './lib.js';
 // `rag` 的配置/检索入口（M6-3 已落）+ 它那套 Python 语义小工具（错误类/真值/码点切片）
 import {
   AttributeError, KeyError, ValueError, change_query, load_config, pySliceCodePoints, pyTruthy,
   retrieve_detail,
 } from './rag.js';
+
+// --------------------------------------------------------------------------
+// 产出语言指令（T14，设计 §5.2；与 backend_py/prompts.py 同文案）
+// --------------------------------------------------------------------------
+
+/**
+ * 产出语言指令的中文原句（= i18n dictionary 的 key；`i18n/en.json` 的 prompt ns 存英文句）。
+ *
+ * 只放 prompt **头部**一段，包装文案保持中文（D5 精简版）：zh 任务只新增这一段，其余
+ * 段落与改前逐字节一致；en 任务只换 directive 句。
+ */
+const OUTPUT_LANG_DIRECTIVE = '用中文撰写所有产出（用例、报告、日志）。';
+
+/**
+ * prompt 头部的产出语言指令段（`【产出语言】…` + 分隔线）。
+ *
+ * 语言一律经 `taskLang`（兼容 db 行/dict；缺失/空/脏值 → zh），不在调用点直接读
+ * `task.lang`。与 Python `_output_lang_head` 逐字节对应。
+ * @param {object|null|undefined} task
+ * @returns {string}
+ */
+function _output_lang_head(task) {
+  return `【产出语言】${i18nT('prompt', OUTPUT_LANG_DIRECTIVE, taskLang(task))}\n\n---\n\n`;
+}
 
 // --------------------------------------------------------------------------
 // Python 语义小工具（本文件私有；`rag.js` 有同名私有实现，各文件不互相 import 私有名）
@@ -240,6 +266,12 @@ export const _ASSET_DIR = pyJoin(REPO_ROOT, 'builtin_prompts', 'free_style');
 export const _ASSET_CACHE = new Map();
 
 /**
+ * 英文模板缺失的告警去重（每资产每进程只 warning 一次；键=英文资产逻辑名，如
+ * `templates/status_template.md`）。只影响告警频次，不影响回落行为。
+ */
+export const _EN_ASSET_WARNED = new Set();
+
+/**
  * 探索任务「最近变更优先」的取数口径（prompt 预算上限，**不是时间窗口**）：
  * 最近 N 条提交 + 每条提交最多列 M 个变更文件；功能聚类/新旧合并/按天倒序交给 agent。
  */
@@ -295,23 +327,70 @@ export function _load_asset(...names) {
   return _ASSET_CACHE.get(key);
 }
 
+/** 中文资产名 → 英文版文件名：`x.md` → `x.en.md`（无 .md 后缀时直接追加 `.en.md`）。 */
+function _enAssetName(name) {
+  return (name.endsWith('.md') ? name.slice(0, -3) : name) + '.en.md';
+}
+
+/**
+ * `prompts._load_asset_lang`：按语言读取内置提示词资产（`en` 优先英文版，其余等同
+ * `_load_asset`）。
+ *
+ * - `lang === 'en'`：先读 `<name>.en.md`（如 `templates/case_template.en.md`），存在即用；
+ *   英文版缺失/为空时**回落中文版**并每资产 `console.warn` 一次（进程内只警告一次，
+ *   绝不抛错——宁可给出中文模板，也不让整个任务失败）；
+ * - `zh` 或其它（含 null/undefined/未知值）：**直接走旧的 `_load_asset`**，逐字节相同、
+ *   零警告；
+ * - 缓存键与中文区分：英文键为 `"en:" + names.join('/')`，不污染旧 `_ASSET_CACHE`
+ *   的 zh 键语义（`names.join('/')`）。缺失回落的英文键不入缓存，下次仍会尝试读盘
+ *   （文件一旦补上即生效），告警仍只出一次。
+ * @param {string} lang
+ * @param {...string} names 相对 `_ASSET_DIR` 的路径分段
+ * @returns {string}
+ */
+export function _load_asset_lang(lang, ...names) {
+  if (lang !== 'en') return _load_asset(...names);
+  const key = `en:${names.join('/')}`;
+  if (!_ASSET_CACHE.has(key)) {
+    // `templates/case_template.md` → `templates/case_template.en.md`（.en 插在 .md 前）
+    const enNames = [...names.slice(0, -1), _enAssetName(names[names.length - 1])];
+    const enPath = pyJoin(_ASSET_DIR, ...enNames);
+    const text = readText(enPath);
+    if (!text) {
+      if (!_EN_ASSET_WARNED.has(key)) {
+        _EN_ASSET_WARNED.add(key);
+        console.warn(`[prompts] 英文资产缺失或为空，已回落中文版: ${enPath}`);
+      }
+      return _load_asset(...names);
+    }
+    _ASSET_CACHE.set(key, text);
+  }
+  return _ASSET_CACHE.get(key);
+}
+
 /**
  * `prompts._free_style_doc`：拼接自由风格测试流程文档与全部文件模板（首轮 prompt 注入用）。
  *
  * 模板依次附在流程文档之后、用分隔线隔开；`flow.md` 末尾的「附带文件模板」一节与该
- * 拼接顺序一一对应。
+ * 拼接顺序一一对应。`lang` 只决定 4 份模板走中文版还是英文版（`_load_asset_lang`）：
+ * `zh`（默认）与改前逐字节相同；`flow.md` 本身保持中文单份（D5），不参与语言选择。
+ * @param {'zh'|'en'} [lang='zh']
+ * @returns {string}
  */
-export function _free_style_doc() {
+export function _free_style_doc(lang = 'zh') {
   const parts = [_load_asset('flow.md')];
   for (const name of ['case_template.md', 'status_template.md', 'index_template.md',
     'bug_report_template.md']) {
-    parts.push('\n\n---\n\n' + _load_asset('templates', name));
+    parts.push('\n\n---\n\n' + _load_asset_lang(lang, 'templates', name));
   }
   return parts.join('');
 }
 
 /**
  * `prompts.first_round_prompt`：构建首轮 prompt。project/task 为 db 视图（sqlite Row 或 dict）。
+ *
+ * 返回内容**最前**是产出语言指令段（`_output_lang_head`，按 `task.lang` 取 zh/en）：
+ * 只在分派层注入这一次，各 builder 自身不拼该段（避免重复/漏加）。
  *
  * `log` 形参在 oracle 里就是**死参数**（没有转给 `retest_prompt`，见文件头「oracle 的活缺陷」），
  * 本文件照旧保留、照旧不用。返回 Promise（见文件头 ①）。
@@ -347,7 +426,7 @@ export async function first_round_prompt(project, task, log = null) {
     prompt += ('\n\n---\n用户附加要求（平台转达，务必遵守；如与上面约束冲突以本段为准）:\n'
       + extra + '\n');
   }
-  return prompt;
+  return _output_lang_head(task) + prompt;
 }
 
 /**
@@ -493,6 +572,9 @@ export function _recent_changes_priority(project, task) {
  *
  * `end_stage` 收窄每轮范围：gen_case 只生成用例不执行；execute 执行回状态不写 bug 报告；
  * report 及以后（含空值）为现状完整行为。
+ *
+ * 注入的 4 份文件模板按 `taskLang(task)` 选择语言（en 任务用英文模板，缺失回落中文）；
+ * 流程文档与约束块保持中文（D5）。语言一律经 `taskLang` 读，不在调用点直接读 `task.lang`。
  */
 export function normal_prompt(project, task) {
   const autoFix = pyTruthy(pyGetItem(task, 'auto_fix')) ? '开' : '关';
@@ -526,20 +608,24 @@ export function normal_prompt(project, task) {
     + '- 项目红线：不编译、不部署、不 git 提交\n'
     + "- 最后用一行输出本轮摘要：'ROUND_DONE 轮次N 新增X通过Y失败Z新bug'\n"
   );
-  return head + '\n---\n\n' + _free_style_doc() + '\n';
+  return head + '\n---\n\n' + _free_style_doc(taskLang(task)) + '\n';
 }
 
 /**
  * `prompts._stress_doc`：拼接压测流程文档与方案包模板（stress 首轮 prompt 注入用）。
  *
  * 模板以 `---` 分隔线跟在流程文档后；顺序与 `load_test.md` 正文的引用一致
- * （方案文档 → 图表声明 → 场景 → INDEX）。
+ * （方案文档 → 图表声明 → 场景 → INDEX）。`lang` 只决定 4 份模板走中文版还是英文版
+ * （`_load_asset_lang`）：`zh`（默认）与改前逐字节相同；`load_test.md` 本身保持中文
+ * 单份（D5），不参与语言选择。
+ * @param {'zh'|'en'} [lang='zh']
+ * @returns {string}
  */
-export function _stress_doc() {
+export function _stress_doc(lang = 'zh') {
   const parts = [_load_asset('load_test.md')];
   for (const name of ['load_plan_template.md', 'load_charts_template.md',
     'load_scenario_template.md', 'load_index_template.md']) {
-    parts.push('\n\n---\n\n' + _load_asset('templates', name));
+    parts.push('\n\n---\n\n' + _load_asset_lang(lang, 'templates', name));
   }
   return parts.join('');
 }
@@ -549,6 +635,8 @@ export function _stress_doc() {
  *
  * 方案包固定落在 `<案例库根>/load/task_<任务id>/`（平台按任务 id 直接定位，不经 INDEX 解析）；
  * 用户压测说明（payload.brief）是目标地址与关注接口的权威来源。本轮只写文件不发请求。
+ *
+ * 注入的 4 份模板按 `taskLang(task)` 选语言（en 任务用英文模板，缺失回落中文）。
  */
 export function stress_prompt(project, task) {
   const brief = pyOr(pyGet(_task_payload(task), 'brief', ''),
@@ -580,7 +668,7 @@ export function stress_prompt(project, task) {
     + '不部署、不 git 提交；不在方案包目录之外写文件；发压由平台在第 2 步自动执行；\n'
     + `- 写完文件后更新 ${pyGetItem(project, 'work_dir')}/.live/live.json 的 `
     + "phase=done，并输出一行摘要：'STRESS_DONE 方案要点（目标/驱动/面板数）'。"
-  ) + '\n---\n\n' + _stress_doc() + '\n';
+  ) + '\n---\n\n' + _stress_doc(taskLang(task)) + '\n';
 }
 
 /**
@@ -1036,17 +1124,23 @@ export function pipeline_prompt(project, task) {
   );
 }
 
-/** `prompts.next_round_prompt`：续轮短 prompt（同会话）——探索/回归分版（回归同样不生成新用例）。 */
+/**
+ * `prompts.next_round_prompt`：续轮短 prompt（同会话）——探索/回归分版（回归同样不生成新用例）。
+ *
+ * 头部同样注入产出语言指令（task=null 时按 zh）；compact 不是自然语言 prompt，保持
+ * 字面 `/compact` 不变（见 `compact_prompt`）。
+ */
 export function next_round_prompt(round_no, task = null) {
   if (task != null && pyOr(pyGetItem(task, 'task_type'), 'normal') === 'regression') {
-    return (
+    const body = (
       `继续执行存量用例回归第 ${round_no} 轮：仍严禁生成任何新用例，按首轮`
       + '「重跑范围指令」继续选取未重跑的用例执行并回写状态，约束同首轮'
       + '（重跑指令、终点范围、红线）；只执行这一轮，结束后更新工作目录下 '
       + ".live/live.json phase=done 并输出 'REGRESSION_DONE 重跑X通过Y失败Z' 摘要行。"
     );
+    return _output_lang_head(task) + body;
   }
-  return (
+  const body = (
     `继续执行自由风格探索测试第 ${round_no} 轮：换一个 ROUNDS.md 未记录过的`
     + '角度生成新 case；若首轮注入的「最近变更」功能组尚未覆盖完，继续优先覆盖'
     + '这些变更功能组（规则见首轮流程文档「最近变更与功能合并规则」），全部覆盖后'
@@ -1056,9 +1150,16 @@ export function next_round_prompt(round_no, task = null) {
     + '选项、红线）；只执行这一轮，结束后更新工作目录下 .live/live.json phase=done '
     + "并输出 'ROUND_DONE ...' 摘要行。"
   );
+  return _output_lang_head(task) + body;
 }
 
-/** `prompts.compact_prompt`：轮次开始前的上下文压缩提示（kimi 支持，其余 agent 日志注明跳过）。 */
+/**
+ * `prompts.compact_prompt`：轮次开始前的上下文压缩提示（kimi 支持，其余 agent 日志注明跳过）。
+ *
+ * 返回字面 slash 命令 `/compact`：T14 计划曾考虑在头部注入语言指令，但 slash 命令加自然
+ * 语言前缀会破坏命令语义（agent/CLI 按首个 token 识别），且当前仓库**无生产调用方**
+ * （仅测试钉住）。故保持命令本身不变；若未来接线，在调用方单独拼接指令段。
+ */
 export function compact_prompt() {
   return '/compact';
 }

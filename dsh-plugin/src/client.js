@@ -11,6 +11,28 @@ const h = React.createElement;
 const OPEN_KEY = 'ts.plugin.open'; // 面板开合状态(localStorage 记忆)
 // 上次所在页面(路由级, 由内嵌 SPA 写入; 键名与 webui/src/lib/lastRoute.js **逐字一致**)
 const ROUTE_KEY = 'ts.last_route';
+
+// ── 界面语言(2026-10-22) ─────────────────────────────────────────────────────
+// 面板 iframe 与 dsh 宿主页**同源**, 本壳直接读 SPA 写下的 localStorage ts_lang
+// (键名与 webui/src/utils/i18n.js 的 LANG_KEY **逐字一致**, 两侧必须同步改)。
+// 未设置/非法值/读不到(隐私模式) 一律按英文 —— 产品决定 D2: 默认英文。
+const LANG_KEY = 'ts_lang';
+const DEFAULT_LANG = 'en';
+
+/** 读当前界面语言: 只认 'zh'/'en'; 其余(含 localStorage 不可用)回退缺省英文。 */
+function readLang() {
+  try {
+    const lang = localStorage.getItem(LANG_KEY);
+    if (lang === 'zh' || lang === 'en') return lang;
+  } catch { /* localStorage 不可用等场景: 按缺省语言渲染 */ }
+  return DEFAULT_LANG;
+}
+
+/** 取当前界面语言的文案: 中文取 zh, 英文(含缺省/非法)取 en。 */
+function L(zh, en) {
+  return readLang() === 'zh' ? zh : en;
+}
+
 let open = false;
 try { open = localStorage.getItem(OPEN_KEY) === '1'; } catch { /* 隐私模式等场景忽略 */ }
 const listeners = new Set();
@@ -42,7 +64,7 @@ function useOpen() {
 //     (Web 的纯 Alt+T)由它兜底。它还必须自管 iframe 一侧 —— 面板是全屏**同源 iframe**,
 //     焦点在它里面时按键不会冒泡到宿主页(与本文件关闭按钮热区的 mousemove 同一个坑)。
 const COMMAND_ID = 'touchstone.toggle'; // 官方命令 id(dsh 要求: 小写点分)
-const COMMAND_LABEL = '打开/关闭 Touchstone 面板';
+const COMMAND_LABEL = L('打开/关闭 Touchstone 面板', 'Open/Close Touchstone Panel');
 const KEY_CODE = 'KeyT';                // 物理键(Alt+T 的 T)
 let shortcuts = null;                   // 官方 shortcuts 服务(未注册成功时为 null)
 
@@ -117,7 +139,7 @@ function onHostKey(e) { toggleByKey(e); }
 //     7px 8px / margin 0 2px / gap 8 / line-height 22 / --dsw-radius-md), 收起态对齐
 //     .hHd-Xa_collapsed .panelRow(36x36 居中);
 //   · 图标盒 16x16 —— 与 dsh 侧栏 SVG 图标同尺寸; 文字继承侧栏根的 14px。
-const ENTRY_TITLE = 'Touchstone 测试平台（Alt+T 开关）';
+const ENTRY_TITLE = L('Touchstone 测试平台（Alt+T 开关）', 'Touchstone Test Platform (Alt+T to toggle)');
 const ENTRY_GLYPH_STYLE = {
   flex: '0 0 16px', width: 16, height: 16, display: 'inline-flex',
   alignItems: 'center', justifyContent: 'center', fontSize: 16, lineHeight: '16px',
@@ -201,7 +223,7 @@ function Toggle(props) {
     onClick: () => setOpen(!isOpen),
   },
   h('span', { style: ENTRY_GLYPH_STYLE, 'aria-hidden': 'true' }, '🧪'),
-  wide ? h('span', { style: ENTRY_LABEL_STYLE }, isOpen ? '关闭 Touchstone' : 'Touchstone') : null);
+  wide ? h('span', { style: ENTRY_LABEL_STYLE }, isOpen ? L('关闭 Touchstone', 'Close Touchstone') : 'Touchstone') : null);
 }
 
 // 关闭按钮自动隐藏(2026-10-03): 常显会盖住被嵌 SPA 侧栏底部的用户名, 所以平时完全隐藏,
@@ -513,7 +535,7 @@ function Panel() {
         pointerEvents: visible ? 'auto' : 'none', // 隐藏时不拦截点击(点击照常落到被嵌页面)
         transition: 'opacity 160ms ease, background 120ms ease',
       },
-      title: '关闭 Touchstone 面板',
+      title: L('关闭 Touchstone 面板', 'Close Touchstone Panel'),
       onMouseEnter: () => { setHover(true); setShown(true); }, // 已浮现时悬停不因热区抖动而消失
       onMouseLeave: () => setHover(false),
       onClick: () => setOpen(false),

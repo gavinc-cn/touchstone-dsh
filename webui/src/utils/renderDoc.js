@@ -40,16 +40,16 @@ function pickHeader(root) {
   if (!first || first.tagName !== 'UL') return { title, meta: [] }
   const hits = []
   for (const li of [...first.children]) {
-    const t = firstTextNode(li)
-    if (!t) return { title, meta: [] }
-    const m = t.data.match(META_KV)
+    const node = firstTextNode(li)
+    if (!node) return { title, meta: [] }
+    const m = node.data.match(META_KV)
     if (!m) return { title, meta: [] }
-    hits.push([t, m])
+    hits.push([node, m])
   }
   if (hits.length < 2) return { title, meta: [] }
-  const meta = hits.map(([t, m]) => {
-    t.data = m[2]                    // 值留在原位（其中的 <code> 等行内标记得以保留）
-    return { k: m[1].trim(), v: t.parentElement.innerHTML }
+  const meta = hits.map(([node, m]) => {
+    node.data = m[2]                 // 值留在原位（其中的 <code> 等行内标记得以保留）
+    return { k: m[1].trim(), v: node.parentElement.innerHTML }
   })
   first.remove()
   return { title, meta }
@@ -74,11 +74,11 @@ export function renderDoc(src, opts) {
   const root = d.body
 
   // 1) 表格：包横向滚动容器（CSS 无法给裸 table 套壳，只能在这里做）
-  for (const t of [...root.querySelectorAll('table')]) {
+  for (const table of [...root.querySelectorAll('table')]) {
     const wrap = d.createElement('div')
     wrap.className = 'md-table-wrap'
-    t.replaceWith(wrap)
-    wrap.appendChild(t)
+    table.replaceWith(wrap)
+    wrap.appendChild(table)
   }
 
   // 2) 抬头（仅方案页需要）：先摘，标题不进目录（它由页面标题栏承担）
@@ -96,12 +96,12 @@ export function renderDoc(src, opts) {
     const id = 'md-h-' + i
     h.id = id
     let no = ''
-    const t = firstTextNode(h)
-    if (t) {
-      const m = t.data.match(SEC_NO)
+    const node = firstTextNode(h)
+    if (node) {
+      const m = node.data.match(SEC_NO)
       if (m) {
         no = m[1]
-        t.data = t.data.slice(m[0].length)   // 序号从文本里摘掉，改由金色标注承担
+        node.data = node.data.slice(m[0].length)   // 序号从文本里摘掉，改由金色标注承担
       }
     }
     const text = h.textContent.trim()

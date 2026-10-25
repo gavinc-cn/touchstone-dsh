@@ -14,6 +14,9 @@
  *   ⑧ 浮层顶边 = 桌面壳发布的窗口 chrome 顶带高 —— dsh 的 --dsh-frame-chrome-top /
  *      --dsh-frame-top-clearance（取大）→ WCO 原生接口 → env() 探针三级兜底；全读不到 = 0
  *      （普通浏览器/独立形态行为不变）；resize 后重算；卸载不留监听、不留 env 探针节点。
+ * 再钉 2026-10-22 的插件外壳文案双语（⑨）：
+ *   ⑨ 语言：入口/关闭按钮读同源 localStorage `ts_lang` 渲染中/英；缺省、非法值、
+ *      读取异常一律英文（产品决定 D2），中文文案逐字保留原文。
  * 协议常量与 SPA 半 webui/src/lib/dshHost.js 逐字一致（那边由
  * webui/src/__tests__/dshHost.test.js 覆盖）。
  *
@@ -224,14 +227,19 @@ function makeMiniReact(hostDoc) {
  * @param chrome - 桌面壳环境桩（2026-10-17 ⑧）:
  *   vars=<CSS 变量名→值> 让 getComputedStyle 返回它; wco=<windowControlsOverlay 桩>;
  *   envHeight=<env() 探针量到的高度>。不传=普通浏览器（三者都读不到）。
+ * @param lang - 预置界面语言（localStorage ts_lang）；不传=本浏览器从未选过（缺省英文）。
+ * @param storageError - true 时 localStorage.getItem 抛错（隐私模式等），验证读语言回落英文。
  * @returns 该环境下所有可观测面（chromeVars 供 resize 重算用例现场改值）。
  */
-function setup({ uiWorkspace, openSessionError = null, open: openInitial = true, lastRoute, chrome } = {}) {
+function setup({ uiWorkspace, openSessionError = null, open: openInitial = true, lastRoute, chrome, lang, storageError = false } = {}) {
   const src = fs.readFileSync(bundlePath, 'utf8');
   // 预置面板开合状态：Panel 在挂载时才挂 iframe/消息桥，开合状态本来就是记忆值
   const initial = openInitial ? { 'ts.plugin.open': '1' } : {};
   if (lastRoute !== undefined) initial['ts.last_route'] = lastRoute;
+  if (lang !== undefined) initial['ts_lang'] = lang;
   const storage = makeStorage(initial);
+  // localStorage 读取一律抛错：语言必须回落 en，入口/面板本体不受影响
+  if (storageError) storage.getItem = () => { throw new Error('storage denied'); };
   const hostDoc = asDocument(makeTarget('host-document'), {
     envHeight: chrome ? chrome.envHeight : 0,
   });
@@ -511,6 +519,67 @@ function caseWindowChrome() {
     + ` fs=${resizeEnv.hostDoc.listenerCount('fullscreenchange')}`);
 }
 
+// ── ⑨ 语言：外壳文案读同源 ts_lang（缺省/非法/异常 → en） ──────────────────────
+function caseLang() {
+  console.log('== ⑨ 语言：入口/关闭按钮读 ts_lang（缺省/非法/异常 → en）==');
+
+  /** 分别在干净环境里渲染侧栏入口（展开态、面板开着）与面板关闭按钮，取可观测文案面。
+   *  入口与面板各用一套 setup：mini React 的 hook 槽按环境复用，混渲染会串状态。 */
+  const copyOf = (opts = {}) => {
+    const entryEnv = setup({ uiWorkspace: {}, ...opts });
+    const entry = entryEnv.rec.slots.find((s) => s.meta.id === 'touchstone-toggle');
+    const wrapped = entry.comp({});
+    const toggle = entryEnv.mini.render(wrapped.type, { wide: true });
+
+    const panelEnv = setup({ uiWorkspace: {}, ...opts });
+    const panel = renderPanel(panelEnv).tree;
+    const close = panel && Array.isArray(panel.children)
+      ? panel.children.find((c) => c && c.type === 'button') : null;
+
+    return {
+      label: toggle.children[1] && toggle.children[1].children[0], // ts_lang=zh 时应为「关闭 Touchstone」
+      title: toggle.props.title,
+      aria: toggle.props['aria-label'],
+      close: close && close.props.title,
+    };
+  };
+
+  // 缺省（本浏览器从未选过语言）→ 英文（产品决定 D2：默认英文）
+  const def = copyOf();
+  check('缺省无 ts_lang → 入口/关闭按钮英文',
+    def.label === 'Close Touchstone'
+    && def.title === 'Touchstone Test Platform (Alt+T to toggle)' && def.aria === def.title
+    && def.close === 'Close Touchstone Panel', JSON.stringify(def));
+
+  // 显式 en → 与缺省一致
+  const en = copyOf({ lang: 'en' });
+  check('ts_lang=en → 入口/关闭按钮英文',
+    en.label === 'Close Touchstone'
+    && en.title === 'Touchstone Test Platform (Alt+T to toggle)'
+    && en.close === 'Close Touchstone Panel', JSON.stringify(en));
+
+  // 显式 zh → 中文原文逐字保留
+  const zh = copyOf({ lang: 'zh' });
+  check('ts_lang=zh → 入口/关闭按钮中文原文',
+    zh.label === '关闭 Touchstone'
+    && zh.title === 'Touchstone 测试平台（Alt+T 开关）' && zh.aria === zh.title
+    && zh.close === '关闭 Touchstone 面板', JSON.stringify(zh));
+
+  // 非法值（大小写/地区码/空串）→ 英文，不被脏值带偏
+  for (const lang of ['fr', 'ZH', 'zh-CN', '']) {
+    const got = copyOf({ lang });
+    check(`ts_lang=${JSON.stringify(lang)} → 回落英文`,
+      got.label === 'Close Touchstone' && got.close === 'Close Touchstone Panel',
+      JSON.stringify(got));
+  }
+
+  // localStorage 读取抛错（隐私模式）：读语言回落英文，入口照常渲染
+  const broken = copyOf({ storageError: true });
+  check('localStorage 读取异常 → 英文（入口照常渲染）',
+    broken.title === 'Touchstone Test Platform (Alt+T to toggle)' && broken.aria === broken.title,
+    JSON.stringify(broken));
+}
+
 function caseReject() {
   console.log('== ③ 拒绝面：来源/异源/sid/异常都不动作 ==');
   // 来源不是本面板 iframe（宿主页里别的插件窗口、或父页自身）
@@ -580,6 +649,7 @@ caseKeepAlive();
 caseEntry();
 caseFocusHandoff();
 caseWindowChrome();
+caseLang();
 
 console.log(failures ? `\nOVERALL: FAIL (${failures} 项失败)` : '\nOVERALL: PASS');
 process.exit(failures ? 1 : 0);

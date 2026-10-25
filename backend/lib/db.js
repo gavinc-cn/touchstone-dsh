@@ -1227,7 +1227,7 @@ const TASK_INSERT_COLUMNS = [
   'project_id', 'name', 'auto_fix', 'retest', 'stop_type', 'stop_value',
   'task_type', 'payload', 'extra', 'model', 'permission', 'auto_commit', 'auto_deploy',
   'auto_retest', 'cases_base', 'start_stage', 'end_stage', 'date_from', 'date_to',
-  'created_at',
+  'lang', 'created_at',
 ];
 
 /**
@@ -1250,7 +1250,8 @@ const TASK_INSERT_COLUMNS = [
  * @param {{name: string, autoFix?: any, retest?: any, stopType?: any, stopValue?: any,
  *          taskType?: string, payload?: string, extra?: any, model?: any, permission?: any,
  *          autoCommit?: any, autoDeploy?: any, autoRetest?: any, casesBase?: any,
- *          startStage?: any, endStage?: any, dateFrom?: any, dateTo?: any}} fields
+ *          startStage?: any, endStage?: any, dateFrom?: any, dateTo?: any,
+ *          lang?: string}} fields
  * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
  * @returns {number} 新任务 id（`lastrowid`）
  */
@@ -1277,6 +1278,9 @@ export function insertTask(projectId, fields = {}, options = {}) {
     fields.endStage || '',
     fields.dateFrom || '',
     fields.dateTo || '',
+    // T13：任务语言（调用点显式传已冻结的请求/父任务语言；缺省 'zh' 兜底）。
+    // 与 Python `insert_task(..., lang="zh")` 同缺省、同列序（lang 在 created_at 前）。
+    orDefault(fields.lang, 'zh'),
     nowStr(),
   ];
   const sql = `INSERT INTO tasks(${TASK_INSERT_COLUMNS.join(',')})`
@@ -1450,12 +1454,34 @@ export function insertBoardCard(projectId, title, description = '', jiraKey = ''
     const sortOrder = Object.values(row)[0];    // 单列未命名：按位置取（同 Python 的 row[0]）
     const info = handle.prepare(
       'INSERT INTO board_cards(project_id, title, description, column_key,'
-      + ' sort_order, jira_key, created_at, updated_at)'
-      + " VALUES(?,?,?,'todo',?,?,?,?)",
+      + ' sort_order, jira_key, lang, created_at, updated_at)'
+      + " VALUES(?,?,?,'todo',?,?,'',?,?)",
     ).run(bindable(projectId), bindable(title), bindable(description), bindable(sortOrder),
       bindable(jiraKey), nowStr(), nowStr());
     publish(boardTopic(projectId));             // P4 看板事件化：新建卡片也发一次信号
     return Number(info.lastInsertRowid);
+  });
+}
+
+/**
+ * 原子冻结卡片语言（T13，2026-10-23；对齐 `db.set_board_card_lang`）。
+ *
+ * **仅当当前为空**（NULL / ''）时写入，先到先得；返回本次是否真的写入。
+ * 谓词 `(lang IS NULL OR lang='')` 是「二次 start 不覆盖」的唯一保证——调用方不
+ * 自己先读后写（读-写窗口会双写）。冻结不是卡片内容变更，刻意不刷 `updated_at`
+ * （避免污染「更新新→旧」排序与看板信号）。
+ *
+ * @param {number} cardId
+ * @param {'zh'|'en'} lang
+ * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
+ * @returns {boolean}
+ */
+export function setBoardCardLang(cardId, lang, options = {}) {
+  return withWriteDb(options, (handle) => {
+    const info = handle.prepare(
+      "UPDATE board_cards SET lang=? WHERE id=? AND (lang IS NULL OR lang='')",
+    ).run(bindable(lang), bindable(cardId));
+    return Number(info.changes) > 0;             // Python: cur.rowcount > 0
   });
 }
 

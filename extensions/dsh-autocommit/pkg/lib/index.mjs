@@ -185,15 +185,48 @@ function cleanTitle(title) {
   return squeezed.length > 0 ? squeezed.slice(0, TITLE_MAX) : DEFAULT_TITLE
 }
 
-/** 阻断消息里的文件缩略清单。 */
-function fileLines(files) {
+/**
+ * 阻断消息里的文件缩略清单（超过 MAX_MESSAGE_FILES 时只列前 N 条并注明总数）。
+ * lang='en' 用英文后缀；其它值（含默认 undefined/zh）保持原有中文文案**逐字节不变**。
+ */
+function fileLines(files, lang) {
   const shown = files.slice(0, MAX_MESSAGE_FILES).map((f) => `  - ${f}`).join('\n')
-  return files.length > MAX_MESSAGE_FILES ? `${shown}\n  ...（共 ${files.length} 个）` : shown
+  if (files.length <= MAX_MESSAGE_FILES) return shown
+  const suffix = lang === 'en' ? ` (${files.length} files total)` : `（共 ${files.length} 个）`
+  return `${shown}\n  ...${suffix}`
+}
+
+/**
+ * agent 侧提示语言（设计 §11 的兜底开关）：仅当 `TS_AGENT_LANG` 去空白小写后**恰好**
+ * 为 `en` 时用英文提示；`zh`/unset/其它值（含 `en-US`）一律现有中文逐字节不变。
+ *
+ * 为什么只是兜底：DSH 的会话创建契约（`CreateAgentOptions.meta`：cwd/parentSession/
+ * isSeeded/origin/delegationDepth/agentPreset）与 `SessionHeader` 都**没有** per-session
+ * env/metadata/lang 通道（2026-10-23 只读调查本地 DSH checkout 的 dsh-session /
+ * dsh-agent 类型声明，无文档化扩展点），平台侧 `create_session` 也只传
+ * cwd/task/model/provider。因此本插件无法按任务语言取到 lang，只能按进程级 env 选。
+ * 每次调用现读 env（运行中切换即生效，便于回滚）。
+ */
+function agentLang() {
+  return String(process.env.TS_AGENT_LANG ?? '').trim().toLowerCase() === 'en' ? 'en' : 'zh'
+}
+
+/** 英文版阻断提示（结构/文件清单/提交要求与中文版一一对应，仅换语言）。 */
+function buildReasonEn({ event, tool, files, prefix, title }) {
+  const head = `[Auto checkpoint] This session still has ${files.length} uncommitted file(s):\n${fileLines(files, 'en')}\n`
+  const how = 'Stage each file explicitly with `git add -- <path>` (never `git add -A` / `.` / `-u`); '
+    + `use "${prefix}<one-line summary>" as the first line of the commit message and `
+    + `"session: (${title})" as one body line; `
+    + 'commit only the files changed in this session and do not touch other uncommitted changes in the working tree.'
+  return event === 'stop'
+    ? `${head}Please commit these files before ending the turn: ${how}You may end the turn normally once they are committed.`
+    : `${head}Please commit these files first, then call ${tool || 'the tool'} again to ask the same question: ${how}`
 }
 
 /** 构造交模型提交的提示（自包含、可执行，与 kimi 的 advise_reason 同义）。 */
 function buildReason({ event, tool, files, prefix, title }) {
-  const head = `[自动检查点] 本次会话还有 ${files.length} 个文件未提交：\n${fileLines(files)}\n`
+  if (agentLang() === 'en') return buildReasonEn({ event, tool, files, prefix, title })
+  const head = `[自动检查点] 本次会话还有 ${files.length} 个文件未提交：\n${fileLines(files, 'zh')}\n`
   const how = `逐文件 \`git add -- <路径>\`（禁止 \`git add -A\`/\`.\`/\`-u\`），`
     + `提交消息首行用 "${prefix}<一句话摘要>"，正文一行 "session: (${title})"；`
     + `只提交本次会话改动的文件，不要动工作区中其他未提交改动。`

@@ -110,6 +110,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { agentFamily } from './agents.js';
+import { localizable } from './i18n.js';
 import { getProject, withReadDb } from './db.js';
 import * as dshevents from './dshevents.js';
 import {
@@ -808,10 +809,12 @@ export async function externalPreflight(sid, options = {}) {
   if (st.owned) return;                          // 平台自持会话：池内原路
   // —— 以下为外部会话（用户在 dsh GUI 直跑/接管）：需要显式许可 ——
   if (!externalDeliverEnabled(options)) {
-    throw new DeliveryRefused(
+    // key+vars 契约：.message 保持渲染后的中文（日志/既有断言不变），i18nKey 给响应层查词
+    throw localizable(new DeliveryRefused(
       '该会话是 dsh 直跑会话，平台已关闭外部会话投递'
       + `（${EXTERNAL_DELIVER_ENV}=0），请到 dsh 会话窗口发送`,
-    );
+    ), '该会话是 dsh 直跑会话，平台已关闭外部会话投递（{env}=0），请到 dsh 会话窗口发送',
+    { env: EXTERNAL_DELIVER_ENV });
   }
   if (String(st.status || '') === 'unknown') {
     // 宿主里没有活 agent（会话已结束/被销毁）：投递必然 404，别让用户白等

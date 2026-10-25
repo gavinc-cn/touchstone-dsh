@@ -10,7 +10,7 @@ import { toast } from '../utils/toast'
 import { QUEUE_STATE_LABEL, queueStateChipClass } from '../utils/queueBadge'
 import { showUnreadBadge } from '../utils/unreadBadge'
 import { cardTimeLabel, cardTimeTitle } from '../utils/cardTime'
-import { ST_LABEL } from '../utils/renderMd'
+import { stLabel } from '../utils/renderMd'
 import { findSlashToken } from '../utils/slashToken'
 import { isPlaceholderImage } from '../utils/media'
 import { mediaDisplayUrl } from '../utils/mediaText'
@@ -31,6 +31,7 @@ import {
 } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
 import { Play, Trash2, Check, Undo2, ArrowRight, Plus, Settings, MessageSquare, FileText, Maximize2, ExternalLink, X, Zap } from 'lucide-react'
+import { useI18n } from '../utils/i18n'
 
 // 卡片操作行按钮（2026-10-10 窄屏自适应批次）——两种形态，样式全在 CSS：
 //   OpsTextButton 带文字：<icon(宽列)> + <icon(窄列)> + <label> 三个兄弟节点，由
@@ -59,8 +60,11 @@ function OpsIconButton({ className = '', ...props }) {
 const DRAG_THRESHOLD = 6  // 拖拽触发阈值（px）：低于该位移视为点击
 const MEDIA_MAX = 10 * 1024 * 1024  // 卡片附件单文件上限（与后端 board/media、描述编辑框一致）
 
-// 任务类型标签（测试任务上板徽标用；与 TasksTab 保持一致）
-const TASK_TYPE_LABEL = { normal: '探索', fix: '修复', retest_bug: '复测', script_retest: '脚本复测', stress: '压测', regression: '回归', pipeline: '后段', reject: '修例' }
+// 任务类型标签（测试任务上板徽标用；与 TasksTab 保持一致）。
+// 工厂形式：render 时传 t，切换语言即重渲染
+const TASK_TYPE_LABEL = (t) => ({ normal: t('探索'), fix: t('修复'), retest_bug: t('复测'),
+  script_retest: t('脚本复测'), stress: t('压测'), regression: t('回归'), pipeline: t('后段'),
+  reject: t('修例') })
 // 任务条目上映列（v2c T4，裁决 R16；v2 §2.1【已定】列映射）：进行中→doing、
 // 失败/中断/停止→review、完成→done（服务端 payload 条目标 column 字段）
 const TASK_COLS = new Set(['doing', 'review', 'done'])
@@ -68,21 +72,22 @@ const TASK_COLS = new Set(['doing', 'review', 'done'])
 // running/queued/done 专色，failed/interrupted/stopped 同走 retest 橙（失败族）
 const TASK_ST_CLASS = { running: 'run', queued: 'pending', done: 'pass' }
 // 每列过滤方案：all=全部（开发卡+测试任务）dev=仅开发卡 test=仅测试任务（按 用户+项目 记忆）
-const FILTER_OPTIONS = [['all', '全部'], ['dev', '仅开发'], ['test', '仅测试']]
+const FILTER_OPTIONS = (t) => [['all', t('全部')], ['dev', t('仅开发')], ['test', t('仅测试')]]
 
-const COLUMNS = [
-  { key: 'todo', label: '待开发' },
-  { key: 'doing', label: '正在开发' },
-  { key: 'blocked', label: '阻塞' },
-  { key: 'review', label: '待审核' },
-  { key: 'done', label: '已完成' },
+const COLUMNS = (t) => [
+  { key: 'todo', label: t('待开发') },
+  { key: 'doing', label: t('正在开发') },
+  { key: 'blocked', label: t('阻塞') },
+  { key: 'review', label: t('待审核') },
+  { key: 'done', label: t('已完成') },
 ]
 // 列排序方案选项（entered_desc 仅已完成列——进入时间新→旧）
-const SORT_BASE = [['manual', '手动'], ['created_desc', '创建新→旧'], ['updated_desc', '更新新→旧'], ['title', '标题']]
-const SORT_OPTIONS = (col) => col === 'done'
-  ? [['entered_desc', '进入新→旧'], ...SORT_BASE]
-  : SORT_BASE
-const MODE_LABEL = { serial: '串行', parallel: '并行' }
+const SORT_BASE = (t) => [['manual', t('手动')], ['created_desc', t('创建新→旧')],
+  ['updated_desc', t('更新新→旧')], ['title', t('标题')]]
+const SORT_OPTIONS = (col, t) => col === 'done'
+  ? [['entered_desc', t('进入新→旧')], ...SORT_BASE(t)]
+  : SORT_BASE(t)
+const MODE_LABEL = (t) => ({ serial: t('串行'), parallel: t('并行') })
 
 // doing 列分区与三手势（v2 §2.4；v2c T3 接线，服务端 _doing_gesture 为仲裁权威）：
 // 视觉分区=queue_state running/starting（含 sync 外部运行卡——v2c→v2d 接口：
@@ -107,6 +112,11 @@ const isRunGesture = (c) => !c.answer_pending
 const isWaitGesture = (c) => c.block_kind === 'queue' && !c.answer_pending
 
 export default function BoardTab({ project }) {
+  const { t } = useI18n()
+  // 队列态文案映射按语言算一次：卡面每卡一次查表即可（映射工厂会给每个枚举调 t）
+  const queueLabels = QUEUE_STATE_LABEL(t)
+  // 任务类型标签同理按语言只建一次（8 个词条），避免每个任务条目每次渲染重建映射
+  const taskTypeLabels = TASK_TYPE_LABEL(t)
   const projectId = project?.id
   const dshCaps = useDshHostCaps()                   // dsh 宿主能力（面板形态才非空；决定「在 dsh 打开」按钮显隐）
   const [data, setData] = useState(null)          // {cards, comments, settings}
@@ -181,9 +191,9 @@ export default function BoardTab({ project }) {
       es.addEventListener('refresh', scheduleReload)
       // 断线由 EventSource 自动重连（重连后照常先收 hello），无需手工处理 onerror
     } catch { /* 环境不支持 EventSource：退回 60s 兜底 */ }
-    const t = setInterval(reload, 60000)
+    const timer = setInterval(reload, 60000)
     return () => {
-      clearInterval(t)
+      clearInterval(timer)
       if (refreshTimerRef.current) { clearTimeout(refreshTimerRef.current); refreshTimerRef.current = null }
       try { es?.close() } catch { /* 已关闭 */ }
     }
@@ -315,7 +325,7 @@ export default function BoardTab({ project }) {
     try {
       await boardApi.mergeWorktree(projectId, m.card.id)
       setMergeFor(null)
-      toast('已交给 agent 合并：卡片回到开发队列排队，完成后自动回「待审核」')
+      toast(t('已交给 agent 合并：卡片回到开发队列排队，完成后自动回「待审核」'))
       await reload()
     } catch (e) { toast(e.message) } finally { setMerging(false) }
   }
@@ -345,8 +355,8 @@ export default function BoardTab({ project }) {
         return
       }
       // 两条成功提示互斥：worktree 起跑不入队，正常起跑落 doing/queue 才提示排队
-      if (worktree) toast('已在独立 worktree 中开始')
-      else if (r.card?.column === 'blocked') toast('已加入统一队列排队')
+      if (worktree) toast(t('已在独立 worktree 中开始'))
+      else if (r.card?.column === 'blocked') toast(t('已加入统一队列排队'))
       await reload()
     } catch (e) { toast(e.message) }
   }
@@ -360,7 +370,7 @@ export default function BoardTab({ project }) {
     try {
       p = await boardApi.worktreePreview(projectId, cardId)
     } catch (e) {
-      p = { supported: false, reason: '无法获取 worktree 预览（后端未重启或接口不可用）' }
+      p = { supported: false, reason: t('无法获取 worktree 预览（后端未重启或接口不可用）') }
     }
     wtPrevRef.current = { ...wtPrevRef.current, [cardId]: p }
     setWtPrev(wtPrevRef.current)
@@ -369,9 +379,9 @@ export default function BoardTab({ project }) {
   // 菜单项置灰原因（空串=可选）：① 已有主会话（后端 D10：会话在 project_dir 建过，切 worktree
   // 会造成「平台以为在工作树、agent 实际在主仓库」的静默背离）；② 预览 supported=false（含取数失败）
   function worktreeBlockReason(card) {
-    if (card.session_id) return '该卡片已有主会话，不能切换到独立 worktree'
+    if (card.session_id) return t('该卡片已有主会话，不能切换到独立 worktree')
     const p = wtPrev[card.id]
-    if (p && p.supported === false) return p.reason || '当前项目不支持独立 worktree'
+    if (p && p.supported === false) return p.reason || t('当前项目不支持独立 worktree')
     return ''
   }
   // 打开「在新 worktree 中开始」二次确认框：先按缓存渲染（路径/分支可能暂缺），
@@ -386,7 +396,7 @@ export default function BoardTab({ project }) {
   async function doDeliverAnswer(card) {
     try {
       await boardApi.deliverAnswer(projectId, card.id)
-      toast('已送达答案')
+      toast(t('已送达答案'))
       await reload()
     } catch (e) { toast(e.message) }
   }
@@ -402,7 +412,7 @@ export default function BoardTab({ project }) {
     try {
       await boardApi.removeCard(projectId, card.id)
       setSelId(null)
-      toast('已移入回收站（可从回收站还原）')
+      toast(t('已移入回收站（可从回收站还原）'))
       await reload()
     } catch (e) { toast(e.message) }
   }
@@ -421,14 +431,15 @@ export default function BoardTab({ project }) {
   }
   async function saveTitle(card) {
     if (editIdRef.current !== card.id) return  // 已取消/已保存（Enter 后 blur 会再触发一次）
-    const t = editTitle.trim()
+    const nextTitle = editTitle.trim()
     editIdRef.current = null
     setEditId(null)
-    if (!t || t === card.title) return          // 空标题/未改动：不请求，直接退出编辑
+    // 空标题/未改动：不请求，直接退出编辑
+    if (!nextTitle || nextTitle === card.title) return
     try {
       // 卡面改名会同步改 DSH 会话名（服务端 best-effort）：未同步/被截断时如实提示
-      const r = await boardApi.updateCard(projectId, card.id, { title: t })
-      const msg = sessionRenameNotice(r)
+      const r = await boardApi.updateCard(projectId, card.id, { title: nextTitle })
+      const msg = sessionRenameNotice(r, t)
       if (msg) toast(msg)
       await reload()
     }
@@ -539,16 +550,16 @@ export default function BoardTab({ project }) {
   }
 
   // 悬停落点变化 → 本地实时预览（不发请求，其他卡让位有 FLIP 动画）
-  function previewTo(card, t) {
+  function previewTo(card, target) {
     const cur = previewRef.current
-    if (cur && cur.col === t.col && cur.index === t.index) return
-    const sameCol = t.col === card.column
-    if (sameCol && t.col !== 'doing' && sortModeOf(t.col) !== 'manual') return  // 非 manual 列禁列内拖排预览；doing 列队序即展示序不限排序方案（v2c T3）
-    previewRef.current = t
-    setDragOver(t.col)
+    if (cur && cur.col === target.col && cur.index === target.index) return
+    const sameCol = target.col === card.column
+    if (sameCol && target.col !== 'doing' && sortModeOf(target.col) !== 'manual') return  // 非 manual 列禁列内拖排预览；doing 列队序即展示序不限排序方案（v2c T3）
+    previewRef.current = target
+    setDragOver(target.col)
     flipSnap.current = snapshotRects()
-    optimisticMove(card, t.col,
-      !sameCol && sortModeOf(t.col) !== 'manual' ? Infinity : t.index)
+    optimisticMove(card, target.col,
+      !sameCol && sortModeOf(target.col) !== 'manual' ? Infinity : target.index)
   }
 
   // 借 ref 固定窗口级处理器（组件重渲染不换函数，避免重复挂载）
@@ -564,8 +575,8 @@ export default function BoardTab({ project }) {
     moveGhostRef.current(e)
     const card = cardsRef.current.find((c) => c.id === d.id)
     if (!card) return
-    const t = dropTarget(e.clientX, e.clientY, d.id)
-    if (t) previewToRef.current(card, t)
+    const drop = dropTarget(e.clientX, e.clientY, d.id)
+    if (drop) previewToRef.current(card, drop)
   }).current
 
   function finishDrag(cardId, x, y) {
@@ -573,7 +584,7 @@ export default function BoardTab({ project }) {
     ghostRef.current = null
     const ghostRect = g ? g.el.getBoundingClientRect() : null
     g?.el.remove()
-    const t = dropTarget(x, y, cardId)
+    const drop = dropTarget(x, y, cardId)
     const snap = snapshotRects()
     if (ghostRect) snap.set(String(cardId), ghostRect)  // 该卡「变化前位置」以 ghost 为准
     flipSnap.current = snap
@@ -586,26 +597,26 @@ export default function BoardTab({ project }) {
     if (!card) { reload(); return }
     const origCol = origColumnRef.current
     origColumnRef.current = null
-    if (!t) {  // 拖空 / Esc：回退本地预览（该卡从 ghost 位置飞回原位）
+    if (!drop) {  // 拖空 / Esc：回退本地预览（该卡从 ghost 位置飞回原位）
       if (start) setData((d0) => d0 && { ...d0, cards: start })
       return
     }
-    if (t.col === 'doing' && origCol !== 'doing') {  // 拖入 doing = 开始开发（回退预览走原 doStart 门禁）
+    if (drop.col === 'doing' && origCol !== 'doing') {  // 拖入 doing = 开始开发（回退预览走原 doStart 门禁）
       if (start) setData((d0) => d0 && { ...d0, cards: start })
       doStartRef.current(card)
       return
     }
-    if (t.col === origCol) {
-      if (t.col === 'doing') {
+    if (drop.col === origCol) {
+      if (drop.col === 'doing') {
         // doing 同列：三手势分流（v2 §2.4；v2c T3 接线——服务端 _doing_gesture
         // 为仲裁权威；确认框沿用 ⚡ window.confirm 先例，v2 §4 已定 2；T2 起
         // doing 列 requestReorder 退役，调序/force/停止统一走 move 的
         // before_id 语义）。落点邻卡按 DOM 分区序反查（fix round 1，F1：
-        // t.domIds 与 dropTarget 的 index 同源——payload 下发序与分区渲染序
+        // drop.domIds 与 dropTarget 的 index 同源——payload 下发序与分区渲染序
         // 可能分叉，answer_pending 双形态卡等场景下按 payload 序取邻卡会错位）
         const byId = new Map((dataRef.current?.cards || []).map((c) => [String(c.id), c]))
-        const others = (t.domIds || []).map((id) => byId.get(id)).filter(Boolean)
-        const beforeCard = others[t.index] ?? null      // 落点后第一张卡（undefined=列尾）
+        const others = (drop.domIds || []).map((id) => byId.get(id)).filter(Boolean)
+        const beforeCard = others[drop.index] ?? null      // 落点后第一张卡（undefined=列尾）
         const zone = !beforeCard ? 'waiting'            // 列尾=等待区区尾（同服务端）
           : isRunGesture(beforeCard) ? 'prefix'
           : isWaitGesture(beforeCard) ? 'waiting'
@@ -614,7 +625,7 @@ export default function BoardTab({ project }) {
         if (isWaitGesture(card) && zone === 'prefix') {
           action = 'force'                              // 手势① 上跨运行位=强制运行
         } else if (isRunGesture(card) && zone === 'waiting'
-                   && others.slice(0, t.index).filter(isWaitGesture).length > 0) {
+                   && others.slice(0, drop.index).filter(isWaitGesture).length > 0) {
           action = 'stop'                               // 手势② 拖到等待卡后面=停止当前任务
                                                       // （严格判定与服务端一致：落点上方
                                                       //  须有等待卡，否则=运行位尾 no-op）
@@ -622,9 +633,9 @@ export default function BoardTab({ project }) {
           action = 'reorder'                            // 手势③ 等待区内部调序（无确认）
         }
         if (action === 'force'
-            && !window.confirm('强制运行：立即启动该卡片（落哪算哪）？')) action = null
+            && !window.confirm(t('强制运行：立即启动该卡片（落哪算哪）？'))) action = null
         if (action === 'stop'
-            && !window.confirm('停止当前任务？停止后卡片进入待审核。')) action = null
+            && !window.confirm(t('停止当前任务？停止后卡片进入待审核。'))) action = null
         if (!action) {
           // 运行位互拖 / 非队列卡互拖 / 确认取消：本地预览回弹原位，无请求
           if (start) setData((d0) => d0 && { ...d0, cards: start })
@@ -634,19 +645,19 @@ export default function BoardTab({ project }) {
         return
       }
       // 其余列同列 manual 拖排（预览态已是结果，提交 reorder 即可）
-      if (sortModeOfRef.current(t.col) !== 'manual') return  // 非 manual 列内拖拽禁用：静默无效（ghost 飞回即放回原处）
-      const others = (dataRef.current?.cards || []).filter((c) => c.column === t.col && c.id !== cardId)
-      requestReorderRef.current(cardId, others[t.index]?.id ?? null)
+      if (sortModeOfRef.current(drop.col) !== 'manual') return  // 非 manual 列内拖拽禁用：静默无效（ghost 飞回即放回原处）
+      const others = (dataRef.current?.cards || []).filter((c) => c.column === drop.col && c.id !== cardId)
+      requestReorderRef.current(cardId, others[drop.index]?.id ?? null)
       return
     }
     // 跨列：目标列 manual 时支持插入指定位置（before_id=落点后第一张卡，null=列尾）；
     // 非 manual 不传 before_id（后端忽略落列尾，显示由排序方案决定）
     let beforeId = null
-    if (sortModeOfRef.current(t.col) === 'manual') {
-      const others = (dataRef.current?.cards || []).filter((c) => c.column === t.col && c.id !== cardId)
-      beforeId = others[t.index]?.id ?? null
+    if (sortModeOfRef.current(drop.col) === 'manual') {
+      const others = (dataRef.current?.cards || []).filter((c) => c.column === drop.col && c.id !== cardId)
+      beforeId = others[drop.index]?.id ?? null
     }
-    requestMoveRef.current(card, t.col, undefined, beforeId)  // 跨列：本地已预览，直接提交 move
+    requestMoveRef.current(card, drop.col, undefined, beforeId)  // 跨列：本地已预览，直接提交 move
   }
 
   const onCardPointerUp = useRef((e) => {
@@ -689,27 +700,27 @@ export default function BoardTab({ project }) {
     <div className="board-tab">
       {/* 工具行：模式徽标 + 设置入口 */}
       <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
-        <span className="text-xs text-muted-foreground">开发看板</span>
-        <span className="bug-status pending">{MODE_LABEL[data?.settings?.mode] || '串行'}</span>
+        <span className="text-xs text-muted-foreground">{t('开发看板')}</span>
+        <span className="bug-status pending">{MODE_LABEL(t)[data?.settings?.mode] || t('串行')}</span>
         <span className="flex-1"></span>
-        <Input className="board-search" placeholder="搜索卡片（标题/描述/Jira）"
+        <Input className="board-search" placeholder={t('搜索卡片（标题/描述/Jira）')}
           value={query} onChange={(e) => setQuery(e.target.value)} />
         <Button size="sm" variant="outline" onClick={() => setSettingsOpen(true)}>
-          <Settings /> 设置
+          <Settings /> {t('设置')}
         </Button>
-        <Button size="sm" variant="outline" title="回收站（删除的卡片可还原）"
+        <Button size="sm" variant="outline" title={t('回收站（删除的卡片可还原）')}
           onClick={() => setTrashOpen(true)}>
-          <Trash2 /> 回收站
+          <Trash2 /> {t('回收站')}
         </Button>
       </div>
       <div className="board-cols" ref={colsRef}>
-        {COLUMNS.map((col) => {
+        {COLUMNS(t).map((col) => {
           const flt = filters[col.key] || 'all'
           // 测试任务条目三列上映（v2c T4，裁决 R16）：doing/review/done 按服务端
           // 条目 column 字段分列（旧后端不下发 column 时按 doing 归组兜底）；
           // flt==='dev' 时任务隐藏、==='test' 时卡片隐藏（仅测试任务）
           const taskList = (TASK_COLS.has(col.key) && flt !== 'dev')
-            ? (data?.active_tasks || []).filter((t) => (t.column || 'doing') === col.key)
+            ? (data?.active_tasks || []).filter((task) => (task.column || 'doing') === col.key)
             : []
           const colCards = flt !== 'test' ? cards.filter((c) => c.column === col.key && matchCard(c)) : []
           // doing 列：服务端下发即队序（sortList 对 doing 列停用，v2c T2/T3——
@@ -730,19 +741,19 @@ export default function BoardTab({ project }) {
                 <span className="board-col-label">{col.label}</span>
                 {/* 列统计口径=看板卡片（v2 §4 已定 3，裁决 R16：不含测试任务） */}
                 <span className="board-col-count">{list.length}</span>
-                <select className="board-col-sort" title="列表过滤：开发任务=卡片，测试任务=平台测试任务"
+                <select className="board-col-sort" title={t('列表过滤：开发任务=卡片，测试任务=平台测试任务')}
                   value={flt}
                   onChange={(e) => changeFilter(col.key, e.target.value)}>
-                  {FILTER_OPTIONS.map(([v, label]) => (
+                  {FILTER_OPTIONS(t).map(([v, label]) => (
                     <option key={v} value={v}>{label}</option>
                   ))}
                 </select>
                 {/* doing 列隐藏排序下拉（v2c 单轨：队序即展示序，sortList 对该列停用——选了也不生效）；其余列照常 */}
                 {col.key !== 'doing' && (
-                <select className="board-col-sort" title="列内排序方案"
+                <select className="board-col-sort" title={t('列内排序方案')}
                   value={sortModeOf(col.key)}
                   onChange={(e) => changeSort(col.key, e.target.value)}>
-                  {SORT_OPTIONS(col.key).map(([v, label]) => (
+                  {SORT_OPTIONS(col.key, t).map(([v, label]) => (
                     <option key={v} value={v}>{label}</option>
                   ))}
                 </select>
@@ -750,33 +761,33 @@ export default function BoardTab({ project }) {
               </div>
               <div className="board-col-body">
                 {/* 测试任务条目（只读：不可拖、无操作行；有会话的点击开任务会话弹窗） */}
-                {taskList.map((t) => (
-                  <div key={'task-' + t.id}
-                    className={'board-task' + (t.session_id ? ' has-session' : '')}
-                    title={t.session_id ? '测试任务 · 点击查看会话' : '测试任务（尚无会话）'}
-                    onClick={() => { if (t.session_id) setSessTask(t) }}>
+                {taskList.map((task) => (
+                  <div key={'task-' + task.id}
+                    className={'board-task' + (task.session_id ? ' has-session' : '')}
+                    title={task.session_id ? t('测试任务 · 点击查看会话') : t('测试任务（尚无会话）')}
+                    onClick={() => { if (task.session_id) setSessTask(task) }}>
                     <div className="board-card-title" style={{ cursor: 'default' }}
                       onClick={(e) => e.stopPropagation()}>
-                      {t.name}
+                      {task.name}
                     </div>
                     <div className="board-card-badges">
                       {/* 任务 id：卡片 id 同款展示（「任务 #96」），便于在任务日志/会话/bug 报告里对上号 */}
-                      <span className="board-card-id" title="测试任务 id">任务 #{t.id}</span>
+                      <span className="board-card-id" title={t('测试任务 id')}>{t('任务 #{id}', { id: task.id })}</span>
                       {/* 状态徽标读 DB status（specQ §7 注记保留：不经 queue_state 派生） */}
-                      <span className={'bug-status ' + (TASK_ST_CLASS[t.status] || 'retest')}>
-                        测试·{ST_LABEL[t.status] || t.status}
+                      <span className={'bug-status ' + (TASK_ST_CLASS[task.status] || 'retest')}>
+                        {t('测试·{status}', { status: stLabel(task.status) })}
                       </span>
-                      <span className="bug-status pending">{TASK_TYPE_LABEL[t.task_type] || t.task_type}</span>
-                      {t.current_round > 0 && <span className="bug-status pending">轮 {t.current_round}</span>}
+                      <span className="bug-status pending">{taskTypeLabels[task.task_type] || task.task_type}</span>
+                      {task.current_round > 0 && <span className="bug-status pending">{t('轮 {n}', { n: task.current_round })}</span>}
                     </div>
-                    {t.error && <div className="board-card-err">{t.error}</div>}
+                    {task.error && <div className="board-card-err">{task.error}</div>}
                   </div>
                 ))}
                 {zoned.map((card, zi) => (
                   <Fragment key={card.id}>
                     {zi === waitStart && (
                       // 运行位区/等待区分隔线（v2 §2.4 分区；线上=运行位区、线下=等待区按队列顺序）
-                      <div className="board-runzone"><span>等待区 · 按队列顺序</span></div>
+                      <div className="board-runzone"><span>{t('等待区 · 按队列顺序')}</span></div>
                     )}
                   <div
                     data-card-id={card.id}
@@ -798,26 +809,26 @@ export default function BoardTab({ project }) {
                           置位口径不变（卡离开 done 时标记照旧可见） */}
                       {showUnreadBadge(card) && (
                         <span className="board-card-new"
-                          title="状态有更新，打开卡片或点卡片上的按钮后标记消失">有更新</span>)}
+                          title={t('状态有更新，打开卡片或点卡片上的按钮后标记消失')}>{t('有更新')}</span>)}
                       {/* 卡片 id（与详情弹窗标题行同款 #N）：日志/会话/bug 报告里说「卡 345」时可直接对上号 */}
-                      <span className="board-card-id" title="卡片 id">#{card.id}</span>
+                      <span className="board-card-id" title={t('卡片 id')}>#{card.id}</span>
                       {/* 队列态徽标＝服务端 queue_state 单枚举派生（P6，前端不拼条件；
                           判定序与互斥不变量见 doc_ai/spec/queue/排队与占用.md）。
                           未知枚举降级不渲染（防服务端新版枚举前滚击穿旧前端）。
                           操作行仍直读契约字段（answer_pending/block_kind，裁决 R1） */}
-                      {!!QUEUE_STATE_LABEL[card.queue_state] && (
+                      {!!queueLabels[card.queue_state] && (
                         <span className={queueStateChipClass(card.queue_state)}>
-                          {QUEUE_STATE_LABEL[card.queue_state]}</span>)}
+                          {queueLabels[card.queue_state]}</span>)}
                       {/* 独立 worktree 卡（card.worktree 非空即该卡跑在独立工作树）：悬浮看完整路径 */}
                       {card.worktree ? (
                         <span className="bug-status pending" title={card.worktree}>🌿 worktree</span>) : null}
                       {card.scheduled_at ? <span className="bug-status pending">⏰ {new Date(card.scheduled_at).toLocaleString()}</span> : null}
-                      {card.parent_card_id ? <span className="bug-status pending">🔗 依赖 #{card.parent_card_id}</span> : null}
+                      {card.parent_card_id ? <span className="bug-status pending">{t('🔗 依赖 #{id}', { id: card.parent_card_id })}</span> : null}
                       {card.block_kind === 'interaction' && (
-                        <span className="bug-status interaction" title="agent 等待用户回答，回复后自动恢复">
-                          🤔 {card.block_text || '等待回答'}</span>)}
-                      {card.block_kind === 'manual' && <span className="bug-status retest">{card.block_text || '手动阻塞'}</span>}
-                      {card.origin === 'sync' && <span className="bug-status pending">同步</span>}
+                        <span className="bug-status interaction" title={t('agent 等待用户回答，回复后自动恢复')}>
+                          🤔 {card.block_text || t('等待回答')}</span>)}
+                      {card.block_kind === 'manual' && <span className="bug-status retest">{card.block_text || t('手动阻塞')}</span>}
+                      {card.origin === 'sync' && <span className="bug-status pending">{t('同步')}</span>}
                       {card.jira_key && <span className="bug-status pending">{card.jira_key}</span>}
                       {/* 最后更新时间（2026-10-10 批次，用户需求「看板卡片上应该显示一个
                           最后更新时间」）：放徽标行末尾——不碰操作行（那行有窄屏量测
@@ -836,86 +847,86 @@ export default function BoardTab({ project }) {
                         // 分裂按钮：主按钮行为不变（统一队列排队开始），右侧 ▾ 另有
                         // 「🌿 在新 worktree 中开始」（平台新建独立工作树、立即执行不入队）
                         <div className="board-split">
-                          <OpsTextButton icon={Play} iconNarrow={Play} label="开始"
+                          <OpsTextButton icon={Play} iconNarrow={Play} label={t('开始')}
                             variant="outline" disabled={archived || agentMissing}
-                            title={archived ? '项目已归档' : agentMissing ? '未配置智能体' : '开始'}
+                            title={archived ? t('项目已归档') : agentMissing ? t('未配置智能体') : t('开始')}
                             onClick={() => doStart(card)} />
                           <ActionMenu align="end"
                             trigger={
                               <OpsIconButton variant="outline" disabled={archived || agentMissing}
-                                title={archived ? '项目已归档'
-                                  : agentMissing ? '未配置智能体' : '更多开始方式'}
+                                title={archived ? t('项目已归档')
+                                  : agentMissing ? t('未配置智能体') : t('更多开始方式')}
                                 onClick={() => loadWorktreePreview(card.id)} />
                             }
                             items={[
-                              { key: 'queue', label: '开始（入队排队）', onSelect: () => doStart(card) },
-                              { key: 'worktree', label: '🌿 在新 worktree 中开始',
+                              { key: 'queue', label: t('开始（入队排队）'), onSelect: () => doStart(card) },
+                              { key: 'worktree', label: t('🌿 在新 worktree 中开始'),
                                 disabled: !!worktreeBlockReason(card),
                                 title: worktreeBlockReason(card) || undefined,
                                 onSelect: () => openWorktreeConfirm(card) },
                             ]} />
                         </div>)}
                       {card.column === 'doing' && !card.running && card.block_kind !== 'queue' && (
-                        <OpsTextButton icon={ArrowRight} iconNarrow={ArrowRight} label="待审核"
+                        <OpsTextButton icon={ArrowRight} iconNarrow={ArrowRight} label={t('待审核')}
                           variant="outline" onClick={() => doMove(card, 'review')} />)}
                       {card.column === 'blocked' && (
-                        <OpsTextButton icon={Play} iconNarrow={Play} label="重试"
+                        <OpsTextButton icon={Play} iconNarrow={Play} label={t('重试')}
                           variant="outline" disabled={archived || agentMissing}
                           onClick={() => doStart(card)} />)}
                       {/* 已作答·待送达：立即送达答案（不等项目空闲）——此时排队主体
                           是答案，「⚡强制」（起新会话）语义不符，故改为送达入口 */}
                       {card.answer_pending && (
-                        <OpsTextButton icon={Zap} iconNarrow={Zap} label="送达"
-                          variant="ghost" title="不等项目空闲，立即把答案送达等待中的会话"
+                        <OpsTextButton icon={Zap} iconNarrow={Zap} label={t('送达')}
+                          variant="ghost" title={t('不等项目空闲，立即把答案送达等待中的会话')}
                           onClick={() => doDeliverAnswer(card)} />)}
                       {/* 排队中卡片的强制入口：跳过队列立即开始（用户自担风险）；
                           已作答·待送达的卡不显示（答案排队走上方「送达」） */}
                       {card.block_kind === 'queue' && !card.answer_pending && (
-                        <OpsTextButton icon={Zap} iconNarrow={Zap} label="强制"
-                          variant="ghost" title="跳过队列立即开始（用户自担风险）"
+                        <OpsTextButton icon={Zap} iconNarrow={Zap} label={t('强制')}
+                          variant="ghost" title={t('跳过队列立即开始（用户自担风险）')}
                           disabled={archived || agentMissing}
                           onClick={async () => {
-                            if (!window.confirm('强制开始将跳过队列立即执行，可能与在跑任务冲突，继续？')) return
+                            if (!window.confirm(t('强制开始将跳过队列立即执行，可能与在跑任务冲突，继续？'))) return
                             await doStart(card, undefined, true)
                           }} />)}
                       {/* 等待区卡停止入口（v2b T3）：取消排队并移入待审核；
                           对已作答·待送达卡同显（停止即放弃待送达答案，后端一并取消） */}
                       {card.block_kind === 'queue' && (
-                        <OpsTextButton icon={X} iconNarrow={X} label="停止"
-                          variant="ghost" title="取消排队并移入待审核"
+                        <OpsTextButton icon={X} iconNarrow={X} label={t('停止')}
+                          variant="ghost" title={t('取消排队并移入待审核')}
                           onClick={() => doStop(card)} />)}
                       {card.column === 'review' && (<>
-                        <OpsTextButton icon={Check} iconNarrow={Check} label="通过"
+                        <OpsTextButton icon={Check} iconNarrow={Check} label={t('通过')}
                           variant="outline" onClick={() => doApprove(card)} />
-                        <OpsTextButton icon={Undo2} iconNarrow={Undo2} label="打回"
+                        <OpsTextButton icon={Undo2} iconNarrow={Undo2} label={t('打回')}
                           variant="outline"
                           onClick={() => { setRejectFor(card); setRejectText('') }} />
                       </>)}
                       {card.column === 'done' && (
-                        <OpsTextButton icon={Undo2} iconNarrow={Undo2} label="重开"
+                        <OpsTextButton icon={Undo2} iconNarrow={Undo2} label={t('重开')}
                           variant="outline" onClick={() => doMove(card, 'todo')} />)}
                       {/* 卡片详情显式入口（与点击卡片正文同语义）：正文点击要过拖拽阈值判定，
                           卡片被编辑标题/拖拽占位时不稳，给按钮一个确定入口 */}
-                      <OpsIconButton variant="ghost" title="打开卡片详情"
+                      <OpsIconButton variant="ghost" title={t('打开卡片详情')}
                         onClick={() => openCard(card)}><Maximize2 /></OpsIconButton>
                       {/* 主会话直达：一键打开卡片主会话（SessionModal board 模式）；尚无会话时禁用 */}
                       <OpsIconButton variant="ghost"
-                        title={card.session_id ? '进入主会话' : '尚无会话'}
+                        title={card.session_id ? t('进入主会话') : t('尚无会话')}
                         disabled={!card.session_id}
-                        onClick={() => setSessFor({ sid: card.session_id, cid: card.id, column: card.column, title: card.title || '未命名' })}>
+                        onClick={() => setSessFor({ sid: card.session_id, cid: card.id, column: card.column, title: card.title || t('未命名') })}>
                         <MessageSquare /></OpsIconButton>
                       {/* 在 dsh 界面打开主会话（仅 dsh 插件面板形态渲染；独立 web 形态宿主桥
                           不应答 caps，按钮不存在）：宿主半收请求后调 uiWorkspace.openSession
                           并在 dsh 主界面显示该会话，同时关掉全屏面板 */}
                       {!!dshCaps?.openSession && (
                         <OpsIconButton variant="ghost"
-                          title={card.session_id ? '在 dsh 界面打开该卡片主会话' : '尚无会话'}
+                          title={card.session_id ? t('在 dsh 界面打开该卡片主会话') : t('尚无会话')}
                           disabled={!card.session_id}
                           onClick={() => openSessionInDsh(card.session_id)}><ExternalLink /></OpsIconButton>)}
                       {/* 删除放操作行**末位**（2026-10-10 用户要求）：窄列折行时它落在最后，
                           与其余按钮之间自然有换行/间距区隔，降低误点风险。
                           刻意不加 margin-left:auto——实测 auto 会在放得下时也把删除顶到单独一行 */}
-                      <OpsIconButton variant="ghost" title="删除卡片"
+                      <OpsIconButton variant="ghost" title={t('删除卡片')}
                         onClick={() => removeCard(card)}><Trash2 /></OpsIconButton>
                     </div>
                   </div>
@@ -932,7 +943,7 @@ export default function BoardTab({ project }) {
                   try { card = await boardApi.createCard(projectId, { title, description }) }
                   catch (e) { toast(e.message); return }
                   if (autoStart && card?.id) {
-                    try { await boardApi.startCard(projectId, card.id); toast('已进入开发队列排队') }
+                    try { await boardApi.startCard(projectId, card.id); toast(t('已进入开发队列排队')) }
                     catch (e) { toast(e.message) }
                   }
                   await reload()
@@ -958,21 +969,21 @@ export default function BoardTab({ project }) {
       {/* 打回意见 */}
       <Dialog open={!!rejectFor} onOpenChange={(v) => !v && setRejectFor(null)}>
         <DialogContent className="modal">
-          <DialogHeader><DialogTitle>打回「{rejectFor?.title}」</DialogTitle></DialogHeader>
-          <Textarea rows={4} placeholder="修改意见（将随会话续发改进）" value={rejectText}
+          <DialogHeader><DialogTitle>{t('打回「{title}」', { title: rejectFor?.title })}</DialogTitle></DialogHeader>
+          <Textarea rows={4} placeholder={t('修改意见（将随会话续发改进）')} value={rejectText}
             onChange={(e) => setRejectText(e.target.value)} />
           <DialogFooter>
-            <Button onClick={async () => { const c = rejectFor; setRejectFor(null); await doStart(c, rejectText) }}>确认打回</Button>
+            <Button onClick={async () => { const c = rejectFor; setRejectFor(null); await doStart(c, rejectText) }}>{t('确认打回')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
       {/* 父任务未完成拦截：提示先完成父任务/解除依赖；start 动作可「强制开始」自担风险跳过，move 不支持强制 */}
       <Dialog open={!!depFor} onOpenChange={(v) => !v && setDepFor(null)}>
         <DialogContent className="modal">
-          <DialogHeader><DialogTitle>父任务尚未完成</DialogTitle></DialogHeader>
-          <p className="hint">该卡片有未完成的父任务依赖。建议先完成父任务，或在详情面板解除依赖后再开始。</p>
+          <DialogHeader><DialogTitle>{t('父任务尚未完成')}</DialogTitle></DialogHeader>
+          <p className="hint">{t('该卡片有未完成的父任务依赖。建议先完成父任务，或在详情面板解除依赖后再开始。')}</p>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDepFor(null)}>取消</Button>
+            <Button variant="outline" onClick={() => setDepFor(null)}>{t('取消')}</Button>
             {/* #10 修复：move 分支不支持 force（后端无此语义），强制开始按钮仅 start 动作渲染；
                 move 分支只留「取消」关闭对话框 */}
             {depFor?.action === 'start' && (
@@ -981,7 +992,7 @@ export default function BoardTab({ project }) {
                 // worktree 起跑被父依赖拦下后强制开始：沿用同一 worktree 语义
                 // （force 只跳依赖/排队，不改「在哪棵工作树里跑」）
                 await doStart(cards.find((c) => c.id === d.cardId), undefined, true, d.worktree)
-              }}>强制开始（自担风险）</Button>
+              }}>{t('强制开始（自担风险）')}</Button>
             )}
           </DialogFooter>
         </DialogContent>
@@ -990,30 +1001,30 @@ export default function BoardTab({ project }) {
           不与项目队列互斥（可能与项目内其他任务并发，风险自担）；预览取不到时后两行不显示 */}
       <Dialog open={!!wtFor} onOpenChange={(v) => !v && setWtFor(null)}>
         <DialogContent className="modal">
-          <DialogHeader><DialogTitle>在新 worktree 中开始</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>{t('在新 worktree 中开始')}</DialogTitle></DialogHeader>
           <p className="hint">
-            将为该卡片新建独立 git worktree，会话在独立工作树中执行，主仓库不受影响。
+            {t('将为该卡片新建独立 git worktree，会话在独立工作树中执行，主仓库不受影响。')}
           </p>
           {wtFor?.preview?.path && (
-            <p className="hint break-all">路径：<span className="font-mono">{wtFor.preview.path}</span></p>)}
+            <p className="hint break-all">{t('路径：')}<span className="font-mono">{wtFor.preview.path}</span></p>)}
           {wtFor?.preview?.branch && (
-            <p className="hint">分支：<span className="font-mono">{wtFor.preview.branch}</span></p>)}
+            <p className="hint">{t('分支：')}<span className="font-mono">{wtFor.preview.branch}</span></p>)}
           <p className="hint font-semibold">
-            该卡将立即执行，不与项目队列互斥，可能与项目内其他任务并发。
+            {t('该卡将立即执行，不与项目队列互斥，可能与项目内其他任务并发。')}
           </p>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setWtFor(null)}>取消</Button>
+            <Button variant="outline" onClick={() => setWtFor(null)}>{t('取消')}</Button>
             <Button onClick={async () => {
               const w = wtFor; setWtFor(null)
               await doStart(w.card, undefined, false, true)
-            }}>开始</Button>
+            }}>{t('开始')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
       {/* 通过前的 worktree 合并交接（2026-10-07 批次）：卡在独立工作树里、还有提交
           没回流主分支时弹出；合并由 agent 执行（平台只投递指令 + 回队列排队） */}
       <MergeHandoffDialog open={!!mergeFor} info={mergeFor?.info} busy={merging}
-        disabledReason={mergeFor?.card?.running ? '会话运行中：等这一轮跑完，或先点「停止」再交接' : ''}
+        disabledReason={mergeFor?.card?.running ? t('会话运行中：等这一轮跑完，或先点「停止」再交接') : ''}
         onHandoff={doHandoffMerge} onPass={doPassWithoutMerge}
         onClose={() => !merging && setMergeFor(null)} />
       {/* 看板设置弹窗：并行模式 + Jira */}
@@ -1041,9 +1052,10 @@ const TITLE_EDIT_MAX_H = 240
  *  时间戳缺失/坏值（老服务端载荷 / 坏库值 ⇒ None）一律不渲染：宁可少显示也不显示错。
  *  不额外加定时器：看板本就有 SSE 事件唤醒 + 60s 兜底重取，重渲染即重算相对时间。 */
 function CardTime({ card }) {
-  const label = cardTimeLabel(card)
+  const { t } = useI18n()
+  const label = cardTimeLabel(card, Date.now(), t)
   if (!label) return null
-  return <span className="board-card-time" title={cardTimeTitle(card)}>🕒 {label}</span>
+  return <span className="board-card-time" title={cardTimeTitle(card, t)}>🕒 {label}</span>
 }
 
 // 卡片「标题+内容」行数上限：合计最多显示 6 行，超出截断（末尾省略号）。
@@ -1053,6 +1065,7 @@ function CardTime({ card }) {
 // 标题已被 CSS clamp 到 6 行，测出的高度即「实际显示行数」，无需测自然行数。
 // ResizeObserver 跟随列宽变化重测（换行数随宽度变化，如窗口缩放/列宽拖动）。
 function CardText({ card, editing, editTitle, onStartEdit, onSaveTitle, onEditChange, onCancelEdit }) {
+  const { t } = useI18n()
   const titleRef = useRef(null)
   const taRef = useRef(null)                     // 行内编辑框（textarea：宽度固定、文字自动折行）
   const [descLines, setDescLines] = useState(5)  // 首帧按标题 1 行估，写在布局后按实测修正
@@ -1104,9 +1117,9 @@ function CardText({ card, editing, editTitle, onStartEdit, onSaveTitle, onEditCh
   }
   return (
     <>
-      <div ref={titleRef} className="board-card-title" title="单击编辑标题"
+      <div ref={titleRef} className="board-card-title" title={t('单击编辑标题')}
         onClick={(e) => { e.stopPropagation(); onStartEdit(card) }}>
-        {card.title || <span className="board-card-title-empty">未命名</span>}
+        {card.title || <span className="board-card-title-empty">{t('未命名')}</span>}
       </div>
       {card.description && descLines > 0 && (
         <div className="board-card-desc" style={{ WebkitLineClamp: descLines }}>{card.description}</div>
@@ -1122,6 +1135,7 @@ function CardText({ card, editing, editTitle, onStartEdit, onSaveTitle, onEditCh
 // 支持粘贴/拖入图片与文件（与详情「标题/描述」编辑框同款）：上传为卡片附件（board_media），
 // 上传后即出缩略图 chips 预览，建卡时把附件 markdown 写进卡片描述（标题是纯文本，放不下图片）
 function QuickAdd({ disabled, onAdd, project }) {
+  const { t } = useI18n()
   const [v, setV] = useState('')
   const [atts, setAtts] = useState([])               // 附件登记 [{md,url,name,mime}]（建卡时并入描述）
   const [uploading, setUploading] = useState(false)  // 附件上传中（粘贴/拖入；期间不许建卡）
@@ -1169,10 +1183,11 @@ function QuickAdd({ disabled, onAdd, project }) {
     const pid = project?.id
     if (!pid) return
     for (const f of list) {
-      if (f.size > MEDIA_MAX) { toast(`附件过大（>10MB）：${f.name}`); continue }
+      if (f.size > MEDIA_MAX) { toast(t('附件过大（>10MB）：{name}', { name: f.name })); continue }
       // 占位图拦截（1x1/2x2 一类极小图，见 utils/media.js）：与描述编辑框/会话 composer 同款
       if (await isPlaceholderImage(f)) {
-        toast(`已跳过占位图（极小尺寸）：${f.name}（剪贴板里不是有效截图，请重新截图或改用「+」选文件）`)
+        toast(t('已跳过占位图（极小尺寸）：{name}（剪贴板里不是有效截图，请重新截图或改用「+」选文件）',
+          { name: f.name }))
         continue
       }
       setUploading(true)
@@ -1180,7 +1195,7 @@ function QuickAdd({ disabled, onAdd, project }) {
         const data = await new Promise((res, rej) => {
           const fr = new FileReader()
           fr.onload = () => res(String(fr.result || '').split(',')[1] || '')
-          fr.onerror = () => rej(new Error('文件读取失败'))
+          fr.onerror = () => rej(new Error(t('文件读取失败')))
           fr.readAsDataURL(f)
         })
         const r = await boardApi.uploadMedia(pid,
@@ -1189,8 +1204,8 @@ function QuickAdd({ disabled, onAdd, project }) {
           ? `![${f.name}](${r.abs || r.url})`
           : `[${f.name}](${r.abs || r.url})`
         setAtts((prev) => [...prev, { md, url: mediaDisplayUrl(r.url), name: f.name, mime: f.type }])
-        toast(`已添加附件：${f.name}`)
-      } catch (e) { toast(e.message || '附件上传失败') }
+        toast(t('已添加附件：{name}', { name: f.name }))
+      } catch (e) { toast(e.message || t('附件上传失败')) }
       finally { setUploading(false) }
     }
   }
@@ -1228,7 +1243,7 @@ function QuickAdd({ disabled, onAdd, project }) {
   // SlashMenu 选中: 仅作 token 替换(光标置于插入文本后), 建卡仍由用户回车/「＋」触发
   function onSlashSelect(it) {
     if (!slashToken) return
-    const ins = `使用 skill「${it.label}」`
+    const ins = t('使用 skill「{name}」', { name: it.label })
     setSlashDismissed(true)
     setV((prev) => prev.slice(0, slashToken.start) + ins
       + prev.slice(slashToken.start + slashToken.text.length))
@@ -1263,14 +1278,14 @@ function QuickAdd({ disabled, onAdd, project }) {
         {/* 附件 chips 行（粘贴/拖入后即时预览，样式与会话输入区同款） */}
         {(atts.length > 0 || uploading) && (
           <div className="sess-attachrow">
-            {uploading && <span className="sess-chip">附件上传中…</span>}
+            {uploading && <span className="sess-chip">{t('附件上传中…')}</span>}
             {atts.map((a, i) => (
               <span key={a.md + i} className="sess-chip" title={a.name}>
                 {(a.mime || '').startsWith('image/') && a.url
                   ? <img src={a.url} alt={a.name} />
                   : <FileText className="h-3.5 w-3.5" />}
                 <span className="sess-chip-name">{a.name}</span>
-                <button type="button" className="sess-chip-x" title="移除附件"
+                <button type="button" className="sess-chip-x" title={t('移除附件')}
                   onClick={() => removeAtt(a.md)}>
                   <X className="h-3 w-3" />
                 </button>
@@ -1283,7 +1298,7 @@ function QuickAdd({ disabled, onAdd, project }) {
           <SlashMenu open={slashOpen} query={slashQuery} items={slashItems}
             onSelect={onSlashSelect} onClose={() => setSlashDismissed(true)} />
           <Textarea ref={taRef} rows={1} style={{ minHeight: 36 }} className="resize-none"
-            placeholder="添加任务…（Enter 落待开发 / Ctrl+Enter 直接排队；可粘贴图片，可留空）"
+            placeholder={t('添加任务…（Enter 落待开发 / Ctrl+Enter 直接排队；可粘贴图片，可留空）')}
             value={v} disabled={disabled}
             onChange={(e) => {
               setV(e.target.value)
@@ -1310,6 +1325,7 @@ function QuickAdd({ disabled, onAdd, project }) {
 
 // 看板设置弹窗：并行模式三档 + Jira 配置（测试连接/导入）
 function BoardSettings({ open, onClose, projectId, settings, reload }) {
+  const { t } = useI18n()
   const [mode, setMode] = useState('serial')
   const [jira, setJira] = useState({ url: '', user: '', token: '' })
   const [testing, setTesting] = useState(false)
@@ -1332,21 +1348,21 @@ function BoardSettings({ open, onClose, projectId, settings, reload }) {
     catch (e) { toast(e.message) }
   }
   async function saveJira() {
-    try { await boardApi.updateSettings(projectId, { jira }); toast('Jira 配置已保存'); await reload() }
+    try { await boardApi.updateSettings(projectId, { jira }); toast(t('Jira 配置已保存')); await reload() }
     catch (e) { toast(e.message) }
   }
   async function testJira() {
     setTesting(true)
     try {
       const r = await boardApi.jiraTest(projectId, jira)
-      toast(r.ok ? `连接成功：${r.name}` : `连接失败：${r.error}`)
+      toast(r.ok ? t('连接成功：{name}', { name: r.name }) : t('连接失败：{error}', { error: r.error }))
     } catch (e) { toast(e.message) } finally { setTesting(false) }
   }
   async function doImport() {
     setImporting(true)
     try {
       const r = await boardApi.jiraImport(projectId)
-      toast(`导入完成：新增 ${r.added}，跳过 ${r.skipped}`)
+      toast(t('导入完成：新增 {added}，跳过 {skipped}', { added: r.added, skipped: r.skipped }))
       await reload()
     } catch (e) { toast(e.message) } finally { setImporting(false) }
   }
@@ -1354,11 +1370,11 @@ function BoardSettings({ open, onClose, projectId, settings, reload }) {
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="modal w-[560px] sm:max-w-[92vw]">
-        <DialogHeader><DialogTitle>看板设置</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{t('看板设置')}</DialogTitle></DialogHeader>
         <div className="board-sec">
-          <div className="board-sec-t">ℹ 并行模式</div>
-          {[['serial', '串行：同时只跑一个任务'],
-            ['parallel', '并行：最多 5 个并行（队列窗口）']].map(([v, label]) => (
+          <div className="board-sec-t">{t('ℹ 并行模式')}</div>
+          {[['serial', t('串行：同时只跑一个任务')],
+            ['parallel', t('并行：最多 5 个并行（队列窗口）')]].map(([v, label]) => (
             <label key={v} className="flex items-center gap-2 py-1 text-sm">
               <input type="radio" name="board-mode" checked={mode === v} onChange={() => saveMode(v)} />
               {label}
@@ -1368,19 +1384,19 @@ function BoardSettings({ open, onClose, projectId, settings, reload }) {
         <div className="board-sec">
           <div className="board-sec-t">🐛 Jira</div>
           <div className="form-col gap-2">
-            <Input placeholder="Jira 地址（如 https://xx.atlassian.net）" value={jira.url}
+            <Input placeholder={t('Jira 地址（如 https://xx.atlassian.net）')} value={jira.url}
               onChange={(e) => setJira({ ...jira, url: e.target.value })} />
-            <Input placeholder="用户名（邮箱）" value={jira.user}
+            <Input placeholder={t('用户名（邮箱）')} value={jira.user}
               onChange={(e) => setJira({ ...jira, user: e.target.value })} />
             <Input placeholder="API token" type="password" value={jira.token}
               onChange={(e) => setJira({ ...jira, token: e.target.value })} />
           </div>
           <div className="mt-2 flex gap-2">
-            <Button size="sm" variant="outline" onClick={saveJira}>保存配置</Button>
-            <Button size="sm" variant="outline" disabled={testing} onClick={testJira}>测试连接</Button>
-            <Button size="sm" disabled={importing} onClick={doImport}>导入我的待办</Button>
+            <Button size="sm" variant="outline" onClick={saveJira}>{t('保存配置')}</Button>
+            <Button size="sm" variant="outline" disabled={testing} onClick={testJira}>{t('测试连接')}</Button>
+            <Button size="sm" disabled={importing} onClick={doImport}>{t('导入我的待办')}</Button>
           </div>
-          <div className="hint mt-1">导入 = 拉取「指派给我且未解决」的前 50 条建卡（按 key 去重）；凭据存服务端</div>
+          <div className="hint mt-1">{t('导入 = 拉取「指派给我且未解决」的前 50 条建卡（按 key 去重）；凭据存服务端')}</div>
         </div>
       </DialogContent>
     </Dialog>

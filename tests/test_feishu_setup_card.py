@@ -484,7 +484,7 @@ def test_handle_message_setup_sends_card(monkeypatch):
     monkeypatch.setattr(feishu.db, "get_feishu_binding_by_open",
                         lambda oid: {"open_id": oid, "user_id": 1})
     monkeypatch.setattr(feishu, "send_setup_card",
-                        lambda uid, cfg: sent.append((uid, cfg)) or (True, ""))
+                        lambda uid, cfg, lang=None: sent.append((uid, cfg)) or (True, ""))
     monkeypatch.setattr(feishu, "rest_reply",
                         lambda mid, text, cfg: replies.append(text))
     cfg = {"app_id": "cli_x", "app_secret": "s"}
@@ -494,7 +494,8 @@ def test_handle_message_setup_sends_card(monkeypatch):
         "mentions": [], "sender_open_id": "ou_1"}, cfg)
     assert sent == [(1, cfg)]
     assert replies == ["🛠 已发送「飞书接入操作卡片」，请在卡片上操作。"]
-    monkeypatch.setattr(feishu, "send_setup_card", lambda uid, cfg: (False, "boom"))
+    monkeypatch.setattr(feishu, "send_setup_card",
+                        lambda uid, cfg, lang=None: (False, "boom"))
     feishu.handle_message_event({
         "message_id": "om_setup_2", "message_type": "text",
         "content": '{"text": "接入"}', "chat_type": "p2p",

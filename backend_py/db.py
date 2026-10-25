@@ -104,6 +104,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     date_to      TEXT NOT NULL DEFAULT '',
     -- 复压标记（2026-10-06）：1=下一次执行只跑发压运行（跳过 agent 轮），用后即清
     load_rerun   INTEGER NOT NULL DEFAULT 0,
+    -- 界面语言（T13，2026-10-23）：任务创建时冻结（'zh'/'en'），存量行 DEFAULT 'zh'；
+    -- 读侧一律经 i18n.task_lang 归一，创建后不可改（不在 update_task 白名单）。
+    lang         TEXT NOT NULL DEFAULT 'zh',
     created_at   TEXT NOT NULL,
     started_at   TEXT,
     ended_at     TEXT,
@@ -150,6 +153,9 @@ CREATE TABLE IF NOT EXISTS board_cards (
     done_at        TEXT,
     trashed        INTEGER NOT NULL DEFAULT 0,
     trashed_at     TEXT,
+    -- 界面语言（T13，2026-10-23）：卡片**新建时为 ''=未冻结**，首次 start 才写入
+    -- 请求语言（之后不覆盖）；存量行 DEFAULT 'zh'。读侧一律经 i18n.card_lang 归一。
+    lang           TEXT NOT NULL DEFAULT 'zh',
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL,
     -- 2026-10-07 起：卡片状态（列）被平台/agent 改动、而用户还没打开过卡片 ⇒ 1
@@ -633,6 +639,10 @@ def migrate():
         # 必须落库：排队行可跨服务重启存活（recover 会放回 waiting），内存标记会丢。
         if "load_rerun" not in cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN load_rerun INTEGER NOT NULL DEFAULT 0")
+        # 界面语言（T13，2026-10-23）：任务创建时冻结；旧库补列后存量行一律 'zh'
+        # （读侧 i18n.task_lang 对未知/空值同样归一 zh，双保险）。
+        if "lang" not in cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN lang TEXT NOT NULL DEFAULT 'zh'")
     # rounds 表补列（旧库升级；2026-10-06 复压批次）
     with connect() as conn:
         rcols = {r["name"] for r in conn.execute("PRAGMA table_info(rounds)")}
@@ -716,6 +726,11 @@ def migrate():
         if "unread" not in cols:
             conn.execute("ALTER TABLE board_cards"
                          " ADD COLUMN unread INTEGER NOT NULL DEFAULT 0")
+        # 界面语言（T13，2026-10-23）：卡片新建写 ''（未冻结），首次 start 才冻结；
+        # 旧库补列的存量卡按 DEFAULT 'zh'（历史卡都是中文界面产物）。
+        if "lang" not in cols:
+            conn.execute("ALTER TABLE board_cards"
+                         " ADD COLUMN lang TEXT NOT NULL DEFAULT 'zh'")
     # feishu_outbox 补 user_id 列（2026-09-09 起投递归属用户，设置页按用户过滤）
     with connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(feishu_outbox)")}
@@ -1035,26 +1050,30 @@ def set_project_archived(project_id, archived):
 def insert_task(project_id, name, auto_fix, retest, stop_type, stop_value,
                 task_type="normal", payload="", extra="", model="", permission="",
                 auto_commit=0, auto_deploy=0, auto_retest=0, cases_base=0,
-                start_stage="", end_stage="", date_from="", date_to=""):
+                start_stage="", end_stage="", date_from="", date_to="", lang="zh"):
     """插入任务行，返回新 id。
 
     start_stage/end_stage 为生命周期阶段 key（见 server.STAGES），空串表示
     不涉及阶段（reject/script_retest/stress/存量行）；date_from/date_to 为
     提交日期范围（YYYY-MM-DD，空=不限，复测/探索优先覆盖该范围提交）。
+
+    lang（T13，2026-10-23）：任务界面语言，调用点**显式传已冻结的请求语言**
+    （`self._request_lang()` / `ctx.lang` / 父任务或发起任务语言）；缺省 'zh' 只对
+    「无语言来源」的旧调用形态兜底。列序与 Node `TASK_INSERT_COLUMNS` 逐字同序。
     """
     with connect() as conn:
         cur = conn.execute(
             "INSERT INTO tasks(project_id, name, auto_fix, retest, stop_type, stop_value,"
             " task_type, payload, extra, model, permission, auto_commit, auto_deploy,"
             " auto_retest, cases_base, start_stage, end_stage, date_from, date_to,"
-            " created_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " lang, created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (project_id, name, 1 if auto_fix else 0, retest, stop_type, stop_value,
              task_type, payload, extra, model, permission,
              1 if auto_commit else 0, 1 if auto_deploy else 0,
              1 if auto_retest else 0, int(cases_base or 0),
              start_stage or "", end_stage or "", date_from or "", date_to or "",
-             now_str()))
+             lang, now_str()))
         return cur.lastrowid
 
 
@@ -1169,7 +1188,12 @@ BOARD_CARD_FIELDS = {
 
 
 def insert_board_card(project_id, title, description="", jira_key=""):
-    """新建看板卡片（默认落 todo 列尾）。返回卡片 id。"""
+    """新建看板卡片（默认落 todo 列尾）。返回卡片 id。
+
+    lang 显式写 `''` = **未冻结**（T13，2026-10-23）：不能用列默认值 'zh' 掩盖
+    「还没人决定这张卡的语言」，首次 start 才由 `set_board_card_lang` 冻结。
+    Jira 同步卡、bug 自动卡同走本函数，因此同样以未冻结态落库。
+    """
     with connect() as conn:
         cur = conn.execute(
             "SELECT COALESCE(MAX(sort_order),0)+1 FROM board_cards"
@@ -1177,14 +1201,29 @@ def insert_board_card(project_id, title, description="", jira_key=""):
         sort_order = cur.fetchone()[0]
         cur = conn.execute(
             "INSERT INTO board_cards(project_id, title, description, column_key,"
-            " sort_order, jira_key, created_at, updated_at)"
-            " VALUES(?,?,?,'todo',?,?,?,?)",
+            " sort_order, jira_key, lang, created_at, updated_at)"
+            " VALUES(?,?,?,'todo',?,?,'',?,?)",
             (project_id, title, description, sort_order, jira_key,
              now_str(), now_str()))
         card_id = cur.lastrowid
         # P4 看板事件化：新建卡片也发一次变更信号（前端重取即见）
         localbus.publish(localbus.board_topic(project_id))
         return card_id
+
+
+def set_board_card_lang(card_id, lang):
+    """原子冻结卡片语言（T13）：**仅当当前为空**（NULL / ''）时写入，先到先得。
+
+    返回本次是否真的写入（True=这次冻结成功；False=已有语言/卡不存在）。
+    谓词 `(lang IS NULL OR lang='')` 是「二次 start 不覆盖」的唯一保证——调用方不
+    自己先读后写（读-写窗口会双写），一律走这一条 UPDATE。冻结不是卡片内容变更，
+    刻意不刷 `updated_at`（避免污染「更新新→旧」排序与看板信号）。
+    """
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE board_cards SET lang=? WHERE id=? AND (lang IS NULL OR lang='')",
+            (lang, card_id))
+        return cur.rowcount > 0
 
 
 def get_board_card(card_id):

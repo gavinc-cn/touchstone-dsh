@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'vitest'
+import { beforeEach, describe, it, expect } from 'vitest'
 import { dirCanGoUp, dirPathText, dirUpTitle, dirRootHint } from '../utils/dirNav'
+
+import { setLang } from '../utils/i18n'
+// 文案断言按中文跑（zh 直接返回中文 key）
+beforeEach(() => setLang('zh'))
 
 // 目录选择弹窗「上级」三态（2026-10-22 卡 1044）：普通目录 / 文件系统根（parent 空串）/
 // 根视角（parent null）。根视角在 Windows 下是盘符列表（此电脑）。

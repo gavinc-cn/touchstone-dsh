@@ -59,7 +59,8 @@ import {
   setLivenessProbe, setUnitHandlers, startUnitSelfcheck,
 } from './lib/runner.js';
 import { serveStatic, webDirReady } from './lib/static.js';
-import { STATE_CACHE, dispatchSafely, isPublicRoute, makeContext } from './routes/index.js';
+import { STATE_CACHE, dispatchSafely, isPublicRoute, makeContext,
+  respondMustChangePassword } from './routes/index.js';
 
 /** 反代注入的免登信任头（须与 dsh-plugin/lib/index.js 的 TRUST_HEADER 一致） */
 const TRUST_HEADER = 'x-ts-internal-user';
@@ -180,7 +181,10 @@ function createHandler({ webDir, trustInternalUser, db }) {
     //   （直接落到末尾 404 JSON），少了它会把那种请求错判成 403。
     const pwGated = path.startsWith('/api/') && (method === 'GET' || method === 'POST');
     if (pwGated && mustChangePwBlocked(user, path, { trusted: hasTrustHeader(req) })) {
-      respondError(res, 403, '请先修改初始口令');
+      // 这条闸在 ctx 构造之前（不能为它提前建 ctx）：响应拼装收在 routes/index.js 的
+      // respondMustChangePassword 里，语言解析与 ctx.error 保持单一口径
+      // （头/query/用户偏好优先级完全一致；单测见 i18n-ctx.test.mjs）。
+      respondMustChangePassword(res, { req, db, user, search });
       return;
     }
 

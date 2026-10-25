@@ -71,6 +71,7 @@
  *
  * 红线：令牌不落任何日志；驱动端点仅回环可达（插件侧同时校验来源地址与令牌）。
  */
+import { localizable } from './i18n.js';
 import { pyJsonDumps } from './pyjson.js';
 import { SseError, sseUrl, streamEvents } from './sse.js';
 
@@ -192,7 +193,8 @@ export function splitDriverUrl() {
     parsed = null;
   }
   if (parsed === null || parsed.protocol !== 'http:' || !parsed.hostname) {
-    throw new DshDriverError(-1, `驱动地址不可用: ${raw || '(空)'}`);
+    throw localizable(new DshDriverError(-1, `驱动地址不可用: ${raw || '(空)'}`),
+      '驱动地址不可用: {raw}', { raw: raw || '(空)' });
   }
   return {
     host: parsed.hostname,
@@ -230,10 +232,13 @@ function httpErrorDetail(raw) {
 /** 传输层失败 → `DshDriverError(-2, …)`；`aborted` 表示是我们自己的超时定时器掐的 */
 function transportError(error, aborted, timeoutMs) {
   if (aborted) {
-    return new DshDriverError(-2, `驱动不可达: 请求超时（>${msLabel(timeoutMs)} 无响应）`);
+    return localizable(
+      new DshDriverError(-2, `驱动不可达: 请求超时（>${msLabel(timeoutMs)} 无响应）`),
+      '驱动不可达: 请求超时（>{ms} 无响应）', { ms: msLabel(timeoutMs) });
   }
   const detail = error && error.message ? error.message : String(error);
-  return new DshDriverError(-2, `驱动不可达: ${detail}`);
+  return localizable(new DshDriverError(-2, `驱动不可达: ${detail}`),
+    '驱动不可达: {detail}', { detail });
 }
 
 // ---------- HTTP 客户端 ----------
@@ -281,7 +286,16 @@ export async function request(method, path, payload = null, timeoutMs = REQUEST_
         raw = '';                       // 错误响应正文读不到：退通用文案（对齐 Python 的 detail=''）
       }
       const detail = raw ? httpErrorDetail(raw) : '';
-      throw new DshDriverError(response.status, detail || `驱动返回 HTTP ${response.status}`);
+      if (detail) {
+        // 有 detail 时 `.message` 就是 detail（旧版 `pyStrErr(e)` 的响应正文即它），
+        // 词条 key 必须让中文渲染结果仍是 detail 本身（无头请求逐字节不变）：
+        // key 只含一个占位符，zh 插值后即 detail；英文词典再补
+        // 「Driver returned HTTP {status}: {driver_detail}」的外层包装与 HTTP 状态。
+        throw localizable(new DshDriverError(response.status, detail),
+          '{driver_detail}', { driver_detail: detail, status: response.status });
+      }
+      throw localizable(new DshDriverError(response.status, `驱动返回 HTTP ${response.status}`),
+        '驱动返回 HTTP {status}', { status: response.status });
     }
     let raw;
     try {
@@ -293,7 +307,8 @@ export async function request(method, path, payload = null, timeoutMs = REQUEST_
     try {
       return JSON.parse(raw);
     } catch {
-      throw new DshDriverError(-2, `驱动响应不是 JSON: ${raw.slice(0, 200)}`);
+      throw localizable(new DshDriverError(-2, `驱动响应不是 JSON: ${raw.slice(0, 200)}`),
+        '驱动响应不是 JSON: {detail}', { detail: raw.slice(0, 200) });
     }
   } finally {
     clearTimeout(timer);

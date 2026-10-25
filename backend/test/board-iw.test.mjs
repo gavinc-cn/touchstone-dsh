@@ -730,7 +730,7 @@ test('deliverPendingAnswerNow：无待送达 / claim 成功直投 / 失败放回
   });
   const [ok, err] = await board.deliverPendingAnswerNow(cid2, s2.opts);
   assert.equal(ok, false);
-  assert.equal(err, '回答失败：链路断了');
+  assert.deepEqual(err, { message: '回答失败：{detail}', vars: { detail: '链路断了' } });
   const after = s2.fx.db.prepare('SELECT * FROM wait_items WHERE id=?').get(rid2);
   assert.equal(after.state, 'waiting');
   assert.equal(after.retries, 0);                    // 手动失败不消耗重试额度

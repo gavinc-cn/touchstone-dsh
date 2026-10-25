@@ -109,7 +109,7 @@ test('cardJson：全字段形状逐键（含 unread/sessions/worktree 的可选�
       'sessions', 'block_kind', 'block_text', 'parent_card_id', 'origin', 'done_at',
       'trashed', 'trashed_at', 'scheduled_at', 'jira_key', 'last_error', 'last_error_at',
       'worktree', 'created_at', 'updated_at', 'updated_at_ts', 'unread',
-      'running', 'busy', 'answer_pending', 'msg_queued', 'queue_state',
+      'running', 'busy', 'answer_pending', 'msg_queued', 'queue_state', 'lang',
     ]);
     assert.equal(card.id, cid);
     assert.equal(card.project_id, pid);
@@ -123,6 +123,7 @@ test('cardJson：全字段形状逐键（含 unread/sessions/worktree 的可选�
     assert.equal(card.answer_pending, false);
     assert.equal(card.msg_queued, false);
     assert.equal(card.queue_state, board.QS_QUEUED, 'block_kind=queue ⇒ queued_serial');
+    assert.equal(card.lang, 'zh', 'T13：未冻结/缺列 ⇒ 读侧归一 zh');
 
     // 显式 queueState ⇒ answer_pending 与之同源（`answer = queue_state == QS_ANSWER`）
     const viaExplicit = board.cardJson(row, {
@@ -137,10 +138,12 @@ test('cardJson：全字段形状逐键（含 unread/sessions/worktree 的可选�
     const legacy = { ...row, sessions: '{oops' };
     delete legacy.worktree;
     delete legacy.unread;
+    delete legacy.lang;                     // 老库无 lang 列也必须降级（T13）
     const degraded = board.cardJson(legacy, {}, o);
     assert.deepEqual(degraded.sessions, []);
     assert.equal(degraded.worktree, '', '缺列回落空串');
     assert.equal(degraded.unread, false);
+    assert.equal(degraded.lang, 'zh', '缺 lang 列 ⇒ 归一 zh');
   });
 });
 

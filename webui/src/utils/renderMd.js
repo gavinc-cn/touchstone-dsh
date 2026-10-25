@@ -2,6 +2,7 @@
 // 支持: 代码围栏/表格/标题/水平线/无序列表/引用/行内 code/bold/链接/图片
 // opts.pathLinks(可选): 把正文里的文件路径渲染成可点链接(md-path), 见 utils/pathLink.js
 import { linkifyPaths } from './pathLink'
+import { t } from './i18n'
 
 const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -97,8 +98,12 @@ export function renderMd(src, opts) {
 
 export function fmtTime(s) { return s || '—' }
 
-export const ST_LABEL = {
-  queued: '排队中', running: '运行中', done: '已完成',
-  stopped: '已停止', failed: '失败', interrupted: '中断',
+// 任务状态 → 展示名（函数形式：t 在调用时按当前语言求值；未知状态原样返回）
+export function stLabel(status) {
+  const map = {
+    queued: t('排队中'), running: t('运行中'), done: t('已完成'),
+    stopped: t('已停止'), failed: t('失败'), interrupted: t('中断'),
+  }
+  return map[status] || status
 }
 

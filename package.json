@@ -33,6 +33,7 @@
     "backend/routes",
     "backend/schema",
     "builtin_prompts",
+    "i18n",
     "extensions",
     "dsh-plugin/cordis.patch.yml",
     "dsh-plugin/install.sh",

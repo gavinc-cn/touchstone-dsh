@@ -28,6 +28,7 @@ import urllib.request
 
 import db
 import feishu_conv
+import i18n
 import requests
 
 FEISHU_EVENTS = ("blocked_interaction", "task_failed", "card_review")
@@ -145,6 +146,47 @@ def hook_of(project_id):
             "user_id": owner_id}
 
 
+def user_lang(user_id):
+    """飞书出站文案的**用户语言**（R22：绑定用户的 `user_prefs(user_id, 0)["lang"]`）。
+
+    口径（双端逐字对应 Node `feishu_cfg.userLang`）：
+    - `TS_I18N=0`（回滚开关）⇒ 恒 `zh`，且**连偏好都不读**（镜像 `i18n.is_i18n_disabled`）；
+    - 无偏好行 / 偏好里没有 `lang` / 坏值（非 `{"v":"zh"|"en"}`）/ 读库异常 ⇒ `zh`；
+    - 合法偏好经 `i18n.resolve_lang(user_pref=...)` 归一（认 `{"v":"en"}` 包装）。
+
+    本函数**绝不抛错**：出站文案是旁路能力，不能因读偏好失败影响主流程。
+    """
+    if i18n.is_i18n_disabled():
+        return "zh"
+    try:
+        pref = (db.get_user_prefs(int(user_id or 0), 0) or {}).get("lang")
+    except Exception:  # noqa: BLE001 —— 任何读库/类型异常都回落中文
+        pref = None
+    # 只认站点的持久化形状 `{"v": "zh"|"en"}`：裸字符串/数组/其他对象一律按坏值
+    # 回落中文（R22；`resolve_lang` 本身对裸字符串是宽松的，此处不放宽）。
+    raw = pref.get("v") if isinstance(pref, dict) else None
+    if not isinstance(raw, str):
+        raw = None
+    return i18n.resolve_lang(user_pref=raw)
+
+
+def project_lang(project_id):
+    """**项目级**出站文案语言（群推送 / 项目卡）：取项目所有者（与 `hook_of` 同一身份）。
+
+    与 `user_lang` 拆开是为了调用点可读：DM/回执用 `user_lang(binding["user_id"])`，
+    群/项目推送用 `project_lang(project_id)`（所有者 = 项目 `user_id`；项目被删 ⇒ 0）。
+    项目不存在 / 读库异常 ⇒ `zh`；`TS_I18N=0` 时**连项目行都不读**（R22：先判开关，
+    再决定是否读库；镜像 Node `feishu_cfg.projectLang`）。
+    """
+    if i18n.is_i18n_disabled():
+        return "zh"
+    try:
+        proj = db.get_project(project_id)
+        return user_lang(proj["user_id"] if proj else 0)
+    except Exception:  # noqa: BLE001 —— 与 user_lang 同一条「绝不抛错」约定
+        return "zh"
+
+
 def sign(secret, ts):
     """飞书自定义机器人签名：base64(hmac_sha256(key=f"{ts}\\n{secret}"))。"""
     string_to_sign = f"{ts}\n{secret}"
@@ -159,38 +201,54 @@ def _payload(text):
                       ensure_ascii=False)
 
 
-def _render(kind, ctx, project_id, base_url=""):
+def _render(kind, ctx, project_id, base_url="", lang="zh"):
     """事件 → 通知文案：首行标题 [项目名]，按 kind 拼 卡片/任务/提问/选项/
     错误/pipeline 跳过 行，末行可选站点链接（项目所有者的用户配置 base_url）；
     凭据永不入文案。blocked_interaction 按 ctx.kind 分形态给「可直接回复」的
     作答指引（提问=作答指令；审批=同意/拒绝指令；不可远程作答的等待仍
-    引导站点）。"""
+    引导站点）。
+
+    语言（T12b）：`lang` 由 `push_event` 按 `project_lang(project_id)` 解析一次
+    （R22：项目所有者；缺偏好/异常 ⇒ zh；`TS_I18N=0` ⇒ zh 且不读偏好）。默认
+    `"zh"` 是兼容线——现有调用与对拍用例一行不改也逐字节不变。"""
     head, with_link = _EVENT_META[kind]
     proj = db.get_project(project_id)
-    lines = [f"{head} [{proj['name'] if proj else f'#{project_id}'}]"]
+    title = i18n.t("api", head, lang)
+    lines = [f"{title} [{proj['name'] if proj else f'#{project_id}'}]"]
     if "card_id" in ctx:
-        lines.append(f"卡片 #{ctx['card_id']} {(ctx.get('title') or '')[:60]}")
+        lines.append(i18n.t("api", "卡片 #{cid} {title}", lang,
+                            cid=str(ctx["card_id"]),
+                            title=(ctx.get("title") or "")[:60]))
     if "task_id" in ctx:
-        lines.append(f"任务 #{ctx['task_id']} {(ctx.get('name') or '')[:50]}"
-                     f"（{ctx.get('type') or ''}）")
+        lines.append(i18n.t("api", "任务 #{tid} {name}（{type}）", lang,
+                            tid=str(ctx["task_id"]),
+                            name=(ctx.get("name") or "")[:50],
+                            type=ctx.get("type") or ""))
     cid = ctx.get("card_id")
     if ctx.get("kind") == "approval":
         # 审批等待：动作/工具/内容摘要 + 同意/拒绝指令（比通用「agent 提问」行更准确）
-        lines.append(f"审批请求：{ctx.get('action') or ctx.get('tool') or '工具调用'}")
+        lines.append(i18n.t(
+            "api", "审批请求：{action}", lang,
+            action=ctx.get("action") or ctx.get("tool")
+            or i18n.t("api", "工具调用", lang)))
         if ctx.get("tool"):
-            lines.append(f"工具：{ctx['tool']}")
+            lines.append(i18n.t("api", "工具：{tool}", lang, tool=ctx["tool"]))
         if ctx.get("input"):
-            lines.append(f"内容：{str(ctx['input'])[:200]}")
-        lines.append(f"飞书回复「同意 {cid}」批准，「拒绝 {cid}」拒绝；"
-                     f"「同意 {cid} 会话」本会话内同类调用自动放行")
+            lines.append(i18n.t("api", "内容：{input}", lang,
+                                input=str(ctx["input"])[:200]))
+        lines.append(i18n.t(
+            "api", "飞书回复「同意 {cid}」批准，「拒绝 {cid}」拒绝；"
+                   "「同意 {cid} 会话」本会话内同类调用自动放行", lang, cid=cid))
     else:
         qs = [q for q in (ctx.get("questions") or []) if q]
         if len(qs) > 1:
             # 多子题：逐题完整展示（旧实现只渲染首题 q0，其余子题在飞书上不可见）
-            lines.append(f"agent 提问（共 {len(qs)} 题）：")
-            lines.extend(_question_text_lines(_question_views(qs)))
+            lines.append(i18n.t("api", "agent 提问（共 {n} 题）：", lang,
+                                n=len(qs)))
+            lines.extend(_question_text_lines(_question_views(qs, lang), lang))
         elif ctx.get("question"):
-            lines.append(f"agent 提问：{ctx['question']}")
+            lines.append(i18n.t("api", "agent 提问：{question}", lang,
+                                question=ctx["question"]))
             for i, o in enumerate(ctx.get("options") or [], 1):
                 lines.append(f"  {i}) {o}")
         if kind == "blocked_interaction":
@@ -199,36 +257,46 @@ def _render(kind, ctx, project_id, base_url=""):
                 # 不可远程作答的等待（answerable=false）：引导回 dsh 会话窗口——
                 # 站点会话窗此时同样不出作答控件，旧文案「请到站点会话窗口处理」
                 # 会把用户引到死胡同（见 _NO_REMOTE_ANSWER_HINT）
-                lines.append(_NO_REMOTE_ANSWER_HINT)
+                lines.append(i18n.t("api", _NO_REMOTE_ANSWER_HINT, lang))
             elif n_q > 1:
                 # 多子题：一条指令按题号逐题答全（表单卡超 form 体积硬限时同样走这条）
-                lines.append(_multi_answer_help(cid, qs or [None] * int(n_q)))
+                lines.append(_multi_answer_help(cid, qs or [None] * int(n_q),
+                                                lang))
             else:
-                tips = [f"飞书回复「作答 {cid} <选项序号>」按选项作答"]
+                tips = [i18n.t("api", "飞书回复「作答 {cid} <选项序号>」按选项作答",
+                               lang, cid=cid)]
                 if ctx.get("multi_select"):
-                    tips.append(f"多选逗号分隔（作答 {cid} 1,3）")
+                    tips.append(i18n.t("api", "多选逗号分隔（作答 {cid} 1,3）",
+                                       lang, cid=cid))
                 if ctx.get("allow_other"):
-                    tips.append(f"「作答 {cid} <文字>」自定义回答")
-                lines.append("；".join(tips))
+                    tips.append(i18n.t("api", "「作答 {cid} <文字>」自定义回答",
+                                       lang, cid=cid))
+                lines.append(i18n.t("api", "；", lang).join(tips))
     if ctx.get("error"):
-        lines.append(f"错误：{str(ctx['error'])[:200]}")
+        lines.append(i18n.t("api", "错误：{error}", lang,
+                            error=str(ctx["error"])[:200]))
     if ctx.get("skipped_n"):
-        lines.append(f"pipeline 后段 {ctx['skipped_n']} 条已连带跳过")
+        lines.append(i18n.t("api", "pipeline 后段 {n} 条已连带跳过", lang,
+                            n=str(ctx["skipped_n"])))
     if with_link:
         base = (base_url or "").rstrip("/")
         if base:
-            lines.append(f"详情：{base}")
+            lines.append(i18n.t("api", "详情：{url}", lang, url=base))
     return "\n".join(lines)
 
 
 def push_event(project_id, kind, ctx):
     """旁路事件入队（任何异常吞掉，绝不影响业务主流程）：
-    hook 选择 → events 过滤 → 渲染 → 幂等入 outbox（记项目所有者 user_id）。"""
+    hook 选择 → events 过滤 → 渲染 → 幂等入 outbox（记项目所有者 user_id）。
+
+    文案语言按**项目所有者**解析一次（`project_lang`；R22）。`TS_I18N=0` 时
+    `project_lang` 在读项目行/偏好之前短路为 zh，行为与旧版逐字节相同。"""
     try:
         h = hook_of(project_id)
         if h is None or kind not in h["events"]:
             return
-        text = _render(kind, ctx, project_id, h.get("base_url") or "")
+        lang = project_lang(project_id)
+        text = _render(kind, ctx, project_id, h.get("base_url") or "", lang)
         dedup = ctx.get("dedup_key") or \
             f"{kind}:{project_id}:{ctx.get('card_id') or ctx.get('task_id') or ''}"
         db.feishu_outbox_push(h["target"], h["secret"], _payload(text), dedup,
@@ -256,13 +324,14 @@ def _option_view(raw):
     return {"id": str(raw or ""), "label": str(raw or ""), "description": ""}
 
 
-def _question_views(qs):
+def _question_views(qs, lang="zh"):
     """interaction.questions（1-4 题）→ 逐题渲染视图（飞书卡片与群文本共用）。
 
     多子题必须**逐题完整展示**：旧实现只渲染首题（q0），其余子题在飞书上完全
     不可见（2026-10-06 实障：agent 一次问 3 题，卡片上只见第 1 题）。视图：
       {no, header, question, body, options:[{no,label,description}],
-       multi_select, allow_other, other_label}"""
+       multi_select, allow_other, other_label}
+    `lang` 只影响「其他」这个缺省自定义标签（数据不译）。"""
     views = []
     for i, q in enumerate(qs, 1):
         q = q if isinstance(q, dict) else {}
@@ -280,12 +349,12 @@ def _question_views(qs):
             "options": options,
             "multi_select": bool(q.get("multi_select")),
             "allow_other": bool(q.get("allow_other")),
-            "other_label": _clip_text(q.get("other_label") or "其他", 40),
+            "other_label": _clip_text(q.get("other_label") or i18n.t("api", "其他", lang), 40),
         })
     return views
 
 
-def _single_question_view(ctx):
+def _single_question_view(ctx, lang="zh"):
     """单题提问 ctx → 单题视图（与 `_question_views` 同形态，供 mini 表单取选项）。
 
     `ctx["questions"]`（逐题全量视图，见 `card_blocked`）优先；旧调用面/测试替身
@@ -293,7 +362,7 @@ def _single_question_view(ctx):
     时按平面字段兜底，组不出视图不让卡片构建抛异常。"""
     qs = [q for q in (ctx.get("questions") or []) if q]
     if qs:
-        return _question_views(qs)[0]
+        return _question_views(qs, lang)[0]
     opts = []
     for i, o in enumerate(ctx.get("options") or [], 1):
         ov = _option_view(o)
@@ -306,10 +375,11 @@ def _single_question_view(ctx):
             "options": opts,
             "multi_select": bool(ctx.get("multi_select")),
             "allow_other": bool(ctx.get("allow_other")),
-            "other_label": _clip_text(ctx.get("other_label") or "其他", 40)}
+            "other_label": _clip_text(ctx.get("other_label") or i18n.t("api", "其他", lang), 40)}
 
 
-def _single_multi_select_pick(cid, ctx):
+
+def _single_multi_select_pick(cid, ctx, lang="zh"):
     """单题**多选**且可远程作答 → `(mini 表单元素 or None, 指引文案)`。
 
     多选组件 `multi_select_static` 按飞书官方规定**只能内嵌表单容器**（`checker`
@@ -320,31 +390,52 @@ def _single_multi_select_pick(cid, ctx):
     表单 JSON 超 `_MQ_FORM_MAX_BYTES`（飞书 form 元素 1000 字节硬限，超限必被
     `230099/11310` 拒收且整卡静默丢失）或该题没有选项时**不发控件**，只回文本
     作答指引——绝不发出必被拒的卡。"""
-    q = _single_question_view(ctx)
-    tail = f"；自定义文字回复「作答 {cid} <文字>」" if q["allow_other"] else ""
+    q = _single_question_view(ctx, lang)
+    tail = (i18n.t("api", "；自定义文字回复「作答 {cid} <文字>」", lang, cid=cid)
+            if q["allow_other"] else "")
     if not q["options"]:
-        return None, (f"请回复「作答 {cid} <文字>」作答" if q["allow_other"]
-                      else "该提问没有可选选项，请到站点会话窗口处理")
-    form = _multi_select_form(cid, q, btn_text="提交作答")
+        return None, (i18n.t("api", "请回复「作答 {cid} <文字>」作答", lang, cid=cid)
+                      if q["allow_other"]
+                      else i18n.t("api", "该提问没有可选选项，请到站点会话窗口处理", lang))
+    form = _multi_select_form(cid, q, i18n.t("api", "提交作答", lang), lang)
     if len(json.dumps(form, ensure_ascii=False)) > _MQ_FORM_MAX_BYTES:
-        return None, (f"多选题：请回复「作答 {cid} 1,3」（逗号分隔序号）" + tail)
-    return form, (f"多选题：勾选后点「提交作答」送达；"
-                  f"也可回复「作答 {cid} 1,3」（逗号分隔序号）" + tail)
+        return None, i18n.t("api",
+                            "多选题：请回复「作答 {cid} 1,3」（逗号分隔序号）{tail}",
+                            lang, cid=str(cid), tail=tail)
+    return form, i18n.t("api",
+                        "多选题：勾选后点「提交作答」送达；"
+                        "也可回复「作答 {cid} 1,3」（逗号分隔序号）{tail}",
+                        lang, cid=str(cid), tail=tail)
 
 
-def _question_card_blocks(views):
+
+def _caps_line(caps, lang="zh"):
+    """能力标注（多选/可自定义）→ 一行文本；无标注返回空串。
+
+    括号与分隔符也是文案的一部分（中文全角、英文半角），故一并走词典；
+    空列表返回空串（调用方据此决定是否追加整行）。"""
+    if not caps:
+        return ""
+    sep = i18n.t("api", "；", lang)
+    return i18n.t("api", "（{caps}）", lang, caps=sep.join(caps))
+
+
+def _question_card_blocks(views, lang="zh"):
     """多子题 → DM 卡片逐题 markdown 元素（**只读**展示；可点选时由
     `_multi_click_elements` 在同一份排版后追加下拉组件）。
     卡片无状态：不可远程作答时只展示题面，作答指引由调用方 hint 承担。"""
-    return [_question_md_element(v, len(views)) for v in views]
+    return [_question_md_element(v, len(views), lang) for v in views]
 
 
-def _question_text_lines(views):
-    """多子题 → 群 webhook 文本行（msg_type=text 不渲染 markdown，按纯文本排版）。"""
+def _question_text_lines(views, lang="zh"):
+    """多子题 → 群 webhook 文本行（msg_type=text 不渲染 markdown，按纯文本排版）。
+
+    `lang` 只影响排版用文案（题号/括号/能力标注）；题面与选项是数据，不译。"""
     lines = []
     for v in views:
-        title = v["header"] or f"第 {v['no']} 题"
-        head = f"【{v['no']}/{len(views)} {title}】"
+        title = v["header"] or i18n.t("api", "第 {no} 题", lang, no=v["no"])
+        head = i18n.t("api", "【{no}/{total} {title}】", lang,
+                      no=v["no"], total=len(views), title=title)
         lines.append(f"{head}{v['question']}" if v["question"] else head)
         if v["body"]:
             lines.append(f"  {v['body']}")
@@ -354,18 +445,21 @@ def _question_text_lines(views):
                 lines.append(f"     {o['description']}")
         caps = []
         if v["multi_select"]:
-            caps.append("多选")
+            caps.append(i18n.t("api", "多选", lang))
         if v["allow_other"]:
-            caps.append(f"可自定义：{v['other_label']}")
+            caps.append(i18n.t("api", "可自定义：{label}", lang,
+                               label=v["other_label"]))
         if caps:
-            lines.append("  （" + "；".join(caps) + "）")
+            lines.append("  " + i18n.t("api", "（{caps}）", lang,
+                                      caps=i18n.t("api", "；", lang).join(caps)))
     return lines
 
 
-def _question_md_element(v, n):
+def _question_md_element(v, n, lang="zh"):
     """单题 → markdown 元素（题号/题头/题面/补充说明/选项与描述/能力标注）。
     「只读展示」与「逐题点选卡」共用同一份排版（2026-10-07 抽公共，避免两处漂移）。"""
-    title = v["header"] or v["question"] or f"第 {v['no']} 题"
+    title = v["header"] or v["question"] or i18n.t("api", "第 {no} 题", lang,
+                                                   no=v["no"])
     md = [f"**{v['no']}/{n} {title}**"]
     if v["header"] and v["question"]:
         md.append(v["question"])
@@ -377,15 +471,17 @@ def _question_md_element(v, n):
             md.append(f"　　{o['description']}")     # 全角缩进：描述次行
     caps = []
     if v["multi_select"]:
-        caps.append("多选")
+        caps.append(i18n.t("api", "多选", lang))
     if v["allow_other"]:
-        caps.append(f"可自定义：{v['other_label']}")
-    if caps:
-        md.append("（" + "；".join(caps) + "）")
+        caps.append(i18n.t("api", "可自定义：{label}", lang,
+                           label=v["other_label"]))
+    line = _caps_line(caps, lang)
+    if line:
+        md.append(line)
     return {"tag": "markdown", "content": "\n".join(md)}
 
 
-def _multi_click_elements(cid, views):
+def _multi_click_elements(cid, views, lang="zh"):
     """多子题 → 「逐题点选卡」元素：每题一块只读 markdown + 一个可点选控件，
     返回 `(elements, 只能文本作答的题号列表)`。
 
@@ -409,12 +505,12 @@ def _multi_click_elements(cid, views):
     els, text_only = [], []
     n = len(views)
     for v in views:
-        els.append(_question_md_element(v, n))
+        els.append(_question_md_element(v, n, lang))
         if not v["options"]:
             text_only.append(v["no"])
             continue
         if v["multi_select"]:
-            form = _multi_select_form(cid, v)
+            form = _multi_select_form(cid, v, lang=lang)
             if len(json.dumps(form, ensure_ascii=False)) <= _MQ_FORM_MAX_BYTES:
                 els.append(form)
             else:
@@ -423,7 +519,8 @@ def _multi_click_elements(cid, views):
         els.append({
             "tag": "select_static",
             "name": f"mq{cid}_{v['no']}",
-            "placeholder": {"tag": "plain_text", "content": "请选择"},
+            "placeholder": {"tag": "plain_text",
+                            "content": i18n.t("api", "请选择", lang)},
             "options": [{"text": {"tag": "plain_text", "content": o["label"]},
                          "value": str(o["no"])} for o in v["options"]],
             "behaviors": [{"type": "callback",
@@ -431,7 +528,7 @@ def _multi_click_elements(cid, views):
     return els, text_only
 
 
-def _multi_select_form(cid, v, btn_text=""):
+def _multi_select_form(cid, v, btn_text="", lang="zh"):
     """多选题 → **单题 mini 表单**（飞书规定 `multi_select_static` 只能内嵌表单容器，
     见 `_multi_click_elements`）。提交按钮与组件同带 `t=mq/c/n`：飞书表单提交帧走
     **按钮**的 behaviors.value，组件值在 `action.form_value[<组件 name>]`（数组）。
@@ -440,7 +537,8 @@ def _multi_select_form(cid, v, btn_text=""):
         "tag": "form", "name": f"mqf{cid}_{v['no']}",
         "elements": [
             {"tag": "multi_select_static", "name": f"mq{cid}_{v['no']}",
-             "placeholder": {"tag": "plain_text", "content": "请选择（可多选）"},
+             "placeholder": {"tag": "plain_text",
+                             "content": i18n.t("api", "请选择（可多选）", lang)},
              "options": [{"text": {"tag": "plain_text", "content": o["label"]},
                           "value": str(o["no"])} for o in v["options"]],
              "behaviors": [{"type": "callback",
@@ -448,35 +546,41 @@ def _multi_select_form(cid, v, btn_text=""):
             {"tag": "button", "name": f"mqs{cid}_{v['no']}",
              "form_action_type": "submit", "type": "primary",
              "text": {"tag": "plain_text",
-                      "content": btn_text or f"提交第 {v['no']} 题"},
+                      "content": btn_text or i18n.t("api", "提交第 {no} 题", lang,
+                                                    no=v["no"])},
              "behaviors": [{"type": "callback",
                             "value": {"t": "mq", "c": cid, "n": v["no"]}}]},
         ]}
 
 
-def _multi_click_hint(cid, qs, text_only=(), multi_forms=()):
+def _multi_click_hint(cid, qs, text_only=(), multi_forms=(), lang="zh"):
     """逐题点选卡末行指引：点满自动整批送达；要写自定义文字（或控件放不下的题）
     给文本补答语法（文本指令与已点选的答案**可混用**——已点选的题不必重复给，
     见 `_answer_by_token`）。`text_only` = 卡片上没有可点控件的题号；
     `multi_forms` = 卡片上发了多选 mini 表单的题号（多选是「勾选 + 点提交」两步，
-    不点名容易被当成勾上就算答了）。"""
+    不点名容易被当成勾上就算答了）。`lang` 只影响包装文案，题号/卡号是数据。"""
     extra = sorted(set(text_only)
                    | {i for i, q in enumerate(qs, 1) if (q or {}).get("allow_other")})
-    lines = [f"逐题选择即可，答满 {len(qs)} 题自动送达 agent。"]
+    lines = [i18n.t("api", "逐题选择即可，答满 {n} 题自动送达 agent。", lang,
+                    n=len(qs))]
     forms = sorted(set(multi_forms))
     if forms:
-        lines.append("；".join(f"第 {i} 题是多选：勾选后点「提交第 {i} 题」"
-                               for i in forms))
+        sep = i18n.t("api", "；", lang)
+        lines.append(sep.join(
+            i18n.t("api", "第 {i} 题是多选：勾选后点「提交第 {i} 题」", lang,
+                   i=i) for i in forms))
     if extra:
-        lines.append("第 " + "、".join(str(i) for i in extra)
-                     + " 题请回复「作答 %s %s」作答"
-                     % (cid, " ".join(f"{i}:<值>" for i in extra))
-                     + "（自定义文字写 <文字>，可选项写序号，多选逗号分隔；"
-                       "已点选的题不用重复给）")
+        nos = i18n.t("api", "、", lang).join(str(i) for i in extra)
+        values = " ".join(i18n.t("api", "{i}:<值>", lang, i=i) for i in extra)
+        lines.append(
+            i18n.t("api", "第 {nos} 题请回复「作答 {cid} {values}」作答", lang,
+                   nos=nos, cid=str(cid), values=values)
+            + i18n.t("api", "（自定义文字写 <文字>，可选项写序号，多选逗号分隔；"
+                            "已点选的题不用重复给）", lang))
     return "\n".join(lines)
 
 
-def _build_interaction_card(ctx, project_name):
+def _build_interaction_card(ctx, project_name, lang="zh"):
     """blocked_interaction ctx → schema 2.0 交互卡片 dict（DM 单聊推送用）。
     交互边界（卡片无状态动作 = 一次点击/一次提交即完成）：
     - 多子题提问（1-4 题）且**可远程作答**：发「逐题点选卡」——每题一块只读题面 +
@@ -495,7 +599,8 @@ def _build_interaction_card(ctx, project_name):
     - 单题自由文本：文字指引（仍走「作答 卡号 …」指令）
     按钮 value 精简键：t=动作（a 作答单题 / mq 多选题点选 / p 批准 / s 会话内批准 /
     d 拒绝）、c=卡号、n=题号、i=选项序号——回调时重读 interaction_of_sid 取服务端
-    选项白名单，天然防过期 qid 重放与伪造（board 侧还有整批白名单校验兜底）。"""
+    选项白名单，天然防过期 qid 重放与伪造（board 侧还有整批白名单校验兜底）。
+    `lang` 只影响包装文案；标题/题面/选项等数据原样插入（不翻译）。"""
     kind = ctx.get("kind")
     cid = ctx.get("card_id")
     elements = []
@@ -507,66 +612,85 @@ def _build_interaction_card(ctx, project_name):
         elements.append({
             "tag": "collapsible_panel", "expanded": True,
             "header": {"title": {"tag": "plain_text",
-                                 "content": "📄 agent 的方案 / 回答（点标题可折叠）"}},
+                                 "content": i18n.t(
+                                     "api", "📄 agent 的方案 / 回答（点标题可折叠）",
+                                     lang)}},
             "elements": [{"tag": "markdown", "content": ctx["plan_inline"]}]})
     if ctx.get("plan_doc_url") and kind != "approval":
         elements.append({"tag": "markdown",
-                         "content": f"📄 [查看完整方案（飞书文档）]({ctx['plan_doc_url']})"})
+                         "content": i18n.t(
+                             "api", "📄 [查看完整方案（飞书文档）]({url})", lang,
+                             url=ctx["plan_doc_url"])})
     if kind == "approval":
-        lines = [f"**审批请求**：{ctx.get('action') or ctx.get('tool') or '工具调用'}"]
+        raw_action = ctx.get("action") or ctx.get("tool")
+        action = (str(raw_action) if raw_action
+                  else i18n.t("api", "工具调用", lang))
+        lines = [i18n.t("api", "**审批请求**：{action}", lang, action=action)]
         if ctx.get("tool"):
-            lines.append(f"工具：{ctx['tool']}")
+            lines.append(i18n.t("api", "工具：{tool}", lang,
+                                tool=str(ctx["tool"])))
         if ctx.get("input"):
-            lines.append(f"内容：{str(ctx['input'])[:200]}")
+            lines.append(i18n.t("api", "内容：{input}", lang,
+                                input=str(ctx["input"])[:200]))
         elements.append({"tag": "markdown", "content": "\n".join(lines)})
-        for label, t, style in (("✅ 批准", "p", "primary"),
-                                ("🔁 会话内批准", "s", "default"),
-                                ("⛔ 拒绝", "d", "danger")):
+        for label, act, style in (("✅ 批准", "p", "primary"),
+                                  ("🔁 会话内批准", "s", "default"),
+                                  ("⛔ 拒绝", "d", "danger")):
             elements.append({
                 "tag": "button", "type": style,
-                "text": {"tag": "plain_text", "content": label},
-                "behaviors": [{"type": "callback", "value": {"t": t, "c": cid}}]})
+                "text": {"tag": "plain_text",
+                         "content": i18n.t("api", label, lang)},
+                "behaviors": [{"type": "callback", "value": {"t": act, "c": cid}}]})
     else:
         qs = [q for q in (ctx.get("questions") or []) if q]
         if len(qs) > 1:
-            views = _question_views(qs)
+            views = _question_views(qs, lang)
             elements.append({"tag": "markdown", "content": "\n".join([
-                f"**agent 提问（共 {len(qs)} 题）**",
-                f"卡片 #{cid} {(ctx.get('title') or '')[:60]}"])})
+                i18n.t("api", "**agent 提问（共 {n} 题）**", lang, n=len(qs)),
+                i18n.t("api", "卡片 #{cid} {title}", lang,
+                       cid=str(cid),
+                       title=(ctx.get("title") or "")[:60])])})
             if ctx.get("answerable"):
                 # 可远程作答：逐题点选（单选=根级下拉；多选=单题 mini 表单），
                 # 点满自动整批送达；放不下控件的题由指引点名走文本补答
-                click_els, text_only = _multi_click_elements(cid, views)
+                click_els, text_only = _multi_click_elements(cid, views, lang)
                 elements.extend(click_els)
                 forms = [v["no"] for v in views
                          if v["multi_select"] and v["no"] not in text_only]
                 elements.append({"tag": "markdown",
                                  "content": _multi_click_hint(cid, qs, text_only,
-                                                              forms)})
+                                                              forms, lang)})
             else:
                 # 不可远程作答（会话非平台自持）：逐题只读展示 + dsh 会话窗口引导。
                 # 2026-10-06 前的实现落到下面的单题分支，只渲染首题（q0），其余
                 # 子题在飞书上完全不可见（用户实障：agent 一次问 3 题只见第 1 题）。
-                elements.extend(_question_card_blocks(views))
+                elements.extend(_question_card_blocks(views, lang))
                 elements.append({"tag": "markdown",
-                                 "content": _NO_REMOTE_ANSWER_HINT})
+                                 "content": i18n.t("api", _NO_REMOTE_ANSWER_HINT,
+                                                   lang)})
         else:
-            md = [f"**agent 提问**：{ctx.get('question') or 'agent 正在等待你的回答'}",
-                  f"卡片 #{cid} {(ctx.get('title') or '')[:60]}"]
+            question = (ctx.get("question")
+                        or i18n.t("api", "agent 正在等待你的回答", lang))
+            md = [i18n.t("api", "**agent 提问**：{question}", lang,
+                         question=question),
+                  i18n.t("api", "卡片 #{cid} {title}", lang,
+                         cid=str(cid),
+                         title=(ctx.get("title") or "")[:60])]
             for i, o in enumerate(ctx.get("options") or [], 1):
                 md.append(f"{i}) {o}")
             elements.append({"tag": "markdown", "content": "\n".join(md)})
             hint = None
             if not ctx.get("answerable"):
                 # 不可远程作答：站点会话窗也答不了（见 _NO_REMOTE_ANSWER_HINT）
-                hint = _NO_REMOTE_ANSWER_HINT
+                hint = i18n.t("api", _NO_REMOTE_ANSWER_HINT, lang)
             elif (ctx.get("questions_count") or len(qs) or 0) > 1:
-                hint = (f"该提问含 {ctx.get('questions_count') or len(qs)} 道子题，"
-                        "请到站点会话窗口逐题作答")
+                hint = i18n.t("api",
+                              "该提问含 {n} 道子题，请到站点会话窗口逐题作答", lang,
+                              n=ctx.get("questions_count") or len(qs))
             elif ctx.get("multi_select"):
                 # 单题多选：卡片上给单题 mini 表单（多选组件只能内嵌表单容器）；
                 # 装不下/无选项时只给文本指引（见 _single_multi_select_pick）
-                form, hint = _single_multi_select_pick(cid, ctx)
+                form, hint = _single_multi_select_pick(cid, ctx, lang)
                 if form is not None:
                     elements.append(form)
             if ctx.get("answerable") and not hint and kind == "question":
@@ -577,12 +701,15 @@ def _build_interaction_card(ctx, project_name):
                         "behaviors": [{"type": "callback",
                                        "value": {"t": "a", "c": cid, "i": i}}]})
                 if ctx.get("allow_other"):
-                    hint = f"自定义回答请回复「作答 {cid} <文字>」"
+                    hint = i18n.t("api", "自定义回答请回复「作答 {cid} <文字>」",
+                                  lang, cid=str(cid))
             if hint:
                 elements.append({"tag": "markdown", "content": hint})
     return {"schema": "2.0",
             "header": {"title": {"tag": "plain_text",
-                                 "content": f"🤔 卡片等待回复 [{project_name}]"},
+                                 "content": i18n.t("api", "🤔 卡片等待回复 [{name}]",
+                                                   lang,
+                                                   name=project_name)},
                        "template": "orange"},
             "body": {"elements": elements}}
 
@@ -669,7 +796,7 @@ def _plan_session_texts(sid):
         return empty
 
 
-def _plan_inline_markdown(ctx, texts):
+def _plan_inline_markdown(ctx, texts, lang="zh"):
     """卡内折叠摘要（上限 `_PLAN_INLINE_MAX`）：只取末条 assistant 回答。
 
     2026-10-18 用户裁定：卡上不要「思考摘录」——think 不进卡（此前 assistant
@@ -681,11 +808,12 @@ def _plan_inline_markdown(ctx, texts):
         return ""
     md = a
     if len(md) > _PLAN_INLINE_MAX:
-        md = md[:_PLAN_INLINE_MAX].rstrip() + "\n\n…（摘要已截断，完整内容见下方飞书文档）"
+        md = md[:_PLAN_INLINE_MAX].rstrip() + i18n.t(
+            "api", "\n\n…（摘要已截断，完整内容见下方飞书文档）", lang)
     return md
 
 
-def _plan_question_md(ctx):
+def _plan_question_md(ctx, lang="zh"):
     """提问**全文**（不截断）→ markdown：逐题题头/题面/补充说明/选项与描述/能力标注。
 
     与卡片渲染（`_question_views` 按 `_Q_TEXT_MAX`/`_Q_OPT_MAX`/`_Q_DESC_MAX` 截断）
@@ -703,7 +831,8 @@ def _plan_question_md(ctx):
         return "\n".join(lines)
     n = len(qs)
     for i, q in enumerate(qs, 1):
-        title = str(q.get("header") or q.get("question") or f"第 {i} 题")
+        title = str(q.get("header") or q.get("question")
+                    or i18n.t("api", "第 {no} 题", lang, no=i))
         lines.append(f"### {i}/{n} {title}")
         if q.get("header") and q.get("question"):
             lines.append(str(q["question"]))
@@ -717,22 +846,27 @@ def _plan_question_md(ctx):
                 lines.append(f"　　{ov['description']}")     # 全角缩进：描述次行
         caps = []
         if q.get("multi_select"):
-            caps.append("多选")
+            caps.append(i18n.t("api", "多选", lang))
         if q.get("allow_other"):
-            caps.append(f"可自定义：{q.get('other_label') or '其他'}")
-        if caps:
-            lines.append("（" + "；".join(caps) + "）")
+            caps.append(i18n.t("api", "可自定义：{label}", lang,
+                               label=q.get("other_label")
+                                or i18n.t("api", "其他", lang)))
+        line = _caps_line(caps, lang)
+        if line:
+            lines.append(line)
     return "\n".join(lines)
 
 
-def _plan_doc_title(ctx):
+def _plan_doc_title(ctx, lang="zh"):
     """文档标题：卡号 + 题头（云空间列表里能一眼认出是哪张卡哪次提问）。"""
-    head = str(ctx.get("header") or ctx.get("question") or "提问").strip()
+    head = str(ctx.get("header") or ctx.get("question")
+               or i18n.t("api", "提问", lang)).strip()
     head = (head.splitlines() or [""])[0]
-    return _clip_text(f"卡 {ctx.get('card_id')} · {head}", 80)
+    return _clip_text(i18n.t("api", "卡 {cid} · {head}", lang,
+                             cid=str(ctx.get("card_id")), head=head), 80)
 
 
-def _plan_doc_markdown(ctx, texts, project_name=""):
+def _plan_doc_markdown(ctx, texts, project_name="", lang="zh"):
     """完整方案文档正文（markdown，经 `_md_blocks` 转飞书块）。
 
     含：提问**全文**（卡片截断的部分在此补全）+ 末条 assistant 回答 + 作答指引
@@ -741,24 +875,32 @@ def _plan_doc_markdown(ctx, texts, project_name=""):
     """
     cid = ctx.get("card_id")
     a = str((texts or {}).get("assistant") or "").strip()
-    lines = [f"# 卡 {cid} · agent 的方案与提问", "",
-             f"- 项目：{project_name or '—'}",
-             f"- 卡片：{str(ctx.get('title') or '')[:60]}",
-             f"- 时间：{_beijing_now()}（北京时间）"]
+    lines = [i18n.t("api", "# 卡 {cid} · agent 的方案与提问", lang,
+                    cid=str(cid)), "",
+             i18n.t("api", "- 项目：{name}", lang, name=project_name or "—"),
+             i18n.t("api", "- 卡片：{title}", lang,
+                    title=str(ctx.get("title") or "")[:60]),
+             i18n.t("api", "- 时间：{time}（北京时间）", lang,
+                    time=_beijing_now())]
     sid = str(ctx.get("session_id") or "").strip()
     if sid:
-        lines.append(f"- 会话：{sid}")
+        lines.append(i18n.t("api", "- 会话：{sid}", lang, sid=sid))
     if a:
-        lines += ["", "## agent 的方案 / 回答", "", a]
-    lines += ["", "## 提问（全文）", "", _plan_question_md(ctx)]
-    lines += ["", "## 如何作答", "",
-              "- 在飞书聊天里点卡片上的选项按钮 / 下拉即完成作答（多选题勾选后点「提交」）；",
-              f"- 也可以直接回复：「作答 {cid} <序号>」（多选逗号分隔，如 `作答 {cid} 1,3`），"
-              f"或「作答 {cid} <自定义文字>」写自由文本；",
-              "- 点选与文本作答可混用，已点选的题不必重复给。"]
+        lines += ["", i18n.t("api", "## agent 的方案 / 回答", lang), "", a]
+    lines += ["", i18n.t("api", "## 提问（全文）", lang), "",
+              _plan_question_md(ctx, lang)]
+    lines += ["", i18n.t("api", "## 如何作答", lang), "",
+              i18n.t("api",
+                     "- 在飞书聊天里点卡片上的选项按钮 / 下拉即完成作答"
+                     "（多选题勾选后点「提交」）；", lang),
+              i18n.t("api",
+                     "- 也可以直接回复：「作答 {cid} <序号>」（多选逗号分隔，"
+                     "如 `作答 {cid} 1,3`），或「作答 {cid} <自定义文字>」写自由文本；",
+                     lang, cid=str(cid)),
+              i18n.t("api", "- 点选与文本作答可混用，已点选的题不必重复给。", lang)]
     md = "\n".join(lines)
     if len(md) > _PLAN_DOC_MAX:
-        md = md[:_PLAN_DOC_MAX] + "\n\n…（正文已截断）"
+        md = md[:_PLAN_DOC_MAX] + i18n.t("api", "\n\n…（正文已截断）", lang)
     return md
 
 
@@ -900,7 +1042,7 @@ def _plan_doc_put(key, url):
         _PLAN_DOCS.pop(min(_PLAN_DOCS, key=lambda k: _PLAN_DOCS[k]["at"]), None)
 
 
-def _attach_plan(ctx, project_name, cfg, open_id=""):
+def _attach_plan(ctx, project_name, cfg, open_id="", lang="zh"):
     """把「方案」挂到卡片上下文：`plan_inline`（卡内折叠摘要）+ `plan_doc_url`（文档链接）。
 
     best-effort：**绝不外抛**——方案是锦上添花，卡本身必须发出去（历史上 form 元素
@@ -913,7 +1055,7 @@ def _attach_plan(ctx, project_name, cfg, open_id=""):
         if not sid:
             return
         texts = _plan_session_texts(sid)
-        inline = _plan_inline_markdown(ctx, texts)
+        inline = _plan_inline_markdown(ctx, texts, lang)
         if inline:
             ctx["plan_inline"] = inline
         key = (int(ctx.get("card_id") or 0), str(ctx.get("qid") or ""))
@@ -921,10 +1063,10 @@ def _attach_plan(ctx, project_name, cfg, open_id=""):
         if cached:
             ctx["plan_doc_url"] = cached
             return
-        md = _plan_doc_markdown(ctx, texts, project_name)
+        md = _plan_doc_markdown(ctx, texts, project_name, lang)
         if not md.strip():
             return
-        url = _docx_create(_plan_doc_title(ctx), md, cfg, open_id)
+        url = _docx_create(_plan_doc_title(ctx, lang), md, cfg, open_id)
         if url:
             _plan_doc_put(key, url)
             ctx["plan_doc_url"] = url
@@ -954,10 +1096,11 @@ def _dm_interaction_card(project_id, ctx):
         name = proj["name"] if proj else f"#{project_id}"
         # M6：把 agent 的方案/回答挂到卡上（卡内折叠摘要 + 完整方案飞书文档链接）。
         # 审批卡不做（它的"背景"由审批请求本身给出，建文档没意义）；开关可回滚。
+        lang = user_lang(owner)
         if plan_enabled() and str(ctx.get("kind") or "") != "approval":
-            _attach_plan(ctx, name, cfg, binding["open_id"] or "")
+            _attach_plan(ctx, name, cfg, binding["open_id"] or "", lang)
         rest_send_card(binding["open_id"],
-                       _build_interaction_card(ctx, name), cfg)
+                       _build_interaction_card(ctx, name, lang), cfg)
     except Exception as e:
         print(f"feishu outbound: DM 交互卡片发送失败: {e!r}",
               file=sys.stderr, flush=True)
@@ -1261,6 +1404,7 @@ _SLASH_PERM_CODES = (99991640, 99991672, 99991679)
 _SLASH_PERM_HINT = ("应用缺少「应用指令」权限：飞书开发者后台 → 权限管理，添加 "
                     "application:app_slash_command:read 与 write，创建并发布新版本后重试")
 _SLASH_ICON_HINT = "指令图标 icon_key 不合法（取值见官方 Slash Command Icon Key 说明）"
+_SLASH_PARAM_HINT = "指令参数校验失败：指令名需为不含「/」的标识符，说明不可为空"
 # 官方「Slash Command Icon Key 说明」全量可选值（2026-10-09 抄自开放平台文档
 # https://open.feishu.cn/document/mcp_open_tools/agent-best-practices/agent-supports-slash-commands
 # 的同名章节，共 72 个；缺省 skill_outlined）。**表外的键一律非法**，创建/更新报业务码
@@ -1376,15 +1520,19 @@ def _slash_remote_icon(item):
     return "skill_outlined"
 
 
-def slash_error_hint(err):
-    """飞书业务码 → 用户可操作的中文引导（设置页展示用，不抛异常）。"""
+def slash_error_hint(err, lang="zh"):
+    """飞书业务码 → 用户可操作的引导（不抛异常）。
+
+    默认 `lang="zh"`：设置页展示（T12d 数据面）与既有断言逐字节不变；
+    飞书 DM 回执（权限卡「重试注册」失败）显式传收件人语言（T12b）。
+    三个固定引导都走 `api` 词条：zh 原文即 key，返回原串。"""
     code = getattr(err, "code", None)
     if code in _SLASH_PERM_CODES:
-        return _SLASH_PERM_HINT
+        return i18n.t("api", _SLASH_PERM_HINT, lang)
     if code == 40000031:
-        return _SLASH_ICON_HINT
+        return i18n.t("api", _SLASH_ICON_HINT, lang)
     if code == 99992402:
-        return "指令参数校验失败：指令名需为不含「/」的标识符，说明不可为空"
+        return i18n.t("api", _SLASH_PARAM_HINT, lang)
     return str(err)
 
 
@@ -1454,10 +1602,13 @@ def _slash_upsert(cfg, name, desc, icon, by_name):
         return "updated"
 
 
-def slash_status(user_id):
+def slash_status(user_id, lang="zh"):
     """设置页读取口：TS 期望清单 + 飞书侧现状（含用户自己的其他指令）。
     凭据缺失/权限不足等一律走 error 字段返回，不抛异常（页面照常渲染并给引导）；
-    need_scope=缺「应用指令」scope（页面据此提供「发飞书权限卡片」入口）。"""
+    need_scope=缺「应用指令」scope（页面据此提供「发飞书权限卡片」入口）。
+
+    语言（T12d）：默认 ``lang="zh"``（设置页 slash 卡既有中文数据面不变）；
+    doctor 的 slash_scope 项显式传**请求语言**，让该项 detail/hint 跟随页面语言。"""
     desired = [{"command": c, "description": d, "icon": i}
                for c, d, i in SLASH_COMMANDS]
     cfg = app_config(user_id)
@@ -1469,24 +1620,29 @@ def slash_status(user_id):
         remote = list_slash_commands(cfg)
     except FeishuRestError as e:
         return {"configured": True, "desired": desired, "remote": [], "extra": [],
-                "need_scope": _need_scope(e), "error": slash_error_hint(e)}
+                "need_scope": _need_scope(e),
+                "error": slash_error_hint(e, lang)}
     extra = sorted(r["command"] for r in remote if r["command"] not in _SLASH_NAMES)
     return {"configured": True, "desired": desired, "remote": remote, "extra": extra,
             "need_scope": False, "error": ""}
 
 
-def sync_slash_commands(user_id):
+def sync_slash_commands(user_id, lang="zh"):
     """把 TS 指令清单幂等同步到飞书：只增/改**自己的**指令，**绝不删**用户的其他指令。
     返回 {ok, created, updated, kept, extra, failed, need_scope, error} 供设置页展示
-    （need_scope=True 时调用方应发权限引导卡片并等用户确认后重试）。"""
+    （need_scope=True 时调用方应发权限引导卡片并等用户确认后重试）。
+
+    `lang` 缺省 `"zh"`：设置页/对拍路径（T12d 数据面）逐字节不变；飞书 DM 回执
+    （权限卡重试失败）显式传收件人语言，让 `error`（诊断数据）与回执同语言。"""
     cfg = app_config(user_id)
     if cfg is None:
         return {"ok": False, "need_scope": False,
-                "error": "未配置应用凭据（App ID/App Secret）"}
+                "error": i18n.t("api", "未配置应用凭据（App ID/App Secret）", lang)}
     try:
         remote = list_slash_commands(cfg)
     except FeishuRestError as e:
-        return {"ok": False, "need_scope": _need_scope(e), "error": slash_error_hint(e)}
+        return {"ok": False, "need_scope": _need_scope(e),
+                "error": slash_error_hint(e, lang)}
     by_name = {r["command"]: r for r in remote}
     buckets = {"created": [], "updated": [], "kept": []}
     failed = []
@@ -1495,13 +1651,13 @@ def sync_slash_commands(user_id):
         if icon not in SLASH_ICON_KEYS:
             # 本地预检：表外的键飞书必回 40000031，先在此拦下——省一次请求，
             # 且不让远端停在「同步到一半」的状态（同步是逐条进行的）
-            failed.append(f"{name}: {_SLASH_ICON_HINT}")
+            failed.append(f"{name}: {i18n.t('api', _SLASH_ICON_HINT, lang)}")
             continue
         try:
             buckets[_slash_upsert(cfg, name, desc, icon, by_name)].append(name)
         except FeishuRestError as e:
             need_scope = need_scope or _need_scope(e)
-            failed.append(f"{name}: {slash_error_hint(e)}")
+            failed.append(f"{name}: {slash_error_hint(e, lang)}")
     return {"ok": not failed,
             "created": buckets["created"], "updated": buckets["updated"],
             "kept": buckets["kept"],
@@ -1537,50 +1693,63 @@ def clear_slash_commands(user_id):
             "error": failed[0] if failed else ""}
 
 
-def _slash_summary(out):
-    """同步结果一句话摘要（DM 卡片回执与设置页提示共用）。"""
-    s = (f"新增 {len(out.get('created') or [])}、更新 {len(out.get('updated') or [])}、"
-         f"已是最新 {len(out.get('kept') or [])}")
+def _slash_summary(out, lang="zh"):
+    """同步结果一句话摘要（DM 卡片回执与设置页提示共用）。
+
+    `lang` 缺省 `"zh"`：设置页调用点（T12d 数据面）一行不改；DM 回执按收件人语言。"""
+    s = i18n.t("api", "新增 {created}、更新 {updated}、已是最新 {kept}", lang,
+               created=len(out.get("created") or []),
+               updated=len(out.get("updated") or []),
+               kept=len(out.get("kept") or []))
     if out.get("failed"):
-        s += f"、失败 {len(out['failed'])}"
+        s += i18n.t("api", "、失败 {failed}", lang,
+                    failed=len(out["failed"]))
     return s
 
 
-def slash_perm_card(app_id, user_id):
+def slash_perm_card(app_id, user_id, lang="zh"):
     """权限引导卡片（schema 2.0，DM 单聊）：说明缺哪个 scope、三步怎么开通、
     开发者后台直达链接，底部「我已开通，重试注册」按钮——点它回调里重跑同步
     （卡片无状态，value 只带身份 u 与动作 t=sc，回调时按 open_id→binding 复核）。
     按钮形态与既有交互卡片完全一致（behaviors/callback），避免未验证的元素类型。
     链接只给「应用详情页」根 URL（官方文档只保证菜单路径「开发配置 → 权限管理 /
-    应用发布 → 版本管理与发布」，深链路由未在文档中出现，不猜）。"""
+    应用发布 → 版本管理与发布」，深链路由未在文档中出现，不猜）。
+
+    语言（T12b）：`lang` 由发卡入口按收件人 `user_lang(user_id)` 传入；默认 `"zh"`。"""
     url = (f"https://open.feishu.cn/app/{app_id}"
            if app_id else "https://open.feishu.cn/app")
-    content = (
+    content = i18n.t(
+        "api",
         "**Touchstone 快捷指令**（机器人私聊输入框打「/」弹出的指令面板）需要你的飞书应用先开通权限：\n"
         "· `application:app_slash_command:read`\n"
         "· `application:app_slash_command:write`\n\n"
         "**开通三步**：\n"
-        f"1. 打开 [开发者后台 · 本应用]({url})，左侧 **开发配置 → 权限管理**，点「开通权限」\n"
+        "1. 打开 [开发者后台 · 本应用]({url})，左侧 **开发配置 → 权限管理**，点「开通权限」\n"
         "2. 搜索 `app_slash_command`，把读、写两个权限都勾上并确认开通\n"
         "3. 左侧 **应用发布 → 版本管理与发布** → 创建版本并发布"
         "（权限改动必须发版、过审后才生效）\n\n"
-        "完成后点下面的按钮，我立刻重试注册；若刚发版，可等约 1 分钟再点一次。")
+        "完成后点下面的按钮，我立刻重试注册；若刚发版，可等约 1 分钟再点一次。",
+        lang, url=url)
     payload = {"t": "sc", "a": "retry", "u": int(user_id)}
     return {"schema": "2.0",
             "header": {"title": {"tag": "plain_text",
-                                 "content": "🔑 需要开通「应用指令」权限"},
+                                 "content": i18n.t(
+                                     "api", "🔑 需要开通「应用指令」权限", lang)},
                        "template": "orange"},
             "body": {"elements": [
                 {"tag": "markdown", "content": content},
                 {"tag": "button", "type": "primary",
-                 "text": {"tag": "plain_text", "content": "我已开通，重试注册"},
+                 "text": {"tag": "plain_text",
+                          "content": i18n.t("api", "我已开通，重试注册", lang)},
                  "behaviors": [{"type": "callback", "value": payload}]},
             ]}}
 
 
 def send_slash_perm_card(user_id):
     """向该用户的飞书单聊发权限引导卡片（需已绑定 + 应用凭据齐全）。
-    返回 (ok, err)：未绑定/未配凭据属正常情形，调用方据此给站点侧提示，不抛异常。"""
+    返回 (ok, err)：未绑定/未配凭据属正常情形，调用方据此给站点侧提示，不抛异常。
+
+    `err` 会回显在站点设置页（T12d 数据面）⇒ 保持中文；卡片按收件人语言。"""
     cfg = app_config(user_id)
     if cfg is None:
         return False, "未配置应用凭据（App ID/App Secret），先保存配置再发卡片"
@@ -1589,7 +1758,8 @@ def send_slash_perm_card(user_id):
         return False, "尚未绑定飞书账号：设置页生成绑定码后在机器人单聊回复「绑定 <码>」"
     try:
         rest_send_card(binding["open_id"],
-                       slash_perm_card(cfg.get("app_id", ""), user_id), cfg)
+                       slash_perm_card(cfg.get("app_id", ""), user_id,
+                                       user_lang(user_id)), cfg)
         return True, ""
     except FeishuRestError as e:
         return False, f"卡片发送失败：{e}"
@@ -1597,26 +1767,41 @@ def send_slash_perm_card(user_id):
 
 def _on_slash_perm_action(sender, value, cfg):
     """权限引导卡片的按钮回调：复核身份（必须是该卡片指向的、已绑定的用户）→
-    重跑 sync_slash_commands → DM 文本回执 + toast。返回 None 表示不更新卡片。"""
+    重跑 sync_slash_commands → DM 文本回执 + toast。返回 None 表示不更新卡片。
+
+    语言（T12b）：入口按点击者解析一次（未绑定 ⇒ R22 中文兜底），DM 与 toast 同语言；
+    重试失败的诊断（`slash_error_hint` / 未配凭据）随 `lang` 本地化（zh 原文不变）。"""
     binding = db.get_feishu_binding_by_open(sender)
     if binding is None:
-        _dm_text(sender, "尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ "
-                         "飞书设置，生成绑定码后在这里回复「绑定 <码>」完成绑定", cfg)
-        return {"toast": {"type": "error", "content": "尚未绑定站点账号"}}
+        _dm_text(sender, i18n.t("api", "尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ "
+                                       "飞书设置，生成绑定码后在这里回复「绑定 <码>」完成绑定",
+                                "zh"), cfg)
+        return {"toast": {"type": "error",
+                          "content": i18n.t("api", "尚未绑定站点账号", "zh")}}
+    lang = user_lang(binding["user_id"])
     uid = int(value.get("u") or 0)
     if uid and uid != int(binding["user_id"]):
         # 防串号：卡片只对它发给的那个人生效
-        return {"toast": {"type": "error", "content": "该卡片不属于当前账号"}}
-    out = sync_slash_commands(binding["user_id"])
+        return {"toast": {"type": "error",
+                          "content": i18n.t("api", "该卡片不属于当前账号", lang)}}
+    out = sync_slash_commands(binding["user_id"], lang)
     if out.get("ok"):
-        _dm_text(sender, "✅ 快捷指令注册完成：" + _slash_summary(out)
-                 + "\n约 5 分钟后在机器人私聊输入「/」即可看到（重启飞书客户端可加速）。", cfg)
-        return {"toast": {"type": "success", "content": "注册完成"}}
-    text = "❌ 仍未成功：" + (out.get("error") or "未知错误")
+        _dm_text(sender, i18n.t(
+            "api", "✅ 快捷指令注册完成：{summary}\n"
+                   "约 5 分钟后在机器人私聊输入「/」即可看到"
+                   "（重启飞书客户端可加速）。",
+            lang, summary=_slash_summary(out, lang)), cfg)
+        return {"toast": {"type": "success",
+                          "content": i18n.t("api", "注册完成", lang)}}
+    text = i18n.t("api", "❌ 仍未成功：{error}", lang,
+                  error=out.get("error") or i18n.t("api", "未知错误", lang))
     if out.get("need_scope"):
-        text += "\n看起来权限还没生效：确认已在权限管理里添加读+写并**创建版本发布**，稍等约 1 分钟再点一次卡片上的按钮。"
+        text += i18n.t(
+            "api", "\n看起来权限还没生效：确认已在权限管理里添加读+写并"
+                   "**创建版本发布**，稍等约 1 分钟再点一次卡片上的按钮。", lang)
     _dm_text(sender, text, cfg)
-    return {"toast": {"type": "error", "content": "仍未成功，看私聊回复"}}
+    return {"toast": {"type": "error",
+                      "content": i18n.t("api", "仍未成功，看私聊回复", lang)}}
 
 
 # ---------- M2 入站：ws 长连接与消息主流程 ----------
@@ -1650,6 +1835,15 @@ HELP_TEXT = (
     "· 快捷指令：输入框里打「/」可直接选 /status、/cards、/approve 等"
     "（参数用法与上面对应中文指令一致）"
 )
+
+
+def help_text(lang="zh"):
+    """帮助文本（T12b）：`HELP_TEXT` 是中文原文（即词典 key），`lang` 决定查表。
+
+    **指令词不译**（帮助/接入/绑定/作答…）：`_INTENT_RULES` 只认这些中文词与
+    `/别名`，英文说明里保留原词用户才照着发得出来（R23 同款边界：slash 注册
+    schema 仍是中文，只有回复/帮助本地化）。zh 分支与旧常量逐字节相同。"""
+    return i18n.t("api", HELP_TEXT, lang)
 
 _WS_THREADS = {}       # user_id -> 入站线程（已拉起且在 run 的；线程退出后残留引用）
 # user_id -> **拉起该线程时**用的 app_id（M10，2026-10-17）：换凭据后旧连接会一直在跑，
@@ -1938,6 +2132,10 @@ MEDIA_TYPE_HINT = "暂不支持该消息类型，请发送文字指令"   # 旧�
 # 未绑定引导（文字与媒体两条路径共用同一串：§3.2 步骤 4 要求与文字路径逐字一致）
 UNBOUND_DM_MSG = ("尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ 飞书设置，"
                   "生成绑定码后在这里回复「绑定 <码>」完成绑定")
+# 卡片回调路径的未绑定引导（与 UNBOUND_DM_MSG **不是同一句**：这里说「在单聊回复」，
+# 消息路径说「在这里回复」；2026-10-22 截图批次的 Node `UNBOUND_DM_CARD` 同串）。
+_UNBOUND_DM_CARD = ("尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ 飞书设置，"
+                    "生成绑定码后在单聊回复「绑定 <码>」完成绑定")
 
 # 固定长文案（Python 模块级常量；Node 同名导出常量，中文逐字一致）
 MEDIA_SCOPE_HINT = ("截图功能需要飞书应用额外开通「获取单聊、群组消息（im:message:readonly）」"
@@ -2066,38 +2264,65 @@ def _download_image(message_id, image_key, cfg):
     return {"data": data, "mime": mime}
 
 
+def _media_hint_lang(sender):
+    """媒体**早退档**（功能关/类型不支持/对话关）回执的语言。
+
+    为什么单独一个函数：这三档的判定必须与旧版同序（在绑定校验之前），但它们都要回
+    同一条可本地化的提示，所以需要语言。约束：
+    - `TS_I18N=0` ⇒ 恒 `zh`，**连绑定行都不读**（回滚开关下与旧版零读库一致）；
+    - 读绑定行/偏好失败 ⇒ `zh` 兜底，保证固定提示仍发得出去（旧版 DB 故障时也不静默）；
+    - 正常路径只读一次绑定行；真正投递的档位在早退判定之后照旧再读一次（旧版位置），
+      不重复计读。
+    """
+    if i18n.is_i18n_disabled():
+        return "zh"
+    try:
+        binding = db.get_feishu_binding_by_open(sender)
+        return user_lang(binding["user_id"]) if binding else "zh"
+    except Exception:  # noqa: BLE001 —— 回执是旁路，读库失败不能吞掉提示本身
+        return "zh"
+
+
 def _handle_media_message(evt, cfg):
     """单聊 image/post 消息：解析 → 逐张下载（全有或全无）→ 投递绑定会话（§3.2）。
 
     判定顺序（与 Node 严格同序）：功能开关 → 类型 → 通用对话开关 → 绑定校验 →
     解析（post 纯文字当普通文本投递）→ 张数截断 → 逐张下载 → route_text(images=…)。
-    任一张失败就一张都不投递（避免半截图文）；失败一律回中文文案，绝不静默。
-    """
+    任一张失败就一张都不投递（避免半截图文）；失败一律回执，绝不静默。
+
+    语言（T12b）：发送者绑定用户（回执收件人）；未绑定无身份 ⇒ R22 中文兜底。
+    早退档的提示语言走 `_media_hint_lang`（`TS_I18N=0` 零读库）；需要真正投递的
+    档位在早退判定之后才读绑定行（与旧版同一位置，不提前读）。"""
     mid = evt.get("message_id")
     mtype = evt.get("message_type")
+    sender = evt.get("sender_open_id") or ""
     if not media_enabled():
-        rest_reply(mid, MEDIA_TYPE_HINT, cfg)
+        rest_reply(mid, i18n.t("api", MEDIA_TYPE_HINT,
+                               _media_hint_lang(sender)), cfg)
         return
     if mtype not in ("image", "post"):
-        rest_reply(mid, MEDIA_TYPE_HINT, cfg)
+        rest_reply(mid, i18n.t("api", MEDIA_TYPE_HINT,
+                               _media_hint_lang(sender)), cfg)
         return
     if not feishu_conv.enabled():
-        rest_reply(mid, MEDIA_TYPE_HINT, cfg)
+        rest_reply(mid, i18n.t("api", MEDIA_TYPE_HINT,
+                               _media_hint_lang(sender)), cfg)
         return
-    sender = evt.get("sender_open_id") or ""
     binding = db.get_feishu_binding_by_open(sender)
     if binding is None:
         rest_reply(mid, UNBOUND_DM_MSG, cfg)
         return
+    lang = user_lang(binding["user_id"])
     text, keys = _media_items(evt)
     print(f"feishu inbound: 媒体消息 type={mtype} images={len(keys)}",
           file=sys.stderr, flush=True)
     if not keys:
         if mtype == "post" and text:
             # post 纯文字（无图）：当普通文本走同一套路由/自动新建/排队语义
-            rest_reply(mid, feishu_conv.route_text(binding, text, cfg), cfg)
+            rest_reply(mid, feishu_conv.route_text(binding, text, cfg, lang=lang), cfg)
         else:
-            rest_reply(mid, MEDIA_FAIL_PREFIX + MEDIA_NO_IMAGE, cfg)
+            rest_reply(mid, i18n.t("api", MEDIA_FAIL_PREFIX, lang)
+                       + i18n.t("api", MEDIA_NO_IMAGE, lang), cfg)
         return
     keys = keys[:MEDIA_MAX_COUNT]
     images = []
@@ -2105,18 +2330,22 @@ def _handle_media_message(evt, cfg):
         try:
             images.append(_download_image(mid, key, cfg))
         except MediaTooLarge:
-            rest_reply(mid, MEDIA_FAIL_PREFIX + MEDIA_TOO_LARGE, cfg)
+            rest_reply(mid, i18n.t("api", MEDIA_FAIL_PREFIX, lang)
+                       + i18n.t("api", MEDIA_TOO_LARGE, lang), cfg)
             return
         except FeishuRestError as e:
             if getattr(e, "code", None) in _MEDIA_SCOPE_CODES:
-                rest_reply(mid, MEDIA_SCOPE_HINT, cfg)
+                rest_reply(mid, i18n.t("api", MEDIA_SCOPE_HINT, lang), cfg)
             else:
-                rest_reply(mid, MEDIA_FAIL_PREFIX + str(e), cfg)
+                rest_reply(mid, i18n.t("api", MEDIA_FAIL_PREFIX, lang)
+                           + str(e), cfg)
             return
         except Exception as e:      # 下载异常（非 FeishuRestError）同样要回执
-            rest_reply(mid, MEDIA_FAIL_PREFIX + str(e), cfg)
+            rest_reply(mid, i18n.t("api", MEDIA_FAIL_PREFIX, lang)
+                       + str(e), cfg)
             return
-    rest_reply(mid, feishu_conv.route_text(binding, text, cfg, images=images), cfg)
+    rest_reply(mid, feishu_conv.route_text(binding, text, cfg, images=images,
+                                           lang=lang), cfg)
 
 
 def _on_message_event(data, cfg):
@@ -2191,30 +2420,43 @@ def handle_message_event(evt, cfg=None):
         # 前置，「绑定 <码>」也会被「尚未绑定」拦下，死锁（未绑定者永远无法绑定）
         if intent and intent["action"] == "bind":
             if binding is not None:
-                rest_reply(mid, "当前账号已绑定，无需重复绑定（解绑后可重新绑定）", cfg)
+                rest_reply(mid, i18n.t("api", "当前账号已绑定，无需重复绑定"
+                                              "（解绑后可重新绑定）",
+                                       user_lang(binding["user_id"])), cfg)
                 return
             err = bind_user(intent["groups"][0], sender)
-            rest_reply(mid, "绑定成功，发「帮助」查看可用指令" if err is None else err, cfg)
+            if err is None:
+                # 绑定刚写成 ⇒ 现在能解析出用户语言（绑定回执按收件人语言）
+                row = db.get_feishu_binding_by_open(sender)
+                lang = user_lang(row["user_id"] if row else 0)
+                rest_reply(mid, i18n.t("api", "绑定成功，发「帮助」查看可用指令",
+                                       lang), cfg)
+            else:
+                rest_reply(mid, err, cfg)
             return
         if binding is None:
             rest_reply(mid, UNBOUND_DM_MSG, cfg)
             return
+        # 入口解析一次、向下传：同一动作内的多条回执必须同语言
+        lang = user_lang(binding["user_id"])
         # M11「接入」：发一张可点的飞书接入操作卡片（换应用/重连/绑定码/自检/补齐/发布），
         # 用**当前这条连接**的应用凭据发——卡片按钮回调会回到同一条连接
         if intent is not None and intent["action"] == "setup":
-            ok, err = send_setup_card(binding["user_id"], cfg)
-            rest_reply(mid, "🛠 已发送「飞书接入操作卡片」，请在卡片上操作。"
-                            if ok else f"卡片发送失败：{err}", cfg)
+            ok, err = send_setup_card(binding["user_id"], cfg, lang)
+            rest_reply(mid, i18n.t(
+                "api", "🛠 已发送「飞书接入操作卡片」，请在卡片上操作。", lang)
+                if ok else i18n.t("api", "卡片发送失败：{err}", lang, err=err), cfg)
             return
         if intent is None:
             if evt.get("chat_type") != "group" and feishu_conv.enabled():
                 # 单聊未识别文本 → 通用对话路由（投递给当前会话；无会话按默认项目自动新建）
-                reply = feishu_conv.route_text(binding, text, cfg)
+                reply = feishu_conv.route_text(binding, text, cfg, lang=lang)
             else:
-                reply = HELP_TEXT      # 群聊保持原行为：不落会话
+                # 群聊保持原行为：不落会话；回复语言 = 发送者（已绑定）偏好
+                reply = help_text(lang)
             rest_reply(mid, reply, cfg)
             return
-        reply = execute_intent(binding, intent, sender, cfg)
+        reply = execute_intent(binding, intent, sender, cfg, lang)
         if reply:
             rest_reply(mid, reply, cfg)
     except Exception as e:
@@ -2223,15 +2465,17 @@ def handle_message_event(evt, cfg=None):
 
 # ---------- DM 交互卡片点击回调（card.action.trigger，schema 2.0） ----------
 
-def _toast_for(reply):
+def _toast_for(reply, lang="zh"):
     """执行器回执文案 → 卡片回调 toast 载荷（reply=None 表示无需回执）。
-    成功前缀与执行器约定对齐（已收下 / ✅）；完整结果走 DM 文本，toast 只做轻提示。"""
+
+    成功前缀与执行器约定对齐（`已收下` / `✅`；英文成功回执同样以 `✅` 开头，
+    见各执行器的英文译法）；完整结果走 DM 文本，toast 只做轻提示。"""
     if reply is None:
         return None
     ok = reply.startswith(("已收下", "✅"))
     return {"toast": {"type": "success" if ok else "error",
-                      "content": "已收下，详情看机器人单聊" if ok
-                      else "操作失败，详情看机器人单聊"}}
+                      "content": i18n.t("api", "已收下，详情看机器人单聊" if ok
+                                        else "操作失败，详情看机器人单聊", lang)}}
 
 
 def _dm_text(open_id, text, cfg):
@@ -2278,37 +2522,42 @@ def _on_card_action(data, cfg):
         if t in ("dp", "ss"):
             binding = db.get_feishu_binding_by_open(sender)
             if binding is None:
-                _dm_text(sender, "尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ "
-                                 "飞书设置，生成绑定码后在单聊回复「绑定 <码>」完成绑定", cfg)
-                return {"toast": {"type": "error", "content": "尚未绑定站点账号"}}
-            return feishu_conv.on_card_action(sender, binding, value, action, cfg)
+                _dm_text(sender, i18n.t("api", _UNBOUND_DM_CARD, "zh"), cfg)
+                return {"toast": {"type": "error",
+                                  "content": i18n.t("api", "尚未绑定站点账号", "zh")}}
+            return feishu_conv.on_card_action(sender, binding, value, action, cfg,
+                                              user_lang(binding["user_id"]))
         if t not in ("a", "mq", "p", "s", "d") or not key:
             return None
         binding = db.get_feishu_binding_by_open(sender)
         if binding is None:
-            _dm_text(sender, "尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ "
-                             "飞书设置，生成绑定码后在单聊回复「绑定 <码>」完成绑定", cfg)
-            return {"toast": {"type": "error", "content": "尚未绑定站点账号"}}
-        found, err = _find_user_card(binding["user_id"], key)
+            # 未绑定者没有用户偏好可言 ⇒ 语言按 R22 兜底中文（不读库）
+            _dm_text(sender, i18n.t("api", _UNBOUND_DM_CARD, "zh"), cfg)
+            return {"toast": {"type": "error",
+                              "content": i18n.t("api", "尚未绑定站点账号", "zh")}}
+        # 入口解析一次、向下传：同一动作内的 DM 回执与 toast 必须同语言
+        lang = user_lang(binding["user_id"])
+        found, err = _find_user_card(binding["user_id"], key, lang)
         if found is None:
             _dm_text(sender, err, cfg)
-            return {"toast": {"type": "error", "content": "没找到对应卡片"}}
+            return {"toast": {"type": "error",
+                              "content": i18n.t("api", "没找到对应卡片", lang)}}
         p, c = found
         if t == "mq":
             # 多选类点选：每次点击自带 toast（含进度），答满那次才发 DM 文本
-            reply, toast = _answer_multi_click(p, c, value, action)
+            reply, toast = _answer_multi_click(p, c, value, action, lang)
             if reply:
                 _dm_text(sender, reply, cfg)
             return toast
         if t == "a":
-            reply = _answer_by_token(p, c, str(value.get("i") or ""))
+            reply = _answer_by_token(p, c, str(value.get("i") or ""), lang)
         else:
             decision = "approved" if t in ("p", "s") else "rejected"
             reply = _decide_approval(p, c, decision,
-                                     "session" if t == "s" else "")
+                                     "session" if t == "s" else "", lang)
         if reply:
             _dm_text(sender, reply, cfg)
-        return _toast_for(reply)
+        return _toast_for(reply, lang)
     except Exception as e:
         print(f"feishu inbound: 卡片回调处理异常: {e!r}", file=sys.stderr, flush=True)
         return None
@@ -2373,13 +2622,16 @@ def _setup_nonce(user_id):
     return nonce
 
 
-def setup_card(user_id, app_id, thread_app, nonce):
+def setup_card(user_id, app_id, thread_app, nonce, lang="zh"):
     """「飞书接入操作卡片」（schema 2.0，DM 单聊）。**纯函数**：给定入参 ⇒ 确定 JSON
     （两侧后端逐字节对拍用；node 侧 `feishu_inbound.js::setupCard`）。
 
     入参：user_id=站点用户 id；app_id=配置里的应用；thread_app=入站长连接**当前绑的**
     应用（空串=连接未运行）；nonce=按钮防伪令牌。两应用不同 ⇒ 卡片切到「换用新应用」
-    形态（换绑后自动发的那张：按钮会先取新绑定码，再用新应用重连）。"""
+    形态（换绑后自动发的那张：按钮会先取新绑定码，再用新应用重连）。
+
+    语言（T12b）：`lang` 由发卡入口按收件人 `user_lang(user_id)` 解析后传入；默认
+    `"zh"` 是兼容线（现有单测/对拍用例一行不改也逐字节不变）。"""
     app_id = str(app_id or "")
     thread_app = str(thread_app or "")
     switching = bool(app_id) and bool(thread_app) and app_id != thread_app
@@ -2391,51 +2643,74 @@ def setup_card(user_id, app_id, thread_app, nonce):
                 "behaviors": [{"type": "callback",
                                "value": {"t": "fs", "a": action, "u": uid, "n": nonce}}]}
 
-    elements = [{"tag": "markdown", "content": "\n".join([
-        "**当前应用**：" + (("`" + app_id + "`") if app_id else "（未配置）"),
-        "**入站长连接**：" + (("运行中 · 绑在 `" + thread_app + "`") if thread_app else "未运行"),
-    ])}]
+    app_line = (i18n.t("api", "**当前应用**：", lang)
+                + (("`" + app_id + "`") if app_id
+                   else i18n.t("api", "（未配置）", lang)))
+    conn_line = (i18n.t("api", "**入站长连接**：", lang)
+                 + (i18n.t("api", "运行中 · 绑在 `{app}`", lang, app=thread_app)
+                    if thread_app else i18n.t("api", "未运行", lang)))
+    elements = [{"tag": "markdown", "content": "\n".join([app_line, conn_line])}]
     if switching:
-        elements.append({"tag": "markdown", "content":
-                         f"检测到应用凭据已换为 `{app_id}`，但长连接还绑在旧应用 "
-                         f"`{thread_app}` 上。点「换用新应用」：我会先把新绑定码发到本会话，"
-                         "再用新应用重连——之后在新机器人单聊里回复「绑定 <码>」即可。"})
-        elements.append(_button("🔁 换用新应用", "switch", "primary"))
+        elements.append({"tag": "markdown", "content": i18n.t(
+            "api", "检测到应用凭据已换为 `{app}`，但长连接还绑在旧应用 "
+                   "`{thread}` 上。点「换用新应用」：我会先把新绑定码发到本会话，"
+                   "再用新应用重连——之后在新机器人单聊里回复「绑定 <码>」即可。",
+            lang, app=app_id, thread=thread_app)})
+        elements.append(_button(i18n.t("api", "🔁 换用新应用", lang),
+                                "switch", "primary"))
     else:
-        elements.append({"tag": "markdown", "content":
-                         "需要时点下面的按钮；换应用后我会自动发一张新的确认卡片。"})
-        elements.append(_button("🔄 重连入站", "restart", "primary"))
-    elements.append(_button("🔑 生成绑定码", "bindcode"))
-    elements.append(_button("🩺 配置自检", "doctor"))
-    elements.append(_button("🧩 补齐配置", "apply"))
-    elements.append(_button("🚀 提交发布", "publish"))
-    elements.append({"tag": "markdown",
-                     "content": "卡片 10 分钟内有效；过期后发「接入」重新获取。"})
+        elements.append({"tag": "markdown", "content": i18n.t(
+            "api", "需要时点下面的按钮；换应用后我会自动发一张新的确认卡片。",
+            lang)})
+        elements.append(_button(i18n.t("api", "🔄 重连入站", lang),
+                                "restart", "primary"))
+    elements.append(_button(i18n.t("api", "🔑 生成绑定码", lang), "bindcode"))
+    elements.append(_button(i18n.t("api", "🩺 配置自检", lang), "doctor"))
+    elements.append(_button(i18n.t("api", "🧩 补齐配置", lang), "apply"))
+    elements.append(_button(i18n.t("api", "🚀 提交发布", lang), "publish"))
+    elements.append({"tag": "markdown", "content": i18n.t(
+        "api", "卡片 10 分钟内有效；过期后发「接入」重新获取。", lang)})
     return {"schema": "2.0",
             "header": {"title": {"tag": "plain_text",
-                                 "content": "🔁 飞书应用已变更" if switching else "🛠 飞书接入操作"},
+                                 "content": i18n.t(
+                                     "api", "🔁 飞书应用已变更" if switching
+                                     else "🛠 飞书接入操作", lang)},
                        "template": "orange" if switching else "blue"},
             "body": {"elements": elements}}
 
 
-def send_setup_card(user_id, cfg=None):
+def send_setup_card(user_id, cfg=None, lang=None):
     """给该用户 DM 发「飞书接入操作卡片」。返回 (ok, err)。
-    `cfg` 缺省=当前配置；**换应用自动发送时调用方必须传旧应用的 cfg**（见模块段注释）。"""
+    `cfg` 缺省=当前配置；**换应用自动发送时调用方必须传旧应用的 cfg**（见模块段注释）。
+    `lang` 缺省按收件人偏好解析（入口已解析时显式传，避免同一动作两次读偏好）。
+
+    语言（T12b）：失败文案按收件人语言出。zh 逐字节保持历史形态——REST 失败时内层
+    仍带 `卡片发送失败：` 前缀（调用方外层再包一次，存量断言即此形态）；en 的内层只留
+    诊断，前缀由调用方的英文包装统一负责（否则会出现
+    `Failed to send the card: 卡片发送失败：…` 的中英拼接）。"""
+    if lang is None:
+        lang = user_lang(user_id)
     if cfg is None:
         cfg = app_config(user_id)
     if cfg is None:
-        return False, "未配置应用凭据（App ID / App Secret），先保存配置再发卡片"
+        return False, i18n.t(
+            "api", "未配置应用凭据（App ID / App Secret），先保存配置再发卡片", lang)
     binding = db.get_feishu_binding_by_user(user_id)
     if not binding:
-        return False, "尚未绑定飞书账号：设置页生成绑定码后在机器人单聊回复「绑定 <码>」"
+        return False, i18n.t(
+            "api", "尚未绑定飞书账号：设置页生成绑定码后在机器人单聊回复"
+                   "「绑定 <码>」", lang)
     cur = app_config(user_id) or {}
     thread_app = (inbound_thread_app_id(user_id)
                   if inbound_status(user_id).get("thread") else "")
-    card = setup_card(user_id, cur.get("app_id") or "", thread_app, _setup_nonce(user_id))
+    card = setup_card(user_id, cur.get("app_id") or "", thread_app,
+                      _setup_nonce(user_id), lang)
     try:
         rest_send_card(binding["open_id"], card, cfg)
         return True, ""
     except FeishuRestError as e:
+        if i18n.normalize_lang(lang) == "en" and not i18n.is_i18n_disabled():
+            return False, str(e)
         return False, f"卡片发送失败：{e}"
 
 
@@ -2456,7 +2731,8 @@ def maybe_send_switch_card(user_id, old_cfg):
         binding = db.get_feishu_binding_by_user(user_id)
         if not binding:
             return False
-        card = setup_card(user_id, new_app, old_app, _setup_nonce(user_id))
+        card = setup_card(user_id, new_app, old_app, _setup_nonce(user_id),
+                          user_lang(user_id))
         rest_send_card(binding["open_id"], card, old_cfg)
         return True
     except Exception as e:     # noqa: BLE001 - 自动卡片绝不反噬换凭据主流程
@@ -2465,7 +2741,7 @@ def maybe_send_switch_card(user_id, old_cfg):
         return False
 
 
-def _setup_switch(user_id, sender, cfg):
+def _setup_switch(user_id, sender, cfg, lang="zh"):
     """「换用新应用」：生成新绑定码 → 用**旧应用** DM 发出 → 停旧连接、用新凭据重连。
     顺序是设计要点：码必须先到用户手上（旧应用通道），再断旧连接（断完就发不出了）。
     返回 (toast, dm_text)；dm_text 为空表示已有独立 DM 说明（不再重复发）。"""
@@ -2473,80 +2749,117 @@ def _setup_switch(user_id, sender, cfg):
     new_app = str((cur or {}).get("app_id") or "")
     old_app = str((cfg or {}).get("app_id") or "")
     if cur is None or not new_app:
-        return ({"toast": {"type": "error", "content": "新应用凭据不完整"}},
-                "❌ 应用凭据不完整：先在设置页保存新应用的 App ID / App Secret，再点本按钮。")
+        return ({"toast": {"type": "error",
+                           "content": i18n.t("api", "新应用凭据不完整", lang)}},
+                i18n.t("api", "❌ 应用凭据不完整：先在设置页保存新应用的 "
+                              "App ID / App Secret，再点本按钮。", lang))
     if old_app == new_app:     # 同应用（只换了 secret）：直接重连，绑定关系不变
         if restart_inbound_for(user_id):
-            return ({"toast": {"type": "success", "content": "已重连"}},
-                    f"🔄 已用当前应用 `{new_app}` 重新建立长连接，绑定关系不变。")
-        return ({"toast": {"type": "error", "content": "重连失败，看私聊"}},
-                "❌ 重连失败：旧连接未在超时内退出；稍后再点一次，仍不行请重启站点。")
+            return ({"toast": {"type": "success",
+                               "content": i18n.t("api", "已重连", lang)}},
+                    i18n.t("api", "🔄 已用当前应用 `{app}` 重新建立长连接，"
+                                  "绑定关系不变。", lang, app=new_app))
+        return ({"toast": {"type": "error",
+                           "content": i18n.t("api", "重连失败，看私聊", lang)}},
+                i18n.t("api", "❌ 重连失败：旧连接未在超时内退出；稍后再点一次，"
+                              "仍不行请重启站点。", lang))
     code = make_bind_code(user_id)
-    text = (f"🔁 已切换到新应用 `{new_app}`。\n"
-            f"**新的绑定码：{code}**（10 分钟内有效）\n"
-            "本（旧）机器人的连接马上断开；请到新机器人单聊里回复：\n"
-            f"绑定 {code}")
+    text = i18n.t("api", "🔁 已切换到新应用 `{app}`。\n"
+                         "**新的绑定码：{code}**（10 分钟内有效）\n"
+                         "本（旧）机器人的连接马上断开；请到新机器人单聊里回复：\n"
+                         "绑定 {code}", lang, app=new_app, code=code)
     try:
         rest_send_text(sender, text, cfg)
     except FeishuRestError as e:
         # 码没送到就不动连接（否则用户既进不去新机器人、旧机器人也断了）
-        return ({"toast": {"type": "error", "content": "绑定码发送失败"}},
-                f"❌ 绑定码没能发进本会话（{e}）；重连未执行，可重试本按钮。")
+        return ({"toast": {"type": "error",
+                           "content": i18n.t("api", "绑定码发送失败", lang)}},
+                i18n.t("api", "❌ 绑定码没能发进本会话（{err}）；重连未执行，"
+                              "可重试本按钮。", lang, err=str(e)))
     if restart_inbound_for(user_id):
-        return ({"toast": {"type": "success", "content": "已切换，去新机器人绑定"}}, "")
-    return ({"toast": {"type": "error", "content": "已换应用但重连失败，看私聊"}},
-            f"⚠️ 新应用 `{new_app}` 重连失败（旧连接未退出）；绑定码 {code} 仍有效，"
-            "可稍后再点本按钮，或重启站点。")
+        return ({"toast": {"type": "success",
+                           "content": i18n.t("api", "已切换，去新机器人绑定", lang)}},
+                "")
+    return ({"toast": {"type": "error",
+                       "content": i18n.t("api", "已换应用但重连失败，看私聊", lang)}},
+            i18n.t("api", "⚠️ 新应用 `{app}` 重连失败（旧连接未退出）；"
+                          "绑定码 {code} 仍有效，可稍后再点本按钮，或重启站点。",
+                   lang, app=new_app, code=code))
 
 
-def _setup_restart(user_id):
+def _setup_restart(user_id, lang="zh"):
     """「重连入站」：停旧连接、用当前库里的凭据重连（同应用换 secret 的主路径）。"""
     cur = app_config(user_id)
     if cur is None:
-        return ({"toast": {"type": "error", "content": "应用凭据未配置"}},
-                "❌ 应用凭据未配置（App ID / App Secret）：先在设置页保存，再点本按钮。")
+        return ({"toast": {"type": "error",
+                           "content": i18n.t("api", "应用凭据未配置", lang)}},
+                i18n.t("api", "❌ 应用凭据未配置（App ID / App Secret）："
+                              "先在设置页保存，再点本按钮。", lang))
     app_id = str(cur.get("app_id") or "")
     if restart_inbound_for(user_id):
-        return ({"toast": {"type": "success", "content": "已重连"}},
-                f"🔄 已用当前应用 `{app_id}` 重新建立长连接。")
-    return ({"toast": {"type": "error", "content": "重连失败，看私聊"}},
-            "❌ 重连失败：旧连接未在超时内退出，稍后再点一次；仍不行请重启站点。")
+        return ({"toast": {"type": "success",
+                           "content": i18n.t("api", "已重连", lang)}},
+                i18n.t("api", "🔄 已用当前应用 `{app}` 重新建立长连接。",
+                       lang, app=app_id))
+    return ({"toast": {"type": "error",
+                       "content": i18n.t("api", "重连失败，看私聊", lang)}},
+            i18n.t("api", "❌ 重连失败：旧连接未在超时内退出，稍后再点一次；"
+                          "仍不行请重启站点。", lang))
 
 
-def _setup_bindcode(user_id):
+def _setup_bindcode(user_id, lang="zh"):
     """「生成绑定码」：发一个新码（10 分钟、内存态；旧码不失效，码均可用一次）。"""
     code = make_bind_code(user_id)
-    return ({"toast": {"type": "success", "content": "绑定码已私聊发你"}},
-            f"🔑 新的绑定码：{code}（10 分钟内有效）\n"
-            "· 未绑定：在本机器人单聊回复「绑定 <码>」\n"
-            "· 已绑定换号：先发「解绑」，再发「绑定 <码>」")
+    return ({"toast": {"type": "success",
+                       "content": i18n.t("api", "绑定码已私聊发你", lang)}},
+            i18n.t("api", "🔑 新的绑定码：{code}（10 分钟内有效）\n"
+                          "· 未绑定：在本机器人单聊回复「绑定 <码>」\n"
+                          "· 已绑定换号：先发「解绑」，再发「绑定 <码>」",
+                   lang, code=code))
 
 
-def _setup_slow_action(user_id, sender, action, cfg):
+def _setup_slow_action(user_id, sender, action, cfg, lang="zh"):
     """慢动作（自检/补齐配置/提交发布）后台执行，结果 DM 回执。绝不外抛。
-    走后台线程的理由：卡片回调要尽快返回 ACK，这几项是多次 REST（2~5s）。"""
+    走后台线程的理由：卡片回调要尽快返回 ACK，这几项是多次 REST（2~5s）。
+
+    doctor/provision 的**逐项数据**（label/detail/hint、error 原文）属站点设置页
+    文案面（T12d），这里只本地化飞书消息的框与回执句。"""
     try:
         if action == "doctor":
             out = doctor(user_id)
             summary = out.get("summary") or {}
             bad = [it for it in (out.get("items") or [])
                    if it.get("state") in ("fail", "warn")]
-            lines = [f"🩺 配置自检：ok {summary.get('ok', 0)} / fail {summary.get('fail', 0)} / "
-                     f"warn {summary.get('warn', 0)} / skip {summary.get('skip', 0)}"]
+            lines = [i18n.t(
+                "api", "🩺 配置自检：ok {ok} / fail {fail} / warn {warn} / "
+                       "skip {skip}", lang,
+                ok=summary.get("ok", 0), fail=summary.get("fail", 0),
+                warn=summary.get("warn", 0), skip=summary.get("skip", 0))]
             for it in bad:
-                lines.append(f"· {it.get('label')}：{it.get('detail')}"
-                             + (f"（{it.get('hint')}）" if it.get("hint") else ""))
+                lines.append(
+                    i18n.t("api", "· {label}：{detail}", lang,
+                           label=str(it.get("label")),
+                           detail=str(it.get("detail")))
+                    + (i18n.t("api", "（{hint}）", lang, hint=it.get("hint"))
+                       if it.get("hint") else ""))
             text = "\n".join(lines)
         elif action == "apply":
             out = provision_apply(user_id)
-            text = ("🧩 配置补齐成功：机器人能力 / 权限 / 长连接订阅 / 事件 / 回调已写入"
-                    "（需发布新版本生效）。" if out.get("ok")
-                    else f"❌ 配置补齐失败：{out.get('error') or '未知错误'}")
+            text = (i18n.t("api", "🧩 配置补齐成功：机器人能力 / 权限 / 长连接订阅 / "
+                                  "事件 / 回调已写入（需发布新版本生效）。", lang)
+                    if out.get("ok")
+                    else i18n.t("api", "❌ 配置补齐失败：{err}", lang,
+                                err=out.get("error")
+                                or i18n.t("api", "未知错误", lang)))
         else:
             out = provision_publish(user_id)
-            text = (f"🚀 已提交发布版本 {out.get('version') or ''}；"
-                    "仍需租户管理员审批后线上生效。" if out.get("ok")
-                    else f"❌ 提交发布失败：{out.get('error') or '未知错误'}")
+            text = (i18n.t("api", "🚀 已提交发布版本 {version}；"
+                                  "仍需租户管理员审批后线上生效。", lang,
+                           version=out.get("version") or "")
+                    if out.get("ok")
+                    else i18n.t("api", "❌ 提交发布失败：{err}", lang,
+                                err=out.get("error")
+                                or i18n.t("api", "未知错误", lang)))
         _dm_text(sender, text, cfg)
     except Exception as e:     # noqa: BLE001 - 后台线程兜底，绝不外抛
         print(f"feishu inbound: 接入卡片后台动作异常: {e!r}", file=sys.stderr, flush=True)
@@ -2555,42 +2868,56 @@ def _setup_slow_action(user_id, sender, action, cfg):
 def _on_setup_card_action(sender, value, cfg):
     """「飞书接入操作卡片」按钮回调（M11）：open_id→binding + nonce 双重复核 → 动作分发。
     返回 toast dict（None=不更新卡片）。`cfg` = 点击到达那条连接的应用凭据——旧应用发的
-    卡片必须用旧应用凭据回 DM，否则发不进当前单聊。"""
+    卡片必须用旧应用凭据回 DM，否则发不进当前单聊。
+
+    语言（T12b）：入口按点击者（= 卡片所属用户）解析一次并向下传，DM 与 toast 同语言；
+    未绑定者没有用户偏好可言 ⇒ R22 中文兜底（不读偏好）。"""
     binding = db.get_feishu_binding_by_open(sender)
     if binding is None:
-        _dm_text(sender, "尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ "
-                         "飞书设置，生成绑定码后在单聊回复「绑定 <码>」完成绑定", cfg)
-        return {"toast": {"type": "error", "content": "尚未绑定站点账号"}}
+        _dm_text(sender, i18n.t("api", "尚未绑定 Touchstone 账号：登录站点 → 侧栏「设置」→ "
+                                       "飞书设置，生成绑定码后在单聊回复「绑定 <码>」完成绑定",
+                                "zh"), cfg)
+        return {"toast": {"type": "error",
+                          "content": i18n.t("api", "尚未绑定站点账号", "zh")}}
     user_id = int(binding["user_id"])
+    lang = user_lang(user_id)
     uid = int(value.get("u") or 0)
     if uid and uid != user_id:
-        return {"toast": {"type": "error", "content": "该卡片不属于当前账号"}}
+        return {"toast": {"type": "error",
+                          "content": i18n.t("api", "该卡片不属于当前账号", lang)}}
     nonce = str(value.get("n") or "")
     item = _SETUP_NONCES.get(nonce)
     if item is None or item[0] != user_id:
-        return {"toast": {"type": "error", "content": "卡片已失效，发「接入」重新获取"}}
+        return {"toast": {"type": "error",
+                          "content": i18n.t("api", "卡片已失效，发「接入」重新获取",
+                                            lang)}}
     if time.time() > item[1]:
         _SETUP_NONCES.pop(nonce, None)
-        return {"toast": {"type": "error", "content": "卡片已过期，发「接入」重新获取"}}
+        return {"toast": {"type": "error",
+                          "content": i18n.t("api", "卡片已过期，发「接入」重新获取",
+                                            lang)}}
     action = str(value.get("a") or "")
     try:
         if action == "switch":
-            toast, text = _setup_switch(user_id, sender, cfg)
+            toast, text = _setup_switch(user_id, sender, cfg, lang)
         elif action == "restart":
-            toast, text = _setup_restart(user_id)
+            toast, text = _setup_restart(user_id, lang)
         elif action == "bindcode":
-            toast, text = _setup_bindcode(user_id)
+            toast, text = _setup_bindcode(user_id, lang)
         elif action in ("doctor", "apply", "publish"):
             # 慢动作：后台线程执行 + 立即 toast（避免卡片回调 ACK 超时）
             threading.Thread(target=_setup_slow_action,
-                             args=(user_id, sender, action, cfg), daemon=True,
+                             args=(user_id, sender, action, cfg, lang), daemon=True,
                              name=f"feishu-setup-{action}-{user_id}").start()
-            return {"toast": {"type": "success", "content": "已收到，结果稍后私聊发你"}}
+            return {"toast": {"type": "success",
+                              "content": i18n.t("api", "已收到，结果稍后私聊发你",
+                                                lang)}}
         else:
             return None
     except Exception as e:     # noqa: BLE001 - 卡片回调绝不外抛
         print(f"feishu inbound: 接入卡片动作异常: {e!r}", file=sys.stderr, flush=True)
-        return {"toast": {"type": "error", "content": "操作失败，详情看站点日志"}}
+        return {"toast": {"type": "error",
+                          "content": i18n.t("api", "操作失败，详情看站点日志", lang)}}
     if text:
         _dm_text(sender, text, cfg)
     return toast
@@ -2643,73 +2970,70 @@ def make_bind_code(user_id):
 
 
 def bind_user(code, open_id):
-    """校验绑定码并绑定（open_id 侧发起）。返回 None=成功，str=错误文案。"""
+    """校验绑定码并绑定（open_id 侧发起）。返回 None=成功，str=错误文案。
+
+    语言（R22）：**无效码**没有身份可依 ⇒ 中文兜底；**过期码**知道码所属 user_id
+    ⇒ 用该用户的偏好（用户可能在站点切过英文，重绑时不该突然回中文）。"""
     item = _BIND_CODES.pop((code or "").strip().upper(), None)
     if item is None:
-        return "绑定码无效或已被使用"
+        return i18n.t("api", "绑定码无效或已被使用", "zh")
     user_id, expires = item
+    lang = user_lang(user_id)
     if time.time() > expires:
-        return "绑定码已过期，请到站点重新生成"
+        return i18n.t("api", "绑定码已过期，请到站点重新生成", lang)
     db.set_feishu_binding(open_id, user_id)
     return None
 
 
-def execute_intent(binding, intent, sender_open_id, cfg=None):
+def execute_intent(binding, intent, sender_open_id, cfg=None, lang="zh"):
     """绑定用户身份执行意图；返回回复文案（空串=不回复）。项目/卡片访问一律先过
     归属（list_projects(user_id) 限用户项目），异常统一转友好文案。
     cfg = 本次消息所属应用的凭据（转交通用对话层做卡片/回执）。"""
     action, g = intent["action"], intent["groups"]
     try:
         if action == "help":
-            return HELP_TEXT
+            return help_text(lang)
         if action == "bind":
-            return "当前账号已绑定，无需重复绑定"
+            return i18n.t("api", "当前账号已绑定，无需重复绑定", lang)
         if action == "unbind":
             db.del_feishu_binding_by_open(sender_open_id)
-            return "已解绑。重新绑定请到站点生成新的绑定码"
+            return i18n.t("api", "已解绑。重新绑定请到站点生成新的绑定码", lang)
         if action == "default_project":
-            return _set_default_project(binding, g[0] or "")
+            return _set_default_project(binding, g[0] or "", lang=lang)
         if action in ("current", "projects", "sessions", "new", "use", "leave"):
-            return feishu_conv.conv_intent(binding, action, g, sender_open_id, cfg)
-        return _execute_board_action(binding, intent, sender_open_id)
+            return feishu_conv.conv_intent(binding, action, g, sender_open_id, cfg,
+                                          lang)
+        return _execute_board_action(binding, intent, sender_open_id, lang)
     except FeishuRestError:
-        return "飞书接口调用失败，请稍后重试"
+        return i18n.t("api", "飞书接口调用失败，请稍后重试", lang)
     except Exception:
-        return "指令执行失败，请稍后重试"
+        return i18n.t("api", "指令执行失败，请稍后重试", lang)
 
 
-def _set_default_project(binding, name, project_id=0):
+def _set_default_project(binding, name, project_id=0, lang=None):
     """设置单聊默认项目：`project_id` 非 0 时**按 id** 设（卡片点选 `t=dp` 路径），
     否则按名匹配（精确名 → 唯一包含匹配）。两条路径共用
-    `feishu_conv.set_default_project`，换项目时自动清当前会话（设计 §3.2）。"""
+    `feishu_conv.set_default_project`，换项目时自动清当前会话（设计 §3.2）。
+
+    `lang` 缺省（None）时按绑定用户偏好解析——与 Node 入口 `langOfBinding` 同口径：
+    显式 `lang` 优先（文本指令入口已解析一次向下传），直调（单测/未来的卡片路径）也不会
+    静默回落中文。"""
+    if lang is None:
+        lang = user_lang(binding["user_id"])
     if project_id:
         project = feishu_conv._project_by_id(binding, project_id)
         if project is None:
-            return "项目不在你的项目列表"
-        return feishu_conv.set_default_project(binding, project)
+            return i18n.t("api", "项目不在你的项目列表", lang)
+        return feishu_conv.set_default_project(binding, project, lang)
     user_id = binding["user_id"]
     projects = db.list_projects(user_id)
     for p in projects:
         if p["name"] == name:
-            return feishu_conv.set_default_project(binding, p)
+            return feishu_conv.set_default_project(binding, p, lang)
     hits = [p for p in projects if name in p["name"]]
     if len(hits) == 1:
-        return feishu_conv.set_default_project(binding, hits[0])
-    return f"项目「{name}」不在你的项目列表"
-
-
-def _find_user_card(user_id, key):
-    """找卡并消歧（文本指令与 DM 卡片按钮回调共用）：纯数字按 id 前缀、否则标题
-    包含，仅限用户自己的项目（多用户隔离）。返回 (project, card) 或 (None, 错误文案)。"""
-    hits = _find_cards(user_id, key)
-    if not hits:
-        return None, f"没有找到匹配「{key}」的卡片（仅搜你自己的项目；支持 id 前缀/标题包含）"
-    if len(hits) > 1:
-        lines = ["匹配到多张卡，请用更精确的 id 或关键字："]
-        for p, c in hits[:6]:
-            lines.append(f"· #{c['id']} [{p['name']}] {(c['title'] or '')[:30]}")
-        return None, "\n".join(lines)
-    return hits[0], ""
+        return feishu_conv.set_default_project(binding, hits[0], lang)
+    return i18n.t("api", "项目「{name}」不在你的项目列表", lang, name=name)
 
 
 # ---------- 多选类「卡片点选」暂存态（2026-10-07 第三/四档） ----------
@@ -2823,7 +3147,7 @@ def _toast(kind, content):
     return {"toast": {"type": kind, "content": content}}
 
 
-def _answer_multi_click(p, c, value, action):
+def _answer_multi_click(p, c, value, action, lang="zh"):
     """多选类点选卡回调（多子题「逐题点选卡」与单题多选 mini 表单共用）：
     把该题答案写进暂存，**答满即整批送达**。返回 `(DM 回执文案 or "", toast 载荷)`。
 
@@ -2835,61 +3159,74 @@ def _answer_multi_click(p, c, value, action):
     import board
     st = board.interaction_of_sid(c["session_id"] or "")
     if not st or not st.get("pending"):
-        return (f"卡片 #{c['id']} 当前没有等待中的提问", _toast("error", "提问已结束"))
+        return (i18n.t("api", "卡片 #{cid} 当前没有等待中的提问", lang, cid=c["id"]),
+                _toast("error", i18n.t("api", "提问已结束", lang)))
     if st.get("kind") != "question":
-        return (f"卡片 #{c['id']} 当前等待的不是提问，"
-                f"请回复「同意 {c['id']}」或「拒绝 {c['id']}」",
-                _toast("error", "该等待是审批"))
+        return (i18n.t("api", "卡片 #{cid} 当前等待的不是提问，"
+                              "请回复「同意 {cid}」或「拒绝 {cid}」",
+                      lang, cid=c["id"]),
+                _toast("error", i18n.t("api", "该等待是审批", lang)))
     if not st.get("answerable"):
-        return (_NO_REMOTE_ANSWER_HINT,
-                _toast("error", "请到 dsh 会话窗口作答"))
+        return (i18n.t("api", _NO_REMOTE_ANSWER_HINT, lang),
+                _toast("error", i18n.t("api", "请到 dsh 会话窗口作答", lang)))
     qs = [q for q in (st.get("questions") or []) if q]
     n = len(qs)
     if n < 1:
-        return (f"卡片 #{c['id']} 当前没有等待中的提问", _toast("error", "提问已结束"))
+        return (i18n.t("api", "卡片 #{cid} 当前没有等待中的提问", lang, cid=c["id"]),
+                _toast("error", i18n.t("api", "提问已结束", lang)))
     if n == 1 and not (qs[0] or {}).get("multi_select"):
-        return (f"该提问是单选题，请用卡片上的选项按钮，或回复"
-                f"「作答 {c['id']} <选项序号>」",
-                _toast("error", "单题单选请用按钮"))
+        return (i18n.t("api", "该提问是单选题，请用卡片上的选项按钮，或回复"
+                              "「作答 {cid} <选项序号>」", lang, cid=c["id"]),
+                _toast("error", i18n.t("api", "单题单选请用按钮", lang)))
     try:
         no = int(value.get("n"))
     except (TypeError, ValueError):
         no = 0
     if no < 1 or no > n:
-        return ("题号无效（卡片可能已过期），请重新作答",
-                _toast("error", "题号无效"))
+        return (i18n.t("api", "题号无效（卡片可能已过期），请重新作答", lang),
+                _toast("error", i18n.t("api", "题号无效", lang)))
     q = qs[no - 1] or {}
     opts = q.get("options") or []
     if not opts:
-        return (f"第 {no} 题没有选项，请回复「作答 {c['id']} {no}:<文字>」",
-                _toast("error", "该题请写文字"))
+        return (i18n.t("api", "第 {no} 题没有选项，请回复「作答 {cid} {no}:<文字>」",
+                       lang, no=no, cid=c["id"]),
+                _toast("error", i18n.t("api", "该题请写文字", lang)))
     idxs = _multi_click_index(action, bool(q.get("multi_select")),
                               f"mq{c['id']}_{no}")
     if idxs is None:
-        return (f"没收到你选的选项，请改用「作答 {c['id']} {no}:<选项序号>」",
-                _toast("error", "未收到选项，请看单聊"))
+        return (i18n.t("api", "没收到你选的选项，请改用「作答 {cid} {no}:<选项序号>」",
+                       lang, cid=c["id"], no=no),
+                _toast("error", i18n.t("api", "未收到选项，请看单聊", lang)))
     if any(i < 1 or i > len(opts) for i in idxs):
-        return (f"第 {no} 题选项序号无效（共 {len(opts)} 个选项）",
-                _toast("error", "选项无效"))
+        return (i18n.t("api", "第 {no} 题选项序号无效（共 {count} 个选项）", lang,
+                       no=no, count=len(opts)),
+                _toast("error", i18n.t("api", "选项无效", lang)))
     if len(idxs) > 1 and not q.get("multi_select"):
-        return (f"第 {no} 题为单选，请只选一项", _toast("error", "单选只能选一项"))
+        return (i18n.t("api", "第 {no} 题为单选，请只选一项", lang, no=no),
+                _toast("error", i18n.t("api", "单选只能选一项", lang)))
     val = ",".join(str(i) for i in sorted(set(idxs)))   # 与文本指令同一形态
     done, total, ready = _mq_put(c["id"], st.get("qid"), n, no, val)
     if not ready:
-        return ("", _toast("success", f"已记下第 {no} 题（{done}/{total}）"))
+        return ("", _toast("success",
+                           i18n.t("api", "已记下第 {no} 题（{done}/{total}）", lang,
+                                  no=no, done=done, total=total)))
     parts = _mq_take(c["id"], st.get("qid"), n)
     if len(parts) < n:
         # 极端竞态（取走前被 TTL 清掉/并发取走）：不提交半份，让用户重选
-        return ("作答未提交（暂存已过期），请重新逐题选择",
-                _toast("error", "暂存过期，请重选"))
-    answers, err = _multi_answers(qs, parts)
+        return (i18n.t("api", "作答未提交（暂存已过期），请重新逐题选择", lang),
+                _toast("error", i18n.t("api", "暂存过期，请重选", lang)))
+    answers, err = _multi_answers(qs, parts, lang)
     if err:
-        return (f"作答未提交：{err}", _toast("error", "作答未提交"))
+        return (i18n.t("api", "作答未提交：{err}", lang, err=str(err)),
+                _toast("error", i18n.t("api", "作答未提交", lang)))
     err = board.answer_interaction(p, c, st.get("qid"), answers)
     if err:
-        return (f"作答失败：{err}", _toast("error", "作答失败"))
-    return (f"已收下：卡片 #{c['id']} {len(answers)} 道作答，排队送达中",
-            _toast("success", f"{len(answers)} 题已答完，已送达"))
+        return (i18n.t("api", "作答失败：{err}", lang, err=str(err)),
+                _toast("error", i18n.t("api", "作答失败", lang)))
+    return (i18n.t("api", "已收下：卡片 #{cid} {n} 道作答，排队送达中", lang,
+                   cid=c["id"], n=len(answers)),
+            _toast("success", i18n.t("api", "{n} 题已答完，已送达", lang,
+                                     n=len(answers))))
 
 
 def _multi_answer_parts(token):
@@ -2915,17 +3252,20 @@ def _multi_answer_parts(token):
     return [(no, val) for no, val in parts] if parts else None
 
 
-def _multi_answer_help(cid, qs):
+def _multi_answer_help(cid, qs, lang="zh"):
     """多子题作答语法回执（缺题/格式不符时给用户看）。
     两条路都可：卡片上逐题点选（点满自动送达），或一条指令按题号一次给全；
-    两者**可混用**——已点选的题不必在指令里重复给（见 `_answer_by_token`）。"""
-    return (f"该提问含 {len(qs)} 道子题：可在卡片上逐题点选（点满自动送达），"
-            f"或回复「作答 {cid} "
-            + " ".join(f"{i}:<选项序号>" for i in range(1, len(qs) + 1))
-            + "」一次答全；多选写「1:2,3」，自定义写「1:文字」")
+    两者**可混用**——已点选的题不必在群里重复给（见 `_answer_by_token`）。"""
+    marks = " ".join(i18n.t("api", "{no}:<选项序号>", lang, no=i)
+                     for i in range(1, len(qs) + 1))
+    return i18n.t("api",
+                  "该提问含 {n} 道子题：可在卡片上逐题点选（点满自动送达），"
+                  "或回复「作答 {cid} {marks}」一次答全；"
+                  "多选写「1:2,3」，自定义写「1:文字」",
+                  lang, n=len(qs), cid=str(cid), marks=marks)
 
 
-def _multi_answers(qs, parts):
+def _multi_answers(qs, parts, lang="zh"):
     """多题逐题值 → board.answer_interaction 的 answers 载荷。
 
     返回 `(answers, err)`：err 非空即 answers=None（**不提交**）。kind 规则对齐
@@ -2936,16 +3276,20 @@ def _multi_answers(qs, parts):
     seen = {}
     for no, val in parts:
         if no < 1 or no > n:
-            return None, f"题号 {no} 无效（本提问共 {n} 题）"
+            return None, i18n.t("api", "题号 {no} 无效（本提问共 {n} 题）", lang,
+                                no=no, n=n)
         if no in seen:
-            return None, f"第 {no} 题重复作答"
+            return None, i18n.t("api", "第 {no} 题重复作答", lang, no=no)
         seen[no] = str(val or "").strip()
     missing = [i for i in range(1, n + 1) if i not in seen]
     if missing:
-        heads = "、".join(
-            f"第 {i} 题（{(qs[i - 1] or {}).get('header') or '未命名'}）"
+        unnamed = i18n.t("api", "未命名", lang)
+        heads = i18n.t("api", "、", lang).join(
+            i18n.t("api", "第 {no} 题（{name}）", lang,
+                   no=i, name=(qs[i - 1] or {}).get("header") or unnamed)
             for i in missing)
-        return None, f"还差 {heads} 未作答，请一次答全 {n} 题"
+        return None, i18n.t("api", "还差 {heads} 未作答，请一次答全 {n} 题", lang,
+                            heads=heads, n=n)
     out = []
     for i, q in enumerate(qs, 1):
         q = q or {}
@@ -2955,13 +3299,18 @@ def _multi_answers(qs, parts):
         multi = bool(q.get("multi_select"))
         if re.fullmatch(r"\d+(?:\s*,\s*\d+)*", val):    # 序号形态（单个/逗号多选）
             if not opts:
-                return None, f"第 {i} 题没有选项，请直接写回答文字"
+                return None, i18n.t("api", "第 {no} 题没有选项，请直接写回答文字", lang,
+                                    no=i)
             idxs = [int(x) for x in re.split(r"\s*,\s*", val)]
             if any(x < 1 or x > len(opts) for x in idxs):
-                return None, (f"第 {i} 题选项序号无效（共 {len(opts)} 个选项）"
-                              if len(opts) > 1 else f"第 {i} 题只有一个选项，序号填 1")
+                return None, (i18n.t("api", "第 {no} 题选项序号无效（共 {count} 个选项）",
+                                     lang, no=i, count=len(opts))
+                              if len(opts) > 1
+                              else i18n.t("api", "第 {no} 题只有一个选项，序号填 1",
+                                          lang, no=i))
             if len(idxs) > 1 and not multi:
-                return None, f"第 {i} 题为单选，请只给一个序号"
+                return None, i18n.t("api", "第 {no} 题为单选，请只给一个序号", lang,
+                                    no=i)
             ids = [str((opts[x - 1] or {}).get("id") or "") for x in idxs]
             if len(ids) > 1:
                 out.append({"wire": wire, "kind": "multi", "option_ids": ids})
@@ -2969,28 +3318,31 @@ def _multi_answers(qs, parts):
                 out.append({"wire": wire, "kind": "single", "option_id": ids[0]})
             continue
         if not val:
-            return None, f"第 {i} 题未作答"
+            return None, i18n.t("api", "第 {no} 题未作答", lang, no=i)
         if len(val) > 2000:
-            return None, f"第 {i} 题自定义输入过长（限 2000 字）"
+            return None, i18n.t("api", "第 {no} 题自定义输入过长（限 2000 字）", lang,
+                                no=i)
         if not q.get("allow_other", True):
-            return None, f"第 {i} 题不支持自定义输入，请给选项序号"
+            return None, i18n.t("api", "第 {no} 题不支持自定义输入，请给选项序号",
+                                lang, no=i)
         out.append({"wire": wire, "kind": "other", "text": val})
     return out, ""
 
 
-def _answer_by_token(p, c, token):
+def _answer_by_token(p, c, token, lang="zh"):
     """作答单题提问（文本指令「作答 卡号 …」与 DM 卡片选项按钮共用）：
     token = 选项序号 / 逗号分隔多序号（multi 形态）/ 自由文本（other 形态）。
     校验一律对 interaction_of_sid 缓存里的服务端值取白名单；返回回执文案。"""
     import board
     st = board.interaction_of_sid(c["session_id"] or "")
     if not st or not st.get("pending"):
-        return f"卡片 #{c['id']} 当前没有等待中的提问"
+        return i18n.t("api", "卡片 #{cid} 当前没有等待中的提问", lang, cid=c["id"])
     if st.get("kind") == "approval":
         # 审批等待收到「作答」：引导用同意/拒绝指令（answer_interaction 只收提问）
-        return f"该等待是工具审批，请回复「同意 {c['id']}」或「拒绝 {c['id']}」"
+        return i18n.t("api", "该等待是工具审批，请回复「同意 {cid}」或「拒绝 {cid}」",
+                      lang, cid=c["id"])
     if not st.get("answerable"):
-        return _NO_REMOTE_ANSWER_HINT
+        return i18n.t("api", _NO_REMOTE_ANSWER_HINT, lang)
     # 作答须一次给全全部子题（answers 逐题 record，漏项即未答）：多子题走
     # 「题号:值」逐题形态（2026-10-06 第二档），并与卡片点选暂存**合并**
     # （2026-10-07 第三档）——文本只需给没点过的题，缺题仍不提交
@@ -3000,28 +3352,29 @@ def _answer_by_token(p, c, token):
         staged = _mq_peek(c["id"], st.get("qid"))
         if parts is None:
             if not staged:
-                return _multi_answer_help(c["id"], qs)
+                return _multi_answer_help(c["id"], qs, lang)
             parts = sorted(staged.items())
         else:
             nos = [no for no, _ in parts]
             dup = next((x for x in nos if nos.count(x) > 1), None)
             if dup is not None:
-                return f"第 {dup} 题重复作答"
+                return i18n.t("api", "第 {no} 题重复作答", lang, no=dup)
             merged = dict(staged)
             merged.update({no: val for no, val in parts})
             parts = sorted(merged.items())
-        answers, err = _multi_answers(qs, parts)
+        answers, err = _multi_answers(qs, parts, lang)
         if err:
             return err
         err = board.answer_interaction(p, c, st.get("qid"), answers)
         _mq_drop(c["id"], st.get("qid"))     # 提交后被消费（成功与否都清，防陈旧）
         if err:
-            return f"作答失败：{err}"
-        return f"已收下：卡片 #{c['id']} {len(answers)} 道作答，排队送达中"
+            return i18n.t("api", "作答失败：{err}", lang, err=str(err))
+        return i18n.t("api", "已收下：卡片 #{cid} {n} 道作答，排队送达中", lang,
+                      cid=c["id"], n=len(answers))
     if _multi_answer_parts(token) is not None:
         # 单题提问收到「1:2」这类逐题语法：明确纠正，别把它当自由文本提交
-        return (f"该提问只有一道题，请回复「作答 {c['id']} <选项序号>」"
-                f"或「作答 {c['id']} <文字>」")
+        return i18n.t("api", "该提问只有一道题，请回复「作答 {cid} <选项序号>」"
+                              "或「作答 {cid} <文字>」", lang, cid=c["id"])
     q0 = qs[0] if qs else {}
     opts = q0.get("options") or st.get("options") or []
     wire = q0.get("id") or "q_0"
@@ -3031,115 +3384,141 @@ def _answer_by_token(p, c, token):
         # 序号形态：单序号→single（选项按 1 起序）；逗号多序号→multi（须允许多选）
         idxs = [int(x) for x in re.split(r"\s*,\s*", token)]
         if any(i < 1 or i > len(opts) for i in idxs):
-            return f"选项序号无效，可回复：{opt_list}" if opts else "该提问没有可选选项"
+            return (i18n.t("api", "选项序号无效，可回复：{options}", lang,
+                           options=opt_list) if opts
+                    else i18n.t("api", "该提问没有可选选项", lang))
         if len(idxs) == 1:
             opt = opts[idxs[0] - 1]
             err = board.answer_interaction(p, c, st.get("qid"),
                                            [{"wire": wire, "kind": "single",
                                              "option_id": (opt or {}).get("id")}])
             if err:
-                return f"作答失败：{err}"
-            return (f"已收下：卡片 #{c['id']} 选择「{(opt or {}).get('label', '')}」，"
-                    "排队送达中")
+                return i18n.t("api", "作答失败：{err}", lang, err=str(err))
+            return i18n.t("api", "已收下：卡片 #{cid} 选择「{label}」，排队送达中",
+                          lang, cid=c["id"], label=(opt or {}).get("label", ""))
         if not q0.get("multi_select"):
-            return "该问题不支持多选，请回复单个选项序号"
+            return i18n.t("api", "该问题不支持多选，请回复单个选项序号", lang)
         chosen = [opts[i - 1] for i in idxs]
         err = board.answer_interaction(p, c, st.get("qid"),
                                        [{"wire": wire, "kind": "multi",
                                          "option_ids": [(o or {}).get("id")
                                                         for o in chosen]}])
         if err:
-            return f"作答失败：{err}"
-        labels = "、".join((o or {}).get("label", "") for o in chosen)
-        return f"已收下：卡片 #{c['id']} 多选「{labels}」，排队送达中"
+            return i18n.t("api", "作答失败：{err}", lang, err=str(err))
+        labels = i18n.t("api", "、", lang).join(
+            (o or {}).get("label", "") for o in chosen)
+        return i18n.t("api", "已收下：卡片 #{cid} 多选「{labels}」，排队送达中", lang,
+                      cid=c["id"], labels=labels)
     # 文本形态：自定义输入（须题目 allow_other；无选项提问同样按文本处理）
     if not q0.get("allow_other"):
         if opts:
-            return f"该问题不支持自定义输入，可回复选项序号：{opt_list}"
-        return "该提问无选项且不支持自定义输入，请到站点会话窗口处理"
+            return i18n.t("api", "该问题不支持自定义输入，可回复选项序号：{options}",
+                          lang, options=opt_list)
+        return i18n.t("api", "该提问无选项且不支持自定义输入，请到站点会话窗口处理", lang)
     if len(token) > 2000:
-        return "输入内容过长（限 2000 字）"
+        return i18n.t("api", "输入内容过长（限 2000 字）", lang)
     err = board.answer_interaction(p, c, st.get("qid"),
                                    [{"wire": wire, "kind": "other",
                                      "text": token}])
     if err:
-        return f"作答失败：{err}"
-    return f"已收下：卡片 #{c['id']} 自定义回答，排队送达中"
+        return i18n.t("api", "作答失败：{err}", lang, err=str(err))
+    return i18n.t("api", "已收下：卡片 #{cid} 自定义回答，排队送达中", lang,
+                  cid=c["id"])
 
 
-def _decide_approval(p, c, decision, scope):
+def _decide_approval(p, c, decision, scope, lang="zh"):
     """审批决定（文本指令「同意/拒绝 卡片」与 DM 卡片按钮共用）：decision ∈
     approved/rejected，scope="session" 本会话内自动放行；经 board.answer_approval
     入统一队列、补位启动时送达（其余校验由 board 白名单把关）。返回回执文案。"""
     import board
     st = board.interaction_of_sid(c["session_id"] or "")
     if not st or not st.get("pending") or st.get("kind") != "approval":
-        return (f"卡片 #{c['id']} 当前没有等待中的审批"
-                f"（提问类请回复「作答 {c['id']} <选项序号|文字>」）")
+        return i18n.t("api", "卡片 #{cid} 当前没有等待中的审批"
+                              "（提问类请回复「作答 {cid} <选项序号|文字>」）",
+                      lang, cid=c["id"])
     aid = str(st.get("approval_id") or "")
     if not aid:
-        return "审批不存在或已过期，请到站点会话窗口处理"
+        return i18n.t("api", "审批不存在或已过期，请到站点会话窗口处理", lang)
     err = board.answer_approval(p, c, aid, decision, scope)
     if err:
-        return f"审批失败：{err}"
-    verb = "已批准" if decision == "approved" else "已拒绝"
-    tail = "（本会话内同类调用自动放行）" if scope == "session" else ""
-    return f"✅ 卡片 #{c['id']} 审批{verb}{tail}，排队送达中"
+        return i18n.t("api", "审批失败：{err}", lang, err=str(err))
+    verb = i18n.t("api", "已批准" if decision == "approved" else "已拒绝", lang)
+    tail = (i18n.t("api", "（本会话内同类调用自动放行）", lang)
+            if scope == "session" else "")
+    return i18n.t("api", "✅ 卡片 #{cid} 审批{verb}{tail}，排队送达中", lang,
+                  cid=c["id"], verb=verb, tail=tail)
 
 
-def _execute_board_action(binding, intent, sender_open_id):
+def _execute_board_action(binding, intent, sender_open_id, lang="zh"):
     """看板/任务类动作：状态/找卡/通过/驳回/作答/同意/拒绝。
     函数级 import board（board 模块级 import feishu，防循环；runner._process_card
     同款处理）。所有动作限定在绑定用户自己的项目内；作答/审批核心在
-    _answer_by_token / _decide_approval（与卡片回调共用，防两路逻辑漂移）。"""
+    _answer_by_token / _decide_approval（与卡片回调共用，防两路逻辑漂移）。
+
+    语言（T12b）：`lang` 由文本指令入口按绑定用户解析一次并向下传，同一条回执的
+    数据（项目名/卡标题/列 key/错误详情）不译；`_COL_LABELS`/`_TASK_STATUS` 的键
+    （todo/blocked…）不动，只翻译展示值。"""
     import board
     action, g = intent["action"], intent["groups"]
     user_id = binding["user_id"]
     if action == "status":
-        p, err = _resolve_project(binding, g[0])
+        p, err = _resolve_project(binding, g[0], lang)
         if p is None:
             return err
-        return _board_summary(p)
+        return _board_summary(p, lang)
     key = (g[0] if g else "").strip()
-    found, err = _find_user_card(user_id, key)
+    found, err = _find_user_card(user_id, key, lang)
     if found is None:
         return err
     p, c = found
     if action == "card":
-        return _card_detail(p, c)
+        return _card_detail(p, c, lang)
     if action == "approve":
         if c["column_key"] != "review":
-            return f"卡片 #{c['id']} 不在「待审核」列（当前 {c['column_key']}），无法通过"
+            return i18n.t("api", "卡片 #{cid} 不在「待审核」列"
+                                  "（当前 {column}），无法通过", lang,
+                          cid=c["id"], column=c["column_key"])
         _, err = board.move_card(p, c["id"], "done")
         if err:
             if "merge_pending" in err:
                 # 独立 worktree 卡的待合并闸（2026-10-07 批次）：飞书侧没有弹框，
                 # 不替用户选「交给 agent 合并 / 仅通过」，引导去网页看板操作
                 mp = err.get("merge_pending") or {}
-                return (f"卡片 #{c['id']} 还有 {mp.get('ahead', 0)} 个提交没回流主分支"
-                        f"（{mp.get('branch', '')} → {mp.get('target', '')}）；"
-                        f"请在网页看板上点「通过」，选择「交给 agent 合并」或「仅通过（不合并）」")
-            return "审核失败：" + str(err.get("error") or err.get("blocked") or "门禁拦截")
-        return f"✅ 卡片 #{c['id']} {(c['title'] or '')[:30]} 已审核通过"
+                return i18n.t(
+                    "api", "卡片 #{cid} 还有 {ahead} 个提交没回流主分支"
+                           "（{branch} → {target}）；请在网页看板上点「通过」，"
+                           "选择「交给 agent 合并」或「仅通过（不合并）」", lang,
+                    cid=c["id"], ahead=mp.get("ahead", 0),
+                    branch=mp.get("branch", ""), target=mp.get("target", ""))
+            return i18n.t("api", "审核失败：{error}", lang,
+                          error=str(err.get("error") or err.get("blocked")
+                                    or i18n.t("api", "门禁拦截", lang)))
+        return i18n.t("api", "✅ 卡片 #{cid} {title} 已审核通过", lang,
+                      cid=c["id"], title=(c["title"] or "")[:30])
     if action == "reject":
         if c["column_key"] != "review":
-            return f"卡片 #{c['id']} 不在「待审核」列（当前 {c['column_key']}），无法驳回"
+            return i18n.t("api", "卡片 #{cid} 不在「待审核」列"
+                                  "（当前 {column}），无法驳回", lang,
+                          cid=c["id"], column=c["column_key"])
         try:
-            board.start_card(p, c, extra=g[1] or "")
+            # T13：卡片语言首轮冻结＝本入口已解析的**收件人**语言（R22 语言源），
+            # 不是命令文案/展示值；打回起跑同样走 start_card 的统一冻结点。
+            board.start_card(p, c, extra=g[1] or "", lang=lang)
         except RuntimeError as e:
-            return f"打回失败：{e}"
-        return f"↩️ 卡片 #{c['id']} 已打回继续开发，打回意见将注入 agent"
+            return i18n.t("api", "打回失败：{error}", lang, error=str(e))
+        return i18n.t("api", "↩️ 卡片 #{cid} 已打回继续开发，"
+                              "打回意见将注入 agent", lang, cid=c["id"])
     if action == "answer":
-        return _answer_by_token(p, c, (g[1] or "").strip())
+        return _answer_by_token(p, c, (g[1] or "").strip(), lang)
     if action in ("agree", "deny"):
         decision = "approved" if action == "agree" else "rejected"
         scope = ("session" if (action == "agree"
                                and (g[1] if len(g) > 1 else "") == "会话") else "")
-        return _decide_approval(p, c, decision, scope)
-    return HELP_TEXT
+        return _decide_approval(p, c, decision, scope, lang)
+    return help_text(lang)
 
 
-def _resolve_project(binding, name):
+def _resolve_project(binding, name, lang="zh"):
     """项目定位（歧义消解）：显式项目名（精确→唯一包含）→ 单聊默认项目 →
     用户唯一项目 → 报错列出可选。返回 (project, "") 或 (None, 错误文案)。"""
     user_id = binding["user_id"]
@@ -3151,7 +3530,8 @@ def _resolve_project(binding, name):
         hits = [p for p in projects if name in p["name"]]
         if len(hits) == 1:
             return hits[0], ""
-        return None, f"项目「{name}」不在你的项目列表"
+        return None, i18n.t("api", "项目「{name}」不在你的项目列表", lang,
+                            name=name)
     if binding["default_project_id"]:
         for p in projects:
             if p["id"] == binding["default_project_id"]:
@@ -3159,9 +3539,10 @@ def _resolve_project(binding, name):
     if len(projects) == 1:
         return projects[0], ""
     if not projects:
-        return None, "你还没有项目，请先到站点创建"
-    return None, ("请指明项目（回复「状态 项目名」），可选：" +
-                  "、".join(p["name"] for p in projects[:8]))
+        return None, i18n.t("api", "你还没有项目，请先到站点创建", lang)
+    return None, (i18n.t("api", "请指明项目（回复「状态 项目名」），可选：", lang)
+                  + i18n.t("api", "、", lang).join(
+                      p["name"] for p in projects[:8]))
 
 
 def _find_cards(user_id, key):
@@ -3179,39 +3560,73 @@ def _find_cards(user_id, key):
     return hits
 
 
-def _card_detail(p, c):
+def _find_user_card(user_id, key, lang="zh"):
+    """找卡并消歧（文本指令与 DM 卡片按钮回调共用）：纯数字按 id 前缀、否则标题
+    包含，仅限用户自己的项目（多用户隔离）。返回 (project, card) 或 (None, 错误文案)。"""
+    hits = _find_cards(user_id, key)
+    if not hits:
+        return None, i18n.t(
+            "api", "没有找到匹配「{key}」的卡片（仅搜你自己的项目；"
+                   "支持 id 前缀/标题包含）", lang, key=key)
+    if len(hits) > 1:
+        lines = [i18n.t("api", "匹配到多张卡，请用更精确的 id 或关键字：", lang)]
+        for p, c in hits[:6]:
+            lines.append(f"· #{c['id']} [{p['name']}] {(c['title'] or '')[:30]}")
+        return None, "\n".join(lines)
+    return hits[0], ""
+
+
+def _card_detail(p, c, lang="zh"):
     """卡片详情文案：列位/阻塞原因/最近错误/会话。"""
-    lines = [f"卡片 #{c['id']} [{p['name']}] {(c['title'] or '')[:40]}",
-             f"状态：{_COL_LABELS.get(c['column_key'], c['column_key'])}"]
+    lines = [i18n.t("api", "卡片 #{cid} [{project}] {title}", lang,
+                    cid=c["id"], project=p["name"],
+                    title=(c["title"] or "")[:40]),
+             i18n.t("api", "状态：{status}", lang,
+                    status=_col_label(c["column_key"], lang))]
     if c["column_key"] == "blocked":
-        lines.append(f"阻塞原因：{c.get('block_text') or c.get('block_kind') or '未知'}")
+        lines.append(i18n.t(
+            "api", "阻塞原因：{reason}", lang,
+            reason=c.get("block_text") or c.get("block_kind")
+            or i18n.t("api", "未知", lang)))
     if c.get("last_error"):
-        lines.append(f"最近错误：{c['last_error'][:120]}")
-    lines.append("回复「作答 %s <选项序号|文字>」回复提问；「同意 %s」/「拒绝 %s」"
-                 "处理审批；「通过 %s」完成审核；「驳回 %s 意见」打回"
-                 % (c["id"], c["id"], c["id"], c["id"], c["id"]))
+        lines.append(i18n.t("api", "最近错误：{error}", lang,
+                            error=c["last_error"][:120]))
+    lines.append(i18n.t(
+        "api", "回复「作答 {cid} <选项序号|文字>」回复提问；"
+               "「同意 {cid}」/「拒绝 {cid}」处理审批；"
+               "「通过 {cid}」完成审核；「驳回 {cid} 意见」打回",
+        lang, cid=c["id"]))
     return "\n".join(lines)
 
 
-def _board_summary(p):
+def _board_summary(p, lang="zh"):
     """项目摘要：任务队列计数与最近任务 + 看板五列计数 + 阻塞卡列表。"""
     tasks = db.list_tasks(p["id"]) or []
     n_run = sum(1 for t in tasks if t["status"] == "running")
     n_que = sum(1 for t in tasks if t["status"] == "queued")
-    lines = [f"[{p['name']}] 任务：运行中 {n_run} / 排队 {n_que}（共 {len(tasks)}）"]
+    lines = [i18n.t("api", "[{name}] 任务：运行中 {running} / 排队 {queued}"
+                           "（共 {total}）", lang,
+                    name=p["name"], running=n_run, queued=n_que,
+                    total=len(tasks))]
     for t in tasks:
         if t["status"] in ("running", "queued"):
-            lines.append(f"· #{t['id']} {t['name'][:30]}（{_TASK_STATUS.get(t['status'], t['status'])}）")
+            lines.append(i18n.t("api", "· #{tid} {name}（{status}）", lang,
+                                tid=t["id"], name=t["name"][:30],
+                                status=_task_status(t["status"], lang)))
     cards = [dict(c) for c in db.list_board_cards(p["id"])]
     by_col = {}
     for c in cards:
         by_col[c["column_key"]] = by_col.get(c["column_key"], 0) + 1
-    lines.append("看板：" + " ".join(
-        f"{_COL_LABELS.get(k, k)}{by_col.get(k, 0)}" for k in _COL_ORDER))
+    lines.append(i18n.t("api", "看板：", lang) + " ".join(
+        i18n.t("api", "{label}{count}", lang,
+               label=_col_label(k, lang), count=by_col.get(k, 0))
+        for k in _COL_ORDER))
     blocked = [c for c in cards if c["column_key"] == "blocked"]
     for c in blocked[:5]:
-        lines.append(f"⛔ #{c['id']} {(c['title'] or '')[:30]}"
-                     f"（{c.get('block_text') or c.get('block_kind') or ''}）")
+        lines.append(i18n.t(
+            "api", "⛔ #{cid} {title}（{reason}）", lang,
+            cid=c["id"], title=(c["title"] or "")[:30],
+            reason=c.get("block_text") or c.get("block_kind") or ""))
     return "\n".join(lines)
 
 
@@ -3220,6 +3635,19 @@ _COL_LABELS = {"todo": "待开发", "doing": "正在开发", "blocked": "阻塞"
                "review": "待审核", "done": "已完成"}
 _TASK_STATUS = {"queued": "排队", "running": "运行中", "done": "已完成",
                 "failed": "失败", "stopped": "已停止", "interrupted": "中断"}
+
+
+def _col_label(key, lang="zh"):
+    """看板列展示值（键 = 协议 token `todo/doing/…`，不译；未知键原样返回）。"""
+    label = _COL_LABELS.get(key)
+    return key if label is None else i18n.t("api", label, lang)
+
+
+def _task_status(key, lang="zh"):
+    """任务状态展示值（键 = DB 状态 token；未知键原样返回）。"""
+    label = _TASK_STATUS.get(key)
+    return key if label is None else i18n.t("api", label, lang)
+
 
 # ---------- 投递线程（outbox → 飞书） ----------
 
@@ -3301,37 +3729,48 @@ def start_notifier():
 
 # ---------- M5 配置自动化：凭据快检 / 应用配置补齐 ----------
 
-def verify_credentials(user_id):
+def verify_credentials(user_id, lang=None):
     """凭据快检（保存凭据后的即时反馈）：token 可取 → 机器人信息可读，两步。
 
     返回 {"ok": bool, "detail": str}，**绝不抛出**；无凭据时零请求。
-    今天保存凭据只写库不校验，错了只能翻日志——本函数是那个缺口的补口。"""
+    今天保存凭据只写库不校验，错了只能翻日志——本函数是那个缺口的补口。
+    语言（T12d）：``lang`` 为**请求语言**（None/zh ⇒ 存量中文逐字节不变）；
+    飞书上游错误原文（`str(e)`）与机器人名是动态/诊断值，按现状透传。"""
+    def _t(key, **vars):
+        return i18n.t("api", key, lang, **vars)
+
     cfg = app_config(user_id)
     if cfg is None:
-        return {"ok": False, "detail": "应用凭据未配置（App ID / App Secret）"}
+        return {"ok": False,
+                "detail": _t("应用凭据未配置（App ID / App Secret）")}
     try:
         _tenant_token(cfg)   # 第一步：凭据正确性（失败码 10003/10014 等）
         out = _rest("GET", "/open-apis/bot/v3/info", cfg=cfg)
         # /bot/v3/info 的 bot 在响应**顶层**（无 data 包裹，同 bot_open_id 的读法）
         bot = out.get("bot") or {}
-        name = bot.get("app_name") or "（未命名）"
+        name = bot.get("app_name") or _t("（未命名）")
         act = bot.get("activate_status")
-        tail = "已启用" if act == 2 else f"启用状态={act}（可能未发布/未启用）"
-        return {"ok": True, "detail": f"凭据可用：机器人 {name}（{tail}）"}
+        tail = (_t("已启用") if act == 2 else
+                _t("启用状态={act}（可能未发布/未启用）", act=str(act)))
+        return {"ok": True,
+                "detail": _t("凭据可用：机器人 {name}（{tail}）",
+                             name=name, tail=tail)}
     except FeishuRestError as e:
         return {"ok": False, "detail": str(e)}
     except Exception as e:   # 兜底：网络/形态异常一律转文案，不抛到 HTTP 层
-        return {"ok": False, "detail": f"探测失败: {e!r}"}
+        return {"ok": False, "detail": _t("探测失败: {error}", error=f"{e!r}")}
 
 
-def _apply_error(e):
-    """补齐失败的文案：缺 patch 权限给精确开通引导，其余原样透出。"""
+def _apply_error(e, lang=None):
+    """补齐失败的文案：缺 patch 权限给精确开通引导，其余原样透出。
+
+    语言（T12d）：固定引导走 `api` 词条（None/zh 逐字节不变）；上游错误原样。"""
     if _need_scope(e):
-        return _PATCH_SCOPE_HINT
+        return i18n.t("api", _PATCH_SCOPE_HINT, lang)
     return str(e)
 
 
-def provision_apply(user_id):
+def provision_apply(user_id, lang=None):
     """把平台所需的**机器人能力 + 权限 + 长连接订阅 + 事件 + 回调**一次补齐到
     用户自己的应用（只动本用户配置里的 app_id，前端永不传 app_id）。
 
@@ -3340,27 +3779,32 @@ def provision_apply(user_id):
     + add_events / callback.add_callbacks。失败即停并如实报告（缺
     application:application:patch 时给开通引导，不静默）。
 
-    返回 {"ok", "need_patch_scope", "error", "steps":[{key,label,ok,detail}]}。"""
+    返回 {"ok", "need_patch_scope", "error", "steps":[{key,label,ok,detail}]}。
+    语言（T12d）：``lang`` 为**请求语言**（None/zh ⇒ 存量中文逐字节不变）；
+    step 的 key/ok 是机器值不变，label/detail 走 `api` 词条。"""
+    def _t(key, **vars):
+        return i18n.t("api", key, lang, **vars)
+
     if not provision_enabled():
         return {"ok": False, "need_patch_scope": False, "steps": [],
-                "error": f"配置自动化已关闭（{PROVISION_ENV}=0）"}
+                "error": _t("配置自动化已关闭（{env}=0）", env=PROVISION_ENV)}
     cfg = app_config(user_id)
     if cfg is None:
         return {"ok": False, "need_patch_scope": False, "steps": [],
-                "error": "应用凭据未配置（App ID / App Secret），请先保存凭据"}
+                "error": _t("应用凭据未配置（App ID / App Secret），请先保存凭据")}
     app_id = cfg["app_id"]
     steps = []
     # ① 机器人能力（错误码 210041 即「未开启机器人能力」，先开它）
     try:
         _rest("PATCH", _APP_ABILITY_API % app_id,
               json_body={"bot": {"enable": True}}, cfg=cfg)
-        steps.append({"key": "ability", "label": "开启机器人能力",
-                      "ok": True, "detail": "已开启"})
+        steps.append({"key": "ability", "label": _t("开启机器人能力"),
+                      "ok": True, "detail": _t("已开启")})
     except FeishuRestError as e:
-        steps.append({"key": "ability", "label": "开启机器人能力",
+        steps.append({"key": "ability", "label": _t("开启机器人能力"),
                       "ok": False, "detail": str(e)})
         return {"ok": False, "need_patch_scope": _need_scope(e),
-                "error": _apply_error(e), "steps": steps}
+                "error": _apply_error(e, lang), "steps": steps}
     # ② 权限 + 订阅方式（长连接）+ 事件 + 回调（一次 PATCH，减少请求与半生效窗口）
     body = {
         "scope": {"add_scopes": [{"scope_name": n, "token_type": t}
@@ -3372,13 +3816,16 @@ def provision_apply(user_id):
     }
     try:
         _rest("PATCH", _APP_CONFIG_API % app_id, json_body=body, cfg=cfg)
-        steps.append({"key": "config", "label": "权限 / 长连接订阅 / 事件 / 回调",
-                      "ok": True, "detail": "已写入（需发布新版本后生效）"})
+        steps.append({"key": "config",
+                      "label": _t("权限 / 长连接订阅 / 事件 / 回调"),
+                      "ok": True,
+                      "detail": _t("已写入（需发布新版本后生效）")})
     except FeishuRestError as e:
-        steps.append({"key": "config", "label": "权限 / 长连接订阅 / 事件 / 回调",
+        steps.append({"key": "config",
+                      "label": _t("权限 / 长连接订阅 / 事件 / 回调"),
                       "ok": False, "detail": str(e)})
         return {"ok": False, "need_patch_scope": _need_scope(e),
-                "error": _apply_error(e), "steps": steps}
+                "error": _apply_error(e, lang), "steps": steps}
     return {"ok": True, "need_patch_scope": False, "error": "", "steps": steps}
 
 
@@ -3392,7 +3839,7 @@ def _doc_item(key, label, state, detail, hint=""):
     return {"key": key, "label": label, "state": state, "detail": detail, "hint": hint}
 
 
-def doctor(user_id, send_probe=False):
+def doctor(user_id, send_probe=False, lang=None, data_lang=None):
     """逐项配置体检（**只读为主**，绝不抛出）：把「存没存上、对不对、通不通」一次说清。
 
     八项：creds（凭据齐全）/ token（凭据有效）/ bot（机器人能力与启用状态）/
@@ -3401,53 +3848,68 @@ def doctor(user_id, send_probe=False):
     send_scope（发消息权限，send_probe=True 时才真发一条自检 DM，60s 频控）/
     webhook（默认推送地址已配）。
 
+    语言（两个维度，别混）：
+      - ``lang``（T12b）：`send_probe` 真发那条 DM 的**收件人**语言（None ⇒ 读绑定用户
+        偏好；不探测/被频控拦下时不读偏好）；
+      - ``data_lang``（T12d）：八项 label/detail/hint 的**请求语言**（None/zh ⇒ 存量
+        中文逐字节不变）。两者分开是因为 DM 收件人语言与页面请求语言可能不同（R22）。
     返回 {"items":[{key,label,state,detail,hint}], "summary":{ok,fail,warn,skip}}。"""
+    dlang = data_lang if data_lang is not None else "zh"
+
+    def _t(key, **vars):
+        return i18n.t("api", key, dlang, **vars)
+
     cfg = dict(user_config(user_id) or {})
     has_creds = bool(cfg.get("app_id") and cfg.get("app_secret"))
     items = [_doc_item(
-        "creds", "应用凭据（App ID / App Secret）",
+        "creds", _t("应用凭据（App ID / App Secret）"),
         "ok" if has_creds else "fail",
-        "已配置" if has_creds else "未配置",
-        "" if has_creds else "在「飞书机器人配置」填入 App ID 与 App Secret 并保存")]
+        _t("已配置") if has_creds else _t("未配置"),
+        "" if has_creds else _t("在「飞书机器人配置」填入 App ID 与 App Secret 并保存"))]
 
     token_ok = False
     if not has_creds:
-        items.append(_doc_item("token", "凭据有效性（tenant_access_token）",
-                               "skip", "凭据未配置，跳过", ""))
+        items.append(_doc_item("token", _t("凭据有效性（tenant_access_token）"),
+                               "skip", _t("凭据未配置，跳过"), ""))
     else:
         try:
             _tenant_token(cfg)
             token_ok = True
-            items.append(_doc_item("token", "凭据有效性（tenant_access_token）",
-                                   "ok", "token 获取成功", ""))
+            items.append(_doc_item("token", _t("凭据有效性（tenant_access_token）"),
+                                   "ok", _t("token 获取成功"), ""))
         except FeishuRestError as e:
-            items.append(_doc_item("token", "凭据有效性（tenant_access_token）",
+            # 上游错误原文（动态/诊断值）按现状透传，不翻译
+            items.append(_doc_item("token", _t("凭据有效性（tenant_access_token）"),
                                    "fail", str(e),
-                                   "核对取值：开发者后台 → 凭证与基础信息 的 App ID / App Secret"))
+                                   _t("核对取值：开发者后台 → 凭证与基础信息 的 "
+                                      "App ID / App Secret")))
         except Exception as e:
-            items.append(_doc_item("token", "凭据有效性（tenant_access_token）",
-                                   "fail", f"探测失败: {e!r}", "检查站点到 open.feishu.cn 的网络"))
+            items.append(_doc_item("token", _t("凭据有效性（tenant_access_token）"),
+                                   "fail", _t("探测失败: {error}", error=f"{e!r}"),
+                                   _t("检查站点到 open.feishu.cn 的网络")))
 
     if not token_ok:
-        items.append(_doc_item("bot", "机器人能力与启用状态",
-                               "skip", "凭据未通过，跳过", ""))
+        items.append(_doc_item("bot", _t("机器人能力与启用状态"),
+                               "skip", _t("凭据未通过，跳过"), ""))
     else:
         try:
             out = _rest("GET", "/open-apis/bot/v3/info", cfg=cfg)
             bot = out.get("bot") or {}
             act = bot.get("activate_status")
-            name = bot.get("app_name") or "（未命名）"
+            name = bot.get("app_name") or _t("（未命名）")
             ok = act == 2
             items.append(_doc_item(
-                "bot", "机器人能力与启用状态", "ok" if ok else "warn",
-                f"{name}（activate_status={act}）",
-                "" if ok else "应用能力 → 添加「机器人」，并在版本管理与发布里发布后生效"))
+                "bot", _t("机器人能力与启用状态"), "ok" if ok else "warn",
+                _t("{name}（activate_status={act}）", name=name, act=str(act)),
+                "" if ok else
+                _t("应用能力 → 添加「机器人」，并在版本管理与发布里发布后生效")))
         except FeishuRestError as e:
-            items.append(_doc_item("bot", "机器人能力与启用状态", "fail", str(e),
-                                   "应用能力 → 添加应用能力 → 机器人，然后创建版本发布"))
+            items.append(_doc_item("bot", _t("机器人能力与启用状态"), "fail", str(e),
+                                   _t("应用能力 → 添加应用能力 → 机器人，然后创建版本发布")))
         except Exception as e:
-            items.append(_doc_item("bot", "机器人能力与启用状态", "fail",
-                                   f"探测失败: {e!r}", "稍后重试"))
+            items.append(_doc_item("bot", _t("机器人能力与启用状态"), "fail",
+                                   _t("探测失败: {error}", error=f"{e!r}"),
+                                   _t("稍后重试")))
 
     st = inbound_status(user_id)
     # M10（2026-10-17）：线程活着但**绑的不是配置里的应用** ⇒ 换凭据后没重启站点。
@@ -3455,60 +3917,69 @@ def doctor(user_id, send_probe=False):
     # 「线程绑的 app」走独立访问口 `inbound_thread_app_id`，不动 `inbound_status` 的形状。
     cfg_app, thread_app = (cfg.get("app_id") or ""), inbound_thread_app_id(user_id)
     if not has_creds:
-        items.append(_doc_item("inbound_ws", "入站长连接（长连接）", "skip",
-                               "凭据未配置，跳过", ""))
+        items.append(_doc_item("inbound_ws", _t("入站长连接（长连接）"), "skip",
+                               _t("凭据未配置，跳过"), ""))
     elif st.get("thread") and cfg_app and thread_app and thread_app != cfg_app:
         items.append(_doc_item(
-            "inbound_ws", "入站长连接（长连接）", "warn",
-            f"连接线程仍绑在 {thread_app}（配置已改为 {cfg_app}）",
-            "在机器人私聊发「接入」点「换用新应用」即可免重启切换；仍不生效再重启站点"))
+            "inbound_ws", _t("入站长连接（长连接）"), "warn",
+            _t("连接线程仍绑在 {thread}（配置已改为 {cfg}）",
+               thread=thread_app, cfg=cfg_app),
+            _t("在机器人私聊发「接入」点「换用新应用」即可免重启切换；"
+               "仍不生效再重启站点")))
     else:
         items.append(_doc_item(
-            "inbound_ws", "入站长连接（长连接）",
+            "inbound_ws", _t("入站长连接（长连接）"),
             "ok" if st.get("thread") else "fail",
-            "连接线程运行中" if st.get("thread") else "未运行",
+            _t("连接线程运行中") if st.get("thread") else _t("未运行"),
             "" if st.get("thread") else
-            "凭据保存后自动连接；仍不启动看站点日志，并确认事件订阅方式为「长连接」"))
+            _t("凭据保存后自动连接；仍不启动看站点日志，并确认事件订阅方式为「长连接」")))
 
     last_ev = _LAST_EVENT_TS.get(user_id)
     if not has_creds:
-        items.append(_doc_item("inbound_event", "事件订阅（真实收到过消息）", "skip",
-                               "凭据未配置，跳过", ""))
+        items.append(_doc_item("inbound_event", _t("事件订阅（真实收到过消息）"), "skip",
+                               _t("凭据未配置，跳过"), ""))
     elif last_ev and (time.time() - last_ev) <= EVENT_FRESH_S:
-        items.append(_doc_item("inbound_event", "事件订阅（真实收到过消息）", "ok",
-                               f"{int(time.time() - last_ev)} 秒前收到过事件", ""))
+        items.append(_doc_item("inbound_event", _t("事件订阅（真实收到过消息）"), "ok",
+                               _t("{n} 秒前收到过事件",
+                                  n=int(time.time() - last_ev)), ""))
     else:
         items.append(_doc_item(
-            "inbound_event", "事件订阅（真实收到过消息）", "warn",
-            "尚未收到过事件" if not last_ev else "最近一次事件已超过 5 分钟",
-            "给机器人**发一条消息**验证：开发者后台 → 事件与回调 → 订阅方式选「长连接」"
-            "并添加 im.message.receive_v1（按钮交互还需回调 card.action.trigger）"))
+            "inbound_event", _t("事件订阅（真实收到过消息）"), "warn",
+            _t("尚未收到过事件") if not last_ev else _t("最近一次事件已超过 5 分钟"),
+            _t("给机器人**发一条消息**验证：开发者后台 → 事件与回调 → "
+               "订阅方式选「长连接」并添加 im.message.receive_v1"
+               "（按钮交互还需回调 card.action.trigger）")))
 
     if not token_ok:
-        items.append(_doc_item("slash_scope", "斜杠指令权限", "skip", "凭据未通过，跳过", ""))
+        items.append(_doc_item("slash_scope", _t("斜杠指令权限"), "skip",
+                               _t("凭据未通过，跳过"), ""))
     else:
         try:
-            sl = slash_status(user_id)
+            # T12d：slash 诊断也跟随请求语言（固定引导有 api 词条，上游原文透传）
+            sl = slash_status(user_id, dlang)
         except Exception as e:
             # slash_status 只吞 FeishuRestError；响应形态意外（如 data 非 dict）会漏出
             # 其他异常——doctor 承诺绝不外抛，这里降级为该项 fail。
-            items.append(_doc_item("slash_scope", "斜杠指令权限", "fail",
-                                   f"探测失败: {e!r}",
-                                   "稍后重试；仍失败可在「快捷指令」卡手动「注册 / 同步」看具体报错"))
+            items.append(_doc_item("slash_scope", _t("斜杠指令权限"), "fail",
+                                   _t("探测失败: {error}", error=f"{e!r}"),
+                                   _t("稍后重试；仍失败可在「快捷指令」卡手动"
+                                      "「注册 / 同步」看具体报错")))
             sl = None
         if sl is None:
             pass                      # 探测异常：已在上面落 fail 项
         elif sl.get("need_scope"):
             items.append(_doc_item(
-                "slash_scope", "斜杠指令权限", "fail", sl.get("error") or "缺权限",
-                "权限管理 添加 application:app_slash_command:read 与 write，"
-                "并创建版本发布；开通后回设置页点「注册 / 同步到飞书」"))
+                "slash_scope", _t("斜杠指令权限"), "fail",
+                sl.get("error") or _t("缺权限"),
+                _t("权限管理 添加 application:app_slash_command:read 与 write，"
+                   "并创建版本发布；开通后回设置页点「注册 / 同步到飞书」")))
         elif sl.get("error"):
-            items.append(_doc_item("slash_scope", "斜杠指令权限", "warn",
-                                   str(sl["error"]), "可在设置页「快捷指令」卡重试"))
+            items.append(_doc_item("slash_scope", _t("斜杠指令权限"), "warn",
+                                   str(sl["error"]),
+                                   _t("可在设置页「快捷指令」卡重试")))
         else:
-            items.append(_doc_item("slash_scope", "斜杠指令权限", "ok",
-                                   "权限可用", ""))
+            items.append(_doc_item("slash_scope", _t("斜杠指令权限"), "ok",
+                                   _t("权限可用"), ""))
 
     binding = None
     try:
@@ -3517,35 +3988,45 @@ def doctor(user_id, send_probe=False):
         binding = None
     if not token_ok or not binding:
         items.append(_doc_item(
-            "send_scope", "发消息权限（可选探测）", "skip",
-            "未绑定飞书账号，跳过" if not binding else "凭据未通过，跳过",
-            "" if binding else "先在下方生成绑定码并在飞书里发「绑定 <码>」"))
+            "send_scope", _t("发消息权限（可选探测）"), "skip",
+            _t("未绑定飞书账号，跳过") if not binding else _t("凭据未通过，跳过"),
+            "" if binding else
+            _t("先在下方生成绑定码并在飞书里发「绑定 <码>」")))
     elif not send_probe:
-        items.append(_doc_item("send_scope", "发消息权限（可选探测）", "skip",
-                               "未探测（勾选「发送测试消息」后重跑自检）", ""))
+        items.append(_doc_item("send_scope", _t("发消息权限（可选探测）"), "skip",
+                               _t("未探测（勾选「发送测试消息」后重跑自检）"), ""))
     elif (time.time() - (_LAST_PROBE_TS.get(user_id) or 0)) < SEND_PROBE_MIN_S:
-        items.append(_doc_item("send_scope", "发消息权限（可选探测）", "skip",
-                               f"{SEND_PROBE_MIN_S} 秒内已发过测试消息，稍后再试", ""))
+        items.append(_doc_item("send_scope", _t("发消息权限（可选探测）"), "skip",
+                               _t("{n} 秒内已发过测试消息，稍后再试",
+                                  n=SEND_PROBE_MIN_S), ""))
     else:
         try:
+            # 真要发这条 DM 才解析语言（无探测/被频控时不读偏好）
+            probe_lang = lang if lang is not None else user_lang(user_id)
             rest_send_text(binding["open_id"],
-                           "🔍 Touchstone 配置自检：收到这条消息说明「发消息」权限已开通。",
+                           i18n.t("api", "🔍 Touchstone 配置自检：收到这条消息说明"
+                                         "「发消息」权限已开通。", probe_lang),
                            cfg)
             _LAST_PROBE_TS[user_id] = time.time()
-            items.append(_doc_item("send_scope", "发消息权限（可选探测）", "ok",
-                                   "测试消息已发送，去飞书查看", ""))
+            items.append(_doc_item("send_scope", _t("发消息权限（可选探测）"), "ok",
+                                   _t("测试消息已发送，去飞书查看"), ""))
         except FeishuRestError as e:
-            items.append(_doc_item("send_scope", "发消息权限（可选探测）", "fail", str(e),
-                                   "权限管理 添加 im:message:send_as_bot 并创建版本发布"))
+            items.append(_doc_item("send_scope", _t("发消息权限（可选探测）"), "fail",
+                                   str(e),
+                                   _t("权限管理 添加 im:message:send_as_bot "
+                                      "并创建版本发布")))
         except Exception as e:
-            items.append(_doc_item("send_scope", "发消息权限（可选探测）", "fail",
-                                   f"探测失败: {e!r}", "稍后重试"))
+            items.append(_doc_item("send_scope", _t("发消息权限（可选探测）"), "fail",
+                                   _t("探测失败: {error}", error=f"{e!r}"),
+                                   _t("稍后重试")))
 
     hook = cfg.get("default_webhook") or ""
     items.append(_doc_item(
-        "webhook", "默认推送 Webhook", "ok" if hook else "warn",
-        "已配置" if hook else "未配置（不影响机器人对话，只影响阻塞事件推送）",
-        "" if hook else "群设置 → 群机器人 → 添加自定义机器人，把 Webhook 填到设置页"))
+        "webhook", _t("默认推送 Webhook"), "ok" if hook else "warn",
+        _t("已配置") if hook else
+        _t("未配置（不影响机器人对话，只影响阻塞事件推送）"),
+        "" if hook else
+        _t("群设置 → 群机器人 → 添加自定义机器人，把 Webhook 填到设置页")))
 
     summary = {"ok": 0, "fail": 0, "warn": 0, "skip": 0}
     for it in items:
@@ -3610,39 +4091,79 @@ def _provision_addons():
     }
 
 
-def provision_status(user_id):
+def _provision_steps(steps, lang):
+    """把 `_PROVISION` 里的 canonical（中文）steps 映射到请求语言。
+
+    label/detail 全是固定文案或飞书上游错误原文：固定文案命中 `api` 词条即翻译，
+    上游原文在词典里不存在 ⇒ `t` 原样返回（不吞诊断）。key/ok 机器值不动。"""
+    return [{**s,
+             "label": i18n.t("api", s.get("label", ""), lang),
+             "detail": i18n.t("api", s.get("detail", ""), lang)}
+            for s in steps or []]
+
+
+def _provision_error(error, lang):
+    """status.error 的已知文案映射；上游/动态错误原文原样透传（白名单）。"""
+    if not error:
+        return error
+    if error == "扫码流程未返回应用凭据（可能超时或未确认），可重新发起":
+        return i18n.t("api", error, lang)
+    for prefix, key in (
+            ("扫码创建失败: ", "扫码创建失败: {error}"),
+            ("应用已创建，但配置补齐未完成：",
+             "应用已创建，但配置补齐未完成：{error}")):
+        if error.startswith(prefix):
+            inner = error[len(prefix):]
+            if inner == _PATCH_SCOPE_HINT:
+                inner = i18n.t("api", inner, lang)
+            return i18n.t("api", key, lang, error=inner)
+    return error
+
+
+def provision_status(user_id, lang=None):
     """扫码流程现状（设置页轮询口，只读）。等待超 TTL 即对外按失败呈现。
 
     `app_id` = 在跑流程的应用优先，否则回落**用户配置里已接入的应用**——前端据此
     决定「是否二次确认 + force」，只回进程内状态会让已有应用的用户永远发不出
-    force（扫码换应用死锁；站点重启后连扫码建过应用的用户也会掉进去）。"""
+    force（扫码换应用死锁；站点重启后连扫码建过应用的用户也会掉进去）。
+
+    语言（T12d）：``lang`` 为请求语言；state/url/app_id/age_s 机器值不变，
+    TTL error、canonical steps 的 label/detail、已知 error 前缀按语言渲染。"""
     st = _PROVISION.get(user_id) or {}
     state = st.get("state", "idle")
     error = st.get("error", "")
     if state == "waiting" and (time.time() - st.get("started_at", 0)) > PROVISION_TTL:
         state = "failed"
-        error = error or "确认链接已超时（10 分钟有效），可重新发起"
+        error = error or i18n.t(
+            "api", "确认链接已超时（10 分钟有效），可重新发起", lang)
     # 回落取**配置里的 app_id**（不要求 secret 齐——只填了 App ID 也算「已接入」，
     # 前端据此二次确认；真正的 force 闸门仍按 app_config（两件齐全）判定）
     app_id = st.get("app_id") or ((user_config(user_id) or {}).get("app_id") or "")
     return {"supported": provision_supported(), "enabled": provision_enabled(),
-            "state": state, "url": st.get("url", ""), "error": error,
-            "app_id": app_id, "steps": st.get("steps", []),
+            "state": state, "url": st.get("url", ""),
+            "error": _provision_error(error, lang),
+            "app_id": app_id,
+            "steps": _provision_steps(st.get("steps", []), lang),
             "age_s": int(time.time() - st["started_at"]) if st.get("started_at") else 0}
 
 
-def provision_start(user_id, force=False):
+def provision_start(user_id, force=False, lang=None):
     """发起扫码建应用（后台线程跑 Device Flow）。返回 {"ok","state","url","error"}。
 
     闸门三条：总闸（TS_FEISHU_PROVISION=0）、SDK 可用性、已有应用需 force；
     同一用户重复点击**不重复建流程**（返回既有流程的现状）。「读状态 → 写状态」
-    全程持 `_PROVISION_LOCK`：并发点两下不会各起一条 Device Flow（复阅 P1）。"""
+    全程持 `_PROVISION_LOCK`：并发点两下不会各起一条 Device Flow（复阅 P1）。
+    语言（T12d）：``lang`` 为请求语言，只影响三条闸门错误文案（state/url 机器值不变）。"""
+    def _t(key, **vars):
+        return i18n.t("api", key, lang, **vars)
+
     if not provision_enabled():
         return {"ok": False, "state": "idle", "url": "",
-                "error": f"配置自动化已关闭（{PROVISION_ENV}=0）"}
+                "error": _t("配置自动化已关闭（{env}=0）", env=PROVISION_ENV)}
     if not provision_supported():
         return {"ok": False, "state": "idle", "url": "",
-                "error": "本机 lark-oapi 版本过低（register_app 需 ≥1.5.5），请升级依赖后重试"}
+                "error": _t("本机 lark-oapi 版本过低（register_app 需 ≥1.5.5），"
+                            "请升级依赖后重试")}
     with _PROVISION_LOCK:
         cur = _PROVISION.get(user_id) or {}
         if cur.get("state") == "waiting" and \
@@ -3651,7 +4172,8 @@ def provision_start(user_id, force=False):
         cfg = app_config(user_id)
         if cfg is not None and not force:
             return {"ok": False, "state": "idle", "url": "",
-                    "error": f"已配置应用 {cfg.get('app_id')}；如需换应用请确认后重试"}
+                    "error": _t("已配置应用 {app_id}；如需换应用请确认后重试",
+                                app_id=cfg.get("app_id"))}
         cancel = threading.Event()
         _PROVISION[user_id] = {"state": "waiting", "url": "", "error": "", "app_id": "",
                                "steps": [], "started_at": time.time(), "cancel": cancel}
@@ -3660,11 +4182,12 @@ def provision_start(user_id, force=False):
     return {"ok": True, "state": "waiting", "url": "", "error": ""}
 
 
-def provision_cancel(user_id):
+def provision_cancel(user_id, lang=None):
     """取消进行中的扫码流程（置 cancel_event，SDK 侧即刻收尾）。"""
     st = _PROVISION.get(user_id) or {}
     if st.get("state") != "waiting":
-        return {"ok": False, "state": st.get("state", "idle"), "error": "当前没有进行中的扫码流程"}
+        return {"ok": False, "state": st.get("state", "idle"),
+                "error": i18n.t("api", "当前没有进行中的扫码流程", lang)}
     st["cancel"].set()
     st["state"] = "cancelled"
     return {"ok": True, "state": "cancelled", "error": ""}
@@ -3745,18 +4268,23 @@ def _next_version(items):
     return "%d.%d.%d" % (best[0], best[1], best[2] + 1)
 
 
-def provision_publish(user_id, version=None, remark="", changelog=""):
+def provision_publish(user_id, version=None, remark="", changelog="", lang=None):
     """提交发布自建应用（POST application/v7/.../publish）：无待发布版本时由飞书自动建版本。
 
     版本号缺省自动递增（见 `_next_version`）；发布后仍需**租户管理员审批**才线上生效
-    （无 API，走引导）。返回 {"ok","version","version_id","need_patch_scope","error"}。"""
+    （无 API，走引导）。返回 {"ok","version","version_id","need_patch_scope","error"}。
+    语言（T12d）：``lang`` 为请求语言，只影响 error；version/version_id 机器值不变。
+    remark/changelog 是发给飞书的应用版本说明（不进站点响应），保持既有中文。"""
+    def _t(key, **vars):
+        return i18n.t("api", key, lang, **vars)
+
     if not provision_enabled():
         return {"ok": False, "version": "", "version_id": "", "need_patch_scope": False,
-                "error": f"配置自动化已关闭（{PROVISION_ENV}=0）"}
+                "error": _t("配置自动化已关闭（{env}=0）", env=PROVISION_ENV)}
     cfg = app_config(user_id)
     if cfg is None:
         return {"ok": False, "version": "", "version_id": "", "need_patch_scope": False,
-                "error": "应用凭据未配置（App ID / App Secret），请先保存凭据"}
+                "error": _t("应用凭据未配置（App ID / App Secret），请先保存凭据")}
     app_id = cfg["app_id"]
     ver = str(version or "").strip()
     try:
@@ -3775,20 +4303,24 @@ def provision_publish(user_id, version=None, remark="", changelog=""):
                 "need_patch_scope": False, "error": ""}
     except FeishuRestError as e:
         return {"ok": False, "version": ver, "version_id": "",
-                "need_patch_scope": _need_scope(e), "error": _apply_error(e)}
+                "need_patch_scope": _need_scope(e),
+                "error": _apply_error(e, lang)}
     except Exception as e:
         return {"ok": False, "version": ver, "version_id": "",
-                "need_patch_scope": False, "error": f"发布失败: {e!r}"}
+                "need_patch_scope": False,
+                "error": _t("发布失败: {error}", error=f"{e!r}")}
 
 
 # ---------- M5 配置自动化：保存配置（含凭据即时快检） ----------
 
-def save_user_config(user_id, body):
+def save_user_config(user_id, body, lang=None):
     """保存用户飞书配置并即时反馈（服务端设置页唯一写口；语义与既有实现逐字一致）：
     字段缺省=不改、显式空串=清除（前端对未编辑的 secret/webhook 不下发该键，防误清）。
 
     新增：凭据齐全时立刻 `verify_credentials` 快检——今天保存凭据只写库不校验，
     填错只能翻日志；`verify` 随响应回给页面做即时提示（凭据不全时为 None，零请求）。
+    语言（T12d）：``lang`` 为请求语言，透传给 verify；None 时保持旧调用形状（单测桩
+    只接受一个参数 ⇒ 存量用例零 churn）。
     返回 {"inbound_started": bool, "verify": {...}|None}。"""
     cfg = user_config(user_id)
     old_cfg = {"app_id": str(cfg.get("app_id") or ""),
@@ -3805,7 +4337,10 @@ def save_user_config(user_id, body):
             cfg[key] = str(body[key] or "").strip()
     db.set_feishu_user_cfg(user_id, cfg)
     started = start_inbound_for(user_id)
-    verify = verify_credentials(user_id) if app_config(user_id) else None
+    verify = None
+    if app_config(user_id):
+        verify = (verify_credentials(user_id) if lang is None
+                  else verify_credentials(user_id, lang))
     # M11：手工换应用（非扫码路径）同样发「确认切换」卡片——旧连接还活着时用旧应用通道
     # 通知用户点确认（后台线程发，REST 不阻塞保存响应；条件在 maybe_send_switch_card 里
     # 复核，凭据没变/线程没跑时是零请求空转）

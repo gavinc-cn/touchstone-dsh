@@ -16,12 +16,14 @@ import { taskApi } from '../api'
 import { renderDoc } from '../utils/renderDoc'
 import { absToMedia, projectRoots } from '../utils/mediaText'
 import { useAppStore } from '../stores/app'
+import { t, useI18n } from '../utils/i18n'
 
-// 驱动类型 → 展示文案（与 loadcase.DRIVER_* 对齐）
-const DRIVER_LABEL = {
-  script: '自定义脚本（run.py）',
-  scenario: '声明式场景（scenario.json）',
-  legacy_scenario: '存量场景（旧布局 load/scenario_<id>.json）',
+// 驱动类型 → 展示文案（机器值 script/scenario/legacy_scenario 不翻译）
+function driverLabel(driver) {
+  if (driver === 'script') return t('自定义脚本（run.py）')
+  if (driver === 'scenario') return t('声明式场景（scenario.json）')
+  if (driver === 'legacy_scenario') return t('存量场景（旧布局 load/scenario_<id>.json）')
+  return driver
 }
 
 /** 可折叠块（原生 details，避免为一段折叠再引组件） */
@@ -38,6 +40,8 @@ function Fold({ title, note, children }) {
 }
 
 export default function LoadPlanTab({ task }) {
+  // 订阅语言切换（lang 变化即重渲染；文案用模块级 t 按当前语言求值）
+  useI18n()
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
   const [active, setActive] = useState('')
@@ -112,12 +116,12 @@ export default function LoadPlanTab({ task }) {
     setActive(id)
   }
 
-  if (err) return <div className="hint">方案读取失败：{err}</div>
-  if (!d) return <div className="hint">正在读取方案包…</div>
+  if (err) return <div className="hint">{t('方案读取失败：{msg}', { msg: err })}</div>
+  if (!d) return <div className="hint">{t('正在读取方案包…')}</div>
 
   const chartsText = d.charts ? JSON.stringify(d.charts, null, 2) : ''
   const sections = (doc.outline || []).filter((s) => s.level >= 2 && s.level <= 3)
-  const title = doc.title || task?.name || `任务 #${task?.id}`
+  const title = doc.title || task?.name || t('任务 #{id}', { id: task?.id })
   // 正文结构体检：长文却没有标题/列表/表格 ⇒ 多半是「纯文本方案」。页面只渲染 markdown，
   // 这类方案会挤成一整段；模板已把格式定为硬要求，这里把它显式指出来（属提示，不阻断）。
   const flatDoc = d.plan_found && (d.plan_md || '').length > 400
@@ -126,15 +130,14 @@ export default function LoadPlanTab({ task }) {
     <div className="lp-plan">
       {flatDoc && (
         <div className="hint lp-warn">
-          这份方案正文没有 markdown 结构（无标题 / 列表 / 表格）——页面只渲染 Markdown，
-          纯文本方案会挤成一整段；建议让 agent 按《方案文档模板》重写 plan.md。
+          {t('这份方案正文没有 markdown 结构（无标题 / 列表 / 表格）——页面只渲染 Markdown，纯文本方案会挤成一整段；建议让 agent 按《方案文档模板》重写 plan.md。')}
         </div>
       )}
       <div className={'lp-doc' + (sections.length >= 3 ? ' has-rail' : '')}>
         {/* 章节导引轨：文档够长（≥3 节）才出现；窄屏由 CSS 隐藏 */}
         {sections.length >= 3 && (
-          <nav className="lp-doc-rail" aria-label="方案目录">
-            <div className="lp-doc-rail-t">目录</div>
+          <nav className="lp-doc-rail" aria-label={t('方案目录')}>
+            <div className="lp-doc-rail-t">{t('目录')}</div>
             <ol>
               {sections.map((s) => (
                 <li key={s.id} className={s.level > 2 ? 'sub' : ''}>
@@ -152,13 +155,13 @@ export default function LoadPlanTab({ task }) {
         <article className="lp-doc-main">
           <header className="lp-doc-head">
             <div className="lp-doc-eyebrow">
-              <span className="lp-doc-kind">压测方案 · #{task?.id}</span>
+              <span className="lp-doc-kind">{t('压测方案')} · #{task?.id}</span>
               <span className="lp-doc-chips">
                 <span className={'lp-chip' + (d.found ? ' on' : ' off')}>
-                  {d.found ? DRIVER_LABEL[d.driver] || d.driver : '未找到执行载体'}
+                  {d.found ? driverLabel(d.driver) : t('未找到执行载体')}
                 </span>
-                <span className="lp-chip">{d.charts?.panels?.length ? `面板 ${d.charts.panels.length} 个` : '默认面板'}</span>
-                {d.has_html && <span className="lp-chip">自定义视图 ✓</span>}
+                <span className="lp-chip">{d.charts?.panels?.length ? t('面板 {n} 个', { n: d.charts.panels.length }) : t('默认面板')}</span>
+                {d.has_html && <span className="lp-chip">{t('自定义视图 ✓')}</span>}
               </span>
             </div>
             <h1 className="lp-doc-title">{title}</h1>
@@ -180,11 +183,13 @@ export default function LoadPlanTab({ task }) {
           ) : (
             <div className="lp-doc-body" ref={bodyRef}>
               <div className="lp-empty-state">
-                <div className="lp-empty-t">本任务未生成方案文档</div>
+                <div className="lp-empty-t">{t('本任务未生成方案文档')}</div>
                 <p>
-                  <code>plan.md</code> 由压测第 1 轮的 agent 产出，用来回答「压谁、压多狠、
-                  看什么、怎么算通过」。它缺失不影响发压执行，但发压前就没有可复核的书面方案——
-                  可在方案包目录 <code>load/task_{task?.id}/</code> 下补一份 Markdown 方案。
+                  <code>plan.md</code>{' '}
+                  {t('由压测第 1 轮的 agent 产出，用来回答「压谁、压多狠、看什么、怎么算通过」。它缺失不影响发压执行，但发压前就没有可复核的书面方案——可在方案包目录')}{' '}
+                  <code>load/task_{task?.id}/</code>
+                  {/* 词条 key 以空格开头：中文在路径后保留原来的一个空格；英文值是「.」，紧跟路径（不加空格） */}
+                  {t(' 下补一份 Markdown 方案。')}
                 </p>
               </div>
             </div>
@@ -194,32 +199,30 @@ export default function LoadPlanTab({ task }) {
 
       {!d.found && (
         <div className="hint lp-warn">
-          本任务的方案包缺失（需在 &lt;案例库根&gt;/load/task_{task?.id}/ 下生成
-          run.py 或 scenario.json）；发压轮会因此失败。
+          {t('本任务的方案包缺失（需在 <案例库根>/load/task_{id}/ 下生成 run.py 或 scenario.json）；发压轮会因此失败。', { id: task?.id })}
         </div>
       )}
       {d.charts_error && (
-        <div className="hint lp-warn">图表声明不合法，面板已回退默认：{d.charts_error}</div>
+        <div className="hint lp-warn">{t('图表声明不合法，面板已回退默认：{msg}', { msg: d.charts_error })}</div>
       )}
 
       <div className="lp-doc-appendix">
         {d.script_text && (
-          <Fold title="执行载体源码" note={d.script_name}>
+          <Fold title={t('执行载体源码')} note={d.script_name}>
             <pre className="lp-code">{d.script_text}</pre>
           </Fold>
         )}
         {chartsText && (
-          <Fold title="图表声明" note="charts.json">
+          <Fold title={t('图表声明')} note="charts.json">
             <pre className="lp-code">{chartsText}</pre>
           </Fold>
         )}
-        <Fold title="指标口径速查" note="写脚本 / 声明图表时对照">
+        <Fold title={t('指标口径速查')} note={t('写脚本 / 声明图表时对照')}>
           <ul className="lp-tips">
-            <li><code>gauge</code>：瞬时值（rps / lat.p50·p90·p95·p99 / err.rate / conc）</li>
-            <li><code>counter</code>：单调递增累计值（req.total / 业务计数），面板按窗口增量或速率画</li>
-            <li><code>labels</code>：维度字典（如 <code>{'{"status":"已成交"}'}</code>），
-              同一 metric 靠它区分序列；<code>groupBy</code> 指定的就是这里的键</li>
-            <li><code>summary</code>：收尾 KPI 行，供单值卡与报告使用</li>
+            <li><code>gauge</code>{t('：瞬时值（rps / lat.p50·p90·p95·p99 / err.rate / conc）')}</li>
+            <li><code>counter</code>{t('：单调递增累计值（req.total / 业务计数），面板按窗口增量或速率画')}</li>
+            <li><code>labels</code>{t('：维度字典（如')} <code>{t('{"status":"已成交"}')}</code>{t('），同一 metric 靠它区分序列；')}{' '}<code>groupBy</code>{' '}{t('指定的就是这里的键')}</li>
+            <li><code>summary</code>{t('：收尾 KPI 行，供单值卡与报告使用')}</li>
           </ul>
         </Fold>
       </div>

@@ -15,10 +15,13 @@ import {
   CardDescription,
 } from '@/components/ui/card'
 import { Loader2 } from 'lucide-react'
+import { useI18n } from '../utils/i18n'
 
 export default function Login() {
   const navigate = useNavigate()
   const auth = useAuthStore()
+  // 文案取 t()：语言切换（另一标签页/账号偏好）时本组件随订阅即时重渲染
+  const { t } = useI18n()
 
   const [mode, setMode] = useState('login')
   const [username, setUsername] = useState('')
@@ -39,7 +42,7 @@ export default function Login() {
     setError('')
     const isReg = mode === 'reg'
     if (isReg && regPassword !== regPassword2) {
-      setError('两次输入的密码不一致')
+      setError(t('两次输入的密码不一致'))
       return
     }
     setBusy(true)
@@ -52,7 +55,7 @@ export default function Login() {
       }
       navigate('/app')
     } catch (e) {
-      setError(e.message || (isReg ? '注册失败' : '登录失败'))
+      setError(e.message || (isReg ? t('注册失败') : t('登录失败')))
     } finally {
       setBusy(false)
     }
@@ -66,7 +69,7 @@ export default function Login() {
           <div className="justify-self-center"><TouchstoneLogo size={40} /></div>
           <div className="text-center">
             <CardTitle className="font-serif text-lg">
-              {mode === 'login' ? 'Touchstone' : '注册用户'}
+              {mode === 'login' ? 'Touchstone' : t('注册用户')}
             </CardTitle>
             <CardDescription className="mt-1">
               Free-style testing · Execution &amp; monitoring
@@ -77,35 +80,35 @@ export default function Login() {
           {mode === 'login' ? (
             <>
               <div className="grid gap-2">
-                <Label htmlFor="login-username" className="text-xs text-muted-foreground">用户名</Label>
+                <Label htmlFor="login-username" className="text-xs text-muted-foreground">{t('用户名')}</Label>
                 <Input id="login-username" value={username}
                   onChange={(e) => setUsername(e.target.value.trim())}
-                  autoComplete="username" placeholder="请输入用户名" autoFocus />
+                  autoComplete="username" placeholder={t('请输入用户名')} autoFocus />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="login-password" className="text-xs text-muted-foreground">密码</Label>
+                <Label htmlFor="login-password" className="text-xs text-muted-foreground">{t('密码')}</Label>
                 <Input id="login-password" value={password}
                   onChange={(e) => setPassword(e.target.value)} type="password"
-                  autoComplete="current-password" placeholder="请输入密码"
+                  autoComplete="current-password" placeholder={t('请输入密码')}
                   onKeyUp={(e) => { if (e.key === 'Enter') submit() }} />
               </div>
             </>
           ) : (
             <>
               <div className="grid gap-2">
-                <Label htmlFor="reg-username" className="text-xs text-muted-foreground">用户名</Label>
+                <Label htmlFor="reg-username" className="text-xs text-muted-foreground">{t('用户名')}</Label>
                 <Input id="reg-username" value={regUsername}
                   onChange={(e) => setRegUsername(e.target.value.trim())}
                   autoComplete="username" autoFocus />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="reg-password" className="text-xs text-muted-foreground">密码</Label>
+                <Label htmlFor="reg-password" className="text-xs text-muted-foreground">{t('密码')}</Label>
                 <Input id="reg-password" value={regPassword}
                   onChange={(e) => setRegPassword(e.target.value)} type="password"
-                  autoComplete="new-password" placeholder="至少 6 位" />
+                  autoComplete="new-password" placeholder={t('至少 6 位')} />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="reg-password2" className="text-xs text-muted-foreground">确认密码</Label>
+                <Label htmlFor="reg-password2" className="text-xs text-muted-foreground">{t('确认密码')}</Label>
                 <Input id="reg-password2" value={regPassword2}
                   onChange={(e) => setRegPassword2(e.target.value)} type="password"
                   autoComplete="new-password"
@@ -117,18 +120,18 @@ export default function Login() {
           <div className="min-h-5 text-[calc(13px*var(--fs))] leading-5 text-destructive">{error}</div>
           <Button size="lg" className="w-full" disabled={busy} onClick={submit}>
             {busy && <Loader2 className="size-4 animate-spin" />}
-            {mode === 'login' ? '登 录' : '注 册'}
+            {mode === 'login' ? t('登 录') : t('注 册')}
           </Button>
         </CardContent>
         <CardFooter className="flex-col items-center gap-3 pt-0">
           <button type="button"
             className="text-sm text-[var(--run)] underline-offset-4 hover:underline"
             onClick={switchMode}>
-            {mode === 'login' ? '没有账号？注册新用户' : '已有账号？返回登录'}
+            {mode === 'login' ? t('没有账号？注册新用户') : t('已有账号？返回登录')}
           </button>
           {mode === 'login' && (
             <p className="text-xs text-muted-foreground">
-              请输入账号密码登录；登录后可在右上角修改密码
+              {t('请输入账号密码登录；登录后可在右上角修改密码')}
             </p>
           )}
         </CardFooter>

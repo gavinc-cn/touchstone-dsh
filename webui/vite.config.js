@@ -11,11 +11,15 @@ export default defineConfig(({ mode }) => ({
   resolve: {
     alias: {
       '@': path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'src'),
+      // 词表在仓库根（webui/ 之外）：单一真源 i18n/en.json，前端构建期内联
+      '@i18n': path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../i18n'),
     },
   },
   server: {
     host: '0.0.0.0',
     port: 5173,
+    // dev 模式放行仓库根：@i18n/en.json 位于 webui/ 之外，默认只允许 webui 会被 fs 拦截
+    fs: { allow: [path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')] },
     proxy: {
       // 开发时 API 与 SSE 转发到 4601 后端
       '/api': {

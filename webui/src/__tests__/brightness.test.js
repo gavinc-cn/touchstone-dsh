@@ -10,10 +10,11 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
-
 import {
   BRIGHTNESSES, DEFAULT_BRIGHTNESS, applyBrightness, brightnessLabel, getBrightness, initBrightness,
 } from '../utils/brightness'
+import { setLang } from '../utils/i18n'
+
 
 // 静态守卫要读真实 CSS 文件（vitest 的 cwd = webui/，见 vitest 配置的 root）
 const css = (rel) => readFileSync(path.resolve(process.cwd(), 'src/styles', rel), 'utf8')
@@ -32,6 +33,9 @@ beforeEach(() => {
   localStorage.clear()
   delete document.documentElement.dataset.bright
 })
+
+// 语言钉在中文：必须注册在清 localStorage 的 beforeEach 之后（否则 ts_lang 被清掉）
+beforeEach(() => setLang('zh'))
 
 describe('brightness', () => {
   it('getBrightness：无持久值回落偏暗，合法值回读，非法值回落', () => {
@@ -64,7 +68,7 @@ describe('brightness', () => {
 
   it('BRIGHTNESSES 三档（原样/偏暗/更暗），缺省档是偏暗', () => {
     expect(BRIGHTNESSES.map((b) => b.id)).toEqual(['normal', 'dim', 'dimmer'])
-    expect(BRIGHTNESSES.map((b) => b.label)).toEqual(['原样', '偏暗', '更暗'])
+    expect(BRIGHTNESSES.map((b) => brightnessLabel(b.id))).toEqual(['原样', '偏暗', '更暗'])
     expect(DEFAULT_BRIGHTNESS).toBe('dim')
     expect(brightnessLabel('dim')).toBe('偏暗')
     expect(brightnessLabel('nope')).toBe('nope')

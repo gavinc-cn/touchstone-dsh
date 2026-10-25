@@ -399,7 +399,7 @@ def test_success_path_calls_route_text_with_images_kwarg(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(
         feishu_conv, "route_text",
-        lambda binding, text, cfg=None, images=None:
+        lambda binding, text, cfg=None, images=None, lang="zh":
         seen.append((binding["open_id"], text, cfg, images)) or "已投递到「会话」")
     feishu.handle_message_event(
         _evt(sender=oid, content={"image_key": "img_v3_x"}), _CFG)

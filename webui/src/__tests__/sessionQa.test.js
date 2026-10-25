@@ -11,12 +11,16 @@
 // `tool/result`（文本形如 {"answers":[{"id":"reload","selected":["…"]}]}）；
 // 会话里没有对应的 user/message 事件，答案只能从 tool_result 取（见
 // doc_ai/spec/sess_dialog/会话详情对话框.md）。
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
-  ASK_PLACEHOLDER, buildQuestionIndex, parseAskAnswer, parseAskQuestions,
+  askPlaceholder, buildQuestionIndex, parseAskAnswer, parseAskQuestions,
   questionLabel, questionTitle,
 } from '../utils/sessionQa'
+import { setLang, t } from '../utils/i18n'
+
+// 文案断言按中文跑（zh 原样返回 key 并插值）
+beforeEach(() => setLang('zh'))
 
 describe('sessionQa：parseAskQuestions 解析提问 args', () => {
   it('题干/选项 label/多选标志逐项取出（真数据形态）', () => {
@@ -177,18 +181,18 @@ describe('sessionQa：questionLabel / questionTitle 展示文案', () => {
   }
 
   it('questionLabel：user 原文；ask 已答=回答；未答/中断=占位文案', () => {
-    expect(questionLabel({ kind: 'user', text: '重启了' })).toBe('重启了')
-    expect(questionLabel(askItem)).toBe('A')
-    expect(questionLabel({ ...askItem, state: 'pending', text: '' })).toBe(ASK_PLACEHOLDER.pending)
-    expect(questionLabel({ ...askItem, state: 'error', text: '' })).toBe(ASK_PLACEHOLDER.error)
+    expect(questionLabel({ kind: 'user', text: '重启了' }, t)).toBe('重启了')
+    expect(questionLabel(askItem, t)).toBe('A')
+    expect(questionLabel({ ...askItem, state: 'pending', text: '' }, t)).toBe(askPlaceholder(t).pending)
+    expect(questionLabel({ ...askItem, state: 'error', text: '' }, t)).toBe(askPlaceholder(t).error)
   })
 
   it('questionTitle：user 原文不变；ask 带题目与回答（未答带占位说明）', () => {
-    expect(questionTitle({ kind: 'user', text: '重启了' })).toBe('重启了')
-    expect(questionTitle(askItem)).toBe('agent 提问：生效时机：要现在生效吗？\n回答：A')
-    expect(questionTitle({ ...askItem, state: 'pending', text: '' }))
+    expect(questionTitle({ kind: 'user', text: '重启了' }, t)).toBe('重启了')
+    expect(questionTitle(askItem, t)).toBe('agent 提问：生效时机：要现在生效吗？\n回答：A')
+    expect(questionTitle({ ...askItem, state: 'pending', text: '' }, t))
       .toBe('agent 提问：生效时机：要现在生效吗？\n等待回答…')
-    expect(questionTitle({ ...askItem, state: 'error', text: '', ask: [] }))
+    expect(questionTitle({ ...askItem, state: 'error', text: '', ask: [] }, t))
       .toBe('agent 提问\n未作答（已中断）')
   })
 })

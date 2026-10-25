@@ -171,7 +171,8 @@ def test_bound_flow_unknown_text_routes(monkeypatch):
     # （投递给当前会话 / 无会话自动新建），不再直接回帮助；帮助只留给群聊与
     # TS_FEISHU_CONV=0（见 tests/test_feishu_conv.py 的群聊与开关用例）。
     monkeypatch.setattr(feishu_conv, "route_text",
-                        lambda binding, text, cfg=None: routed.append(text) or "已投递到「会话」")
+                        lambda binding, text, cfg=None, lang="zh":
+                        routed.append(text) or "已投递到「会话」")
     feishu._MSG_SEEN.clear()
     feishu._MSG_SEEN_SET.clear()
     feishu.handle_message_event(_evt(mid="m3", text="不认识的指令xyz"))
@@ -723,9 +724,10 @@ def _stub_card_env(monkeypatch, answer=None, approval=None):
                         lambda oid: {"open_id": oid, "user_id": 1,
                                      "default_project_id": 2})
     monkeypatch.setattr(feishu, "_find_user_card",
-                        lambda uid, key: ((_proj(2, "touchstone"),
-                                           _card(7, 2, "登录鉴权", col="blocked",
-                                                 bk="interaction")), ""))
+                        lambda uid, key, lang="zh": (
+                            (_proj(2, "touchstone"),
+                             _card(7, 2, "登录鉴权", col="blocked",
+                                   bk="interaction")), ""))
     sent, calls = [], {"answer": [], "approval": []}
     monkeypatch.setattr(feishu, "rest_send_text",
                         lambda oid, text, cfg=None: sent.append(text))

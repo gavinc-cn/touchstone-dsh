@@ -21,10 +21,17 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { Send, Trash2, Copy, Shrink, CopyPlus, GitFork } from 'lucide-react'
+import { useI18n } from '../utils/i18n'
 
 const MEDIA_MAX = 10 * 1024 * 1024  // 附件单文件上限（与后端一致）
 
+// 持久化默认卡名：空标题保存时写库的规范值，必须与界面语言无关（en 界面保存也落
+// 中文原文，保证数据一致），所以不能走 t()。用 \u 转义书写等价于 '未命名'：扫描器
+// 不还原转义，不会把这条**数据**误计成待翻译的界面文案（人工已核对，值即原文）。
+const UNTITLED_TITLE = '\u672a\u547d\u540d'
+
 export default function BoardDetail({ project, card, comments, onClose, reload }) {
+  const { t, lang } = useI18n()
   const projectId = project.id
   const [editing, setEditing] = useState(false)
   // draft 为「标题/描述一体文本」：第一行=标题，其余=描述（保存时拆分 PATCH）
@@ -56,8 +63,8 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
   // 也走同一条改写（形态③ file?inline=1，2026-10-16）
   const mdRoots = useMemo(() => projectRoots([project], projectId), [project, projectId])
   const descHtml = useMemo(() => ({
-    __html: renderMd(absToMedia(card.description || '*（无描述）*', projectId, { roots: mdRoots })),
-  }), [card.description, projectId, mdRoots])
+    __html: renderMd(absToMedia(card.description || t('*（无描述）*'), projectId, { roots: mdRoots })),
+  }), [card.description, projectId, mdRoots, t, lang])
   // 父任务候选：排除自己（后代由后端 set_parent 拦截，前端仅做基本过滤）
   const [allCards, setAllCards] = useState([])
   const [boardCaps, setBoardCaps] = useState(null)   // 看板能力声明(按项目 agent 族, 后端下发)
@@ -77,16 +84,18 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
     try {
       // 改标题会同步改 DSH 会话名（服务端 best-effort）：未同步/被截断时如实提示
       const r = await boardApi.updateCard(projectId, card.id, patch)
-      const msg = sessionRenameNotice(r)
+      const msg = sessionRenameNotice(r, t)
       if (msg) toast(msg)
       await reload()
     }
     catch (e) { toast(e.message) }
   }
-  // 一体文本拆分保存：第一行=标题（空则取「未命名」，截 200），其余=描述
+  // 一体文本拆分保存：第一行=标题（空则取持久化规范值「未命名」，截 200），其余=描述
+  // 注意：落库值必须是语言无关的中文规范值（UNTITLED_TITLE），不能取 t('未命名')——
+  // 否则 en 界面保存会写英文 Untitled，同一张卡的标题随 UI 语言漂移。
   async function saveDesc() {
     const nl = draft.indexOf('\n')
-    const title = (nl < 0 ? draft : draft.slice(0, nl)).trim() || '未命名'
+    const title = (nl < 0 ? draft : draft.slice(0, nl)).trim() || UNTITLED_TITLE
     const description = nl < 0 ? '' : draft.slice(nl + 1)
     await save({ title: title.slice(0, 200), description })
     setEditing(false)
@@ -113,10 +122,11 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
     const list = Array.from(files || [])
     if (!list.length || uploading) return
     for (const f of list) {
-      if (f.size > MEDIA_MAX) { toast(`附件过大（>10MB）：${f.name}`); continue }
+      if (f.size > MEDIA_MAX) { toast(t('附件过大（>10MB）：{name}', { name: f.name })); continue }
       // 占位图拦截（1x1/2x2 一类极小图，见 utils/media.js）：来源应用没给有效截图，跳过并提示
       if (await isPlaceholderImage(f)) {
-        toast(`已跳过占位图（极小尺寸）：${f.name}（剪贴板里不是有效截图，请重新截图或改用「+」选文件）`)
+        toast(t('已跳过占位图（极小尺寸）：{name}（剪贴板里不是有效截图，请重新截图或改用「+」选文件）',
+          { name: f.name }))
         continue
       }
       setUploading(true)
@@ -124,7 +134,7 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
         const data = await new Promise((res, rej) => {
           const fr = new FileReader()
           fr.onload = () => res(String(fr.result || '').split(',')[1] || '')
-          fr.onerror = () => rej(new Error('文件读取失败'))
+          fr.onerror = () => rej(new Error(t('文件读取失败')))
           fr.readAsDataURL(f)
         })
         const r = await boardApi.uploadMedia(projectId,
@@ -143,9 +153,9 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
         setDraft((prev) => (inDesc
           ? prev.slice(0, caret) + md + prev.slice(ta.selectionEnd ?? caret)
           : (prev ? prev + '\n' : '') + md + '\n'))
-        toast(inDesc || !focused ? `已粘贴附件：${f.name}`
-          : `标题不支持图片，已附加到描述区：${f.name}`)
-      } catch (e) { toast(e.message || '附件上传失败') }
+        toast(inDesc || !focused ? t('已粘贴附件：{name}', { name: f.name })
+          : t('标题不支持图片，已附加到描述区：{name}', { name: f.name }))
+      } catch (e) { toast(e.message || t('附件上传失败')) }
       finally { setUploading(false) }
     }
   }
@@ -172,13 +182,13 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
   async function removeWorktree() {
     if (removingWt) return
     const ok = window.confirm(
-      `确认清理该独立 worktree？\n\n${card.worktree}\n\n` +
-      '仅在工作树无未提交改动且会话未运行时才能清理（分支保留，不自动删除）。')
+      t('确认清理该独立 worktree？\n\n{path}\n\n', { path: card.worktree }) +
+      t('仅在工作树无未提交改动且会话未运行时才能清理（分支保留，不自动删除）。'))
     if (!ok) return
     setRemovingWt(true)
     try {
       await boardApi.removeWorktree(projectId, card.id)
-      toast('已清理 worktree')
+      toast(t('已清理 worktree'))
       await reload()
     } catch (e) { toast(e.message) }
     finally { setRemovingWt(false) }
@@ -198,17 +208,17 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
         <RzHandles start={rzStart} reset={rzReset} />
         <DialogHeader className="text-left">
           <DialogTitle className="cursor-move select-none text-sm break-words" onMouseDown={rzDragStart}>
-            #{card.id} {card.title || '未命名'}
+            #{card.id} {card.title || t('未命名')}
           </DialogTitle>
         </DialogHeader>
         <div className="board-detail">
           {/* 📝 标题 / 描述（一体编辑：第一行=标题，其余=描述） */}
           <div className="board-sec">
-            <div className="board-sec-t">📝 标题 / 描述
-              {!editing && <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>✏ 编辑</Button>}
+            <div className="board-sec-t">{t('📝 标题 / 描述')}
+              {!editing && <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>{t('✏ 编辑')}</Button>}
             </div>
             {editing ? (<>
-              <div className="hint">第一行为标题，其余为描述；支持粘贴/拖入图片与文件（存为附件，10MB 内）；Ctrl+Enter 保存</div>
+              <div className="hint">{t('第一行为标题，其余为描述；支持粘贴/拖入图片与文件（存为附件，10MB 内）；Ctrl+Enter 保存')}</div>
               <Textarea ref={draftRef} rows={10} value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onPaste={onPasteFiles} onDrop={onDropFiles}
@@ -219,12 +229,12 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
                     if (!uploading) saveDesc()
                   }
                 }}
-                placeholder={'第一行为标题（空则显示「未命名」），其余为描述…'} />
+                placeholder={t('第一行为标题（空则显示「未命名」），其余为描述…')} />
               <div className="mt-1 flex gap-2">
                 <Button size="sm" onClick={saveDesc} disabled={uploading}>
-                  {uploading ? '附件上传中…' : '保存'}</Button>
+                  {uploading ? t('附件上传中…') : t('保存')}</Button>
                 <Button size="sm" variant="outline"
-                  onClick={() => { setEditing(false); setDraft(card.title + '\n' + (card.description || '')) }}>取消</Button>
+                  onClick={() => { setEditing(false); setDraft(card.title + '\n' + (card.description || '')) }}>{t('取消')}</Button>
               </div>
             </>) : <div className="md-body" dangerouslySetInnerHTML={descHtml}></div>}
           </div>
@@ -232,11 +242,11 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
           {/* ⏰ 定时（仅 todo 列可设） */}
           {card.column === 'todo' && (
             <div className="board-sec">
-              <div className="board-sec-t">⏰ 定时开工</div>
+              <div className="board-sec-t">{t('⏰ 定时开工')}</div>
               <Input type="datetime-local"
                 value={schedule || (card.scheduled_at ? toLocalInput(card.scheduled_at) : '')}
                 onChange={(e) => saveSchedule(e.target.value)} />
-              <div className="hint">到点自动进入「正在开发」（受串行门禁约束）</div>
+              <div className="hint">{t('到点自动进入「正在开发」（受串行门禁约束）')}</div>
             </div>
           )}
 
@@ -244,125 +254,131 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
               清理入口（后端判据：会话运行中 409 / 工作树有未提交改动 400；平台不自动删分支） */}
           {card.worktree && (
             <div className="board-sec">
-              <div className="board-sec-t">🌿 独立 worktree
+              <div className="board-sec-t">{t('🌿 独立 worktree')}
                 <Button size="sm" variant="ghost" disabled={removingWt}
-                  title="删除该独立工作树目录（会话运行中或工作树有未提交改动时会被后端拒绝）"
-                  onClick={removeWorktree}>{removingWt ? '清理中…' : '清理 worktree'}</Button>
+                  title={t('删除该独立工作树目录（会话运行中或工作树有未提交改动时会被后端拒绝）')}
+                  onClick={removeWorktree}>{removingWt ? t('清理中…') : t('清理 worktree')}</Button>
               </div>
               <div className="hint break-all" title={card.worktree}>
-                <span className="font-mono">{card.worktree}</span>（分支 ts/card-{card.id}）
+                <span className="font-mono">{card.worktree}</span>{t('（分支 ts/card-{id}）', { id: card.id })}
               </div>
             </div>
           )}
 
           {/* 💬 相关会话（行显示标题，单击行即打开会话详情；按钮区独立不触发行点击） */}
           <div className="board-sec">
-            <div className="board-sec-t">💬 相关会话</div>
+            <div className="board-sec-t">{t('💬 相关会话')}</div>
             {(card.sessions || []).map((sid) => (
               <div key={sid}
                 className="flex items-center gap-1 py-0.5 text-xs cursor-pointer hover:bg-accent/40 rounded px-1 -mx-1"
-                title={`点击查看会话 ${sid}`}
+                title={t('点击查看会话 {sid}', { sid })}
                 onClick={() => setViewSid(sid)}>
                 <span className="flex-1 min-w-0 truncate">
                   {sessTitles[sid] || <span className="font-mono">{sid}</span>}
                 </span>
                 {sessTitles[sid] && <span className="font-mono text-muted-foreground">{sid.slice(0, 8)}</span>}
-                {sid === card.session_id && <span className="bug-status pass">主</span>}
-                <Button size="sm" variant="ghost" title="复制 id"
-                  onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(sid); toast('已复制') }}><Copy /></Button>
+                {sid === card.session_id && <span className="bug-status pass">{t('主')}</span>}
+                <Button size="sm" variant="ghost" title={t('复制 id')}
+                  onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(sid); toast(t('已复制')) }}><Copy /></Button>
                 {sid !== card.session_id && (
-                  <Button size="sm" variant="ghost" title="设为主会话"
-                    onClick={(e) => { e.stopPropagation(); save({ session_id: sid }) }}>设主</Button>)}
-                <Button size="sm" variant="ghost" title="解绑"
+                  <Button size="sm" variant="ghost" title={t('设为主会话')}
+                    onClick={(e) => { e.stopPropagation(); save({ session_id: sid }) }}>{t('设主')}</Button>)}
+                <Button size="sm" variant="ghost" title={t('解绑')}
                   onClick={(e) => { e.stopPropagation(); save({ unbind_session: sid }) }}>✂</Button>
                 {boardCaps?.compact && (
-                  <Button size="sm" variant="ghost" title="compact 压缩会话上下文"
+                  <Button size="sm" variant="ghost" title={t('compact 压缩会话上下文')}
                     onClick={async (e) => {
                       e.stopPropagation()
-                      try { await boardApi.compact(projectId, card.id, sid); toast('compact 已触发') }
+                      try { await boardApi.compact(projectId, card.id, sid); toast(t('compact 已触发')) }
                       catch (e2) { toast(e2.message) }
                     }}><Shrink /></Button>)}
                 {boardCaps?.fork && (
                   <Button size="sm" variant="ghost" disabled={forking}
-                    title="压缩并新建：压缩会话内容并新建会话（新会话只含压缩摘要、无历史轮次，原会话保留）"
+                    title={t('压缩并新建：压缩会话内容并新建会话（新会话只含压缩摘要、无历史轮次，原会话保留）')}
                     onClick={async (e) => {
                       e.stopPropagation()
                       if (forking) return
                       setForking(true)
                       try {
                         const r = await boardApi.forkCompact(projectId, card.id, sid)
-                        toast('已新建会话并注入压缩内容')
+                        toast(t('已新建会话并注入压缩内容'))
                         await save({ bind_session: r.new_sid })
                       } catch (e2) { toast(e2.message) }
                       finally { setForking(false) }
-                    }}>{forking ? '压缩中…' : <CopyPlus />}</Button>)}
+                    }}>{forking ? t('压缩中…') : <CopyPlus />}</Button>)}
                 {boardCaps?.fork && (
                   <Button size="sm" variant="ghost" disabled={forkingSess}
-                    title="fork 会话：完整复制为新会话（历史/上下文全量保留）并加入卡片会话列表（不改变主会话，需要时点「设主」）"
+                    title={t('fork 会话：完整复制为新会话（历史/上下文全量保留）并加入卡片会话列表（不改变主会话，需要时点「设主」）')}
                     onClick={async (e) => {
                       e.stopPropagation()
                       if (forkingSess) return
                       setForkingSess(true)
                       try {
                         const r = await boardApi.forkSession(projectId, card.id, sid)
-                        toast('已 fork 新会话并加入卡片会话列表')
+                        toast(t('已 fork 新会话并加入卡片会话列表'))
                         await save({ bind_session: r.new_sid })
                       } catch (e2) { toast(e2.message) }
                       finally { setForkingSess(false) }
-                    }}>{forkingSess ? 'fork 中…' : <GitFork />}</Button>)}
-                <Button size="sm" variant="ghost" title="查看会话"
+                    }}>{forkingSess ? t('fork 中…') : <GitFork />}</Button>)}
+                <Button size="sm" variant="ghost" title={t('查看会话')}
                   onClick={(e) => { e.stopPropagation(); setViewSid(sid) }}>🔍</Button>
               </div>
             ))}
             {/* 绑定已有会话：搜索下拉（空输入=全部会话，输入即过滤标题/sid，可搜索或直接粘贴 sid），含已绑定/已归档标记 */}
             <div className="mt-1 flex gap-1">
-              <SearchSelect className="flex-1" placeholder="搜索或选择已有会话…"
-                emptyHint="工作区暂无会话"
+              <SearchSelect className="flex-1" placeholder={t('搜索或选择已有会话…')}
+                emptyHint={t('工作区暂无会话')}
                 options={availSess.map((s) => ({
                   value: s.sid,
-                  label: `${s.title || s.sid.slice(0, 12)}（${new Date(s.mtime * 1000).toLocaleString()}）` +
-                    (s.bound ? ' [已绑定]' : '') + (s.archived ? ' [已归档]' : ''),
+                  // 标点放进词条（en 用半角括号 + 空格），避免英文界面露出全角「（）」
+                  label: t('{title}（{date}）', {
+                    title: s.title || s.sid.slice(0, 12),
+                    date: new Date(s.mtime * 1000).toLocaleString(),
+                  }) + (s.bound ? t(' [已绑定]') : '') + (s.archived ? t(' [已归档]') : ''),
                   search: s.sid,
                 }))}
                 value={bindSid} onChange={setBindSid} />
               <Button size="sm" variant="outline" disabled={!bindSid.trim()}
-                onClick={async () => { await save({ bind_session: bindSid.trim() }); setBindSid('') }}>绑定</Button>
+                onClick={async () => { await save({ bind_session: bindSid.trim() }); setBindSid('') }}>{t('绑定')}</Button>
             </div>
           </div>
 
           {/* 🔗 父任务依赖（搜索下拉：空输入=全部卡片，输入即过滤标题/列名） */}
           <div className="board-sec">
-            <div className="board-sec-t">🔗 父任务依赖</div>
-            <SearchSelect placeholder="选择父任务卡片…"
-              emptyHint="没有匹配的卡片"
-              options={[{ value: '', label: '（无依赖）' }].concat(
+            <div className="board-sec-t">{t('🔗 父任务依赖')}</div>
+            <SearchSelect placeholder={t('选择父任务卡片…')}
+              emptyHint={t('没有匹配的卡片')}
+              options={[{ value: '', label: t('（无依赖）') }].concat(
                 allCards.filter((c) => c.id !== card.id).map((c) => ({
                   value: String(c.id),
-                  label: `#${c.id} ${c.title || '未命名'}（${c.column}）`,
+                  // 同款：全角括号/空格收进词条，en 输出 “#12 Fix bug (doing)”
+                  label: t('#{id} {title}（{column}）', {
+                    id: c.id, title: c.title || t('未命名'), column: c.column,
+                  }),
                   search: c.title || '',
                 })))}
               value={card.parent_card_id ? String(card.parent_card_id) : ''}
               onChange={(v) => save({ parent_card_id: v ? +v : null })} />
             {allCards.filter((c) => c.id !== card.id).length === 0 && (
-              <div className="hint">暂无其他卡片可作为父任务</div>)}
+              <div className="hint">{t('暂无其他卡片可作为父任务')}</div>)}
           </div>
 
           {/* 💭 评论区（Ctrl+Enter 仅保存；➤ 保存并投递主会话） */}
           <div className="board-sec">
-            <div className="board-sec-t">💭 评论</div>
+            <div className="board-sec-t">{t('💭 评论')}</div>
             {(comments || []).map((m) => (
               <div key={m.id} className="py-1 text-xs">
                 <div className="flex items-center gap-1">
                   <span className="text-muted-foreground">{m.created_at}</span>
-                  {m.sent && <span className="bug-status pass">✓ 已投递</span>}
+                  {m.sent && <span className="bug-status pass">{t('✓ 已投递')}</span>}
                   <span className="flex-1"></span>
                   {!m.sent && !isDsh && (
-                    <Button size="sm" variant="ghost" title="投递到主会话"
+                    <Button size="sm" variant="ghost" title={t('投递到主会话')}
                       onClick={async () => {
                         try { await boardApi.sendComment(projectId, card.id, m.id); await reload() }
                         catch (e) { toast(e.message) }
                       }}><Send /></Button>)}
-                  <Button size="sm" variant="ghost" title="删除"
+                  <Button size="sm" variant="ghost" title={t('删除')}
                     onClick={async () => { try { await boardApi.removeComment(projectId, card.id, m.id); await reload() } catch (e) { toast(e.message) } }}><Trash2 /></Button>
                 </div>
                 {/* 评论由纯文本改为 markdown 渲染(描述同方案): 附件 abs 引用经 absToMedia 改写
@@ -370,15 +386,15 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
                 <div className="md-body" dangerouslySetInnerHTML={{ __html: renderMd(absToMedia(m.text, projectId, { roots: mdRoots })) }}></div>
               </div>
             ))}
-            <Textarea rows={3} placeholder={isDsh ? '评论（dsh 不支持投递，仅保存）' : '评论（Ctrl+Enter 保存）'}
+            <Textarea rows={3} placeholder={isDsh ? t('评论（dsh 不支持投递，仅保存）') : t('评论（Ctrl+Enter 保存）')}
               value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && e.ctrlKey) addComment(false) }} />
             <div className="mt-1 flex gap-2">
-              <Button size="sm" variant="outline" onClick={() => addComment(false)}>保存</Button>
+              <Button size="sm" variant="outline" onClick={() => addComment(false)}>{t('保存')}</Button>
               {!isDsh && (
                 <Button size="sm" onClick={() => addComment(true)}
-                  disabled={!card.session_id} title={card.session_id ? '' : '尚无会话，请先开始开发'}>
-                  <Send /> 保存并投递
+                  disabled={!card.session_id} title={card.session_id ? '' : t('尚无会话，请先开始开发')}>
+                  <Send /> {t('保存并投递')}
                 </Button>)}
             </div>
           </div>

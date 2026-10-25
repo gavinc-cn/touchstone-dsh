@@ -53,6 +53,9 @@ import {
   taskSince, unitState,
 } from '../lib/serverstate.js';
 
+/** 驱动忙拒绝（409）无第二参时的兜底文案（同 board.js:BUSY_FALLBACK，覆盖门禁按常量登记） */
+const BUSY_FALLBACK = '会话运行中，稍后重试';
+
 /** `time.sleep(0.75)` 的 Node 形态；`tickMs<=0` 立即返回（单测用） */
 function sleep(ms) {
   if (!(ms > 0)) return Promise.resolve();
@@ -599,21 +602,22 @@ export async function taskSessionChat(ctx, taskId, bodyOverride = null) {
         // Python `e.args[1] if len(e.args) > 1 else "会话运行中，稍后重试"`：Node 的
         // `new Error()` 把 message 定为 `''`，「只传 code」与「传了空消息」无法区分；
         // dshdriver 的构造点都带非空消息 ⇒ 空串按「无第二参」回兜底文案。
-        ctx.errorSpaced(409, err.message ? String(err.message) : '会话运行中，稍后重试');
+        ctx.errorSpaced(409, err.message ? String(err.message) : BUSY_FALLBACK);
       } else {
-        ctx.errorSpaced(500, `agent 调用失败: ${pyStrErr(err)}`);
+        ctx.errorSpaced(500, 'agent 调用失败: {detail}', { detail: pyStrErr(err) });
       }
       return;
     }
     // ② OSError（Node 的系统错误）⇒ 500，同一文案
     if (isOsError(err)) {
-      ctx.errorSpaced(500, `agent 调用失败: ${pyStrErr(err)}`);
+      ctx.errorSpaced(500, 'agent 调用失败: {detail}', { detail: pyStrErr(err) });
       return;
     }
     // ③ 裸 RuntimeError = 投递前置闸 `chat.DeliveryRefused`（外部会话前提不成立）：
     //    消息未入队、未落行 ⇒ 400 + 闸的中文文案，让前端能如实 toast。
     if (err instanceof chat.DeliveryRefused) {
-      ctx.errorSpaced(400, pyStrErr(err));
+      // lib 错误对象直接透传：ctx.error* 按 .i18nKey/.i18nVars 或 .message 本地化
+      ctx.errorSpaced(400, err);
       return;
     }
     // 其余（Python 里不是 RuntimeError/OSError 的异常）逃出 do_POST ⇒ 只断这条连接；
@@ -687,11 +691,11 @@ export async function injectMsg(ctx, project, sid, body, taskId = null) {
   } catch (err) {
     // 被拒（已被 worker 拾起/不可注入）：消息仍在队列，不改状态 ⇒ 400
     if (err instanceof chat.InjectRefused) {
-      ctx.errorSpaced(400, pyStrErr(err));
+      ctx.errorSpaced(400, err);              // lib 错误对象透传（固定文案 = 词条 key）
       return;
     }
     // 投递失败：消息已按原位次退回排队（chat.injectNow 内），此处只报错 ⇒ 502
-    ctx.errorSpaced(502, `注入失败：${pyStrErr(err)}`);
+    ctx.errorSpaced(502, '注入失败：{detail}', { detail: pyStrErr(err) });
     return;
   }
   ctx.text(200, '{"ok":true}', 'application/json; charset=utf-8');   // 硬编码字节串 ⇒ 紧凑
@@ -816,7 +820,7 @@ export async function taskSessionProfile(ctx, taskId) {
   }
   for (const unsupported of ['model', 'permission_mode']) {
     if (String(pyTruthy(pyGet(body, unsupported)) ? pyGet(body, unsupported) : '')) {
-      ctx.errorSpaced(400, `任务会话不支持 ${unsupported}（仅看板卡会话支持）`);
+      ctx.errorSpaced(400, '任务会话不支持 {kind}（仅看板卡会话支持）', { kind: unsupported });
       return;
     }
   }
@@ -826,7 +830,8 @@ export async function taskSessionProfile(ctx, taskId) {
   }
   const effort = normalizeEffort(pyGet(body, 'reasoning_effort'));
   if (effort === null) {
-    ctx.errorSpaced(400, `思考等级非法（${DSH_EFFORT_LEVELS.join('/')} 或留空）`);
+    ctx.errorSpaced(400, '思考等级非法（{levels} 或留空）',
+      { levels: DSH_EFFORT_LEVELS.join('/') });
     return;
   }
   const sid = task.session_id || '';
@@ -842,7 +847,7 @@ export async function taskSessionProfile(ctx, taskId) {
     await dshdriver.setModel(sid, mid, provider, effort);
   } catch (e) {
     if (e instanceof DshDriverError) {
-      ctx.errorSpaced(502, pyStrErr(e));
+      ctx.errorSpaced(502, e);                // 驱动错误可能带 i18nKey（如 HTTP 状态）
       return;
     }
     throw e;
@@ -890,7 +895,7 @@ export async function taskSessionRewind(ctx, taskId) {
     dbmod.updateTask(task.id, { session_id: newSid }, { db: ctx.db });
   } catch (e) {
     if (e instanceof DshDriverError) {
-      ctx.errorSpaced(502, `回退失败：${pyStrErr(e)}`);
+      ctx.errorSpaced(502, '回退失败：{detail}', { detail: pyStrErr(e) });
       return;
     }
     throw e;

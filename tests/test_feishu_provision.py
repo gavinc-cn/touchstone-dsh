@@ -176,7 +176,8 @@ def _doctor_stubs(monkeypatch, *, cfg=None, token=None, bot=None, ws=True, ws_ap
     spy = _RestSpy(data=data)
     monkeypatch.setattr(feishu, "_rest", spy)
     monkeypatch.setattr(feishu, "slash_status",
-                        lambda uid: slash or {"configured": True, "need_scope": False,
+                        lambda uid, lang="zh": slash or {"configured": True,
+                                              "need_scope": False,
                                               "error": "", "remote": [], "extra": [],
                                               "desired": []})
     monkeypatch.setattr(db, "get_feishu_binding_by_user", lambda uid: bound)
@@ -734,7 +735,7 @@ def test_doctor_slash_probe_exception_degrades(monkeypatch):
     飞书返回形态意外时 `slash_status` 会漏出 AttributeError，HTTP 层 500）。"""
     _doctor_stubs(monkeypatch, bot={"bot": {"app_name": "T", "activate_status": 2}})
     monkeypatch.setattr(feishu, "slash_status",
-                        lambda uid: (_ for _ in ()).throw(
+                        lambda uid, lang="zh": (_ for _ in ()).throw(
                             AttributeError("'list' object has no attribute 'get'")))
     out = feishu.doctor(1)                      # 不得外抛
     assert _item(out, "slash_scope")["state"] == "fail"

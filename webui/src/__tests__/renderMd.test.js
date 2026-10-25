@@ -1,9 +1,13 @@
 // utils/renderMd.js 单测：轻量 markdown → HTML（气泡/描述/评论共用的渲染器）
 // 覆盖：HTML 转义（防注入）、标题与行内 code/bold、代码围栏、列表/引用/水平线、
 // 表格、链接与图片的 URL 白名单（javascript: 等协议被过滤为纯文本）、空输入与状态常量。
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
-import { renderMd, fmtTime, ST_LABEL } from '../utils/renderMd'
+import { renderMd, fmtTime, stLabel } from '../utils/renderMd'
+import { setLang } from '../utils/i18n'
+
+// 路径链接的 title 走 t()：断言按中文跑（zh 原样返回 key 并插值）
+beforeEach(() => setLang('zh'))
 
 describe('renderMd', () => {
   it('段落渲染并转义 HTML 特殊字符', () => {
@@ -70,9 +74,9 @@ describe('renderMd', () => {
     expect(renderMd(undefined)).toBe('')
     expect(fmtTime('')).toBe('—')
     expect(fmtTime('2026-09-13 10:00')).toBe('2026-09-13 10:00')
-    expect(ST_LABEL.queued).toBe('排队中')
-    expect(ST_LABEL.running).toBe('运行中')
-    expect(ST_LABEL.done).toBe('已完成')
+    expect(stLabel('queued')).toBe('排队中')
+    expect(stLabel('running')).toBe('运行中')
+    expect(stLabel('done')).toBe('已完成')
   })
 })
 

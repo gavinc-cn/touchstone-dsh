@@ -5,29 +5,33 @@
 //   false       = 外部会话（用户在 dsh GUI 里直跑/接管）→ 提示条 + 停止置灰；
 //   null/未下发 = 注册表未知（未连接/未对齐/没见过该 sid）→ **按池内渲染**，
 //                 与现状一致（未知 ≠ 外部：绝不据未知反向推断成外部会话）。
-import { describe, expect, it } from 'vitest'
-import { OWNED_EXTERNAL_HINT, canStop, ownedHint } from '../utils/sessionOwned'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { canStop, ownedExternalHint, ownedHint } from '../utils/sessionOwned'
+import { setLang, t } from '../utils/i18n'
+
+// 文案断言按中文跑（zh 原样返回 key 并插值）
+beforeEach(() => setLang('zh'))
 
 describe('ownedHint（提示条文案）', () => {
   it('外部会话（owned=false）给提示：文案含「外部会话」并说明平台停不了它', () => {
-    const t = ownedHint(false)
-    expect(t).toContain('外部会话')
-    expect(t).toContain('dsh GUI')          // 说清是谁在跑（不是平台启动的）
-    expect(t).toContain('停止')             // 说清后果（停止/中断对它无效）
+    const hint = ownedHint(false, t)
+    expect(hint).toContain('外部会话')
+    expect(hint).toContain('dsh GUI')          // 说清是谁在跑（不是平台启动的）
+    expect(hint).toContain('停止')             // 说清后果（停止/中断对它无效）
   })
 
   it('池内会话（owned=true）不提示', () => {
-    expect(ownedHint(true)).toBe('')
+    expect(ownedHint(true, t)).toBe('')
   })
 
   it('注册表未知（null/undefined）不提示——未知 ≠ 外部，按池内渲染', () => {
-    expect(ownedHint(null)).toBe('')
-    expect(ownedHint(undefined)).toBe('')
-    expect(ownedHint()).toBe('')
+    expect(ownedHint(null, t)).toBe('')
+    expect(ownedHint(undefined, t)).toBe('')
+    expect(ownedHint(undefined, t)).toBe('')
   })
 
-  it('提示文案只有一处出处（常量即返回值，防两处措辞漂移）', () => {
-    expect(ownedHint(false)).toBe(OWNED_EXTERNAL_HINT)
+  it('提示文案只有一处出处（工厂即返回值，防两处措辞漂移）', () => {
+    expect(ownedHint(false, t)).toBe(ownedExternalHint(t))
   })
 })
 

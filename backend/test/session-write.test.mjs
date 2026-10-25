@@ -78,13 +78,13 @@ class FakeRes {
 }
 
 /** 真 ctx + **真路由表**分派（`path` 不含查询串，与 server.js 的构造一致） */
-async function post(fx, path, body, { userId } = {}) {
+async function post(fx, path, body, { userId, headers = {} } = {}) {
   const res = new FakeRes();
   const uid = userId === undefined
     ? fx.db.prepare("SELECT id FROM users WHERE username='admin'").get().id
     : userId;
   const ctx = makeContext({
-    req: fakeReq({ body }),
+    req: fakeReq({ body, headers }),
     res,
     db: fx.db,
     user: { id: uid },
@@ -421,6 +421,12 @@ test('chat：DeliveryRefused（投递前置闸）⇒ 400 + 闸的中文文案（
         const res = await post(fx, `/api/tasks/${task}/session/chat`, { message: 'hi' });
         assert.equal(res.status, 400, '闸拒投是 400（Python 的裸 RuntimeError 档），不是 500');
         assert.equal(res.text, '{"error": "会话已结束，无法投递（宿主无活动 agent）"}');
+        // 英文模式（T10 R18 扩展）：lib 抛的 DeliveryRefused 也按请求语言整条英文化
+        const en = await post(fx, `/api/tasks/${task}/session/chat`, { message: 'hi' },
+          { headers: { 'X-TS-Lang': 'en' } });
+        assert.equal(en.status, 400);
+        assert.equal(en.text,
+          '{"error": "The session has ended and cannot receive deliveries (no active agent in the host)"}');
         assert.equal(drv.calls.length, 0, '闸在投递之前：驱动一个请求都不该收到');
         // 消息未落行（Python：`提交首行前置闸`，chat_msgs 查不到这次发送）
         assert.equal(fx.db.prepare('SELECT COUNT(*) AS n FROM chat_msgs').get().n, 0);
@@ -512,6 +518,12 @@ test('inject：族不支持 ⇒ 400；InjectRefused ⇒ 400（消息仍在队列
     const b = await post(fx, `/api/tasks/${task}/session/chat/inject`, { msg_id: 'm-run' });
     assert.equal(b.status, 400);
     assert.equal(b.text, '{"error": "该消息已不在排队中（可能已开始发送）"}');
+    // 英文模式：InjectRefused 同样按请求语言整条英文化
+    const en = await post(fx, `/api/tasks/${task}/session/chat/inject`, { msg_id: 'm-run' },
+      { headers: { 'X-TS-Lang': 'en' } });
+    assert.equal(en.status, 400);
+    assert.equal(en.text,
+      '{"error": "The message is no longer queued (it may have started sending)"}');
     assert.equal(waitq.msgGet('m-run', { db: fx.db }).state, 'running', '被拒 ⇒ 消息未动');
   });
 });
@@ -633,6 +645,49 @@ test('stop：200 `{"ok":true}`（紧凑）+ 取消该会话排队消息 + /cance
       assert.ok(drv.state.cancelDoneAt > 0, '假驱动的 /cancel 已响应');
       assert.ok(res.endedAt >= drv.state.cancelDoneAt,
         '漏 await chat.stop 时端点在 /cancel 返回前就写响应（本断言即守卫）');
+    });
+  });
+});
+
+// --------------------------------------------------------------------------
+// profile：驱动 HTTP 错误的 detail 必须保留（T10 fix round 2 回归）
+// --------------------------------------------------------------------------
+
+test('profile：驱动 5xx 的 detail 在中文/en 都保留；无 detail 才回落通用文案', async () => {
+  await withFixture('sessw-profile-502', async (fx) => {
+    const pid = project(fx);
+    const task = insertTask(fx.db, pid, { sessionId: 'session-p1' });
+    const path = `/api/tasks/${task}/session/profile`;
+
+    // ① 驱动正文带 `error` ⇒ `.message` 就是 detail；中文无头必须保持旧字节（detail 原样，
+    //    不能再被「驱动返回 HTTP <status>」覆盖掉），英文给「Driver returned HTTP …: detail」。
+    await withDriver({
+      '/model': ({ reply }) => reply(500, { error: '宿主崩了' }),
+    }, async () => {
+      const zh = await post(fx, path, { reasoning_effort: 'high' });
+      assert.equal(zh.status, 502);
+      assert.equal(zh.text, '{"error": "宿主崩了"}',
+        '中文无头：detail 必须逐字节保留（旧版 pyStrErr(e) 的输出）');
+      const en = await post(fx, path, { reasoning_effort: 'high' },
+        { headers: { 'X-TS-Lang': 'en' } });
+      assert.equal(en.status, 502);
+      assert.equal(en.text, '{"error": "Driver returned HTTP 500: 宿主崩了"}');
+    });
+
+    // ② 正文非 JSON ⇒ detail 为空，回落「驱动返回 HTTP <status>」（中英各一条）。
+    await withDriver({
+      '/model': ({ res }) => {
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('not json');
+      },
+    }, async () => {
+      const zh = await post(fx, path, { reasoning_effort: 'high' });
+      assert.equal(zh.status, 502);
+      assert.equal(zh.text, '{"error": "驱动返回 HTTP 500"}');
+      const en = await post(fx, path, { reasoning_effort: 'high' },
+        { headers: { 'X-TS-Lang': 'en' } });
+      assert.equal(en.status, 502);
+      assert.equal(en.text, '{"error": "Driver returned HTTP 500"}');
     });
   });
 });

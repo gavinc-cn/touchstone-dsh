@@ -7,6 +7,7 @@ import {
   autoBucketSec, bucketize, downsample, formatValue, groupLatest, matchSeries,
   metricSeries, seriesPoints, statValue, timeSpan,
 } from '../../utils/loadMetrics'
+import { t, useI18n } from '../../utils/i18n'
 
 // 序列配色：平台语义色优先，超出部分用一组补充色循环
 // 全走 CSS 变量（--seq-4/5/6 原先写死为浅色系，白底上会糊；见 styles/theme.css 皮肤块）
@@ -22,8 +23,8 @@ const MAX_LINE_POINTS = 600
 const MAX_STACK_BUCKETS = 40
 
 /** 空态占位（无数据/指标未上报） */
-function Empty({ text = '暂无数据（本轮尚未产生该指标）' }) {
-  return <div className="lp-empty hint">{text}</div>
+function Empty({ text }) {
+  return <div className="lp-empty hint">{text || t('暂无数据（本轮尚未产生该指标）')}</div>
 }
 
 /** 折线/柱状共用的坐标换算 */
@@ -31,7 +32,7 @@ function makeScale(t0, t1, vmin, vmax) {
   const span = t1 - t0
   const vspan = vmax - vmin
   return {
-    x: (t) => PAD.l + (span > 0 ? (t - t0) / span : 0.5) * (W - PAD.l - PAD.r),
+    x: (ts) => PAD.l + (span > 0 ? (ts - t0) / span : 0.5) * (W - PAD.l - PAD.r),
     y: (v) => H - PAD.b - (vspan > 0 ? (v - vmin) / vspan : 0.5) * (H - PAD.t - PAD.b),
   }
 }
@@ -81,7 +82,7 @@ export function LinePanel({ panel, store }) {
         <Axes scale={scale} vmin={vmin} vmax={vmax} />
         {items.map((it) => (
           <polyline key={it.label} fill="none" strokeWidth="1.6" stroke={it.color}
-            points={it.points.map(([t, v]) => `${scale.x(t)},${scale.y(v)}`).join(' ')} />
+            points={it.points.map(([ts, v]) => `${scale.x(ts)},${scale.y(v)}`).join(' ')} />
         ))}
       </svg>
       <div className="lp-legend">
@@ -128,8 +129,8 @@ export function BarPanel({ panel, store }) {
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="lp-svg">
       <Axes scale={scale} vmin={0} vmax={Math.max(...vs, 1)} />
-      {points.map(([t, v]) => (
-        <rect key={t} x={scale.x(t) - bw / 2} y={scale.y(v)} width={bw}
+      {points.map(([ts, v]) => (
+        <rect key={ts} x={scale.x(ts) - bw / 2} y={scale.y(v)} width={bw}
           height={H - PAD.b - scale.y(v)} fill={COLORS[0]} opacity="0.85" />
       ))}
     </svg>
@@ -151,34 +152,34 @@ export function StackedBarPanel({ panel, store }) {
   // 各组的桶序列（counter 取增量、gauge 取均值）——按桶时间对齐后纵向堆叠
   const buckets = new Map()
   withData.forEach((g) => {
-    bucketize(g.points, bucket, g.type === 'counter' ? 'sum' : 'avg').forEach(([t, v]) => {
-      if (!buckets.has(t)) buckets.set(t, {})
-      buckets.get(t)[g.label] = v
+    bucketize(g.points, bucket, g.type === 'counter' ? 'sum' : 'avg').forEach(([ts, v]) => {
+      if (!buckets.has(ts)) buckets.set(ts, {})
+      buckets.get(ts)[g.label] = v
     })
   })
   const times = [...buckets.keys()].sort((a, b) => a - b)
-  const totals = times.map((t) => Object.values(buckets.get(t)).reduce((a, b) => a + b, 0))
+  const totals = times.map((ts) => Object.values(buckets.get(ts)).reduce((a, b) => a + b, 0))
   const vmax = Math.max(...totals, 1)
   const labels = withData.map((g) => g.label)
   const bw = Math.max(1, (W - PAD.l - PAD.r) / times.length * 0.7)
-  const x = (t) => PAD.l + ((t - times[0]) / (Math.max(times[times.length - 1] - times[0], 1)))
+  const x = (ts) => PAD.l + ((ts - times[0]) / (Math.max(times[times.length - 1] - times[0], 1)))
     * (W - PAD.l - PAD.r)
   const y = (v) => H - PAD.b - (v / vmax) * (H - PAD.t - PAD.b)
   return (
     <div>
       <svg viewBox={`0 0 ${W} ${H}`} className="lp-svg">
         <Axes scale={{ x, y }} vmin={0} vmax={vmax} />
-        {times.map((t) => {
+        {times.map((ts) => {
           let acc = 0
           return (
-            <g key={t}>
+            <g key={ts}>
               {labels.map((lb, i) => {
-                const v = buckets.get(t)[lb] || 0
+                const v = buckets.get(ts)[lb] || 0
                 const y0 = y(acc)
                 acc += v
                 const y1 = y(acc)
                 return v > 0 ? (
-                  <rect key={lb} x={x(t) - bw / 2} y={y1} width={bw} height={y0 - y1}
+                  <rect key={lb} x={x(ts) - bw / 2} y={y1} width={bw} height={y0 - y1}
                     fill={COLORS[i % COLORS.length]} opacity="0.9" />
                 ) : null
               })}
@@ -266,8 +267,8 @@ export function TablePanel({ panel, store }) {
     const last = s.points.length ? s.points[s.points.length - 1][1] : null
     const pts = seriesPoints(s, { rate: s.type === 'counter' })
     const rate = pts.length ? pts[pts.length - 1][1] : null
-    const dim = key ? s.labels?.[key] : (Object.values(s.labels || {}).join(' / ') || '全部')
-    return { dim: String(dim ?? '全部'), labels: s.labels || {}, last, rate,
+    const dim = key ? s.labels?.[key] : (Object.values(s.labels || {}).join(' / ') || t('全部'))
+    return { dim: String(dim ?? t('全部')), labels: s.labels || {}, last, rate,
              type: s.type }
   })
   const hasCounter = rows.some((r) => r.type === 'counter')
@@ -276,9 +277,9 @@ export function TablePanel({ panel, store }) {
       <table className="lp-table">
         <thead>
           <tr>
-            <th>{key || '维度'}</th>
-            <th style={{ textAlign: 'right' }}>最新值</th>
-            {hasCounter && <th style={{ textAlign: 'right' }}>速率 /s</th>}
+            <th>{key || t('维度')}</th>
+            <th style={{ textAlign: 'right' }}>{t('最新值')}</th>
+            {hasCounter && <th style={{ textAlign: 'right' }}>{t('速率 /s')}</th>}
           </tr>
         </thead>
         <tbody>
@@ -297,6 +298,8 @@ export function TablePanel({ panel, store }) {
 
 /** 面板分发：type → 组件（未知类型给一行提示，不炸整页） */
 export function PanelView({ panel, store }) {
+  // 订阅语言切换：各面板子组件随之重渲染（文案用 t() 在渲染时求值）
+  useI18n()
   const props = { panel, store }
   if (panel.type === 'line') return <LinePanel {...props} />
   if (panel.type === 'bar') return <BarPanel {...props} />
@@ -304,5 +307,5 @@ export function PanelView({ panel, store }) {
   if (panel.type === 'donut') return <DonutPanel {...props} />
   if (panel.type === 'stat') return <StatPanel {...props} />
   if (panel.type === 'table') return <TablePanel {...props} />
-  return <Empty text={`未支持的面板类型：${panel.type}`} />
+  return <Empty text={t('未支持的面板类型：{type}', { type: panel.type })} />
 }

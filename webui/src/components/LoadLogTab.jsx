@@ -13,6 +13,7 @@ import { absToMedia, projectRoots } from '../utils/mediaText'
 import { toast } from '../utils/toast'
 import { runLabel } from '../utils/loadRuns'
 import { useAppStore } from '../stores/app'
+import { t, useI18n } from '../utils/i18n'
 import LoadDashboard from './LoadDashboard'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -34,6 +35,8 @@ function logCls(line) {
 }
 
 export default function LoadLogTab({ task }) {
+  // 订阅语言切换（lang 变化即重渲染；文案用模块级 t 按当前语言求值）
+  useI18n()
   const [runs, setRuns] = useState([])
   const [runKey, setRunKey] = useState('')      // 空串 = 跟随最新/正在跑
   const [tick, setTick] = useState(0)           // 手动刷新计数
@@ -115,11 +118,11 @@ export default function LoadLogTab({ task }) {
     <div className="lp-log">
       <section className="lp-panel full">
         <div className="lp-panel-head">
-          <h4>运行</h4>
-          <span className="hint">每次发压是一次运行（报告 / 曲线 / 日志都按运行切分）</span>
+          <h4>{t('运行')}</h4>
+          <span className="hint">{t('每次发压是一次运行（报告 / 曲线 / 日志都按运行切分）')}</span>
           <span className="ml-auto flex items-center gap-2">
-            <button type="button" className="lp-chip" title="刷新运行列表"
-              onClick={() => setTick((n) => n + 1)}>↻ 刷新</button>
+            <button type="button" className="lp-chip" title={t('刷新运行列表')}
+              onClick={() => setTick((n) => n + 1)}>↻ {t('刷新')}</button>
             {runs.length > 0 && (
               <Select value={selKey} onValueChange={setRunKey}>
                 <SelectTrigger size="sm" className="h-7 min-w-[220px] text-xs">
@@ -138,12 +141,12 @@ export default function LoadLogTab({ task }) {
         </div>
         {!runs.length && (
           <div className="hint">
-            {running ? '发压中…（运行列表稍后自动刷新）'
-              : '暂无运行记录（发压结束后生成报告与曲线）'}
+            {running ? t('发压中…（运行列表稍后自动刷新）')
+              : t('暂无运行记录（发压结束后生成报告与曲线）')}
           </div>
         )}
         {sel && !sel.has_metrics && (
-          <div className="hint lp-warn">该运行为存量报告（无曲线数据）；可查看下方报告。</div>
+          <div className="hint lp-warn">{t('该运行为存量报告（无曲线数据）；可查看下方报告。')}</div>
         )}
       </section>
 
@@ -153,34 +156,34 @@ export default function LoadLogTab({ task }) {
 
       <section className="lp-panel full">
         <div className="lp-panel-head">
-          <h4>运行日志</h4>
+          <h4>{t('运行日志')}</h4>
           {sel && (
             <span className="hint">
-              {sel.registered ? `第 ${sel.round_no} 轮（发压）` : '存量运行无独立日志'}
+              {sel.registered ? t('第 {n} 轮（发压）', { n: sel.round_no }) : t('存量运行无独立日志')}
             </span>
           )}
         </div>
         <div className="log lp-logbox" ref={boxRef}>
           {logLines.length ? logLines.map((line, i) => (
             <div key={i} className={'log-line ' + logCls(line)}>{line || '\u00a0'}</div>
-          )) : <div className="hint">{roundNo ? '该运行暂无日志' : '该运行没有独立日志文件'}</div>}
+          )) : <div className="hint">{roundNo ? t('该运行暂无日志') : t('该运行没有独立日志文件')}</div>}
         </div>
       </section>
 
       <section className="lp-panel full">
         <div className="lp-panel-head">
-          <h4>压测报告</h4>
+          <h4>{t('压测报告')}</h4>
           {report?.found && (
             <span className="hint">
-              {report.file}{report.run_key ? `（运行键 ${report.run_key}）` : ''}
+              {report.file}{report.run_key ? t('（运行键 {key}）', { key: report.run_key }) : ''}
             </span>
           )}
           {report?.found && (
-            <button type="button" className="lp-chip ml-auto" title="复制报告文件名"
+            <button type="button" className="lp-chip ml-auto" title={t('复制报告文件名')}
               onClick={() => {
                 navigator.clipboard?.writeText(report.file || '')
-                toast('已复制报告文件名')
-              }}>复制文件名</button>
+                toast(t('已复制报告文件名'))
+              }}>{t('复制文件名')}</button>
           )}
         </div>
         {report?.found ? (
@@ -189,8 +192,8 @@ export default function LoadLogTab({ task }) {
           </div>
         ) : (
           <div className="hint">
-            {live ? '发压中，结束后生成报告'
-              : (sel ? '该运行暂无报告' : '暂无压测报告（发压结束或被停止后生成）')}
+            {live ? t('发压中，结束后生成报告')
+              : (sel ? t('该运行暂无报告') : t('暂无压测报告（发压结束或被停止后生成）'))}
           </div>
         )}
       </section>

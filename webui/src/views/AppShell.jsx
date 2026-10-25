@@ -4,6 +4,7 @@ import { useAuthStore } from '../stores/auth'
 import { useAppStore } from '../stores/app'
 import { projectApi, prefsApi } from '../api'
 import { toast } from '../utils/toast'
+import { applyServerLang, useI18n } from '../utils/i18n'
 import { useResizable } from '../hooks/useResizable'
 import TasksTab from '../components/TasksTab.jsx'
 import MonitorTab from '../components/MonitorTab.jsx'
@@ -15,7 +16,7 @@ import { canonicalPermission, permissionDefaultLabel, permissionItems, permissio
 import { effortChoices } from '../utils/sessionEffort'
 import { dirCanGoUp, dirPathText, dirUpTitle, dirRootHint } from '../utils/dirNav'
 // 主标签页定义/默认序/布局规范化（含压测面板默认置末的存量迁移）唯一出处
-import { TAB_KEYS, TAB_LABEL, normTabCfg } from '../utils/tabCfg'
+import { TAB_KEYS, normTabCfg, tabLabel } from '../utils/tabCfg'
 import { RzHandles } from '../components/RzHandles'
 import TouchstoneLogo from '../components/TouchstoneLogo.jsx'
 import { Button } from '@/components/ui/button'
@@ -31,7 +32,12 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Plus, Pencil, LogOut, Menu, Settings, ShieldUser, RefreshCw, Archive, ArchiveRestore, Trash2, FolderOpen, FolderPlus, ArrowUp, EyeOff, X } from 'lucide-react'
 
-const DUP_LABEL = { project_dir: '项目目录', work_dir: '工作目录' }
+// 目录重复提醒里的字段展示名：t 由调用方传入（渲染时求值，切换语言即时重渲染）
+function dupLabel(t, field) {
+  if (field === 'project_dir') return t('项目目录')
+  if (field === 'work_dir') return t('工作目录')
+  return field
+}
 
 // 取路径最后一段（项目名称留空时自动命名）: / 与 \ 均按分隔符处理(跨 Windows/Linux),
 // 忽略尾部分隔符与纯盘符段(如 "D:"), 与后端 path_last_segment 行为一致
@@ -54,6 +60,8 @@ function loadSideW() {
 }
 
 export default function AppShell() {
+  // 文案取 t()：切换语言即时重渲染
+  const { t } = useI18n()
   const navigate = useNavigate()
   const auth = useAuthStore()
   const store = useAppStore()
@@ -193,6 +201,8 @@ export default function AppShell() {
     let dead = false
     prefsApi.get(0).then((r) => {
       if (dead) return
+      // 账号级语言偏好：仅在本浏览器从未手动选过时采用（本地选择永远优先，不覆盖）
+      applyServerLang(r.prefs?.lang)
       const order = (Array.isArray(r.prefs?.proj_order?.order) ? r.prefs.proj_order.order : [])
         .map(Number).filter(Number.isFinite)
       if (order.length) setProjOrder(order)
@@ -426,7 +436,7 @@ export default function AppShell() {
     const body = { ...pf }
     // 项目名称留空: 自动取项目路径最后一段作为名称(后端有同逻辑兜底)
     if (!body.name) body.name = pathLastSeg(body.project_dir)
-    if (!body.name) { toast('请填写项目名称'); return }
+    if (!body.name) { toast(t('请填写项目名称')); return }
     try {
       const dupList = await projectApi.dupCheck({ project_dir: body.project_dir || '', work_dir: body.work_dir || '', exclude: editId })
       if (dupList.length) {
@@ -457,7 +467,7 @@ export default function AppShell() {
         await useAppStore.getState().selectProject(r.id)
       }
       setProjModal(false)
-      toast(editId ? '已保存' : '项目已创建')
+      toast(editId ? t('已保存') : t('项目已创建'))
     } catch (e) { toast(e.message) }
   }
 
@@ -465,7 +475,7 @@ export default function AppShell() {
   async function archiveProject(p, archived) {
     try {
       await useAppStore.getState().archiveProject(p.id, archived)
-      toast(archived ? '项目已归档' : '项目已恢复')
+      toast(archived ? t('项目已归档') : t('项目已恢复'))
     } catch (e) { toast(e.message) }
   }
 
@@ -512,7 +522,7 @@ export default function AppShell() {
     setDirNewBusy(true)
     try {
       const d = await projectApi.fsMkdir(dirData?.path || '', name)
-      toast(`已新建文件夹：${d?.name || name}`)
+      toast(t('已新建文件夹：{name}', { name: d?.name || name }))
       navDir(d?.path || dirData?.path || '')
     } catch (e) {
       toast(e.message)
@@ -542,7 +552,7 @@ export default function AppShell() {
     if (!delTarget) return
     try {
       await useAppStore.getState().deleteProject(delTarget.id, { confirm_name: delName })
-      toast('项目已删除；案例文件与 bug 报告文件已保留，请自行手动清理')
+      toast(t('项目已删除；案例文件与 bug 报告文件已保留，请自行手动清理'))
       setDelTarget(null)
     } catch (e) { toast(e.message) }
   }
@@ -604,14 +614,14 @@ export default function AppShell() {
   const modelDefaultItem = modelList.find((m) => m.name === modelOpts.default)
   const modelDefaultText = modelDefaultItem
     ? (modelDefaultItem.display_name || modelDefaultItem.name)
-    : (modelOpts.default || '智能体默认')
+    : (modelOpts.default || t('智能体默认'))
   // ---- 项目弹窗「思考等级」选项（2026-10-04）----
   // 按当前（推定）模型从宿主模型目录取该模型支持的档位；模型未知/目录无档位信息时
   // 回落内置档位表（工具内部处理，fromCatalog=false 时列表项括注 id 提醒非目录来源）
   const effortModel = modelExplicit
     ? pf.model
     : (modelValue === '__default__' ? modelOpts.default : modelValue)
-  const effortOpts = effortChoices(modelOpts, effortModel)
+  const effortOpts = effortChoices(modelOpts, effortModel, t)
 
   // ---- 项目弹窗「权限」控件（2026-10-21：动态跟随 DSH 宿主权限目录）----
   // 值/提交口径=宿主 preset key（''=留空用宿主默认）；选项=目录选项 + 现值兜底项
@@ -624,10 +634,10 @@ export default function AppShell() {
     ? permissionLabel(permCatalog.options, pf.permission_mode)
     : permissionDefaultLabel(permCatalog)
   const permTriggerTitle = permUnavailable
-    ? '宿主权限目录不可用（需要 dsh 插件宿主）；留空用宿主默认'
+    ? t('宿主权限目录不可用（需要 dsh 插件宿主）；留空用宿主默认')
     : (pf.permission_mode
-      ? '留空用宿主默认；显式选择后项目内新起的看板卡片会话按此档运行'
-      : '尚未显式选择：暗色显示的是宿主默认档（留空即用默认）')
+      ? t('留空用宿主默认；显式选择后项目内新起的看板卡片会话按此档运行')
+      : t('尚未显式选择：暗色显示的是宿主默认档（留空即用默认）'))
 
   return (
     <div className="flex h-svh">
@@ -638,16 +648,16 @@ export default function AppShell() {
           <span>Touchstone</span>
         </div>
         <div className="flex items-center justify-between px-4 pt-3 pb-1 font-mono text-[calc(10px*var(--fs))] uppercase tracking-[0.14em] text-muted-foreground">
-          <span>{showArchived ? '已归档项目' : '项目列表'}</span>
+          <span>{showArchived ? t('已归档项目') : t('项目列表')}</span>
           <div className="flex items-center gap-1">
             {/* 新建项目入口：与右上角「添加项目」同一条路径，但落在左侧——
                 dsh 桌面版窗口控制按钮只盖右上角，这里任何窗口尺寸都点得到（卡 987） */}
-            <button type="button" title="添加项目"
+            <button type="button" title={t('添加项目')}
               className="rounded p-0.5 hover:text-foreground"
               onClick={() => openProjectModal()}>
               <Plus size={13} />
             </button>
-            <button type="button" title={showArchived ? '返回项目列表' : '查看已归档项目'}
+            <button type="button" title={showArchived ? t('返回项目列表') : t('查看已归档项目')}
               className="rounded p-0.5 hover:text-foreground"
               onClick={() => setShowArchived((v) => !v)}>
               {showArchived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
@@ -672,14 +682,14 @@ export default function AppShell() {
               <div className="flex items-center gap-1">
                 <div className={'flex-1 truncate text-sm font-semibold ' + (store.currentProject?.id === p.id ? 'text-[var(--tab-active)]' : '')}>{p.name}</div>
                 {/* 归档/恢复入口: 阻止冒泡, 避免触发卡片选中 */}
-                <button type="button" title={p.archived ? '恢复项目' : '归档项目'}
+                <button type="button" title={p.archived ? t('恢复项目') : t('归档项目')}
                   className="flex-none rounded p-1 text-muted-foreground hover:text-foreground"
                   onClick={(e) => { e.stopPropagation(); archiveProject(p, !p.archived) }}>
                   {p.archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
                 </button>
                 {/* 删除入口仅归档项目提供: 需弹窗输入项目名确认 */}
                 {p.archived && (
-                  <button type="button" title="删除项目"
+                  <button type="button" title={t('删除项目')}
                     className="flex-none rounded p-1 text-muted-foreground hover:text-[var(--fail, #dc2626)]"
                     onClick={(e) => { e.stopPropagation(); openDelModal(p) }}>
                     <Trash2 size={13} />
@@ -689,24 +699,24 @@ export default function AppShell() {
               <div className="truncate font-mono text-[calc(11px*var(--fs))] text-muted-foreground">{p.project_dir}</div>
               {/* 看板三列数量（正在开发/阻塞/待审核）：来自后端 board_counts, 颜色与看板列一致 */}
               <div className="mt-0.5 flex items-center gap-1.5 font-mono text-[calc(10px*var(--fs))] text-muted-foreground">
-                <span>正在开发 <b className="font-semibold text-[var(--run)]">{p.board_counts?.doing ?? 0}</b></span>
-                <span>阻塞 <b className="font-semibold text-[var(--fail)]">{p.board_counts?.blocked ?? 0}</b></span>
-                <span>待审核 <b className="font-semibold text-[var(--retest)]">{p.board_counts?.review ?? 0}</b></span>
+                <span>{t('正在开发')} <b className="font-semibold text-[var(--run)]">{p.board_counts?.doing ?? 0}</b></span>
+                <span>{t('阻塞')} <b className="font-semibold text-[var(--fail)]">{p.board_counts?.blocked ?? 0}</b></span>
+                <span>{t('待审核')} <b className="font-semibold text-[var(--retest)]">{p.board_counts?.review ?? 0}</b></span>
               </div>
             </div>
           ))}
-          {!visibleProjects.length && <div className="p-2 text-xs text-muted-foreground">{showArchived ? '暂无已归档项目' : '暂无项目'}</div>}
+          {!visibleProjects.length && <div className="p-2 text-xs text-muted-foreground">{showArchived ? t('暂无已归档项目') : t('暂无项目')}</div>}
         </div>
         <div className="flex items-center gap-1 border-t border-border px-2.5 py-2">
           <span className="mr-auto truncate text-xs text-muted-foreground">{auth.username}</span>
           {/* 设置: 独立页面(左侧分区列表 + 右侧内容), 主题/改密/飞书/RAG 全在该页 */}
-          <Button variant="ghost" size="sm" title="站点设置" onClick={() => navigate('/settings')}>
-            <Settings /> 设置
+          <Button variant="ghost" size="sm" title={t('站点设置')} onClick={() => navigate('/settings')}>
+            <Settings /> {t('设置')}
           </Button>
           {/* 菜单: 只保留 管理 / 登出 两项(自绘下拉, 无新增依赖) */}
           <div className="sets-wrap">
             <Button variant="ghost" size="sm" onClick={() => setSetOpen((v) => !v)}>
-              <Menu /> 菜单
+              <Menu /> {t('菜单')}
             </Button>
             {setOpen && (
               <>
@@ -714,11 +724,11 @@ export default function AppShell() {
                 <div className="sets-menu">
                   {auth.isAdmin && (
                     <button type="button" onClick={() => { setSetOpen(false); navigate('/admin') }}>
-                      <ShieldUser /> 管理
+                      <ShieldUser /> {t('管理')}
                     </button>
                   )}
                   <button type="button" className="danger" onClick={logout}>
-                    <LogOut /> 登出
+                    <LogOut /> {t('登出')}
                   </button>
                 </div>
               </>
@@ -728,33 +738,33 @@ export default function AppShell() {
       </aside>
 
       {/* 侧栏宽度拖拽手柄: 拖动改宽(180–480px), 双击复位 230px */}
-      <div className="vsplit side-split" title="拖动调整侧栏宽度，双击复位"
+      <div className="vsplit side-split" title={t('拖动调整侧栏宽度，双击复位')}
         onMouseDown={onSideSplitDown} onDoubleClick={resetSideW}></div>
 
       {/* 主区 */}
       <main className="flex min-w-0 flex-1 flex-col">
         <div className="flex flex-none items-center gap-3 border-b border-border bg-card px-4 py-2">
           <h2 className="m-0 truncate font-serif text-[calc(15px*var(--fs))] font-semibold">
-            {store.currentProject?.name || '— 未选择项目'}
+            {store.currentProject?.name || t('— 未选择项目')}
           </h2>
           {store.currentProject?.archived && (
-            <span className="flex-none rounded-full border border-border px-2 py-0.5 text-[calc(10px*var(--fs))] text-muted-foreground">已归档</span>
+            <span className="flex-none rounded-full border border-border px-2 py-0.5 text-[calc(10px*var(--fs))] text-muted-foreground">{t('已归档')}</span>
           )}
           <div className="flex-1"></div>
           <Button size="sm" onClick={() => openProjectModal()}>
-            <Plus /> 添加项目
+            <Plus /> {t('添加项目')}
           </Button>
           {store.currentProject && (
             <Button size="sm" variant="outline" onClick={() => openProjectModal(store.currentProject)}>
-              <Pencil /> 编辑项目
+              <Pencil /> {t('编辑项目')}
             </Button>
           )}
           {store.currentProject && (
             <Button size="sm" variant="outline"
-              title="归档后从项目列表默认隐藏，可在侧栏「已归档项目」视图中恢复"
+              title={t('归档后从项目列表默认隐藏，可在侧栏「已归档项目」视图中恢复')}
               onClick={() => archiveProject(store.currentProject, !store.currentProject.archived)}>
               {store.currentProject.archived ? <ArchiveRestore /> : <Archive />}
-              {store.currentProject.archived ? '恢复项目' : '归档项目'}
+              {store.currentProject.archived ? t('恢复项目') : t('归档项目')}
             </Button>
           )}
         </div>
@@ -771,8 +781,8 @@ export default function AppShell() {
                     <TabsTrigger key={k} value={k} data-tab-key={k}
                       className={'tabbar-trigger pr-5 data-[state=active]:text-[var(--tab-active)]' + (dragKey === k ? ' tabbar-dragging' : '')}
                       onPointerDown={(e) => onTabPointerDown(e, k)}>
-                      {TAB_LABEL[k]}
-                      <span className="tabbar-hide" title="隐藏此标签页（可点右侧按钮恢复）"
+                      {tabLabel(k)}
+                      <span className="tabbar-hide" title={t('隐藏此标签页（可点右侧按钮恢复）')}
                         onClick={(e) => { e.stopPropagation(); hideTab(k) }}
                         onPointerDown={(e) => e.stopPropagation()}>
                         <X className="size-2.5" />
@@ -780,15 +790,15 @@ export default function AppShell() {
                     </TabsTrigger>
                   ))}
                   {!visibleKeys.length && (
-                    <span className="px-3 py-2 text-xs text-muted-foreground">标签页已全部隐藏</span>
+                    <span className="px-3 py-2 text-xs text-muted-foreground">{t('标签页已全部隐藏')}</span>
                   )}
                 </TabsList>
                 <div className="ml-auto"></div>
                 <div className="sets-wrap">
-                  <Button variant="ghost" size="sm" title="显示/恢复隐藏的标签页"
+                  <Button variant="ghost" size="sm" title={t('显示/恢复隐藏的标签页')}
                     onClick={() => setHiddenOpen((v) => !v)}>
                     <EyeOff />
-                    {cfgNow.hidden.length ? `隐藏 ${cfgNow.hidden.length}` : '标签页'}
+                    {cfgNow.hidden.length ? t('隐藏 {n}', { n: cfgNow.hidden.length }) : t('标签页')}
                   </Button>
                   {hiddenOpen && (
                     <>
@@ -796,13 +806,13 @@ export default function AppShell() {
                       <div className="sets-menu drop-down">
                         {!cfgNow.hidden.length && (
                           <div className="px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-                            没有隐藏的标签页。
-                            <br />把鼠标悬停到标签上点 × 即可隐藏。
+                            {t('没有隐藏的标签页。')}
+                            <br />{t('把鼠标悬停到标签上点 × 即可隐藏。')}
                           </div>
                         )}
                         {cfgNow.hidden.map((k) => (
                           <button key={k} type="button" onClick={() => restoreTab(k)}>
-                            <EyeOff /> {TAB_LABEL[k]}
+                            <EyeOff /> {tabLabel(k)}
                           </button>
                         ))}
                       </div>
@@ -837,17 +847,16 @@ export default function AppShell() {
             <div className="mt-20 flex flex-col items-center gap-3 px-6 text-center text-sm text-muted-foreground">
               {projLoaded && !store.projects.length ? (
                 <>
-                  <div className="text-[calc(15px*var(--fs))] font-semibold text-foreground">还没有项目</div>
+                  <div className="text-[calc(15px*var(--fs))] font-semibold text-foreground">{t('还没有项目')}</div>
                   <p className="max-w-[560px] leading-relaxed">
-                    创建一个项目：绑定被测代码目录与工作目录，案例库（free_style）与
-                    Bug 报告（bug_report）会在工作目录下自动生成。
+                    {t('创建一个项目：绑定被测代码目录与工作目录，案例库（free_style）与 Bug 报告（bug_report）会在工作目录下自动生成。')}
                   </p>
                 </>
               ) : (
-                <div>← 选择一个项目，或点击「添加项目」创建</div>
+                <div>{t('← 选择一个项目，或点击「添加项目」创建')}</div>
               )}
               <Button size="lg" data-empty-cta="add-project" onClick={() => openProjectModal()}>
-                <Plus /> 添加项目
+                <Plus /> {t('添加项目')}
               </Button>
             </div>
           )}
@@ -864,21 +873,21 @@ export default function AppShell() {
           <RzHandles start={rzStart} reset={rzReset} />
           <DialogHeader className="text-left">
             <DialogTitle className="cursor-move select-none text-sm" onMouseDown={rzDragStart}>
-              {editId ? '编辑项目' : '添加项目'}
+              {editId ? t('编辑项目') : t('添加项目')}
             </DialogTitle>
           </DialogHeader>
           <div className="modal-scroll overflow-y-auto">
-            <div className="form-row"><label>项目名称</label>
-              <Input value={pf.name} onChange={(e) => setPf({ ...pf, name: e.target.value.trim() })} placeholder="如 my-project" /></div>
-            <div className="form-row"><label>项目目录</label>
+            <div className="form-row"><label>{t('项目名称')}</label>
+              <Input value={pf.name} onChange={(e) => setPf({ ...pf, name: e.target.value.trim() })} placeholder={t('如 my-project')} /></div>
+            <div className="form-row"><label>{t('项目目录')}</label>
               <Input value={pf.project_dir} onChange={(e) => onProjectDirChange(e.target.value.trim())}
                 onBlur={() => loadAgentSkills(pf.agent_path, pf.project_dir)}
                 placeholder="/path/to/your/project" />
-              <Button variant="outline" size="sm" onClick={() => openDirModal('project_dir')} title="浏览服务端目录并选择">
-                <FolderOpen /> 浏览
+              <Button variant="outline" size="sm" onClick={() => openDirModal('project_dir')} title={t('浏览服务端目录并选择')}>
+                <FolderOpen /> {t('浏览')}
               </Button></div>
             <div className="form-row">
-              <label>智能体</label>
+              <label>{t('智能体')}</label>
               {/* Radix Select 不接受空字符串 value, 用手动哨兵值 __manual__ 表示"手动填写路径" */}
               <Select value={pf.agent_path || '__manual__'}
                 onValueChange={(v) => {
@@ -888,13 +897,13 @@ export default function AppShell() {
                   loadAgentSkills(ap, pf.project_dir)  // 智能体切换后技能列表随之刷新
                 }}>
                 <SelectTrigger className="min-w-[200px] flex-1">
-                  <SelectValue placeholder="手动填写路径" />
+                  <SelectValue placeholder={t('手动填写路径')} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__manual__">手动填写路径</SelectItem>
+                  <SelectItem value="__manual__">{t('手动填写路径')}</SelectItem>
                   {agents.map((a) => (
                     <SelectItem key={a.path || a.name} value={a.found ? a.path : '__missing__'}>
-                      {a.found ? `${a.name} · ${a.version || a.path}` : `${a.name} 未找到`}
+                      {a.found ? `${a.name} · ${a.version || a.path}` : t('{name} 未找到', { name: a.name })}
                     </SelectItem>
                   ))}
                   {/* 现值兜底项：绑定路径不在扫描结果里（P7b 之前的存量旧族绑定，如 kimi-web:/
@@ -906,20 +915,20 @@ export default function AppShell() {
                     return (
                       <SelectItem value={cur}>
                         {cur.startsWith('dsh-plugin:')
-                          ? `dsh（插件·进程内） ${cur.slice(11)}`
-                          : `${cur}（当前绑定）`}
+                          ? t('dsh（插件·进程内） {path}', { path: cur.slice(11) })
+                          : t('{path}（当前绑定）', { path: cur })}
                       </SelectItem>
                     )
                   })()}
                 </SelectContent>
               </Select>
-              <Button variant="outline" size="sm" onClick={scanAgents} title="重新扫描本机 CLI">
-                <RefreshCw /> 扫描
+              <Button variant="outline" size="sm" onClick={scanAgents} title={t('重新扫描本机 CLI')}>
+                <RefreshCw /> {t('扫描')}
               </Button>
             </div>
-            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>智能体只有「dsh（插件·进程内）」一个入口：无需额外参数，模型取自宿主 ~/.dsh/settings.yaml（也可在此显式指定）；kimi/opencode/claude/hermes 旧族与 dsh CLI（裸 dsh 可执行）均已退场，存量旧绑定起跑会报「该智能体族已下线」，请改绑本入口</div>
+            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>{t('智能体只有「dsh（插件·进程内）」一个入口：无需额外参数，模型取自宿主 ~/.dsh/settings.yaml（也可在此显式指定）；kimi/opencode/claude/hermes 旧族与 dsh CLI（裸 dsh 可执行）均已退场，存量旧绑定起跑会报「该智能体族已下线」，请改绑本入口')}</div>
             <div className="form-row">
-              <label title="当前智能体已配置的模型；保存后新创建的任务（含修复/复测）默认使用该模型，已建任务不受影响">模型</label>
+              <label title={t('当前智能体已配置的模型；保存后新创建的任务（含修复/复测）默认使用该模型，已建任务不受影响')}>{t('模型')}</label>
               {/* 智能体有模型列表(dsh 插件族: 宿主 /models 目录)时渲染下拉选择(无搜索过滤);
                   无列表(空/退场/未知路径、驱动不可用或扫描失败)时退回自由输入, 保留手填能力 */}
               {modelList.length ? (
@@ -927,13 +936,13 @@ export default function AppShell() {
                   onValueChange={(v) => setPf({ ...pf, model: v === '__default__' ? '' : v })}>
                   {/* 非用户显式选择（暗色）= 展示推定值（智能体默认/列表第一项） */}
                   <SelectTrigger className={'min-w-[200px] flex-1' + (modelExplicit ? '' : ' text-muted-foreground')}
-                    title={modelExplicit ? '' : '尚未显式选择：暗色显示的是当前智能体的默认模型（留空即用默认）'}>
+                    title={modelExplicit ? '' : t('尚未显式选择：暗色显示的是当前智能体的默认模型（留空即用默认）')}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     {/* 哨兵项=留空用智能体默认模型(Radix Select 不允许空串值, 用 __default__ 代理) */}
                     <SelectItem value="__default__">
-                      {modelOpts.default ? `默认（${modelDefaultText}）` : '默认（智能体默认）'}
+                      {modelOpts.default ? t('默认（{name}）', { name: modelDefaultText }) : t('默认（智能体默认）')}
                     </SelectItem>
                     {modelList.map((m) => (
                       <SelectItem key={m.name} value={m.name}>{m.display_name || m.name}</SelectItem>
@@ -942,28 +951,31 @@ export default function AppShell() {
                 </Select>
               ) : (
                 <Input className="max-w-[240px]"
-                  placeholder={modelOpts.default ? `默认（${modelDefaultText}）` : '默认（智能体默认）'}
+                  placeholder={modelOpts.default ? t('默认（{name}）', { name: modelDefaultText }) : t('默认（智能体默认）')}
                   value={pf.model} onChange={(e) => setPf({ ...pf, model: e.target.value.trim() })} />
               )}
             </div>
-            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>留空用智能体默认模型；设置后从下一条任务开始生效</div>
+            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>{t('留空用智能体默认模型；设置后从下一条任务开始生效')}</div>
             {/* 思考等级（2026-10-04）：与「模型」同层——会话的默认 dsh reasoningEffort。
                 选项按当前（推定）模型从宿主模型目录取（只列该模型支持的档位；目录不可用
                 时回落内置档位表）；留空＝智能体默认档。 */}
             <div className="form-row">
-              <label title="项目内会话的默认思考等级（dsh reasoningEffort）；留空用智能体默认档">思考等级</label>
+              <label title={t('项目内会话的默认思考等级（dsh reasoningEffort）；留空用智能体默认档')}>{t('思考等级')}</label>
               <Select value={pf.reasoning_effort || '__default__'}
                 onValueChange={(v) => setPf({ ...pf, reasoning_effort: v === '__default__' ? '' : v })}>
                 <SelectTrigger className={'min-w-[200px] flex-1' + (pf.reasoning_effort ? '' : ' text-muted-foreground')}
-                  title={pf.reasoning_effort ? '' : '尚未显式选择：暗色显示的是智能体默认档（留空即用默认）'}>
+                  title={pf.reasoning_effort ? '' : t('尚未显式选择：暗色显示的是智能体默认档（留空即用默认）')}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   {/* 哨兵项=留空用智能体默认档（Radix Select 不允许空串值） */}
                   <SelectItem value="__default__">
                     {effortOpts.defaultEffort
-                      ? `默认（${(effortOpts.options.find((o) => o.value === effortOpts.defaultEffort) || {}).label || effortOpts.defaultEffort}）`
-                      : '默认（智能体默认）'}
+                      ? t('默认（{name}）', {
+                        name: (effortOpts.options.find((o) => o.value === effortOpts.defaultEffort) || {}).label
+                          || effortOpts.defaultEffort,
+                      })
+                      : t('默认（智能体默认）')}
                   </SelectItem>
                   {/* 现值兜底项：档位来自宿主目录，换了模型/老插件可能不在当前选项里 */}
                   {pf.reasoning_effort && !effortOpts.options.some((o) => o.value === pf.reasoning_effort) && (
@@ -977,20 +989,20 @@ export default function AppShell() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>思考等级：列表来自当前模型的可用档位；留空用智能体默认；设置后新起的会话（含任务与看板卡）按此档运行</div>
+            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>{t('思考等级：列表来自当前模型的可用档位；留空用智能体默认；设置后新起的会话（含任务与看板卡）按此档运行')}</div>
             {/* 权限档（2026-10-21 起动态跟随 DSH 宿主权限目录 /api/agents/presets）：
                 项目内**看板卡片会话**的默认权限档；档位列表/顺序/标签与宿主一致，提交值
                 为宿主 preset key（read-only/workspace-write/danger-full-access/path-rules/...）。
                 目录不可用（驱动未配置/宿主插件缺失）时下拉置灰，只展示现值 label，仍可保存
                 其它字段。任务会话暂不适用（无审批作答面，需要审批的档会挂起）。 */}
             <div className="form-row">
-              <label title="项目内看板卡片会话的默认权限档；留空用宿主默认">权限</label>
+              <label title={t('项目内看板卡片会话的默认权限档；留空用宿主默认')}>{t('权限')}</label>
               <Select value={permValue} disabled={permUnavailable}
                 onValueChange={(v) => setPf({ ...pf, permission_mode: v === '__default__' ? '' : v })}>
                 <SelectTrigger className={'min-w-[200px] flex-1' + (pf.permission_mode ? '' : ' text-muted-foreground')}
                   title={permTriggerTitle}>
                   {/* 触发器只显示档位名（两行选项内容只属于展开列表，显式 children 覆盖） */}
-                  <SelectValue className="sess-ctl-value" placeholder="权限">{permTriggerText}</SelectValue>
+                  <SelectValue className="sess-ctl-value" placeholder={t('权限')}>{permTriggerText}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {/* 哨兵项=留空用宿主默认（Radix Select 不允许空串值） */}
@@ -1007,13 +1019,13 @@ export default function AppShell() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>权限：项目内新起的看板卡片会话按此档运行；审批请求由平台接管并在会话窗作答；任务会话暂不支持权限档</div>
-            <div className="form-row"><label title="理解/分析项目时优先使用的 skill，注入每类任务首轮提示词">理解项目</label>
+            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>{t('权限：项目内新起的看板卡片会话按此档运行；审批请求由平台接管并在会话窗作答；任务会话暂不支持权限档')}</div>
+            <div className="form-row"><label title={t('理解/分析项目时优先使用的 skill，注入每类任务首轮提示词')}>{t('理解项目')}</label>
               <Select value={pf.skill_understand || '__none__'}
                 onValueChange={(v) => setPf({ ...pf, skill_understand: v === '__none__' ? '' : v })}>
-                <SelectTrigger className="min-w-[200px] flex-1"><SelectValue placeholder="不指定" /></SelectTrigger>
+                <SelectTrigger className="min-w-[200px] flex-1"><SelectValue placeholder={t('不指定')} /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__none__">不指定</SelectItem>
+                  <SelectItem value="__none__">{t('不指定')}</SelectItem>
                   {skillOpts.map((s) => (
                     <SelectItem key={`u-${s.name}`} value={s.name} title={s.description}>
                       {s.name}{s.description ? ` — ${s.description.slice(0, 60)}` : ''}
@@ -1022,12 +1034,12 @@ export default function AppShell() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="form-row"><label title="修复任务自动部署=开时使用的 skill">部署项目</label>
+            <div className="form-row"><label title={t('修复任务自动部署=开时使用的 skill')}>{t('部署项目')}</label>
               <Select value={pf.skill_deploy || '__none__'}
                 onValueChange={(v) => setPf({ ...pf, skill_deploy: v === '__none__' ? '' : v })}>
-                <SelectTrigger className="min-w-[200px] flex-1"><SelectValue placeholder="不指定" /></SelectTrigger>
+                <SelectTrigger className="min-w-[200px] flex-1"><SelectValue placeholder={t('不指定')} /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__none__">不指定</SelectItem>
+                  <SelectItem value="__none__">{t('不指定')}</SelectItem>
                   {skillOpts.map((s) => (
                     <SelectItem key={`d-${s.name}`} value={s.name} title={s.description}>
                       {s.name}{s.description ? ` — ${s.description.slice(0, 60)}` : ''}
@@ -1036,12 +1048,12 @@ export default function AppShell() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="form-row"><label title="修复任务自动提交=开时使用的 skill">提交项目</label>
+            <div className="form-row"><label title={t('修复任务自动提交=开时使用的 skill')}>{t('提交项目')}</label>
               <Select value={pf.skill_commit || '__none__'}
                 onValueChange={(v) => setPf({ ...pf, skill_commit: v === '__none__' ? '' : v })}>
-                <SelectTrigger className="min-w-[200px] flex-1"><SelectValue placeholder="不指定" /></SelectTrigger>
+                <SelectTrigger className="min-w-[200px] flex-1"><SelectValue placeholder={t('不指定')} /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__none__">不指定</SelectItem>
+                  <SelectItem value="__none__">{t('不指定')}</SelectItem>
                   {skillOpts.map((s) => (
                     <SelectItem key={`c-${s.name}`} value={s.name} title={s.description}>
                       {s.name}{s.description ? ` — ${s.description.slice(0, 60)}` : ''}
@@ -1050,12 +1062,12 @@ export default function AppShell() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="form-row"><label title="测试本项目时优先使用的 skill，注入每类任务首轮提示词">测试项目</label>
+            <div className="form-row"><label title={t('测试本项目时优先使用的 skill，注入每类任务首轮提示词')}>{t('测试项目')}</label>
               <Select value={pf.skill_test || '__none__'}
                 onValueChange={(v) => setPf({ ...pf, skill_test: v === '__none__' ? '' : v })}>
-                <SelectTrigger className="min-w-[200px] flex-1"><SelectValue placeholder="不指定" /></SelectTrigger>
+                <SelectTrigger className="min-w-[200px] flex-1"><SelectValue placeholder={t('不指定')} /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__none__">不指定</SelectItem>
+                  <SelectItem value="__none__">{t('不指定')}</SelectItem>
                   {skillOpts.map((s) => (
                     <SelectItem key={`t-${s.name}`} value={s.name} title={s.description}>
                       {s.name}{s.description ? ` — ${s.description.slice(0, 60)}` : ''}
@@ -1064,12 +1076,12 @@ export default function AppShell() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="form-row"><label title="生成用例时遵循的命名/结构/登记规范 skill，注入每类任务首轮提示词">用例规范</label>
+            <div className="form-row"><label title={t('生成用例时遵循的命名/结构/登记规范 skill，注入每类任务首轮提示词')}>{t('用例规范')}</label>
               <Select value={pf.skill_cases || '__none__'}
                 onValueChange={(v) => setPf({ ...pf, skill_cases: v === '__none__' ? '' : v })}>
-                <SelectTrigger className="min-w-[200px] flex-1"><SelectValue placeholder="不指定" /></SelectTrigger>
+                <SelectTrigger className="min-w-[200px] flex-1"><SelectValue placeholder={t('不指定')} /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__none__">不指定</SelectItem>
+                  <SelectItem value="__none__">{t('不指定')}</SelectItem>
                   {skillOpts.map((s) => (
                     <SelectItem key={`cs-${s.name}`} value={s.name} title={s.description}>
                       {s.name}{s.description ? ` — ${s.description.slice(0, 60)}` : ''}
@@ -1078,21 +1090,21 @@ export default function AppShell() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>选项来自当前智能体可用的 skill（dsh 无 skill 机制恒为空）；理解/测试项目/用例规范项注入每类任务首轮，部署/提交项仅注入修复任务的对应条款（自动提交/部署=开时）</div>
-            <div className="form-row"><label>工作目录</label>
-              <Input value={pf.work_dir} onChange={(e) => setPf({ ...pf, work_dir: e.target.value.trim() })} placeholder="默认 &lt;项目目录&gt;/.touchstone；其下自动生成案例库 free_style 与 bug 报告 bug_report" />
-              <Button variant="outline" size="sm" onClick={() => openDirModal('work_dir')} title="浏览服务端目录并选择">
-                <FolderOpen /> 浏览
+            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>{t('选项来自当前智能体可用的 skill（dsh 无 skill 机制恒为空）；理解/测试项目/用例规范项注入每类任务首轮，部署/提交项仅注入修复任务的对应条款（自动提交/部署=开时）')}</div>
+            <div className="form-row"><label>{t('工作目录')}</label>
+              <Input value={pf.work_dir} onChange={(e) => setPf({ ...pf, work_dir: e.target.value.trim() })} placeholder={t('默认 <项目目录>/.touchstone；其下自动生成案例库 free_style 与 bug 报告 bug_report')} />
+              <Button variant="outline" size="sm" onClick={() => openDirModal('work_dir')} title={t('浏览服务端目录并选择')}>
+                <FolderOpen /> {t('浏览')}
               </Button></div>
             <div className="form-col">
-              <Label className="text-xs text-muted-foreground">项目附加提示词</Label>
+              <Label className="text-xs text-muted-foreground">{t('项目附加提示词')}</Label>
               <Textarea value={pf.guide_text} onChange={(e) => setPf({ ...pf, guide_text: e.target.value })} rows={3} className="min-h-0"
-                placeholder="填写如何理解项目 / 如何写 git commit message / 如何部署项目 等信息；内容会加入每个任务的提示词"></Textarea>
+                placeholder={t('填写如何理解项目 / 如何写 git commit message / 如何部署项目 等信息；内容会加入每个任务的提示词')}></Textarea>
             </div>
           </div>
           <DialogFooter className="flex-none">
-            <Button variant="outline" onClick={() => setProjModal(false)}>取消</Button>
-            <Button onClick={saveProject}>保存</Button>
+            <Button variant="outline" onClick={() => setProjModal(false)}>{t('取消')}</Button>
+            <Button onClick={saveProject}>{t('保存')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1106,18 +1118,18 @@ export default function AppShell() {
         >
           <RzHandles start={dupRzStart} reset={dupRzReset} />
           <DialogHeader className="text-left">
-            <DialogTitle className="cursor-move select-none text-sm" onMouseDown={dupDragStart}>目录重复提醒</DialogTitle>
+            <DialogTitle className="cursor-move select-none text-sm" onMouseDown={dupDragStart}>{t('目录重复提醒')}</DialogTitle>
           </DialogHeader>
           {dups.map((d, i) => (
             <div className="dup-item" key={i}>
-              <b>{DUP_LABEL[d.field] || d.field}</b> {d.value}
-              <span className="dup-owner">被「{d.username} / {d.project_name}」使用</span>
+              <b>{dupLabel(t, d.field)}</b> {d.value}
+              <span className="dup-owner">{t('被「{user} / {project}」使用', { user: d.username, project: d.project_name })}</span>
             </div>
           ))}
-          <div className="hint" style={{ textAlign: 'left', margin: '6px 0 0' }}>重复的目录可能与其他项目的案例库/报告互相干扰，确认仍要保存？</div>
+          <div className="hint" style={{ textAlign: 'left', margin: '6px 0 0' }}>{t('重复的目录可能与其他项目的案例库/报告互相干扰，确认仍要保存？')}</div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDupModal(false)}>返回修改</Button>
-            <Button onClick={confirmDup}>仍然保存</Button>
+            <Button variant="outline" onClick={() => setDupModal(false)}>{t('返回修改')}</Button>
+            <Button onClick={confirmDup}>{t('仍然保存')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1133,28 +1145,30 @@ export default function AppShell() {
           <RzHandles start={dirRzStart} reset={dirRzReset} />
           <DialogHeader className="text-left">
             <DialogTitle className="cursor-move select-none text-sm" onMouseDown={dirDragStart}>
-              选择目录
+              {t('选择目录')}
             </DialogTitle>
           </DialogHeader>
           <div className="flex items-center gap-1.5">
             <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
               title={dirData?.path || dirPathText(dirData)}>
-              {dirPathText(dirData) || '（选择根目录）'}
+              {dirPathText(dirData) || t('（选择根目录）')}
             </span>
             {/* parent 空串=文件系统根（盘符根 / POSIX 根）⇒「上级」进盘符/根列表；null=已在根视角。
                 2026-10-22 卡 1044：修复 Windows 盘符根上级被禁用、进不了盘符列表（无法选盘符/切换盘） */}
             <Button variant="outline" size="sm" disabled={dirBusy || !dirCanGoUp(dirData)}
               onClick={() => navDir(dirData.parent)} title={dirUpTitle(dirData)}>
-              <ArrowUp /> 上级
+              <ArrowUp /> {t('上级')}
             </Button>
             <Button variant="outline" size="sm" disabled={dirBusy}
               onClick={() => navDir(dirData?.path || '')}>
-              <RefreshCw /> 刷新
+              <RefreshCw /> {t('刷新')}
             </Button>
             <Button variant="outline" size="sm" disabled={dirBusy || !dirData?.path}
               onClick={() => { setDirNewOpen(!dirNewOpen); setDirNewName('') }}
-              title={dirData?.path ? `在 ${dirData.path} 下新建文件夹` : '请先进入一个目录'}>
-              <FolderPlus /> 新建文件夹
+              title={dirData?.path
+                ? t('在 {path} 下新建文件夹', { path: dirData.path })
+                : t('请先进入一个目录')}>
+              <FolderPlus /> {t('新建文件夹')}
             </Button>
           </div>
           {/* 新建文件夹行(内联展开, 常驻于工具栏下方): Enter 或「创建」提交, 成功后直接进入新目录 */}
@@ -1163,20 +1177,20 @@ export default function AppShell() {
               <Input autoFocus value={dirNewName} disabled={dirNewBusy}
                 onChange={(e) => setDirNewName(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') createDir() }}
-                placeholder="新文件夹名称（在当前目录下创建）" />
+                placeholder={t('新文件夹名称（在当前目录下创建）')} />
               <Button size="sm" disabled={dirNewBusy || !dirNewName.trim()} onClick={createDir}>
-                {dirNewBusy ? '创建中…' : '创建'}
+                {dirNewBusy ? t('创建中…') : t('创建')}
               </Button>
               <Button variant="outline" size="sm" disabled={dirNewBusy}
                 onClick={() => { setDirNewOpen(false); setDirNewName('') }}>
-                取消
+                {t('取消')}
               </Button>
             </div>
           )}
           <div className="modal-scroll max-h-[50vh] min-h-[120px] overflow-y-auto rounded-md border border-border p-1">
-            {dirBusy && <div className="p-2 text-xs text-muted-foreground">加载中…</div>}
+            {dirBusy && <div className="p-2 text-xs text-muted-foreground">{t('加载中…')}</div>}
             {!dirBusy && !(dirData?.dirs || []).length && (
-              <div className="p-2 text-xs text-muted-foreground">无子目录</div>
+              <div className="p-2 text-xs text-muted-foreground">{t('无子目录')}</div>
             )}
             {/* 根视角提示（仅 Windows 盘符列表）：说明怎么把盘符根目录选为结果 */}
             {!dirBusy && dirRootHint(dirData) && (
@@ -1192,8 +1206,8 @@ export default function AppShell() {
             ))}
           </div>
           <DialogFooter className="flex-none">
-            <Button variant="outline" onClick={() => setDirModal(false)}>取消</Button>
-            <Button disabled={dirBusy || !dirData?.path} onClick={pickDir}>选择此目录</Button>
+            <Button variant="outline" onClick={() => setDirModal(false)}>{t('取消')}</Button>
+            <Button disabled={dirBusy || !dirData?.path} onClick={pickDir}>{t('选择此目录')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1209,27 +1223,27 @@ export default function AppShell() {
           <RzHandles start={delRzStart} reset={delRzReset} />
           <DialogHeader className="text-left">
             <DialogTitle className="cursor-move select-none text-sm" onMouseDown={delDragStart}>
-              删除项目
+              {t('删除项目')}
             </DialogTitle>
           </DialogHeader>
           {delTarget && (
             <div className="space-y-1 text-sm">
-              <div><span className="text-muted-foreground">项目名称：</span><b>{delTarget.name}</b></div>
+              <div><span className="text-muted-foreground">{t('项目名称：')}</span><b>{delTarget.name}</b></div>
               <div className="truncate font-mono text-xs text-muted-foreground">{delTarget.project_dir}</div>
-              <div className="truncate font-mono text-xs text-muted-foreground">工作目录：{delTarget.work_dir}</div>
+              <div className="truncate font-mono text-xs text-muted-foreground">{t('工作目录：{dir}', { dir: delTarget.work_dir })}</div>
             </div>
           )}
-          <div className="form-row"><label>输入项目名称确认</label>
+          <div className="form-row"><label>{t('输入项目名称确认')}</label>
             <Input value={delName} onChange={(e) => setDelName(e.target.value)}
               placeholder={delTarget?.name || ''} /></div>
           <div className="hint" style={{ textAlign: 'left', margin: '0' }}>
-            将删除项目及其全部任务与轮次记录，不可恢复。磁盘上的案例文件与 bug 报告文件不会删除，请自行手动清理。
+            {t('将删除项目及其全部任务与轮次记录，不可恢复。磁盘上的案例文件与 bug 报告文件不会删除，请自行手动清理。')}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDelTarget(null)}>取消</Button>
+            <Button variant="outline" onClick={() => setDelTarget(null)}>{t('取消')}</Button>
             <Button variant="destructive" disabled={!delTarget || delName !== delTarget.name}
               onClick={confirmDeleteProject}>
-              确定删除
+              {t('确定删除')}
             </Button>
           </DialogFooter>
         </DialogContent>

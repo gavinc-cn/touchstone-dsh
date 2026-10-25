@@ -47,9 +47,10 @@ function installHooks() {
   };
   board.setBoardHooks({
     // 桩的形参**逐位对齐 Python `_enter_doing(project, card, extra, force, worktree,
-    // queueWorktree, options)`**（7 位）——少一位就落到 `queueWorktree`、`options` 落空。
+    // queueWorktree, lang, options)`**（8 位）——少一位就落到 `queueWorktree`、
+    // `options` 落空（lang 是 T13 修复轮 1 加在 options 前面的请求语言）。
     enterDoing: (project, card, extra = '', force = false, worktree = false,
-      queueWorktree = false, options = null) => {
+      queueWorktree = false, lang = '', options = null) => {
       requireDb('enterDoing', options);
       calls.push(['enterDoing', card.id, force === true, extra]);
       // 起跑成功的最小副作用：落 doing（真实现由 M5-2 提供；这里只让调用方拿到卡）
@@ -174,11 +175,11 @@ test('setParent：自身/后代/非法/跨项目/回收站父卡一律 cycle，�
 test('moveCard：卡不存在 / 非法列 / doing→todo 三档硬错误，库不动', async () => {
   const s = setup('move-err');
   const card = insertCard(s.fx.db, s.pid, { title: 'K', columnKey: 'doing' });
-  assert.deepEqual(await board.moveCard({ id: s.pid }, 999999, 'todo', '', null, false, s.opts),
+  assert.deepEqual(await board.moveCard({ id: s.pid }, 999999, 'todo', '', null, false, '', s.opts),
     [null, { error: 'card not found' }]);
-  assert.deepEqual(await board.moveCard({ id: s.pid }, card, 'nope', '', null, false, s.opts),
+  assert.deepEqual(await board.moveCard({ id: s.pid }, card, 'nope', '', null, false, '', s.opts),
     [null, { error: 'bad column' }]);
-  assert.deepEqual(await board.moveCard({ id: s.pid }, card, 'todo', '', null, false, s.opts),
+  assert.deepEqual(await board.moveCard({ id: s.pid }, card, 'todo', '', null, false, '', s.opts),
     [null, { error: 'doing 不可直接拖回 todo' }]);
   assert.equal(cardRow(s.fx, card).column_key, 'doing');
   assert.equal(s.calls.length, 0);
@@ -189,7 +190,7 @@ test('moveCard：同列非 doing 早退（返回卡、零写、零钩子）', as
   const s = setup('move-same');
   const card = insertCard(s.fx.db, s.pid, { title: 'K', columnKey: 'review' });
   const before = cardRow(s.fx, card);
-  const [out, err] = await board.moveCard({ id: s.pid }, card, 'review', '', null, false, s.opts);
+  const [out, err] = await board.moveCard({ id: s.pid }, card, 'review', '', null, false, '', s.opts);
   assert.equal(err, null);
   assert.equal(out.column, 'review');
   assert.equal(cardRow(s.fx, card).updated_at, before.updated_at);   // 一字未写
@@ -203,7 +204,7 @@ test('moveCard：todo→blocked 记 manual 阻塞、清定时、落列尾、不�
     title: 'K', columnKey: 'todo', scheduledAt: 1_700_000_000, unread: 0,
   });
   insertCard(s.fx.db, s.pid, { title: 'B1', columnKey: 'blocked' });
-  const [out, err] = await board.moveCard({ id: s.pid }, card, 'blocked', '等上游', null, false, s.opts);
+  const [out, err] = await board.moveCard({ id: s.pid }, card, 'blocked', '等上游', null, false, '', s.opts);
   assert.equal(err, null);
   const row = cardRow(s.fx, card);
   assert.equal(row.column_key, 'blocked');
@@ -226,11 +227,11 @@ test('moveCard：非 manual 列忽略 beforeId（落列尾）；manual 列按 be
 
   // 缺省 settings 的 review 列排序方案 = manual? 显式写死一份，两档都测
   setBoardSettings(s.fx.db, s.pid, { sort: { review: 'created_desc' } });
-  await board.moveCard({ id: s.pid }, moving, 'review', '', a, false, opts);
+  await board.moveCard({ id: s.pid }, moving, 'review', '', a, false, '', opts);
   assert.equal(cardRow(s.fx, moving).sort_order, 3);           // 非 manual：列尾
   setBoardSettings(s.fx.db, s.pid, { sort: { review: 'manual' } });
-  await board.moveCard({ id: s.pid }, moving, 'todo', '', null, false, opts);
-  const [out2, err2] = await board.moveCard({ id: s.pid }, moving, 'review', '', a, false, opts);
+  await board.moveCard({ id: s.pid }, moving, 'todo', '', null, false, '', opts);
+  const [out2, err2] = await board.moveCard({ id: s.pid }, moving, 'review', '', a, false, '', opts);
   assert.equal(err2, null);
   assert.equal(out2.column, 'review');
   assert.equal(cardRow(s.fx, moving).sort_order, 1);           // 插到 a 之前
@@ -238,8 +239,8 @@ test('moveCard：非 manual 列忽略 beforeId（落列尾）；manual 列按 be
   assert.equal(cardRow(s.fx, b).sort_order, 3);
 
   // before 不在目标列 ⇒ 400 文案（列不动）
-  await board.moveCard({ id: s.pid }, moving, 'todo', '', null, false, opts);
-  const [, err3] = await board.moveCard({ id: s.pid }, moving, 'review', '', 999999, false, opts);
+  await board.moveCard({ id: s.pid }, moving, 'todo', '', null, false, '', opts);
+  const [, err3] = await board.moveCard({ id: s.pid }, moving, 'review', '', 999999, false, '', opts);
   assert.deepEqual(err3, { error: '目标位置卡不在该列' });
   assert.equal(cardRow(s.fx, moving).column_key, 'todo');
   s.close();
@@ -258,14 +259,14 @@ test('moveCard：进 done 先归档（失败即整体放弃，列不动）', asy
       return '归档失败：驱动不可用';
     },
   });
-  const [out, err] = await board.moveCard({ id: s.pid }, card, 'done', '', null, false, s.opts);
+  const [out, err] = await board.moveCard({ id: s.pid }, card, 'done', '', null, false, '', s.opts);
   assert.equal(out, null);
   assert.deepEqual(err, { error: '归档失败：驱动不可用' });
   assert.equal(cardRow(s.fx, card).column_key, 'review');       // 归档先行：一个字节没动
   assert.deepEqual(s.calls, [['archive', card, true, '进入已完成']]);
   installHooks();                                               // 复位成成功桩
 
-  const [out2, err2] = await board.moveCard({ id: s.pid }, card, 'done', '', null, false, s.opts);
+  const [out2, err2] = await board.moveCard({ id: s.pid }, card, 'done', '', null, false, '', s.opts);
   assert.equal(err2, null);
   assert.equal(out2.column, 'done');
   assert.equal(cardRow(s.fx, card).done_at !== null, true);     // done_at 派生
@@ -275,7 +276,7 @@ test('moveCard：进 done 先归档（失败即整体放弃，列不动）', asy
 test('moveCard：离开 done 取消归档；merge_ack=true 跳过待合并闸', async () => {
   const s = setup('move-undone');
   const card = insertCard(s.fx.db, s.pid, { title: 'K', columnKey: 'done' });
-  const [out, err] = await board.moveCard({ id: s.pid }, card, 'review', '', null, false, s.opts);
+  const [out, err] = await board.moveCard({ id: s.pid }, card, 'review', '', null, false, '', s.opts);
   assert.equal(err, null);
   assert.equal(out.column, 'review');
   assert.deepEqual(s.calls.filter((c) => c[0] === 'archive'), [['archive', card, false, '离开已完成', true]]);
@@ -283,7 +284,7 @@ test('moveCard：离开 done 取消归档；merge_ack=true 跳过待合并闸', 
 
   // 无 worktree 的卡：待合并闸直接放行（mergePending 给 null）
   const card2 = insertCard(s.fx.db, s.pid, { title: 'K2', columnKey: 'review' });
-  const [out2, err2] = await board.moveCard({ id: s.pid }, card2, 'done', '', null, true, s.opts);
+  const [out2, err2] = await board.moveCard({ id: s.pid }, card2, 'done', '', null, true, '', s.opts);
   assert.equal(err2, null);
   assert.equal(out2.column, 'done');
   s.close();
@@ -296,13 +297,13 @@ test('moveCard：离开 done 取消归档；merge_ack=true 跳过待合并闸', 
 test('moveCard：进 doing 委托 enterDoing（单一写点）；离开 doing 走 leaveDoing', async () => {
   const s = setup('move-doing');
   const todo = insertCard(s.fx.db, s.pid, { title: 'T', columnKey: 'todo' });
-  const [out, err] = await board.moveCard({ id: s.pid }, todo, 'doing', '', null, false, s.opts);
+  const [out, err] = await board.moveCard({ id: s.pid }, todo, 'doing', '', null, false, '', s.opts);
   assert.equal(err, null);
   assert.equal(out.column, 'doing');
   assert.deepEqual(s.calls, [['enterDoing', todo, false, '']]);
 
   s.calls.length = 0;
-  const [out2, err2] = await board.moveCard({ id: s.pid }, todo, 'review', '', null, false, s.opts);
+  const [out2, err2] = await board.moveCard({ id: s.pid }, todo, 'review', '', null, false, '', s.opts);
   assert.equal(err2, null);
   assert.equal(out2.column, 'review');
   // stopCard 的第 2 参必须是 db options 袋（`true` = 桩看到 `{db}` 在场）：
@@ -318,7 +319,7 @@ test('moveCard：doing→blocked 对排队占位卡只显式出队（不跑 leav
     title: 'Q', columnKey: 'doing', blockKind: 'queue', blockText: '排队等待：统一队列',
   });
   insertWait(s.fx.db, { projectId: s.pid, kind: 'card', targetId: card, state: 'waiting', seq: 5 });
-  const [out, err] = await board.moveCard({ id: s.pid }, card, 'blocked', '手动', null, false, s.opts);
+  const [out, err] = await board.moveCard({ id: s.pid }, card, 'blocked', '手动', null, false, '', s.opts);
   assert.equal(err, null);
   assert.equal(out.column, 'blocked');
   const row = cardRow(s.fx, card);
@@ -336,7 +337,7 @@ test('moveCard：拖离时放弃待送达答案（取消活跃 a: 行）', async
   const card = insertCard(s.fx.db, s.pid, { title: 'A', columnKey: 'doing' });
   insertWait(s.fx.db, { projectId: s.pid, kind: 'answer', targetId: card, state: 'waiting', seq: 6 });
   assert.equal(board.isAnswerPending(card, s.opts), true);
-  await board.moveCard({ id: s.pid }, card, 'blocked', '', null, false, s.opts);
+  await board.moveCard({ id: s.pid }, card, 'blocked', '', null, false, '', s.opts);
   const ans = s.fx.db.prepare(
     "SELECT * FROM wait_items WHERE kind='answer' AND target_id=? ORDER BY id DESC LIMIT 1",
   ).get(String(card));
@@ -348,7 +349,7 @@ test('moveCard：拖离时放弃待送达答案（取消活跃 a: 行）', async
 test('moveCard：非 doing 列 → doing 列以外的移列也停会话（防御分支）', async () => {
   const s = setup('move-defensive');
   const card = insertCard(s.fx.db, s.pid, { title: 'R', columnKey: 'review' });
-  await board.moveCard({ id: s.pid }, card, 'todo', '', null, false, s.opts);
+  await board.moveCard({ id: s.pid }, card, 'todo', '', null, false, '', s.opts);
   assert.deepEqual(s.calls, [['stopCard', card, true]]);
   s.close();
 });
@@ -360,7 +361,7 @@ test('moveCard：非 doing 列 → doing 列以外的移列也停会话（防御
 test('doingGesture：非队列卡无手势语义（原样返回 200）', async () => {
   const s = setup('gesture-nonqueue');
   const card = insertCard(s.fx.db, s.pid, { title: 'S', columnKey: 'doing' });
-  const [out, err] = await board.moveCard({ id: s.pid }, card, 'doing', '', null, false, s.opts);
+  const [out, err] = await board.moveCard({ id: s.pid }, card, 'doing', '', null, false, '', s.opts);
   assert.equal(err, null);
   assert.equal(out.id, card);
   assert.equal(s.calls.length, 0);
@@ -373,7 +374,7 @@ test('doingGesture：等待卡落到运行位 = force 手势（enterDoing(force=
   const waiting = insertCard(s.fx.db, s.pid, { title: 'WAIT', columnKey: 'doing' });
   insertWait(s.fx.db, { projectId: s.pid, kind: 'card', targetId: running, state: 'running', seq: 1 });
   insertWait(s.fx.db, { projectId: s.pid, kind: 'card', targetId: waiting, state: 'waiting', seq: 2 });
-  const [out, err] = await board.moveCard({ id: s.pid }, waiting, 'doing', '', running, false, s.opts);
+  const [out, err] = await board.moveCard({ id: s.pid }, waiting, 'doing', '', running, false, '', s.opts);
   assert.equal(err, null);
   assert.equal(out.id, waiting);
   assert.deepEqual(s.calls.map((c) => [c[0], c[1], c[2]]), [['enterDoing', waiting, true]]);
@@ -389,7 +390,7 @@ test('doingGesture：运行卡落到等待卡之后 = 停止手势（递归落 r
   insertWait(s.fx.db, { projectId: s.pid, kind: 'card', targetId: w1, state: 'waiting', seq: 2 });
   insertWait(s.fx.db, { projectId: s.pid, kind: 'card', targetId: w2, state: 'waiting', seq: 3 });
   // 运行卡拖到 W2 之前（其上方另有等待卡 W1）⇒ 停止
-  const [out, err] = await board.moveCard({ id: s.pid }, running, 'doing', '', w2, false, s.opts);
+  const [out, err] = await board.moveCard({ id: s.pid }, running, 'doing', '', w2, false, '', s.opts);
   assert.equal(err, null);
   assert.equal(out.column, 'review');
   assert.equal(cardRow(s.fx, running).column_key, 'review');
@@ -407,12 +408,12 @@ test('doingGesture：运行卡落到运行位 = no-op；等待卡落等待区 = 
   insertWait(s.fx.db, { projectId: s.pid, kind: 'card', targetId: w2, state: 'waiting', seq: 3 });
 
   // 运行卡落到运行位（before=r1 自己）：no-op
-  const [out1, err1] = await board.moveCard({ id: s.pid }, r1, 'doing', '', r1, false, s.opts);
+  const [out1, err1] = await board.moveCard({ id: s.pid }, r1, 'doing', '', r1, false, '', s.opts);
   assert.equal(err1, null);
   assert.equal(out1.id, r1);
 
   // 等待卡 w1 落到 w2 之前：seq 交换（w2 原 3，w1 排到 3 之后 ⇒ 取 4/上界 3 之间）
-  const [out2, err2] = await board.moveCard({ id: s.pid }, w2, 'doing', '', w1, false, s.opts);
+  const [out2, err2] = await board.moveCard({ id: s.pid }, w2, 'doing', '', w1, false, '', s.opts);
   assert.equal(err2, null);
   assert.equal(out2.id, w2);
   const w2Seq = Number(s.fx.db.prepare(
@@ -431,7 +432,7 @@ test('doingGesture：落点卡不在 doing 列 ⇒ 400 文案', async () => {
   const w = insertCard(s.fx.db, s.pid, { title: 'W', columnKey: 'doing' });
   const other = insertCard(s.fx.db, s.pid, { title: 'O', columnKey: 'review' });
   insertWait(s.fx.db, { projectId: s.pid, kind: 'card', targetId: w, state: 'waiting', seq: 1 });
-  const [out, err] = await board.moveCard({ id: s.pid }, w, 'doing', '', other, false, s.opts);
+  const [out, err] = await board.moveCard({ id: s.pid }, w, 'doing', '', other, false, '', s.opts);
   assert.equal(out, null);
   assert.deepEqual(err, { error: '目标位置卡不在该列' });
   s.close();
@@ -561,8 +562,8 @@ test('未注入缝时响亮失败（BoardHookMissing 而非静默 no-op）', asy
     }
     assert.fail('未抛 BoardHookMissing（缝缺失被静默吞掉了）');
   };
-  await expectHookMissing(() => board.moveCard({ id: s.pid }, card, 'todo', '', null, false, s.opts));
-  await expectHookMissing(() => board.moveCard({ id: s.pid }, card, 'doing', '', null, false, s.opts));
+  await expectHookMissing(() => board.moveCard({ id: s.pid }, card, 'todo', '', null, false, '', s.opts));
+  await expectHookMissing(() => board.moveCard({ id: s.pid }, card, 'doing', '', null, false, '', s.opts));
   installHooks();
   s.close();
 });

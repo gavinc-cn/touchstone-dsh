@@ -68,13 +68,14 @@ export function buildRows(entries) {
 /**
  * 工具名顺序去重计数 → 段落数组（`bash` / `bash ×3`）
  * @param {Array<string>} names 按出现顺序的工具名
+ * @param {Function} t 翻译函数（空工具名兜底文案）
  * @returns {Array<string>}
  */
-function nameSegments(names) {
+function nameSegments(names, t) {
   const order = []
   const count = new Map()
   for (const raw of names) {
-    const n = String(raw || '').trim() || '工具'
+    const n = String(raw || '').trim() || t('工具')
     if (!count.has(n)) { count.set(n, 0); order.push(n) }
     count.set(n, count.get(n) + 1)
   }
@@ -84,10 +85,11 @@ function nameSegments(names) {
 /**
  * proc 组摘要（组标题行文案与错误标记）
  * @param {Array} items 组内条目
+ * @param {Function} t 翻译函数（useI18n 的 t；**必传**——摘要里带 {n} 插值）
  * @returns {{text: string, calls: number, thinks: number, errors: number}}
  *          text 形如 `工具 5 次 · skill, bash ×3 · 思考 2 段 · 错误 1 次`
  */
-export function summarizeProc(items) {
+export function summarizeProc(items, t) {
   const list = items || []
   const calls = list.filter((e) => e.kind === 'tool_call')
   // 空正文的思考条目不渲染（Entry 对空思考返回 null），摘要同样不计数，避免虚报
@@ -96,7 +98,7 @@ export function summarizeProc(items) {
   const errors = results.filter((e) => e.is_error).length
   // 工具名优先取调用；只有结果没有调用（异常形态）时用结果里的名字兜底
   const src = calls.length ? calls : results
-  const segs = nameSegments(src.map((e) => e.name))
+  const segs = nameSegments(src.map((e) => e.name), t)
   // 按段拼名称清单，超预算只留已装下的段并以「…」收尾
   const parts = []
   let used = 0
@@ -108,9 +110,10 @@ export function summarizeProc(items) {
   }
   const names = parts.join(', ')
   const chunks = []
-  if (calls.length) chunks.push(`工具 ${calls.length} 次${names ? ` · ${names}` : ''}`)
-  else if (names) chunks.push(names)     // 只有结果的异常形态：只出名称清单
-  if (thinks) chunks.push(`思考 ${thinks} 段`)
-  if (errors) chunks.push(`错误 ${errors} 次`)
+  if (calls.length) {
+    chunks.push(t('工具 {n} 次', { n: calls.length }) + (names ? ` · ${names}` : ''))
+  } else if (names) chunks.push(names)     // 只有结果的异常形态：只出名称清单
+  if (thinks) chunks.push(t('思考 {n} 段', { n: thinks }))
+  if (errors) chunks.push(t('错误 {n} 次', { n: errors }))
   return { text: chunks.join(' · '), calls: calls.length, thinks, errors }
 }

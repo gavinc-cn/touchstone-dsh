@@ -80,7 +80,7 @@ function apiBuiltinAssetsList(ctx) {
     list = assets.listAssets(target, resolved.projectDir);
   } catch (e) {
     if (e instanceof assets.AssetError) {
-      ctx.errorSpaced(e.code, e.message);
+      ctx.errorSpaced(e.code, e);          // AssetError 可能带 i18nKey（插值文案）
       return;
     }
     throw e;
@@ -108,7 +108,8 @@ async function apiBuiltinAssetAction(ctx, assetId, action) {
   if (!resolved.ok) return;
   const asset = assets.getAsset(assetId);
   if (asset === null || asset === undefined) {
-    ctx.errorSpaced(404, `未知资产：${assetId}`);      // json.dumps 形态（带空格）
+    // 动态文案用「中文 {占位符} 词条 + vars」：中文侧插值回原文，英文侧查同一词条
+    ctx.errorSpaced(404, '未知资产：{id}', { id: assetId });   // json.dumps 形态（带空格）
     return;
   }
   let result;
@@ -118,12 +119,12 @@ async function apiBuiltinAssetAction(ctx, assetId, action) {
       : assets.uninstall(asset, target, resolved.projectDir);
   } catch (e) {
     if (e instanceof assets.AssetError) {
-      ctx.errorSpaced(e.code, e.message);
+      ctx.errorSpaced(e.code, e);          // 同上：key+vars 由 lib 的 localizable 附加
       return;
     }
     // 磁盘异常（权限/空间）统一 500，带原因供前端 toast（Python 只吞 OSError）
     if (e && typeof e.code === 'string') {
-      ctx.errorSpaced(500, `操作失败：${pyStrOrEmpty(e.message)}`);
+      ctx.errorSpaced(500, '操作失败：{detail}', { detail: pyStrOrEmpty(e.message) });
       return;
     }
     throw e;

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { taskApi } from '../api'
-import { ST_LABEL } from '../utils/renderMd'
+import { stLabel } from '../utils/renderMd'
 import TouchstoneLogo from '../components/TouchstoneLogo'
 import LoadDashboard from '../components/LoadDashboard'
 import { Button } from '@/components/ui/button'
@@ -9,6 +9,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import { ArrowDownToLine } from 'lucide-react'
+import { useI18n } from '../utils/i18n'
 
 /** 日志行着色分类（沿用原任务详情内联面板的规则） */
 function logCls(line) {
@@ -28,6 +29,8 @@ const LOG_TAIL = 5000
 
 // 独立日志页: 由任务详情「查看日志」以新标签页打开, URL 形如 /log?task=<id>&round=<n>
 export default function TaskLogPage() {
+  // 文案取 t()：切换语言即时重渲染（lang 变化时浏览器标题也重算）
+  const { t, lang } = useI18n()
   const [params, setParams] = useSearchParams()
   const taskId = +(params.get('task') || 0)
   const round = +(params.get('round') || 0)
@@ -43,13 +46,13 @@ export default function TaskLogPage() {
 
   // 任务与轮次列表: 进入页面及切换轮次时加载（顺带刷新任务状态徽标）
   useEffect(() => {
-    if (!taskId) { setLoadErr('缺少 task 参数'); return }
+    if (!taskId) { setLoadErr(t('缺少 task 参数')); return }
     let stopped = false
     ;(async () => {
       try {
-        const [t, rs] = await Promise.all([taskApi.get(taskId), taskApi.rounds(taskId)])
+        const [taskData, rs] = await Promise.all([taskApi.get(taskId), taskApi.rounds(taskId)])
         if (stopped) return
-        setTask(t)
+        setTask(taskData)
         setRounds(rs)
         // 轮次参数缺失或越界时回落到最后一轮
         if (rs.length && !rs.some((r) => r.round_no === round)) {
@@ -62,9 +65,9 @@ export default function TaskLogPage() {
 
   // 浏览器标签页标题（离开页面时还原）
   useEffect(() => {
-    document.title = task ? `日志 · ${task.name}` : '任务日志'
+    document.title = task ? t('日志 · {name}', { name: task.name }) : t('任务日志')
     return () => { document.title = 'Touchstone' }
-  }, [task])
+  }, [task, lang]) // lang 变化也要重算标题
 
   // 日志轮询: 2s 刷新, 若本来在底部则跟随滚动（逻辑与原任务详情内联面板一致）
   useEffect(() => {
@@ -106,9 +109,9 @@ export default function TaskLogPage() {
     <div className="log-page">
       <div className="log-page-head">
         <TouchstoneLogo size={20} />
-        <span className="t">任务日志</span>
-        {task && <span className="dim">「{task.name}」</span>}
-        {task && <span className={'badge st-' + task.status}><span className="dot"></span>{ST_LABEL[task.status] || task.status}</span>}
+        <span className="t">{t('任务日志')}</span>
+        {task && <span className="dim">{t('「{name}」', { name: task.name })}</span>}
+        {task && <span className={'badge st-' + task.status}><span className="dot"></span>{stLabel(task.status)}</span>}
         <span className="spacer"></span>
         {rounds.length > 0 && (
           <Select value={String(round)} onValueChange={(v) => setParams({ task: String(taskId), round: v })}>
@@ -117,23 +120,23 @@ export default function TaskLogPage() {
             </SelectTrigger>
             <SelectContent>
               {rounds.map((r) => (
-                <SelectItem key={r.round_no} value={String(r.round_no)}>第 {r.round_no} 轮</SelectItem>
+                <SelectItem key={r.round_no} value={String(r.round_no)}>{t('第 {n} 轮', { n: r.round_no })}</SelectItem>
               ))}
             </SelectContent>
           </Select>
         )}
-        <span className="hint">{logLines.length} 行 · 2s 自动刷新 · 在底部时自动跟随</span>
+        <span className="hint">{t('{n} 行 · 2s 自动刷新 · 在底部时自动跟随', { n: logLines.length })}</span>
         <Button variant="outline" size="sm" className="h-7 px-2 text-xs"
-          title="回到底部并恢复自动跟随" onClick={scrollToBottom}>
-          <ArrowDownToLine /> 底部
+          title={t('回到底部并恢复自动跟随')} onClick={scrollToBottom}>
+          <ArrowDownToLine /> {t('底部')}
         </Button>
       </div>
       {task?.task_type === 'stress' && <LoadDashboard task={task} />}
       <div className="log-page-body">
         {loadErr ? (
-          <div className="hint" style={{ margin: 'auto' }}>加载失败：{loadErr}</div>
+          <div className="hint" style={{ margin: 'auto' }}>{t('加载失败：{error}', { error: loadErr })}</div>
         ) : noLog ? (
-          <div className="hint" style={{ margin: 'auto' }}>该轮暂无日志</div>
+          <div className="hint" style={{ margin: 'auto' }}>{t('该轮暂无日志')}</div>
         ) : (
           <div className="log" ref={logBox}>
             {logLines.map((line, i) => (

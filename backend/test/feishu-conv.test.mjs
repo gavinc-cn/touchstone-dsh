@@ -179,6 +179,11 @@ function harness(over = {}) {
   const feishu = { appConfig: (userId) => { P('appConfig'); return st.appCfg; } };
 
   const options = {
+    // 只读空库句柄：`feishu_cfg.userLang` 在 options 无 `db` 时会落到默认库（真实
+    // `~/.touchstone/touchstone.db`）——用户把界面切成 en 后，本文件的「默认中文」
+    // 断言会随真实偏好变红。注入空库恢复文件头「依赖全注入、不碰真库」的合同
+    // （不改任何断言；en 档仍由显式 options.lang 覆盖）。
+    db: { prepare: () => ({ all: () => [], get: () => undefined }) },
     dbmod, sessparse, dshdriver, dshevents, agents, waitq, rest, chat, feishu,
     now: () => st.now, log: (line) => calls.log.push(line), env: st.env, ...over,
   };
@@ -506,6 +511,31 @@ test('routeText：存盘 OSError ⇒ MEDIA_SAVE_FAIL_PREFIX+原因（note 照旧
     assert.deepEqual(h.calls.submit, [], '存盘失败一张都不投递');
     assert.equal(h.logText().includes('[feishu] 截图'), false, '没投递就不许打「已投递」日志');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('routeText en：截图 composed 全英文（header / markdown / 回执）', async () => {
+  // T12b 修复轮补：Node 侧此前只断言了媒体失败回执，en 截图组装（与 Python 孪生
+  // `test_media_receipts_and_composition_english` 同判据）没有入口级用例。
+  const tmp = mediaTmp('store-en');
+  try {
+    const h = harness({ lang: 'en' });
+    h.st.projects = [makeProject(7, { work_dir: tmp.workDir })];
+    h.st.sessionExists = () => true;
+    const b = makeBinding({ cur_sid: 's1', cur_title: 'T', cur_project_id: 7 });
+    const reply = await conv.routeText(b, 'look', CFG, h.options,
+      [{ data: Buffer.from('89504e470d0a1a0a', 'hex'), mime: 'image/png' }]);
+    const files = tmp.readdir();
+    assert.equal(files.length, 1);
+    const composed = h.calls.submit[0][2];
+    assert.ok(composed.startsWith(
+      'look\n\n[Feishu screenshot] The user sent 1 screenshot(s) from Feishu: \n'),
+      `composed=${JSON.stringify(composed)}`);
+    assert.ok(composed.includes(
+      `![Feishu screenshot 1.png](${path.join(tmp.mediaDir, files[0])})`), composed);
+    assert.ok(!/[\u4e00-\u9fff]/.test(composed), `英文截图文案仍含中文: ${composed}`);
+    assert.equal(reply, 'Delivered to "T" (running); the answer will be sent back '
+      + 'here when the run finishes');
+  } finally { tmp.cleanup(); }
 });
 
 test('routeText：长度闸先于落盘（超长文字 + images ⇒ 直接回执，零文件零提交）', async () => {

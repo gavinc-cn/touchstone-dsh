@@ -194,12 +194,14 @@ function makeCtx({ shortcuts = null, injectShortcuts = true } = {}) {
  * 搭一套完整环境：载入真实产物 + 桩 DOM/React/ctx，并把 apply 跑起来。
  * @param applyIt - false 时只搭环境不 apply（供「apply 抛错」用例自行调用）。
  * @param openAtBoot - true 时预置 `ts.plugin.open=1`（产物载入即读到「面板开着」，用于入口开合态）。
+ * @param lang - 预置界面语言（localStorage ts_lang）；不传=本浏览器从未选过（缺省英文）。
  * @returns 该环境下所有可观测面（storage / hostDoc / slots / mini React / shortcuts）。
  */
-function setup({ shortcuts = null, registerError = null, runtime = 'web', platform = 'windows', catalogRow = null, applyIt = true, openAtBoot = false } = {}) {
+function setup({ shortcuts = null, registerError = null, runtime = 'web', platform = 'windows', catalogRow = null, applyIt = true, openAtBoot = false, lang } = {}) {
   const src = fs.readFileSync(bundlePath, 'utf8');
   const storage = makeStorage();
   if (openAtBoot) storage.setItem('ts.plugin.open', '1'); // 必须在产物求值前落库（模块级读取）
+  if (lang !== undefined) storage.setItem('ts_lang', lang); // 同上：文案在产物求值时按语言取
   const hostDoc = asDocument(makeTarget('host-document'));
   let factory = null;
   // 宿主页 window 桩：除 __ModuleLoader__ 外要有真 window 的事件面（面板打开时消息桥会挂
@@ -275,8 +277,14 @@ function caseOfficialRegistration() {
   check('regions=page+editable、modals 为空',
     JSON.stringify(cmd.regions) === JSON.stringify(['page', 'editable']) && Array.isArray(cmd.modals) && cmd.modals.length === 0,
     JSON.stringify({ regions: cmd.regions, modals: cmd.modals }));
-  check('label 是函数（目录每次刷新重取本地化名）',
-    typeof cmd.label === 'function' && typeof cmd.label() === 'string' && cmd.label().includes('Touchstone'));
+  check('label 是函数（目录每次刷新重取本地化名；缺省英文）',
+    typeof cmd.label === 'function' && cmd.label() === 'Open/Close Touchstone Panel',
+    typeof cmd.label === 'function' ? cmd.label() : typeof cmd.label);
+  // 文案读同源 localStorage ts_lang：显式中文 → 回中文原文（缺省英文见上一条）
+  const zhEnv = setup({ lang: 'zh' });
+  check('ts_lang=zh → 命令名回中文原文',
+    !!zhEnv.svc.registered[0] && zhEnv.svc.registered[0].label() === '打开/关闭 Touchstone 面板',
+    zhEnv.svc.registered[0] ? zhEnv.svc.registered[0].label() : 'not registered');
   check('别名含 touchstone/测试平台', Array.isArray(cmd.aliases) && cmd.aliases.includes('touchstone'));
 
   const res = cmd.resolve({ region: 'page', modal: null, target: null });
@@ -473,8 +481,9 @@ function caseEntryLook() {
   check('插件 dispose 后样式表被摘除', env.hostDoc.styles.length === 0,
     String(env.hostDoc.styles.length));
 
-  // 面板开着（产物载入时即读到 ts.plugin.open=1）→ 带开合类且文案变化
-  const opened = setup({ openAtBoot: true });
+  // 面板开着（产物载入时即读到 ts.plugin.open=1）→ 带开合类且文案变化。
+  // 语言钉 zh：文案按 ts_lang 取，本用例验的是中文原文（缺省英文由 dev-check-bridge ⑨ 覆盖）
+  const opened = setup({ openAtBoot: true, lang: 'zh' });
   const on = entryElement(opened, true);
   check('面板开着时带 ts-sb-on、文案为「关闭 Touchstone」',
     !!on && on.props.className === 'ts-sb-entry ts-sb-on'

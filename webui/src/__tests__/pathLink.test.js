@@ -1,14 +1,27 @@
 // utils/pathLink.js 单测：会话回答里的文件路径识别（点击后可预览文件）
 // 覆盖：相对/绝对/Windows 路径、尾随标点剥离、URL 与目录不误伤、
 // 裸文件名的 KNOWN_EXT 白名单（`sys.path` 之类属性访问不得被当成文件）。
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import { linkifyPaths } from '../utils/pathLink'
+import { setLang, t } from '../utils/i18n'
+
+// 链接 title 走 t()：断言按中文跑（zh 原样返回 key 并插值）
+beforeEach(() => setLang('zh'))
 
 /** 期望的链接标记（实现：class=md-path + data-path + title 提示） */
-const A = (p, t = p) => `<a class="md-path" data-path="${p}" title="点击预览：${p}">${t}</a>`
+const A = (p, alt = p) => `<a class="md-path" data-path="${p}" title="${t('点击预览：{path}', { path: p })}">${alt}</a>`
 
 describe('linkifyPaths', () => {
+  it('英文界面下 title 用英文（t 即时取当前语言）', () => {
+    setLang('en')
+    try {
+      expect(linkifyPaths('doc_ai/x.md')).toContain('title="Preview: doc_ai/x.md"')
+    } finally {
+      setLang('zh')
+    }
+  })
+
   it('正文里的相对路径变可点链接', () => {
     expect(linkifyPaths('已更新 doc_ai/spec/foo.md 并同步')).toBe(`已更新 ${A('doc_ai/spec/foo.md')} 并同步`)
   })

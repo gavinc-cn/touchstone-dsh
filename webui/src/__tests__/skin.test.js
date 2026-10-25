@@ -7,6 +7,8 @@
 //   - applySkin 把**解析后**的具体皮肤写 data-skin，把**原始选择**写 localStorage
 //   - 选择为 auto 时 initSkin 订阅宿主明暗变化并实时重应用
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { setLang } from '../utils/i18n'
+
 
 // 宿主明暗探测是外部边界：这里打桩，只验 skin.js 的解析与订阅接线
 const theme = vi.hoisted(() => ({ dark: true, subs: new Set() }))
@@ -35,6 +37,9 @@ beforeEach(() => {
   delete document.documentElement.dataset.skin
   theme.dark = true
 })
+
+// 语言钉在中文：必须注册在清 localStorage 的 beforeEach 之后（否则 ts_lang 被清掉）
+beforeEach(() => setLang('zh'))
 
 describe('skin', () => {
   it('getSkin：无持久值回落默认（测试环境非嵌入 ⇒ dsh-dark），合法值回读（含 auto），非法值回落', () => {
@@ -126,6 +131,8 @@ describe('skin', () => {
     expect(skinLabel(AUTO)).toBe('跟随 DSH')
     expect(skinLabel('no-such-skin')).toBe('no-such-skin')
     expect(SKINS.map((s) => s.id)).toEqual(['dsh-dark', 'dsh-light', 'starlight', 'classic'])
-    expect(SKINS.every((s) => s.preview.length === 2 && s.label)).toBe(true) // 设置页色样两格
+    // 设置页色样两格 + 每个皮肤都必须有展示名（迁移后展示名走 skinLabel，不能回落成 id）
+    expect(SKINS.every((s) => s.preview.length === 2 && skinLabel(s.id) !== s.id)).toBe(true)
+    expect(SKINS.map((s) => skinLabel(s.id))).toEqual(['DSH 深色', 'DSH 浅色', '星夜金', '经典蓝'])
   })
 })

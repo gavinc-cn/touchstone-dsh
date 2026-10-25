@@ -22,6 +22,7 @@ import time
 import urllib.request
 
 import export_cases
+import i18n
 import lib
 
 # 派生文件名（<案例库根>/.live/ 下，平台维护，agent 只读）
@@ -93,9 +94,14 @@ def _cfg_int(value, default, upper, name):
     try:
         n = int(value)
     except (TypeError, ValueError):
-        raise ValueError("%s 须为正整数" % name)
+        # key+vars（不预渲染）：中文插值结果与旧 % 格式化逐字节相同，
+        # 英文侧查共享词条（Node rag.js localizable 同 key）
+        raise i18n.localizable(ValueError("%s 须为正整数" % name),
+                               "{name} 须为正整数", {"name": name})
     if n < 1 or n > upper:
-        raise ValueError("%s 须在 1~%d 之间" % (name, upper))
+        raise i18n.localizable(ValueError("%s 须在 1~%d 之间" % (name, upper)),
+                               "{name} 须在 1~{upper} 之间",
+                               {"name": name, "upper": upper})
     return n
 
 

@@ -52,7 +52,9 @@ import {
 } from './db.js';
 import {
   FEISHU_DEFAULT_EVENTS, FEISHU_EVENTS, appConfig, hookOf, notifyEvents,
+  projectLang, userLang,
 } from './feishu_cfg.js';
+import * as i18n from './i18n.js';
 import { PY_WS, pyStrip } from './lib.js';
 import { pyJsonDumps } from './pyjson.js';
 import * as sessparse from './sessparse.js';
@@ -300,7 +302,7 @@ export function clipText(text, limit) {
  * @param {unknown[]} qs
  * @returns {object[]}
  */
-export function questionViews(qs) {
+export function questionViews(qs, lang = 'zh') {
   const views = [];
   let index = 0;
   for (const raw of qs) {
@@ -325,19 +327,29 @@ export function questionViews(qs) {
       options,
       multi_select: pyTruthy(q.multi_select),
       allow_other: pyTruthy(q.allow_other),
-      other_label: clipText(q.other_label || '其他', 40),
+      other_label: clipText(q.other_label || i18n.t('api', '其他', lang), 40),
     });
   }
   return views;
 }
 
 /**
+ * 能力标注（多选/可自定义）→ 一行文本；无标注返回空串。
+ * 括号与分隔符也是文案的一部分（中文全角、英文半角），故一并走词典。
+ */
+function capsLine(caps, lang = 'zh') {
+  if (!caps.length) return '';
+  const sep = i18n.t('api', '；', lang);
+  return i18n.t('api', '（{caps}）', lang, { caps: caps.join(sep) });
+}
+
+/**
  * 单题提问 ctx → 单题视图，对齐 `feishu._single_question_view`(feishu.py:286)：
  * `ctx.questions` 优先，旧调用面/测试替身只给平面字段时按平面字段兜底。
  */
-export function singleQuestionView(ctx) {
+export function singleQuestionView(ctx, lang = 'zh') {
   const qs = (ctx.questions || []).filter((q) => pyTruthy(q));
-  if (qs.length) return questionViews(qs)[0];
+  if (qs.length) return questionViews(qs, lang)[0];
   const opts = [];
   let i = 0;
   for (const o of (ctx.options || [])) {
@@ -353,7 +365,7 @@ export function singleQuestionView(ctx) {
     options: opts,
     multi_select: pyTruthy(ctx.multi_select),
     allow_other: pyTruthy(ctx.allow_other),
-    other_label: clipText(ctx.other_label || '其他', 40),
+    other_label: clipText(ctx.other_label || i18n.t('api', '其他', lang), 40),
   };
 }
 
@@ -363,11 +375,12 @@ export function singleQuestionView(ctx) {
  * @param {object[]} views
  * @returns {string[]}
  */
-export function questionTextLines(views) {
+export function questionTextLines(views, lang = 'zh') {
   const lines = [];
   for (const v of views) {
-    const title = v.header || `第 ${v.no} 题`;
-    const head = `【${v.no}/${views.length} ${title}】`;
+    const title = v.header || i18n.t('api', '第 {no} 题', lang, { no: v.no });
+    const head = i18n.t('api', '【{no}/{total} {title}】', lang,
+      { no: v.no, total: views.length, title });
     lines.push(v.question ? `${head}${v.question}` : head);
     if (v.body) lines.push(`  ${v.body}`);
     for (const o of v.options) {
@@ -375,9 +388,14 @@ export function questionTextLines(views) {
       if (o.description) lines.push(`     ${o.description}`);
     }
     const caps = [];
-    if (v.multi_select) caps.push('多选');
-    if (v.allow_other) caps.push(`可自定义：${v.other_label}`);
-    if (caps.length) lines.push(`  （${caps.join('；')}）`);
+    if (v.multi_select) caps.push(i18n.t('api', '多选', lang));
+    if (v.allow_other) {
+      caps.push(i18n.t('api', '可自定义：{label}', lang, { label: v.other_label }));
+    }
+    if (caps.length) {
+      lines.push('  ' + i18n.t('api', '（{caps}）', lang,
+        { caps: caps.join(i18n.t('api', '；', lang)) }));
+    }
   }
   return lines;
 }
@@ -389,11 +407,23 @@ export function questionTextLines(views) {
  * @param {unknown[]} qs
  * @returns {string}
  */
-export function multiAnswerHelp(cid, qs) {
-  const marks = Array.from({ length: qs.length }, (_, k) => `${k + 1}:<选项序号>`);
-  return `该提问含 ${qs.length} 道子题：可在卡片上逐题点选（点满自动送达），`
-    + `或回复「作答 ${cid} ${marks.join(' ')}」一次答全；`
-    + '多选写「1:2,3」，自定义写「1:文字」';
+export function multiAnswerHelp(cid, qs, lang = 'zh') {
+  const marks = Array.from({ length: qs.length },
+    (_, k) => i18n.t('api', '{no}:<选项序号>', lang, { no: k + 1 })).join(' ');
+  return i18n.t('api',
+    '该提问含 {n} 道子题：可在卡片上逐题点选（点满自动送达），'
+    + '或回复「作答 {cid} {marks}」一次答全；多选写「1:2,3」，自定义写「1:文字」',
+    lang, { n: qs.length, cid, marks });
+}
+
+/**
+ * 不可远程作答的统一引导（`NO_REMOTE_ANSWER_HINT` 的语言化视图）：
+ * 常量本身保持中文（对拍/测试按字面引用），出站时按 `lang` 查词典。
+ * @param {'zh'|'en'|string} [lang]
+ * @returns {string}
+ */
+export function noRemoteAnswerHint(lang = 'zh') {
+  return i18n.t('api', NO_REMOTE_ANSWER_HINT, lang);
 }
 
 /**
@@ -412,31 +442,47 @@ export function multiAnswerHelp(cid, qs) {
  * @returns {string}
  */
 export function render(kind, ctx, projectId, baseUrl = '', options = {}) {
+  const lang = options.lang || 'zh';
   const meta = EVENT_META[kind];
   if (meta === undefined) throw new TypeError(`未知事件类别: ${kind}（Python 侧是 KeyError）`);
   const [head, withLink] = meta;
   const proj = getProject(projectId, options);
-  const lines = [`${head} [${proj ? proj.name : `#${projectId}`}]`];
-  if ('card_id' in ctx) lines.push(`卡片 #${pyStr(ctx.card_id)} ${clipField(ctx.title, 60)}`);
+  const title = i18n.t('api', head, lang);
+  const lines = [`${title} [${proj ? proj.name : `#${projectId}`}]`];
+  if ('card_id' in ctx) {
+    lines.push(i18n.t('api', '卡片 #{cid} {title}', lang,
+      { cid: pyStr(ctx.card_id), title: clipField(ctx.title, 60) }));
+  }
   if ('task_id' in ctx) {
-    lines.push(`任务 #${pyStr(ctx.task_id)} ${clipField(ctx.name, 50)}（${pyStrOrEmpty(ctx.type)}）`);
+    lines.push(i18n.t('api', '任务 #{tid} {name}（{type}）', lang, {
+      tid: pyStr(ctx.task_id), name: clipField(ctx.name, 50),
+      type: pyStrOrEmpty(ctx.type),
+    }));
   }
   const cid = ctx.card_id;
   if (ctx.kind === 'approval') {
     // 审批等待：动作/工具/内容摘要 + 同意/拒绝指令（比通用「agent 提问」行更准确）
-    lines.push(`审批请求：${pyStr(ctx.action || ctx.tool || '工具调用')}`);
-    if (pyTruthy(ctx.tool)) lines.push(`工具：${pyStr(ctx.tool)}`);
-    if (pyTruthy(ctx.input)) lines.push(`内容：${cpSlice(pyStr(ctx.input), 200)}`);
-    lines.push(`飞书回复「同意 ${pyStr(cid)}」批准，「拒绝 ${pyStr(cid)}」拒绝；`
-      + `「同意 ${pyStr(cid)} 会话」本会话内同类调用自动放行`);
+    lines.push(i18n.t('api', '审批请求：{action}', lang, {
+      action: pyStr(ctx.action || ctx.tool || i18n.t('api', '工具调用', lang)),
+    }));
+    if (pyTruthy(ctx.tool)) {
+      lines.push(i18n.t('api', '工具：{tool}', lang, { tool: ctx.tool }));
+    }
+    if (pyTruthy(ctx.input)) {
+      lines.push(i18n.t('api', '内容：{input}', lang,
+        { input: cpSlice(pyStr(ctx.input), 200) }));
+    }
+    lines.push(i18n.t('api', '飞书回复「同意 {cid}」批准，「拒绝 {cid}」拒绝；'
+      + '「同意 {cid} 会话」本会话内同类调用自动放行', lang, { cid }));
   } else {
     const qs = (ctx.questions || []).filter((q) => pyTruthy(q));
     if (qs.length > 1) {
       // 多子题：逐题完整展示（旧实现只渲染首题 q0，其余子题在飞书上不可见）
-      lines.push(`agent 提问（共 ${qs.length} 题）：`);
-      lines.push(...questionTextLines(questionViews(qs)));
+      lines.push(i18n.t('api', 'agent 提问（共 {n} 题）：', lang, { n: qs.length }));
+      lines.push(...questionTextLines(questionViews(qs, lang), lang));
     } else if (pyTruthy(ctx.question)) {
-      lines.push(`agent 提问：${pyStr(ctx.question)}`);
+      lines.push(i18n.t('api', 'agent 提问：{question}', lang,
+        { question: ctx.question }));
       let i = 0;
       for (const o of (ctx.options || [])) {
         i += 1;
@@ -447,24 +493,35 @@ export function render(kind, ctx, projectId, baseUrl = '', options = {}) {
       const nQ = qs.length || (pyTruthy(ctx.questions_count) ? ctx.questions_count : 0);
       if (!pyTruthy(ctx.answerable)) {
         // 不可远程作答的等待（answerable=false）：引导回 dsh 会话窗口（见常量注释）
-        lines.push(NO_REMOTE_ANSWER_HINT);
+        lines.push(i18n.t('api', NO_REMOTE_ANSWER_HINT, lang));
       } else if (nQ > 1) {
         // 多子题：一条指令按题号逐题答全（表单卡超 form 体积硬限时同样走这条）
         const filled = qs.length ? qs : Array.from({ length: Number(nQ) }, () => null);
-        lines.push(multiAnswerHelp(cid, filled));
+        lines.push(multiAnswerHelp(cid, filled, lang));
       } else {
-        const tips = [`飞书回复「作答 ${pyStr(cid)} <选项序号>」按选项作答`];
-        if (pyTruthy(ctx.multi_select)) tips.push(`多选逗号分隔（作答 ${pyStr(cid)} 1,3）`);
-        if (pyTruthy(ctx.allow_other)) tips.push(`「作答 ${pyStr(cid)} <文字>」自定义回答`);
-        lines.push(tips.join('；'));
+        const tips = [i18n.t('api', '飞书回复「作答 {cid} <选项序号>」按选项作答',
+          lang, { cid })];
+        if (pyTruthy(ctx.multi_select)) {
+          tips.push(i18n.t('api', '多选逗号分隔（作答 {cid} 1,3）', lang, { cid }));
+        }
+        if (pyTruthy(ctx.allow_other)) {
+          tips.push(i18n.t('api', '「作答 {cid} <文字>」自定义回答', lang, { cid }));
+        }
+        lines.push(tips.join(i18n.t('api', '；', lang)));
       }
     }
   }
-  if (pyTruthy(ctx.error)) lines.push(`错误：${cpSlice(pyStr(ctx.error), 200)}`);
-  if (pyTruthy(ctx.skipped_n)) lines.push(`pipeline 后段 ${pyStr(ctx.skipped_n)} 条已连带跳过`);
+  if (pyTruthy(ctx.error)) {
+    lines.push(i18n.t('api', '错误：{error}', lang,
+      { error: cpSlice(pyStr(ctx.error), 200) }));
+  }
+  if (pyTruthy(ctx.skipped_n)) {
+    lines.push(i18n.t('api', 'pipeline 后段 {n} 条已连带跳过', lang,
+      { n: pyStr(ctx.skipped_n) }));
+  }
   if (withLink) {
     const base = String(baseUrl || '').replace(/\/+$/, '');
-    if (base) lines.push(`详情：${base}`);
+    if (base) lines.push(i18n.t('api', '详情：{url}', lang, { url: base }));
   }
   return lines.join('\n');
 }
@@ -485,7 +542,10 @@ export function pushEvent(projectId, kind, ctx, options = {}) {
   try {
     const h = hookOf(projectId, options);
     if (h === null || !h.events.has(kind)) return;
-    const text = render(kind, ctx, projectId, h.base_url || '', options);
+    // 语言按项目所有者解析一次（R22；TS_I18N=0 ⇒ zh 且不读偏好，与 Python 同口径）
+    const lang = projectLang(projectId, options);
+    const text = render(kind, ctx, projectId, h.base_url || '',
+      { ...options, lang });
     const dedup = ctx.dedup_key
       || `${kind}:${projectId}:${ctx.card_id || ctx.task_id || ''}`;
     feishuOutboxPush(h.target, h.secret, payload(text), dedup, h.user_id || 0, options);
@@ -509,36 +569,40 @@ export function pushEvent(projectId, kind, ctx, options = {}) {
  * @param {object} ctx
  * @returns {[object|null, string]}
  */
-export function singleMultiSelectPick(cid, ctx) {
-  const q = singleQuestionView(ctx);
-  const tail = q.allow_other ? `；自定义文字回复「作答 ${cid} <文字>」` : '';
+export function singleMultiSelectPick(cid, ctx, lang = 'zh') {
+  const q = singleQuestionView(ctx, lang);
+  const tail = q.allow_other
+    ? i18n.t('api', '；自定义文字回复「作答 {cid} <文字>」', lang, { cid }) : '';
   if (!q.options.length) {
     return [null, q.allow_other
-      ? `请回复「作答 ${cid} <文字>」作答`
-      : '该提问没有可选选项，请到站点会话窗口处理'];
+      ? i18n.t('api', '请回复「作答 {cid} <文字>」作答', lang, { cid })
+      : i18n.t('api', '该提问没有可选选项，请到站点会话窗口处理', lang)];
   }
-  const form = multiSelectForm(cid, q, '提交作答');
+  const form = multiSelectForm(cid, q, i18n.t('api', '提交作答', lang), lang);
   if (formCharLen(form) > MQ_FORM_MAX_BYTES) {
-    return [null, `多选题：请回复「作答 ${cid} 1,3」（逗号分隔序号）${tail}`];
+    return [null, i18n.t('api',
+      '多选题：请回复「作答 {cid} 1,3」（逗号分隔序号）{tail}', lang, { cid, tail })];
   }
-  return [form, '多选题：勾选后点「提交作答」送达；'
-    + `也可回复「作答 ${cid} 1,3」（逗号分隔序号）${tail}`];
+  return [form, i18n.t('api',
+    '多选题：勾选后点「提交作答」送达；也可回复「作答 {cid} 1,3」（逗号分隔序号）{tail}',
+    lang, { cid, tail })];
 }
 
 /**
  * 多子题 → DM 卡片逐题 markdown 元素（**只读**展示），对齐
  * `feishu._question_card_blocks`(feishu.py:333)。
  */
-export function questionCardBlocks(views) {
-  return views.map((v) => questionMdElement(v, views.length));
+export function questionCardBlocks(views, lang = 'zh') {
+  return views.map((v) => questionMdElement(v, views.length, lang));
 }
 
 /**
  * 单题 → markdown 元素，对齐 `feishu._question_md_element`(feishu.py:363)
  * （「只读展示」与「逐题点选卡」共用同一份排版，避免两处漂移）。
  */
-export function questionMdElement(v, n) {
-  const title = v.header || v.question || `第 ${v.no} 题`;
+export function questionMdElement(v, n, lang = 'zh') {
+  const title = v.header || v.question
+    || i18n.t('api', '第 {no} 题', lang, { no: v.no });
   const md = [`**${v.no}/${n} ${title}**`];
   if (v.header && v.question) md.push(v.question);
   if (v.body) md.push(v.body);
@@ -547,9 +611,10 @@ export function questionMdElement(v, n) {
     if (o.description) md.push(`　　${o.description}`);   // 全角缩进：描述次行
   }
   const caps = [];
-  if (v.multi_select) caps.push('多选');
-  if (v.allow_other) caps.push(`可自定义：${v.other_label}`);
-  if (caps.length) md.push(`（${caps.join('；')}）`);
+  if (v.multi_select) caps.push(i18n.t('api', '多选', lang));
+  if (v.allow_other) caps.push(i18n.t('api', '可自定义：{label}', lang, { label: v.other_label }));
+  const line = capsLine(caps, lang);
+  if (line) md.push(line);
   return { tag: 'markdown', content: md.join('\n') };
 }
 
@@ -571,7 +636,7 @@ function formCharLen(form) {
  * 提交按钮与组件同带 `t=mq/c/n`：飞书表单提交帧走**按钮**的 behaviors.value，
  * 组件值在 `action.form_value[<组件 name>]`（数组）。
  */
-export function multiSelectForm(cid, v, btnText = '') {
+export function multiSelectForm(cid, v, btnText = '', lang = 'zh') {
   return {
     tag: 'form',
     name: `mqf${cid}_${v.no}`,
@@ -579,7 +644,7 @@ export function multiSelectForm(cid, v, btnText = '') {
       {
         tag: 'multi_select_static',
         name: `mq${cid}_${v.no}`,
-        placeholder: { tag: 'plain_text', content: '请选择（可多选）' },
+        placeholder: { tag: 'plain_text', content: i18n.t('api', '请选择（可多选）', lang) },
         options: v.options.map((o) => ({
           text: { tag: 'plain_text', content: o.label },
           value: String(o.no),
@@ -591,7 +656,10 @@ export function multiSelectForm(cid, v, btnText = '') {
         name: `mqs${cid}_${v.no}`,
         form_action_type: 'submit',
         type: 'primary',
-        text: { tag: 'plain_text', content: btnText || `提交第 ${v.no} 题` },
+        text: {
+          tag: 'plain_text',
+          content: btnText || i18n.t('api', '提交第 {no} 题', lang, { no: v.no }),
+        },
         behaviors: [{ type: 'callback', value: { t: 'mq', c: cid, n: v.no } }],
       },
     ],
@@ -603,18 +671,18 @@ export function multiSelectForm(cid, v, btnText = '') {
  * 返回 `[elements, 只能文本作答的题号列表]`。单选放**根级** `select_static`；多选包一层
  * 单题 mini 表单（超预算或没选项 ⇒ 该题进 text_only，绝不发出必被拒的卡）。
  */
-export function multiClickElements(cid, views) {
+export function multiClickElements(cid, views, lang = 'zh') {
   const els = [];
   const textOnly = [];
   const n = views.length;
   for (const v of views) {
-    els.push(questionMdElement(v, n));
+    els.push(questionMdElement(v, n, lang));
     if (!v.options.length) {
       textOnly.push(v.no);
       continue;
     }
     if (v.multi_select) {
-      const form = multiSelectForm(cid, v);
+      const form = multiSelectForm(cid, v, '', lang);
       if (formCharLen(form) <= MQ_FORM_MAX_BYTES) els.push(form);
       else textOnly.push(v.no);        // 组件装不进 form 硬限：退回文本作答
       continue;
@@ -622,7 +690,7 @@ export function multiClickElements(cid, views) {
     els.push({
       tag: 'select_static',
       name: `mq${cid}_${v.no}`,
-      placeholder: { tag: 'plain_text', content: '请选择' },
+      placeholder: { tag: 'plain_text', content: i18n.t('api', '请选择', lang) },
       options: v.options.map((o) => ({
         text: { tag: 'plain_text', content: o.label },
         value: String(o.no),
@@ -637,20 +705,26 @@ export function multiClickElements(cid, views) {
  * 逐题点选卡末行指引，对齐 `feishu._multi_click_hint`(feishu.py:455)。
  * `textOnly` = 卡片上没有可点控件的题号；`multiForms` = 发了多选 mini 表单的题号。
  */
-export function multiClickHint(cid, qs, textOnly = [], multiForms = []) {
+export function multiClickHint(cid, qs, textOnly = [], multiForms = [], lang = 'zh') {
   const extra = [...new Set([
     ...textOnly,
     ...qs.map((q, i) => ((q || {}).allow_other ? i + 1 : null)).filter((v) => v !== null),
   ])].sort((a, b) => a - b);
-  const lines = [`逐题选择即可，答满 ${qs.length} 题自动送达 agent。`];
+  const lines = [i18n.t('api', '逐题选择即可，答满 {n} 题自动送达 agent。', lang,
+    { n: qs.length })];
   const forms = [...new Set(multiForms)].sort((a, b) => a - b);
   if (forms.length) {
-    lines.push(forms.map((i) => `第 ${i} 题是多选：勾选后点「提交第 ${i} 题」`).join('；'));
+    const sep = i18n.t('api', '；', lang);
+    lines.push(forms.map((i) => i18n.t('api',
+      '第 {i} 题是多选：勾选后点「提交第 {i} 题」', lang, { i })).join(sep));
   }
   if (extra.length) {
-    lines.push(`第 ${extra.join('、')} 题请回复「作答 ${cid} `
-      + extra.map((i) => `${i}:<值>`).join(' ')
-      + '」作答（自定义文字写 <文字>，可选项写序号，多选逗号分隔；已点选的题不用重复给）');
+    const nos = i18n.t('api', '、', lang);
+    const values = extra.map((i) => i18n.t('api', '{i}:<值>', lang, { i })).join(' ');
+    lines.push(i18n.t('api', '第 {nos} 题请回复「作答 {cid} {values}」作答', lang,
+      { nos: extra.join(nos), cid, values })
+      + i18n.t('api', '（自定义文字写 <文字>，可选项写序号，多选逗号分隔；'
+        + '已点选的题不用重复给）', lang));
   }
   return lines.join('\n');
 }
@@ -667,7 +741,7 @@ export function multiClickHint(cid, qs, textOnly = [], multiForms = []) {
  * @param {string} projectName
  * @returns {object}
  */
-export function buildInteractionCard(ctx, projectName) {
+export function buildInteractionCard(ctx, projectName, lang = 'zh') {
   const kind = ctx.kind;
   const cid = ctx.card_id;
   const elements = [];
@@ -677,7 +751,10 @@ export function buildInteractionCard(ctx, projectName) {
       tag: 'collapsible_panel',
       expanded: true,
       header: {
-        title: { tag: 'plain_text', content: '📄 agent 的方案 / 回答（点标题可折叠）' },
+        title: {
+          tag: 'plain_text',
+          content: i18n.t('api', '📄 agent 的方案 / 回答（点标题可折叠）', lang),
+        },
       },
       elements: [{ tag: 'markdown', content: ctx.plan_inline }],
     });
@@ -685,13 +762,22 @@ export function buildInteractionCard(ctx, projectName) {
   if (pyTruthy(ctx.plan_doc_url) && kind !== 'approval') {
     elements.push({
       tag: 'markdown',
-      content: `📄 [查看完整方案（飞书文档）](${ctx.plan_doc_url})`,
+      content: i18n.t('api', '📄 [查看完整方案（飞书文档）]({url})', lang,
+        { url: pyStr(ctx.plan_doc_url) }),
     });
   }
   if (kind === 'approval') {
-    const lines = [`**审批请求**：${pyStr(ctx.action || ctx.tool || '工具调用')}`];
-    if (pyTruthy(ctx.tool)) lines.push(`工具：${pyStr(ctx.tool)}`);
-    if (pyTruthy(ctx.input)) lines.push(`内容：${cpSlice(pyStr(ctx.input), 200)}`);
+    const rawAction = ctx.action || ctx.tool;
+    const action = pyTruthy(rawAction) ? pyStr(rawAction)
+      : i18n.t('api', '工具调用', lang);
+    const lines = [i18n.t('api', '**审批请求**：{action}', lang, { action })];
+    if (pyTruthy(ctx.tool)) {
+      lines.push(i18n.t('api', '工具：{tool}', lang, { tool: pyStr(ctx.tool) }));
+    }
+    if (pyTruthy(ctx.input)) {
+      lines.push(i18n.t('api', '内容：{input}', lang,
+        { input: cpSlice(pyStr(ctx.input), 200) }));
+    }
     elements.push({ tag: 'markdown', content: lines.join('\n') });
     for (const [label, t, style] of [
       ['✅ 批准', 'p', 'primary'],
@@ -701,39 +787,43 @@ export function buildInteractionCard(ctx, projectName) {
       elements.push({
         tag: 'button',
         type: style,
-        text: { tag: 'plain_text', content: label },
+        text: { tag: 'plain_text', content: i18n.t('api', label, lang) },
         behaviors: [{ type: 'callback', value: { t, c: cid } }],
       });
     }
   } else {
     const qs = (ctx.questions || []).filter((q) => pyTruthy(q));
     if (qs.length > 1) {
-      const views = questionViews(qs);
+      const views = questionViews(qs, lang);
       elements.push({
         tag: 'markdown',
         content: [
-          `**agent 提问（共 ${qs.length} 题）**`,
-          `卡片 #${pyStr(cid)} ${clipField(ctx.title, 60)}`,
+          i18n.t('api', '**agent 提问（共 {n} 题）**', lang, { n: qs.length }),
+          i18n.t('api', '卡片 #{cid} {title}', lang,
+            { cid: pyStr(cid), title: clipField(ctx.title, 60) }),
         ].join('\n'),
       });
       if (pyTruthy(ctx.answerable)) {
-        const [clickEls, textOnly] = multiClickElements(cid, views);
+        const [clickEls, textOnly] = multiClickElements(cid, views, lang);
         elements.push(...clickEls);
         const forms = views
           .filter((v) => v.multi_select && !textOnly.includes(v.no))
           .map((v) => v.no);
         elements.push({
           tag: 'markdown',
-          content: multiClickHint(cid, qs, textOnly, forms),
+          content: multiClickHint(cid, qs, textOnly, forms, lang),
         });
       } else {
-        elements.push(...questionCardBlocks(views));
-        elements.push({ tag: 'markdown', content: NO_REMOTE_ANSWER_HINT });
+        elements.push(...questionCardBlocks(views, lang));
+        elements.push({ tag: 'markdown', content: noRemoteAnswerHint(lang) });
       }
     } else {
+      const question = pyTruthy(ctx.question) ? pyStr(ctx.question)
+        : i18n.t('api', 'agent 正在等待你的回答', lang);
       const md = [
-        `**agent 提问**：${pyStr(ctx.question || 'agent 正在等待你的回答')}`,
-        `卡片 #${pyStr(cid)} ${clipField(ctx.title, 60)}`,
+        i18n.t('api', '**agent 提问**：{question}', lang, { question }),
+        i18n.t('api', '卡片 #{cid} {title}', lang,
+          { cid: pyStr(cid), title: clipField(ctx.title, 60) }),
       ];
       let i = 0;
       for (const o of (ctx.options || [])) {
@@ -743,12 +833,12 @@ export function buildInteractionCard(ctx, projectName) {
       elements.push({ tag: 'markdown', content: md.join('\n') });
       let hint = null;
       if (!pyTruthy(ctx.answerable)) {
-        hint = NO_REMOTE_ANSWER_HINT;
+        hint = noRemoteAnswerHint(lang);
       } else if ((ctx.questions_count || qs.length || 0) > 1) {
-        hint = `该提问含 ${pyStr(ctx.questions_count || qs.length)} 道子题，`
-          + '请到站点会话窗口逐题作答';
+        hint = i18n.t('api', '该提问含 {n} 道子题，请到站点会话窗口逐题作答', lang,
+          { n: pyStr(ctx.questions_count || qs.length) });
       } else if (pyTruthy(ctx.multi_select)) {
-        const [form, pickHint] = singleMultiSelectPick(cid, ctx);
+        const [form, pickHint] = singleMultiSelectPick(cid, ctx, lang);
         hint = pickHint;
         if (form !== null) elements.push(form);
       }
@@ -763,7 +853,10 @@ export function buildInteractionCard(ctx, projectName) {
             behaviors: [{ type: 'callback', value: { t: 'a', c: cid, i: k } }],
           });
         }
-        if (pyTruthy(ctx.allow_other)) hint = `自定义回答请回复「作答 ${pyStr(cid)} <文字>」`;
+        if (pyTruthy(ctx.allow_other)) {
+          hint = i18n.t('api', '自定义回答请回复「作答 {cid} <文字>」', lang,
+            { cid: pyStr(cid) });
+        }
       }
       if (hint) elements.push({ tag: 'markdown', content: hint });
     }
@@ -771,7 +864,11 @@ export function buildInteractionCard(ctx, projectName) {
   return {
     schema: '2.0',
     header: {
-      title: { tag: 'plain_text', content: `🤔 卡片等待回复 [${projectName}]` },
+      title: {
+        tag: 'plain_text',
+        content: i18n.t('api', '🤔 卡片等待回复 [{name}]', lang,
+          { name: pyStr(projectName) }),
+      },
       template: 'orange',
     },
     body: { elements },
@@ -885,12 +982,13 @@ export function planSessionTexts(sid) {
  * @param {{assistant?: string, think?: string}} texts
  * @returns {string}
  */
-export function planInlineMarkdown(ctx, texts) {
+export function planInlineMarkdown(ctx, texts, lang = 'zh') {
   const a = pyStrip(pyStrOrEmpty((texts || {}).assistant));
   if (!a) return '';
   let md = a;
   if (cpLen(md) > PLAN_INLINE_MAX) {
-    md = `${pyRstrip(cpSlice(md, PLAN_INLINE_MAX))}\n\n…（摘要已截断，完整内容见下方飞书文档）`;
+    md = pyRstrip(cpSlice(md, PLAN_INLINE_MAX))
+      + i18n.t('api', '\n\n…（摘要已截断，完整内容见下方飞书文档）', lang);
   }
   return md;
 }
@@ -902,7 +1000,7 @@ export function planInlineMarkdown(ctx, texts) {
  * @param {object} ctx
  * @returns {string}
  */
-export function planQuestionMd(ctx) {
+export function planQuestionMd(ctx, lang = 'zh') {
   const qs = (ctx.questions || []).filter((q) => pyTruthy(q));
   const lines = [];
   if (!qs.length) {
@@ -919,7 +1017,8 @@ export function planQuestionMd(ctx) {
   let i = 0;
   for (const q of qs) {
     i += 1;
-    const title = pyStr(q.header || q.question || `第 ${i} 题`);
+    const title = pyStr(q.header || q.question
+      || i18n.t('api', '第 {no} 题', lang, { no: i }));
     lines.push(`### ${i}/${n} ${title}`);
     if (q.header && q.question) lines.push(pyStr(q.question));
     const body = pyStrip(pyStrOrEmpty(q.body));
@@ -932,9 +1031,13 @@ export function planQuestionMd(ctx) {
       if (ov.description) lines.push(`　　${ov.description}`);   // 全角缩进：描述次行
     }
     const caps = [];
-    if (q.multi_select) caps.push('多选');
-    if (q.allow_other) caps.push(`可自定义：${q.other_label || '其他'}`);
-    if (caps.length) lines.push(`（${caps.join('；')}）`);
+    if (q.multi_select) caps.push(i18n.t('api', '多选', lang));
+    if (q.allow_other) {
+      caps.push(i18n.t('api', '可自定义：{label}', lang,
+        { label: q.other_label || i18n.t('api', '其他', lang) }));
+    }
+    const line = capsLine(caps, lang);
+    if (line) lines.push(line);
   }
   return lines.join('\n');
 }
@@ -944,9 +1047,11 @@ export function planQuestionMd(ctx) {
  * @param {object} ctx
  * @returns {string}
  */
-export function planDocTitle(ctx) {
-  const head = pyFirstLine(pyStrip(pyStr(ctx.header || ctx.question || '提问')));
-  return clipText(`卡 ${pyStr(ctx.card_id)} · ${head}`, 80);
+export function planDocTitle(ctx, lang = 'zh') {
+  const head = pyFirstLine(pyStrip(pyStr(ctx.header || ctx.question
+    || i18n.t('api', '提问', lang))));
+  return clipText(i18n.t('api', '卡 {cid} · {head}', lang,
+    { cid: pyStr(ctx.card_id), head }), 80);
 }
 
 /**
@@ -959,26 +1064,33 @@ export function planDocTitle(ctx) {
  * @param {string} [projectName]
  * @returns {string}
  */
-export function planDocMarkdown(ctx, texts, projectName = '') {
-  const cid = ctx.card_id;
+export function planDocMarkdown(ctx, texts, projectName = '', lang = 'zh') {
+  const cid = pyStr(ctx.card_id);
   const a = pyStrip(pyStrOrEmpty((texts || {}).assistant));
   const lines = [
-    `# 卡 ${pyStr(cid)} · agent 的方案与提问`, '',
-    `- 项目：${pyStr(pyTruthy(projectName) ? projectName : '—')}`,
-    `- 卡片：${cpSlice(pyStrOrEmpty(ctx.title), 60)}`,
-    `- 时间：${beijingNow()}（北京时间）`,
+    i18n.t('api', '# 卡 {cid} · agent 的方案与提问', lang, { cid }), '',
+    i18n.t('api', '- 项目：{name}', lang,
+      { name: pyStr(pyTruthy(projectName) ? projectName : '—') }),
+    i18n.t('api', '- 卡片：{title}', lang,
+      { title: cpSlice(pyStrOrEmpty(ctx.title), 60) }),
+    i18n.t('api', '- 时间：{time}（北京时间）', lang, { time: beijingNow() }),
   ];
   const sid = pyStrip(pyStrOrEmpty(ctx.session_id));
-  if (sid) lines.push(`- 会话：${sid}`);
-  if (a) lines.push('', '## agent 的方案 / 回答', '', a);
-  lines.push('', '## 提问（全文）', '', planQuestionMd(ctx));
-  lines.push('', '## 如何作答', '',
-    '- 在飞书聊天里点卡片上的选项按钮 / 下拉即完成作答（多选题勾选后点「提交」）；',
-    `- 也可以直接回复：「作答 ${pyStr(cid)} <序号>」（多选逗号分隔，如 \`作答 ${pyStr(cid)} 1,3\`），`
-    + `或「作答 ${pyStr(cid)} <自定义文字>」写自由文本；`,
-    '- 点选与文本作答可混用，已点选的题不必重复给。');
+  if (sid) lines.push(i18n.t('api', '- 会话：{sid}', lang, { sid }));
+  if (a) lines.push('', i18n.t('api', '## agent 的方案 / 回答', lang), '', a);
+  lines.push('', i18n.t('api', '## 提问（全文）', lang), '',
+    planQuestionMd(ctx, lang));
+  lines.push('', i18n.t('api', '## 如何作答', lang), '',
+    i18n.t('api', '- 在飞书聊天里点卡片上的选项按钮 / 下拉即完成作答'
+      + '（多选题勾选后点「提交」）；', lang),
+    i18n.t('api', '- 也可以直接回复：「作答 {cid} <序号>」（多选逗号分隔，'
+      + '如 `作答 {cid} 1,3`），或「作答 {cid} <自定义文字>」写自由文本；',
+    lang, { cid }),
+    i18n.t('api', '- 点选与文本作答可混用，已点选的题不必重复给。', lang));
   let md = lines.join('\n');
-  if (cpLen(md) > PLAN_DOC_MAX) md = `${cpSlice(md, PLAN_DOC_MAX)}\n\n…（正文已截断）`;
+  if (cpLen(md) > PLAN_DOC_MAX) {
+    md = cpSlice(md, PLAN_DOC_MAX) + i18n.t('api', '\n\n…（正文已截断）', lang);
+  }
   return md;
 }
 
@@ -1186,12 +1298,12 @@ export function planDocPut(cardId, qid, url) {
  * @param {string} [openId]
  * @returns {Promise<void>}
  */
-export async function attachPlan(ctx, projectName, cfg, openId = '') {
+export async function attachPlan(ctx, projectName, cfg, openId = '', lang = 'zh') {
   try {
     const sid = pyStrip(pyStrOrEmpty(ctx.session_id));
     if (!sid) return;
     const texts = planSessionTexts(sid);
-    const inline = planInlineMarkdown(ctx, texts);
+    const inline = planInlineMarkdown(ctx, texts, lang);
     if (inline) ctx.plan_inline = inline;
     const cid = Math.trunc(Number(ctx.card_id || 0)) || 0;
     const qid = pyStrOrEmpty(ctx.qid);
@@ -1200,9 +1312,9 @@ export async function attachPlan(ctx, projectName, cfg, openId = '') {
       ctx.plan_doc_url = cached;
       return;
     }
-    const md = planDocMarkdown(ctx, texts, projectName);
+    const md = planDocMarkdown(ctx, texts, projectName, lang);
     if (!pyStrip(md)) return;
-    const url = await docxCreate(planDocTitle(ctx), md, cfg, openId);
+    const url = await docxCreate(planDocTitle(ctx, lang), md, cfg, openId);
     if (url) {
       planDocPut(cid, qid, url);
       ctx.plan_doc_url = url;
@@ -1240,12 +1352,14 @@ export async function dmInteractionCard(projectId, ctx, options = {}) {
     const cfg = appConfig(owner, options);
     if (!binding || !cfg) return;
     const name = proj ? proj.name : `#${projectId}`;
+    // 语言归属 = 收件人（项目所有者）；入口解析一次、向下传
+    const lang = userLang(owner, options);
     // 审批卡不做方案文档（它的「背景」由审批请求本身给出，建文档没意义）；开关可回滚
     if (planEnabled() && pyStrOrEmpty(ctx.kind) !== 'approval') {
-      await attachPlan(ctx, name, cfg, binding.open_id || '');
+      await attachPlan(ctx, name, cfg, binding.open_id || '', lang);
     }
     const lane = await loadRestLane();
-    await lane.restSendCard(binding.open_id, buildInteractionCard(ctx, name), cfg);
+    await lane.restSendCard(binding.open_id, buildInteractionCard(ctx, name, lang), cfg);
   } catch (error) {
     stderrLine('feishu outbound: DM 交互卡片发送失败: ' + errRepr(error));
   }
@@ -1637,9 +1751,16 @@ export function bindUser(code, openId, options = {}) {
   const key = String(code || '').trim().toUpperCase();
   const item = _BIND_CODES.get(key);
   _BIND_CODES.delete(key);
-  if (item === undefined) return '绑定码无效或已被使用';
+  if (item === undefined) {
+    // 无效码没有身份可依 ⇒ 中文兜底（R22）
+    return i18n.t('api', '绑定码无效或已被使用', 'zh');
+  }
   const [userId, expires] = item;
-  if (Date.now() / 1000 > expires) return '绑定码已过期，请到站点重新生成';
+  // 过期码知道码所属 user_id ⇒ 用该用户的偏好（可能在站点切过英文）
+  const lang = userLang(userId, options);
+  if (Date.now() / 1000 > expires) {
+    return i18n.t('api', '绑定码已过期，请到站点重新生成', lang);
+  }
   setFeishuBinding(openId, userId, 0, options);
   return null;
 }

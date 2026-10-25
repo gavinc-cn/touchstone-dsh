@@ -50,6 +50,10 @@ class _FakeHandler:
     def _board_owned(self, project_id, card_id=None):
         return self._owned
 
+    _request_lang = server.Handler._request_lang
+    _localize_error = server.Handler._localize_error
+    _error = server.Handler._error
+    _error_spaced = server.Handler._error_spaced
     def _respond(self, code, body, ctype=None):
         self.resp.append((code, body))
 

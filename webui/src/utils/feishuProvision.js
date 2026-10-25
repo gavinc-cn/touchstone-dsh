@@ -9,6 +9,8 @@
 //   补齐应用配置 / 提交发布 = 纯写操作，后端早已实现 ⇒ 只看 enabled（不被 supported 连坐）；
 //   刷新状态 = 只读探测 ⇒ 只受 busy 影响（busy 是组件本地状态，不进本函数）。
 // 注意 supported=false **不等于**「配置自动化已关闭」：两者语义不同，文案也不许混用。
+import { t } from './i18n'
+
 export function provisionGates(st) {
   const supported = !!st?.supported
   const enabled = !!st?.enabled
@@ -50,18 +52,15 @@ export function provisionNotices(st) {
       key: 'unsupported',
       tone: 'warn',
       text: enabled
-        ? '本机后端不具备「扫码创建应用」能力：扫码按钮不可用（这与「配置自动化被关掉」不是一回事）。'
-          + '仍可用「补齐应用配置」为已有应用补齐权限、事件订阅与回调，App ID / Secret 可在上方手工填写；'
-          + '或升级后端依赖后刷新本页重试扫码。'
-        : '本机后端不具备「扫码创建应用」能力：扫码按钮不可用（这与「配置自动化被关掉」不是一回事）。'
-          + '升级后端依赖后刷新本页可重试扫码。',
+        ? t('本机后端不具备「扫码创建应用」能力：扫码按钮不可用（这与「配置自动化被关掉」不是一回事）。仍可用「补齐应用配置」为已有应用补齐权限、事件订阅与回调，App ID / Secret 可在上方手工填写；或升级后端依赖后刷新本页重试扫码。')
+        : t('本机后端不具备「扫码创建应用」能力：扫码按钮不可用（这与「配置自动化被关掉」不是一回事）。升级后端依赖后刷新本页可重试扫码。'),
     })
   }
   if (!enabled) {
     out.push({
       key: 'disabled',
       tone: 'closed',
-      text: '配置自动化已被 TS_FEISHU_PROVISION=0 关闭：可只跑自检，写操作不可用。',
+      text: t('配置自动化已被 TS_FEISHU_PROVISION=0 关闭：可只跑自检，写操作不可用。'),
     })
   }
   return out

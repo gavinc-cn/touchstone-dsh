@@ -133,6 +133,10 @@ class _FakeHandler:
     def end_headers(self):
         pass
 
+    _request_lang = server.Handler._request_lang
+    _localize_error = server.Handler._localize_error
+    _error = server.Handler._error
+    _error_spaced = server.Handler._error_spaced
     def _respond(self, code, body=b"", ctype=""):
         self.status = code
 

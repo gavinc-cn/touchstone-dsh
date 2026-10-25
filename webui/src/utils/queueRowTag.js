@@ -10,8 +10,10 @@
 //
 // 2026-10-22 用户报：running 行标「发送中」读起来像「消息还在发送」，实际早已
 // 交给 agent、只是这一轮还没结束 ⇒ running 文案定稿「已发送」。
+import { t } from './i18n'
+
 export function queueRowTag(state) {
-  if (state === 'server') return '服务端排队'
-  if (state === 'running') return '已发送'
-  return '排队中'
+  if (state === 'server') return t('服务端排队')
+  if (state === 'running') return t('已发送')
+  return t('排队中')
 }

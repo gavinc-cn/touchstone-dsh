@@ -1058,7 +1058,7 @@ test('DELETE：终态任务（无等待行）也删得掉；越权/不存在 ⇒
 // ⑧ db.insertTask —— 与 db.py:insert_task(1012) 逐点对齐
 // --------------------------------------------------------------------------
 
-test('db.insertTask：19 字段 + now_str 落库、缺省值、返回值是 number', () => {
+test('db.insertTask：20 字段 + now_str 落库、缺省值、返回值是 number', () => {
   const env = setup();
   try {
     const id = db.insertTask(env.p1, {
@@ -1075,7 +1075,8 @@ test('db.insertTask：19 字段 + now_str 落库、缺省值、返回值是 numb
       payload: '{"a": 1}', extra: 'e', status: 'queued', session_id: '', model: 'm',
       permission: 'yolo', auto_commit: 1, auto_deploy: 1, auto_retest: 1, cases_base: 3,
       fresh_prompt: 0, current_round: 0, new_bugs: 0, date_from: '2026-01-01',
-      date_to: '2026-02-01', load_rerun: 0, started_at: null, ended_at: null, error: '',
+      date_to: '2026-02-01', load_rerun: 0, lang: 'zh', started_at: null, ended_at: null,
+      error: '',
     });
     assert.match(row.created_at, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 
@@ -1088,6 +1089,10 @@ test('db.insertTask：19 字段 + now_str 落库、缺省值、返回值是 numb
     assert.equal(row2.payload, '');
     assert.equal(row2.start_stage, '');
     assert.equal(row2.cases_base, 0);
+    assert.equal(row2.lang, 'zh', 'T13：lang 缺省 zh（与 db.py:insert_task 同缺省）');
+    // 显式 lang 原样落库（创建冻结口由调用点负责传已解析的请求语言）
+    assert.equal(taskRow(env, db.insertTask(env.p1,
+      { name: 'n2-en', lang: 'en', ...base }, { db: env.db })).lang, 'en');
 
     // int(cases_base or 0)：''/None/[] ⇒ 0；数字串按 int() 解析
     for (const [name, casesBase] of [['n3', ''], ['n4', []], ['n4b', null]]) {
@@ -1155,6 +1160,24 @@ test('runner.INSTANCE 为 null ⇒ 不静默 no-op（抛给 dispatchSafely，只
     assert.equal(r.status, null);
     // 任务行已经落库（Python 的写序：insert 之后才 submit）
     assert.equal(env.db.prepare('SELECT COUNT(*) AS n FROM tasks').get().n, 1);
+  } finally {
+    env.close();
+  }
+});
+
+test('load/rerun：非压测/运行中 ⇒ 400 紧凑字节（两处 ctx.text→ctx.error 转换不改形状）', async () => {
+  const env = setup();
+  try {
+    const normal = addTask(env, env.p1, { task_type: 'normal' });
+    const notStress = await call(env, `/api/tasks/${normal}/load/rerun`,
+      { method: 'POST' });
+    assert.equal(notStress.status, 400);
+    assert.equal(notStress.text(), '{"error":"仅压测任务支持复压"}');
+
+    const stress = addTask(env, env.p1, { task_type: 'stress', status: 'running' });
+    const busy = await call(env, `/api/tasks/${stress}/load/rerun`, { method: 'POST' });
+    assert.equal(busy.status, 400);
+    assert.equal(busy.text(), '{"error":"任务运行中或排队中，请先停止"}');
   } finally {
     env.close();
   }

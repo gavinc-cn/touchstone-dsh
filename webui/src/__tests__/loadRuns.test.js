@@ -1,6 +1,10 @@
 // 压测运行展示辅助单测（2026-10-06 复压批次）：状态标签与选择器文案规则。
-import { describe, expect, it } from 'vitest'
-import { RUN_STATUS, runKpiText, runLabel } from '../utils/loadRuns'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { runKpiText, runLabel, runStatusLabel } from '../utils/loadRuns'
+
+import { setLang } from '../utils/i18n'
+// 文案断言按中文跑（zh 直接返回中文 key）
+beforeEach(() => setLang('zh'))
 
 describe('loadRuns 运行选择器文案', () => {
   it('已登记运行：编号 + 开始时间（MM-DD HH:MM）+ 状态', () => {
@@ -17,7 +21,7 @@ describe('loadRuns 运行选择器文案', () => {
   })
 
   it('状态兜底：未知状态码原样显示，字段缺失不抛异常', () => {
-    expect(RUN_STATUS.interrupted).toBe('被中断')
+    expect(runStatusLabel('interrupted')).toBe('被中断')
     expect(runLabel({ registered: true, status: 'weird' }, 0)).toContain('weird')
     expect(runLabel(undefined, 0)).toContain('未知')
   })

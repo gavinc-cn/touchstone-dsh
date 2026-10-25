@@ -4,6 +4,7 @@
 // - 勾选「同时应用到我的全部项目」→ POST /api/me/feishu-hook/apply
 //   （写本人全部未归档项目；webhook/secret 留空不下发 ⇒ 各项目保留自己的值，
 //    只统一「启用推送」与事件勾选，2026-10-10 用户需求）
+import { t } from './i18n'
 
 // 保存体：enabled/events 恒下发；webhook/secret 只在用户输入了内容时才带键
 // （后端语义：缺省=保持现有值，故「留空」不会把已配好的 webhook 清掉）
@@ -28,6 +29,6 @@ export function applyResultText(r) {
   const n = Number(r && r.updated) || 0
   const skipped = Number(r && r.archived_skipped) || 0
   return skipped > 0
-    ? `已应用到 ${n} 个项目（跳过 ${skipped} 个已归档）`
-    : `已应用到 ${n} 个项目`
+    ? t('已应用到 {n} 个项目（跳过 {skipped} 个已归档）', { n, skipped })
+    : t('已应用到 {n} 个项目', { n })
 }

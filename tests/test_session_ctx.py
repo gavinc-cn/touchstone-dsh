@@ -93,6 +93,10 @@ class _BoardHandler:
     def _board_owns_sid(self, row, sid):
         return {"id": 7, "column_key": "doing", "block_kind": None}
 
+    _request_lang = server.Handler._request_lang
+    _localize_error = server.Handler._localize_error
+    _error = server.Handler._error
+    _error_spaced = server.Handler._error_spaced
     def _respond(self, code, body, ctype=None):
         self.resp.append((code, json.loads(body.decode("utf-8"))))
 

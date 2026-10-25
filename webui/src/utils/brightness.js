@@ -14,14 +14,32 @@
 //     强调文字 --star-text）；不动状态色/背景/描边/品牌填充（--star 仍是品牌墨）；
 //   - 只对深色皮肤有意义：dsh-light 三档同值，等价于不生效（与 dsh 宿主 dim-text 同口径：
 //     浅色模式不动）。
+import { t } from './i18n'
+
 const KEY = 'ts_bright'
 
-// 档位定义：id 同时是 <html data-bright> 的取值（hint 要短，设置页三张卡并排显示）
+// 档位定义：id 同时是 <html data-bright> 的取值（展示名/提示见下方函数，按当前语言求值）
 export const BRIGHTNESSES = [
-  { id: 'normal', label: '原样', hint: '出厂取值' },
-  { id: 'dim', label: '偏暗', hint: '压一档（默认）' },
-  { id: 'dimmer', label: '更暗', hint: '再压一档' },
+  { id: 'normal' },
+  { id: 'dim' },
+  { id: 'dimmer' },
 ]
+
+// 档位 id → 展示名（设置页档位卡用；未知值原样返回）
+export function brightnessLabel(id) {
+  if (id === 'normal') return t('原样')
+  if (id === 'dim') return t('偏暗')
+  if (id === 'dimmer') return t('更暗')
+  return id
+}
+
+// 档位 id → 一句话提示（hint 要短，设置页三张卡并排显示）
+export function brightnessHint(id) {
+  if (id === 'normal') return t('出厂取值')
+  if (id === 'dim') return t('压一档（默认）')
+  if (id === 'dimmer') return t('再压一档')
+  return ''
+}
 
 // 缺省档：偏暗（用户诉求的默认观感；未存过偏好的浏览器按此显示）
 export const DEFAULT_BRIGHTNESS = 'dim'
@@ -42,9 +60,4 @@ export function applyBrightness(id) {
 // 渲染前调用（main.jsx），避免首屏文字亮度闪烁
 export function initBrightness() {
   applyBrightness(getBrightness())
-}
-
-// 档位 id → 展示名（设置页档位卡用；未知值原样返回）
-export function brightnessLabel(id) {
-  return BRIGHTNESSES.find((b) => b.id === id)?.label || id
 }

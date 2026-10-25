@@ -43,15 +43,17 @@ function usable(ts) {
  *
  * @param {number} ts 毫秒 epoch
  * @param {number} [now] 当前时刻（毫秒 epoch，缺省取本机时钟；单测注入用）
+ * @param {Function} t 翻译函数（useI18n 的 t；**必传**——本函数带 {n} 插值，identity
+ *   兜底会把占位符原样漏给界面；render 时传 t 即可即时切换语言）
  * @returns {string} 文案；时间戳不可用 ⇒ `''`（调用方据此不渲染）
  */
-export function timeAgo(ts, now = Date.now()) {
+export function timeAgo(ts, now = Date.now(), t) {
   if (!usable(ts) || !usable(now)) return ''
   const diff = now - ts
-  if (diff < MIN) return '刚刚'          // 含未来时间：两端时钟有偏差时按「刚刚」，不出负数
-  if (diff < HOUR) return `${Math.floor(diff / MIN)} 分钟前`
-  if (diff < DAY) return `${Math.floor(diff / HOUR)} 小时前`
-  if (diff < WEEK) return `${Math.floor(diff / DAY)} 天前`
+  if (diff < MIN) return t('刚刚')       // 含未来时间：两端时钟有偏差时按「刚刚」，不出负数
+  if (diff < HOUR) return t('{n} 分钟前', { n: Math.floor(diff / MIN) })
+  if (diff < DAY) return t('{n} 小时前', { n: Math.floor(diff / HOUR) })
+  if (diff < WEEK) return t('{n} 天前', { n: Math.floor(diff / DAY) })
   // 7 天以上：按浏览器本地时区取日期；同年省掉年份（看板上绝大多数是这个尺度）
   const d = new Date(ts)
   const n = new Date(now)
@@ -77,19 +79,21 @@ export function fmtFull(ts) {
  *
  * @param {object} card 看板卡片（服务端 card_json 透传）
  * @param {number} [now] 当前时刻（毫秒 epoch，单测注入用）
+ * @param {Function} t 翻译函数（**必传**，转交 timeAgo 做 {n} 插值）
  * @returns {string}
  */
-export function cardTimeLabel(card, now = Date.now()) {
-  return timeAgo(card?.updated_at_ts, now)
+export function cardTimeLabel(card, now = Date.now(), t) {
+  return timeAgo(card?.updated_at_ts, now, t)
 }
 
 /**
  * 卡面悬浮提示文案：「最后更新：<精确时刻>」；时间戳不可用 ⇒ `''`（不挂空 title）。
  *
  * @param {object} card 看板卡片
+ * @param {Function} t 翻译函数（**必传**，用于 {time} 插值）
  * @returns {string}
  */
-export function cardTimeTitle(card) {
+export function cardTimeTitle(card, t) {
   const s = fmtFull(card?.updated_at_ts)
-  return s ? `最后更新：${s}` : ''
+  return s ? t('最后更新：{time}', { time: s }) : ''
 }

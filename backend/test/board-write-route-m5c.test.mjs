@@ -48,10 +48,12 @@ function fakeRes() {
   };
 }
 
-function fakeReq(method, body) {
+function fakeReq(method, body, headers = {}) {
   const text = body === undefined ? '' : Buffer.from(JSON.stringify(body), 'utf8');
   const stream = Readable.from(text.length ? [text] : [], { objectMode: false });
-  stream.headers = text.length ? { 'content-length': String(text.length) } : {};
+  stream.headers = text.length
+    ? { 'content-length': String(text.length), ...headers }
+    : { ...headers };
   stream.method = method;
   return stream;
 }
@@ -71,10 +73,10 @@ function setup(tag) {
   return { ...fx, pid, pOther, admin, adminRow: admin };
 }
 
-async function call(env, method, target, { body, user } = {}) {
+async function call(env, method, target, { body, user, headers = {} } = {}) {
   const { res, cap } = fakeRes();
   const ctx = makeContext({
-    req: fakeReq(method, body),
+    req: fakeReq(method, body, headers),
     res,
     db: env.db,
     user: user === undefined ? env.adminRow : user,
@@ -104,6 +106,8 @@ class FakeDriver {
     this.calls = [];
     this.forkSid = 'session-11111111-1111-4111-8111-111111111111';
     this.renameTitle = null;                 // 非 null ⇒ /rename 回该值（验 accepted_title）
+    // 非 null ⇒ /model 直接回该响应（验驱动 5xx 的 detail 透传；body 为字符串时按原样发）
+    this.modelFailure = null;
     // 宿主权限目录（2026-10-21 权限档对齐；profile 端点校验 catalog 值用）
     this.presetsPayload = {
       current: 'danger-full-access',
@@ -140,7 +144,19 @@ class FakeDriver {
       res.end(JSON.stringify(obj));
     };
     if (p === '/session') return json(200, { session_id: body.session_id || 'session-new-0000' });
-    if (p === '/model') return json(200, { selected: { model: body.model } });
+    if (p === '/model') {
+      if (this.modelFailure !== null) {
+        const { status, body: payload } = this.modelFailure;
+        if (typeof payload === 'string') {
+          res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
+          res.end(payload);
+        } else {
+          json(status, payload);
+        }
+        return undefined;
+      }
+      return json(200, { selected: { model: body.model } });
+    }
     if (p === '/permission') return json(200, { ok: true });
     if (p === '/presets') return json(200, this.presetsPayload);
     if (p === '/fork') return json(200, { new_session_id: this.forkSid });
@@ -493,6 +509,15 @@ test('POST .../interaction/answer：无待答提问 / 缺 qid / 题库校验失�
   assert.equal(noQid.text(), '{"error":"qid/approval_id required"}');   // 紧凑
   const wrongQid = await call(s, 'POST', url, { body: { qid: 'call-9', answers: [] } });
   assert.equal(wrongQid.json().error, '提问不存在或已过期');
+  // 英文模式（T10 R18）：lib 返回的错误串经 ctx.errorSpaced 整条英文化
+  const wrongQidEn = await call(s, 'POST', url,
+    { body: { qid: 'call-9', answers: [] }, headers: { 'X-TS-Lang': 'en' } });
+  assert.equal(wrongQidEn.status, 400);
+  assert.equal(wrongQidEn.json().error,
+    'The question does not exist or has expired');
+  const noneEn = await call(s, 'POST', url,
+    { body: { qid: 'call-1', answers: [] }, headers: { 'X-TS-Lang': 'en' } });
+  assert.equal(noneEn.json().error, 'Invalid answer payload');
   const badOpt = await call(s, 'POST', url, { body: { qid: 'call-1',
     answers: [{ wire: 'q_0', kind: 'single', option_id: 'nope' }] } });
   assert.equal(badOpt.json().error, '选项不存在或已过期');
@@ -679,6 +704,34 @@ test('POST .../sessions/<sid>/profile：驱动异常 ⇒ 502（不是 500/400）
     assert.equal(r.status, 502);
     // 文案与 Python `dshdriver` 的 `Unconfigured` 逐字一致（Python 侧同样 502 原样透出）
     assert.equal(r.json().error, '未配置 dsh agent 驱动（非插件形态或插件未下发驱动地址）');
+  });
+  s.close();
+});
+
+test('POST .../sessions/<sid>/profile：驱动 HTTP 错误的 detail 在中文/en 都保留', async () => {
+  const s = setup('profile-502-detail');
+  insertCard(s.db, s.pid, { sessionId: 'sid-a', sessions: '["sid-a"]' });
+  const url = `/api/projects/${s.pid}/board/sessions/sid-a/profile`;
+  await withDriver(async (drv) => {
+    // ① 驱动正文带 `error` ⇒ `.message` 就是 detail；中文无头保持旧字节（detail 原样），
+    //    英文给「Driver returned HTTP …: detail」。
+    drv.modelFailure = { status: 500, body: { error: '宿主崩了' } };
+    const zh = await call(s, 'POST', url, { body: { model: 'm' } });
+    assert.equal(zh.status, 502);
+    assert.equal(zh.text(), '{"error": "宿主崩了"}',
+      '中文无头：detail 必须逐字节保留（旧版 pyStrErr(e) 的输出）');
+    const en = await call(s, 'POST', url, {
+      body: { model: 'm' }, headers: { 'X-TS-Lang': 'en' } });
+    assert.equal(en.status, 502);
+    assert.equal(en.text(), '{"error": "Driver returned HTTP 500: 宿主崩了"}');
+
+    // ② 正文非 JSON ⇒ detail 为空，回落「驱动返回 HTTP <status>」（中英各一条）。
+    drv.modelFailure = { status: 500, body: 'not json' };
+    const zhFallback = await call(s, 'POST', url, { body: { model: 'm' } });
+    assert.equal(zhFallback.text(), '{"error": "驱动返回 HTTP 500"}');
+    const enFallback = await call(s, 'POST', url, {
+      body: { model: 'm' }, headers: { 'X-TS-Lang': 'en' } });
+    assert.equal(enFallback.text(), '{"error": "Driver returned HTTP 500"}');
   });
   s.close();
 });

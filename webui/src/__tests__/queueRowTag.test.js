@@ -3,9 +3,13 @@
 // running=平台消息单元已交给会话（等 turn 结束）/ 其余=平台排队中。
 // 2026-10-22 用户报：running 行此前标「发送中」——消息其实已经交给 agent，
 // 看着像还在发送；文案定稿改「已发送」。
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import { queueRowTag } from '../utils/queueRowTag'
+
+import { setLang } from '../utils/i18n'
+// 文案断言按中文跑（zh 直接返回中文 key）
+beforeEach(() => setLang('zh'))
 
 describe('queueRowTag：排队消息行 tag 文案', () => {
   it('running = 已发送（消息已交给会话，等 turn 结束；不再叫「发送中」）', () => {

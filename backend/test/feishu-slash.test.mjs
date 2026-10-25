@@ -76,7 +76,7 @@ const ORACLE_ROWS = oracleCommands();
 const ORACLE_ICONS = oracleIconKeys();
 const PERM_HINT = oracleJoinedLiteral('_SLASH_PERM_HINT');
 const ICON_HINT = oracleLiteral('_SLASH_ICON_HINT');
-const PARAM_HINT = /if code == 99992402:\n        return "([^"]*)"/.exec(PY)[1];
+const PARAM_HINT = oracleLiteral('_SLASH_PARAM_HINT');
 
 /**
  * 17 条清单的**字面量副本**（人工逐条抄自 `feishu.py:1198-1216`）。它与

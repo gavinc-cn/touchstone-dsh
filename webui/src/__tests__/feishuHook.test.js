@@ -3,9 +3,13 @@
 // - webhook/secret 留空 ⇒ **不带键**（后端缺省=不改 ⇒ 各项目保留原值）
 // - 事件空数组照常下发（= 把事件全关掉，而不是"没改"）
 // - applyAll 时不带 pid（批量端点写的是本人全部未归档项目）
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import { applyResultText, buildHookBody, hookSaveRequest } from '../utils/feishuHook'
+
+import { setLang } from '../utils/i18n'
+// 文案断言按中文跑（zh 直接返回中文 key）
+beforeEach(() => setLang('zh'))
 
 describe('buildHookBody', () => {
   it('enabled/events 恒下发，webhook 带值才下发（留空=保持各项目原值）', () => {

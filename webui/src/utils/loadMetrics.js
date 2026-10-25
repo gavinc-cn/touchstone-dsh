@@ -11,6 +11,7 @@
 //   stacked_bar        counter 画每桶增量（堆叠）；gauge 画每桶均值
 //   donut              一律用各分组的最新累计值（占比语义）
 //   stat               按 agg（last/avg/max/min/sum）取值，counter 的 last=最新累计值
+import { t } from './i18n'
 
 // 单序列点数上限（前端环形截断）：指标通道 1Hz×多序列，超限按最旧丢弃
 export const MAX_POINTS_PER_SERIES = 1200
@@ -79,7 +80,7 @@ export function metricSeries(store, metric) {
 }
 
 /**
- * 序列 → 绘图点 [[t, v]]。
+ * 序列 → 绘图点 [[ts, v]]。
  * gauge 取原值；counter 取相邻增量（可选再除以 Δt 换算成每秒速率）。
  * @param {object} series 序列对象
  * @param {{scale?: number, rate?: boolean}} opts scale=数值放大（如错误率×100）
@@ -87,7 +88,7 @@ export function metricSeries(store, metric) {
 export function seriesPoints(series, opts = {}) {
   const scale = Number(opts.scale) || 1
   const pts = series.points
-  if (series.type !== 'counter') return pts.map(([t, v]) => [t, v * scale])
+  if (series.type !== 'counter') return pts.map(([ts, v]) => [ts, v * scale])
   const out = []
   for (let i = 1; i < pts.length; i += 1) {
     const dt = pts[i][0] - pts[i - 1][0]
@@ -107,16 +108,16 @@ export function seriesPoints(series, opts = {}) {
 export function bucketize(points, bucketSec, mode = 'last') {
   if (!points.length || bucketSec <= 0) return points.slice()
   const buckets = new Map()
-  points.forEach(([t, v]) => {
-    const b = Math.floor(t / bucketSec) * bucketSec
+  points.forEach(([ts, v]) => {
+    const b = Math.floor(ts / bucketSec) * bucketSec
     const cur = buckets.get(b)
-    if (!cur) buckets.set(b, { t: b, sum: v, n: 1, last: v })
+    if (!cur) buckets.set(b, { ts: b, sum: v, n: 1, last: v })
     else { cur.sum += v; cur.n += 1; cur.last = v }
   })
-  return [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([t, b]) => {
-    if (mode === 'avg') return [t, b.sum / b.n]
-    if (mode === 'sum') return [t, b.sum]
-    return [t, b.last]
+  return [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([ts, b]) => {
+    if (mode === 'avg') return [ts, b.sum / b.n]
+    if (mode === 'sum') return [ts, b.sum]
+    return [ts, b.last]
   })
 }
 
@@ -136,8 +137,8 @@ export function groupLatest(store, metric, groupBy) {
   const out = []
   store.list().filter((s) => s.metric === metric).forEach((s) => {
     if (!s.points.length) return
-    const label = groupBy ? s.labels?.[groupBy] : (Object.values(s.labels || {})[0] ?? '全部')
-    out.push({ label: String(label ?? '全部'), value: s.points[s.points.length - 1][1],
+    const label = groupBy ? s.labels?.[groupBy] : (Object.values(s.labels || {})[0] ?? t('全部'))
+    out.push({ label: String(label ?? t('全部')), value: s.points[s.points.length - 1][1],
                labels: s.labels || {} })
   })
   return out.sort((a, b) => b.value - a.value)
@@ -178,9 +179,9 @@ export function formatValue(v, precision) {
 export function timeSpan(pointsList) {
   let lo = Infinity
   let hi = -Infinity
-  pointsList.forEach((pts) => pts.forEach(([t]) => {
-    if (t < lo) lo = t
-    if (t > hi) hi = t
+  pointsList.forEach((pts) => pts.forEach(([ts]) => {
+    if (ts < lo) lo = ts
+    if (ts > hi) hi = ts
   }))
   return hi > lo ? hi - lo : 0
 }

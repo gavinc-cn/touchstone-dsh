@@ -1038,6 +1038,10 @@ def test_server_session_profile_dsh_model_only(monkeypatch):
     calls = []
 
     class _H:
+        _request_lang = server.Handler._request_lang
+        _localize_error = server.Handler._localize_error
+        _error = server.Handler._error
+        _error_spaced = server.Handler._error_spaced
         def _respond(self, code, body=b"", ctype=""):
             calls.append((code, json.loads(body or b"{}")))
         def _owned_project(self, pid):
@@ -1230,6 +1234,10 @@ def test_server_rewind_dsh_forks_and_returns_sid(monkeypatch):
     calls = []
 
     class _H:
+        _request_lang = server.Handler._request_lang
+        _localize_error = server.Handler._localize_error
+        _error = server.Handler._error
+        _error_spaced = server.Handler._error_spaced
         def _respond(self, code, body=b"", ctype=""):
             calls.append((code, json.loads(body or b"{}")))
 
@@ -1307,6 +1315,10 @@ def test_session_media_endpoints_pass_dsh_family(monkeypatch):
     class _H:
         """只实现两个端点触达的方法（不建真连接）。"""
 
+        _request_lang = server.Handler._request_lang
+        _localize_error = server.Handler._localize_error
+        _error = server.Handler._error
+        _error_spaced = server.Handler._error_spaced
         def _respond(self, code, body=b"", ctype=""):
             calls.append((code, body))
 
@@ -1372,6 +1384,10 @@ def test_server_rewind_dsh_task_rebinds_session(monkeypatch):
     rebound = []
 
     class _H:
+        _request_lang = server.Handler._request_lang
+        _localize_error = server.Handler._localize_error
+        _error = server.Handler._error
+        _error_spaced = server.Handler._error_spaced
         def _respond(self, code, body=b"", ctype=""):
             calls.append((code, json.loads(body or b"{}")))
 
@@ -1480,8 +1496,9 @@ def test_board_answer_approval_dsh_direct_and_scope(monkeypatch):
     def boom(sid, aid, outcome):
         raise board.dshdriver.DshDriverError(-2, "不可达")
     monkeypatch.setattr(board.dshdriver, "answer_approval", boom)
-    assert "审批失败" in board.answer_approval(proj, {"session_id": "session-a"},
-                                             "ap-1", "approved")
+    fail = board.answer_approval(proj, {"session_id": "session-a"}, "ap-1", "approved")
+    # key+vars 契约（T11）：外层文案是词条 key，detail 在 vars 里
+    assert fail["message"].startswith("审批失败") and fail["vars"]["detail"] == "不可达"
 
 
 def test_server_session_profile_dsh_permission_and_model(monkeypatch):
@@ -1494,6 +1511,10 @@ def test_server_session_profile_dsh_permission_and_model(monkeypatch):
     calls = []
 
     class _H:
+        _request_lang = server.Handler._request_lang
+        _localize_error = server.Handler._localize_error
+        _error = server.Handler._error
+        _error_spaced = server.Handler._error_spaced
         def _respond(self, code, body=b"", ctype=""):
             calls.append((code, json.loads(body or b"{}")))
         def _owned_project(self, pid):

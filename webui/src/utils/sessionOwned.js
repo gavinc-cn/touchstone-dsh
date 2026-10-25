@@ -12,19 +12,27 @@
 // 纯函数层：只做「值 → 文案 / 布尔」的派生，不碰 DOM、不读 store，便于单测
 // （本仓前端测试全是纯函数层，见 src/__tests__/）。
 
-/** 外部会话提示条文案（仅 `owned === false` 时渲染；必须含「外部会话」字样） */
-export const OWNED_EXTERNAL_HINT =
-  '外部会话：本会话由 dsh GUI 直接运行（不是平台启动的），平台的停止/中断对它无效；'
-  + '你仍可发消息，消息按平台队列投递。'
+/**
+ * 外部会话提示条文案（仅 `owned === false` 时渲染；必须含「外部会话」字样）。
+ * 工厂形式：render 时传 t，切换语言即重渲染；缺省 identity 供纯逻辑/单测调用。
+ *
+ * @param {Function} [t] 翻译函数
+ * @returns {string} 提示文案
+ */
+export function ownedExternalHint(t = (s) => s) {
+  return t('外部会话：本会话由 dsh GUI 直接运行（不是平台启动的），平台的停止/中断对它无效；')
+    + t('你仍可发消息，消息按平台队列投递。')
+}
 
 /**
  * 提示条文案：外部会话给提示；池内与注册表未知一律返回空串（调用方按空串不渲染）。
  *
  * @param {boolean|null|undefined} owned 会话 meta 的 owned 三态
+ * @param {Function} [t] 翻译函数
  * @returns {string} 提示文案，或空串（不渲染提示条）
  */
-export function ownedHint(owned) {
-  return owned === false ? OWNED_EXTERNAL_HINT : ''
+export function ownedHint(owned, t = (s) => s) {
+  return owned === false ? ownedExternalHint(t) : ''
 }
 
 /**

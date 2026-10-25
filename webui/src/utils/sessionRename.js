@@ -12,16 +12,17 @@
  * 卡面改名的同步结果 → 提示文案（无提示返回空串）。
  *
  * @param {object|null} res - PATCH 卡片的响应体（可能不带 session_rename）。
+ * @param {Function} t 翻译函数（useI18n 的 t；**必传**——提示里带 {err}/{title} 插值）
  * @returns {string} 空串＝不提示；否则为给用户看的一句话。
  */
-export function sessionRenameNotice(res) {
+export function sessionRenameNotice(res, t) {
   const info = res && res.session_rename
   if (!info) return ''
   if (info.ok === false) {
-    return `卡名已改；DSH 会话名未同步：${info.error || '未知原因'}`
+    return t('卡名已改；DSH 会话名未同步：{err}', { err: info.error || t('未知原因') })
   }
   if (info.accepted_title) {
-    return `DSH 侧标题被截断为「${info.accepted_title}」（卡面保留原文）`
+    return t('DSH 侧标题被截断为「{title}」（卡面保留原文）', { title: info.accepted_title })
   }
   return ''
 }

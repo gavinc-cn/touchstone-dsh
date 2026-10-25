@@ -13,39 +13,44 @@
 // 看板卡片与会话详情窗共用本组件（各自传各自的 info 与回调）。
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from './ui/dialog'
 import { Button } from './ui/button'
+import { useI18n } from '../utils/i18n'
 
 export default function MergeHandoffDialog({ open, info, busy, disabledReason, onHandoff, onPass, onClose }) {
+  const { t } = useI18n()
   const m = info || {}
   const dirty = Number(m.dirty_count || 0)
   return (
     <Dialog open={!!open} onOpenChange={(v) => !v && onClose && onClose()}>
       <DialogContent className="modal">
-        <DialogHeader><DialogTitle>通过前：worktree 改动还没回流主分支</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{t('通过前：worktree 改动还没回流主分支')}</DialogTitle></DialogHeader>
         <p className="hint">
-          该卡片在独立 worktree 中开发，改动在分支 <span className="font-mono">{m.branch || '—'}</span> 上，
-          主分支 <span className="font-mono">{m.target || '—'}</span> 还不知道这些改动。
+          {t('该卡片在独立 worktree 中开发，改动在分支')}{' '}
+          <span className="font-mono">{m.branch || '—'}</span>
+          {/* 空格放在词条内：zh 需要「分支名 + 空格 + 上」，en 的分号必须紧跟分支名
+              （JSX 里统一加空格会出现 “main ;”），两侧各自持有正确间距 */}
+          {t(' 上， 主分支 ')}
+          <span className="font-mono">{m.target || '—'}</span>
+          {' '}{t('还不知道这些改动。')}
         </p>
         <p className="hint">
-          待合并提交：<b>{m.ahead || 0}</b> 个
-          {m.behind ? <>（主分支领先 {m.behind} 个提交，需先同步）</> : null}
+          {t('待合并提交：')}<b>{m.ahead || 0}</b>{t(' 个', { n: m.ahead || 0 })}
+          {m.behind ? t('（主分支领先 {n} 个提交，需先同步）', { n: m.behind }) : null}
         </p>
         {dirty > 0 && (
-          <p className="hint">工作树有 {dirty} 处未提交改动，交给 agent 时会先提交它们。</p>
+          <p className="hint">{t('工作树有 {n} 处未提交改动，交给 agent 时会先提交它们。', { n: dirty })}</p>
         )}
         <p className="hint">
-          「交给 agent 合并」= 平台把合并指令发给卡片主会话并让卡片回开发队列排队：
-          agent 先同步主分支最新代码，再尽量快进（不能快进才生成合并提交）回流，冲突由它解决；
-          干完这轮卡片自动回「待审核」，那时再点「通过」即完成。
+          {t('「交给 agent 合并」= 平台把合并指令发给卡片主会话并让卡片回开发队列排队：agent 先同步主分支最新代码，再尽量快进（不能快进才生成合并提交）回流，冲突由它解决；干完这轮卡片自动回「待审核」，那时再点「通过」即完成。')}
         </p>
-        {m.path && <p className="hint break-all">工作树：<span className="font-mono">{m.path}</span></p>}
+        {m.path && <p className="hint break-all">{t('工作树：')}<span className="font-mono">{m.path}</span></p>}
         {/* 会话还在跑时不能投合并指令（后端 400「会话运行中」）——提前置灰并说明原因 */}
         {disabledReason && <p className="hint">{disabledReason}</p>}
         <DialogFooter>
-          <Button variant="outline" disabled={busy} onClick={onClose}>取消</Button>
-          <Button variant="outline" disabled={busy} onClick={onPass}>仅通过（不合并）</Button>
+          <Button variant="outline" disabled={busy} onClick={onClose}>{t('取消')}</Button>
+          <Button variant="outline" disabled={busy} onClick={onPass}>{t('仅通过（不合并）')}</Button>
           <Button disabled={busy || !!disabledReason} title={disabledReason || undefined}
             onClick={onHandoff}>
-            {busy ? '提交中…' : '交给 agent 合并'}
+            {busy ? t('提交中…') : t('交给 agent 合并')}
           </Button>
         </DialogFooter>
       </DialogContent>

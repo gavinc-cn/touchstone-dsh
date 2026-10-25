@@ -38,7 +38,8 @@
  * 零 npm 依赖（只用 `./feishu_rest.js`、`./feishu_cfg.js`、`./db.js`）。
  */
 import { getFeishuBindingByUser } from './db.js';
-import { appConfig } from './feishu_cfg.js';
+import { appConfig, userLang } from './feishu_cfg.js';
+import * as i18n from './i18n.js';
 import {
   FEISHU_DOMAIN, FeishuRestError, rest, restSendCard,
 } from './feishu_rest.js';
@@ -230,16 +231,24 @@ function slashRemoteIcon(item) {
 }
 
 /**
- * 飞书业务码 → 用户可操作的中文引导（设置页展示用，不抛异常）。
+ * 飞书业务码 → 用户可操作的引导（不抛异常）。
  * 对齐 `feishu.slash_error_hint`(feishu.py:1334-1343)。
+ *
+ * 默认 `lang='zh'`：设置页展示（T12d 数据面）与既有断言逐字节不变；
+ * 飞书 DM 回执（权限卡「重试注册」失败）由 `syncSlashCommands` 按 `options.lang`
+ * 显式传入（T12b）。三个固定引导都走 `api` 词条：zh 原文即 key，返回原串。
  * @param {any} err 一般是 `FeishuRestError`（带 `code`），也接受任意异常
+ * @param {'zh'|'en'|string} [lang]
  * @returns {string}
  */
-export function slashErrorHint(err) {
+export function slashErrorHint(err, lang = 'zh') {
   const code = errCode(err);
-  if (isPermCode(code)) return SLASH_PERM_HINT;
-  if (code === 40000031) return SLASH_ICON_HINT;
-  if (code === 99992402) return '指令参数校验失败：指令名需为不含「/」的标识符，说明不可为空';
+  if (isPermCode(code)) return i18n.t('api', SLASH_PERM_HINT, lang);
+  if (code === 40000031) return i18n.t('api', SLASH_ICON_HINT, lang);
+  if (code === 99992402) {
+    return i18n.t('api', '指令参数校验失败：指令名需为不含「/」的标识符，说明不可为空',
+      lang);
+  }
   return pyStr(err);
 }
 
@@ -370,7 +379,8 @@ export async function _slashUpsert(cfg, name, desc, icon, byName) {
  * 对齐 `feishu.slash_status`(feishu.py:1412-1430)：凭据缺失/权限不足等一律走 `error` 字段返回，
  * **不抛异常**（页面照常渲染并给引导）；`need_scope` = 缺「应用指令」scope。
  * @param {number} userId
- * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options] 透传给 `appConfig`
+ * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv, lang?: string}} [options]
+ *   透传给 `appConfig`；`lang`（T12d）是请求语言，只影响 error 的固定引导文案。
  * @returns {Promise<{configured: boolean, desired: Array<object>, remote: Array<object>,
  *                    extra: string[], need_scope: boolean, error: string}>}
  */
@@ -391,7 +401,7 @@ export async function slashStatus(userId, options = {}) {
     if (!(e instanceof FeishuRestError)) throw e;
     return {
       configured: true, desired, remote: [], extra: [],
-      need_scope: _needScope(e), error: slashErrorHint(e),
+      need_scope: _needScope(e), error: slashErrorHint(e, options.lang),
     };
   }
   const extra = pySorted(remote.filter((r) => !_SLASH_NAMES.includes(r.command))
@@ -402,22 +412,27 @@ export async function slashStatus(userId, options = {}) {
 /**
  * 把 TS 指令清单幂等同步到飞书：只增/改**自己的**指令，**绝不删**用户的其他指令。
  * 对齐 `feishu.sync_slash_commands`(feishu.py:1433-1465)。
+ *
+ * `options.lang` 缺省 `'zh'`：设置页/对拍路径（T12d 数据面）逐字节不变；
+ * 飞书 DM 回执（权限卡重试失败）由 `onSlashPermAction` 透传收件人语言（T12b）。
  * @param {number} userId
- * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
+ * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv, lang?: string}} [options]
  * @returns {Promise<{ok: boolean, created?: string[], updated?: string[], kept?: string[],
  *                    extra?: string[], failed?: string[], need_scope: boolean, error: string}>}
  */
 export async function syncSlashCommands(userId, options = {}) {
+  const lang = options.lang || 'zh';
   const cfg = appConfig(userId, options);
   if (cfg === null) {
-    return { ok: false, need_scope: false, error: '未配置应用凭据（App ID/App Secret）' };
+    return { ok: false, need_scope: false,
+      error: i18n.t('api', '未配置应用凭据（App ID/App Secret）', lang) };
   }
   let remote;
   try {
     remote = await listSlashCommands(cfg);
   } catch (e) {
     if (!(e instanceof FeishuRestError)) throw e;
-    return { ok: false, need_scope: _needScope(e), error: slashErrorHint(e) };
+    return { ok: false, need_scope: _needScope(e), error: slashErrorHint(e, lang) };
   }
   const byName = new Map(remote.map((r) => [r.command, r]));
   const buckets = { created: [], updated: [], kept: [] };
@@ -427,7 +442,7 @@ export async function syncSlashCommands(userId, options = {}) {
     if (!SLASH_ICON_KEYS.has(icon)) {
       // 本地预检：表外的键飞书必回 40000031，先在此拦下——省一次请求，
       // 且不让远端停在「同步到一半」的状态（同步是逐条进行的）
-      failed.push(`${name}: ${SLASH_ICON_HINT}`);
+      failed.push(`${name}: ${i18n.t('api', SLASH_ICON_HINT, lang)}`);
       continue;
     }
     try {
@@ -435,7 +450,7 @@ export async function syncSlashCommands(userId, options = {}) {
     } catch (e) {
       if (!(e instanceof FeishuRestError)) throw e;
       needScope = needScope || _needScope(e);
-      failed.push(`${name}: ${slashErrorHint(e)}`);
+      failed.push(`${name}: ${slashErrorHint(e, lang)}`);
     }
   }
   return {
@@ -499,24 +514,25 @@ export async function clearSlashCommands(userId, options = {}) {
  * @param {number} userId
  * @returns {object} 卡片 dict（逐字节照抄 oracle）
  */
-export function slashPermCard(appId, userId) {
+export function slashPermCard(appId, userId, lang = 'zh') {
   const url = appId ? `${FEISHU_DOMAIN}/app/${appId}` : `${FEISHU_DOMAIN}/app`;
-  const content = '**Touchstone 快捷指令**（机器人私聊输入框打「/」弹出的指令面板）'
-    + '需要你的飞书应用先开通权限：\n'
+  const content = i18n.t('api',
+    '**Touchstone 快捷指令**（机器人私聊输入框打「/」弹出的指令面板）需要你的飞书应用先开通权限：\n'
     + '· `application:app_slash_command:read`\n'
     + '· `application:app_slash_command:write`\n\n'
     + '**开通三步**：\n'
-    + `1. 打开 [开发者后台 · 本应用](${url})，左侧 **开发配置 → 权限管理**，点「开通权限」\n`
+    + '1. 打开 [开发者后台 · 本应用]({url})，左侧 **开发配置 → 权限管理**，点「开通权限」\n'
     + '2. 搜索 `app_slash_command`，把读、写两个权限都勾上并确认开通\n'
     + '3. 左侧 **应用发布 → 版本管理与发布** → 创建版本并发布'
     + '（权限改动必须发版、过审后才生效）\n\n'
-    + '完成后点下面的按钮，我立刻重试注册；若刚发版，可等约 1 分钟再点一次。';
+    + '完成后点下面的按钮，我立刻重试注册；若刚发版，可等约 1 分钟再点一次。',
+    lang, { url });
   const uid = pyInt(userId);
   const payload = { t: 'sc', a: 'retry', u: uid };
   return {
     schema: '2.0',
     header: {
-      title: { tag: 'plain_text', content: '🔑 需要开通「应用指令」权限' },
+      title: { tag: 'plain_text', content: i18n.t('api', '🔑 需要开通「应用指令」权限', lang) },
       template: 'orange',
     },
     body: {
@@ -525,7 +541,7 @@ export function slashPermCard(appId, userId) {
         {
           tag: 'button',
           type: 'primary',
-          text: { tag: 'plain_text', content: '我已开通，重试注册' },
+          text: { tag: 'plain_text', content: i18n.t('api', '我已开通，重试注册', lang) },
           behaviors: [{ type: 'callback', value: payload }],
         },
       ],
@@ -559,7 +575,8 @@ export async function sendSlashPermCard(userId, options = {}) {
     return [false, '尚未绑定飞书账号：设置页生成绑定码后在机器人单聊回复「绑定 <码>」'];
   }
   try {
-    await restSendCard(binding.open_id, slashPermCard(cfg.app_id || '', userId), cfg);
+    await restSendCard(binding.open_id,
+      slashPermCard(cfg.app_id || '', userId, userLang(userId, options)), cfg);
     return [true, ''];
   } catch (e) {
     if (!(e instanceof FeishuRestError)) throw e;

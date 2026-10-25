@@ -4,9 +4,13 @@
 //   supported=false 只该关掉「扫码创建飞书应用」这一个入口，
 //   不许连坐「补齐应用配置」「提交发布」这两个后端早已实现的动作（曾经整卡不可操作）。
 // 「刷新状态」是只读探测，只受 busy（组件本地状态）影响，不受任何能力闸门影响。
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import { provisionGates, provisionNotices, provisionQrUrl } from '../utils/feishuProvision'
+
+import { setLang } from '../utils/i18n'
+// 文案断言按中文跑（zh 直接返回中文 key）
+beforeEach(() => setLang('zh'))
 
 describe('provisionGates：supported × enabled 2×2', () => {
   it('① supported=true / enabled=true：三个按钮都可用', () => {

@@ -48,6 +48,7 @@ import re
 import tempfile
 
 import agents  # 复用 agent 族的 skill 目录约定（SKILL_DIRS_BY_FAMILY）
+import i18n
 
 # 清单根：平台仓库根 extensions/（Python 源码在 backend_py/，Node 后端读同一份）；
 # TS_EXT_DIR 覆盖（测试与自定义部署）
@@ -428,10 +429,19 @@ def plugin_patch_state(asset):
 
 
 def _patch_foreign_error(asset, patch):
-    """遇到用户自定义注册写法时的统一拒绝原因（安装/卸载共用）。"""
-    return AssetError(
-        f"「{asset['name']}」在 {display_path(patch['path'])} 里已有自定义写法的注册行，"
-        f"平台不覆盖、也不删除用户手写的 patch 配置；请先手工移除该条目再试", 409)
+    """遇到用户自定义注册写法时的统一拒绝原因（安装/卸载共用）。
+
+    返回**带 i18n_key/i18n_vars 的 AssetError**：`.message` 仍是渲染后的中文
+    （日志/既有断言口径不变），响应层按请求语言查共享词条（Node 同一 key）。
+    """
+    name = asset["name"]
+    path = display_path(patch["path"])
+    return i18n.localizable(
+        AssetError(f"「{name}」在 {path} 里已有自定义写法的注册行，"
+                   f"平台不覆盖、也不删除用户手写的 patch 配置；请先手工移除该条目再试", 409),
+        "「{name}」在 {path} 里已有自定义写法的注册行，平台不覆盖、也不删除用户手写的 patch 配置；"
+        "请先手工移除该条目再试",
+        {"name": name, "path": path})
 
 
 def install_root(asset, target, project_dir=""):
@@ -444,15 +454,35 @@ def install_root(asset, target, project_dir=""):
     return _skill_root(asset["family"], target, project_dir)
 
 
-def _unsupported_reason(asset, target):
-    """资产在目标下不可安装的用户可读原因。"""
+def _unsupported_error(asset, target):
+    """资产在目标下不可安装的错误（返回带 i18n_key/i18n_vars 的 AssetError）。
+
+    三个词条都是共享词典里的 key（Node `unsupportedInfo()` 同三 key）；`.message`
+    仍按中文渲染，故 `raise _unsupported_error(...)` 的旧中文输出逐字节不变。
+    每个分支都把字面量 key 直接写进 `localizable()`（覆盖门禁据此静态校验）。
+    """
     if target not in asset["targets"]:
-        return ("该资产只支持" +
-                "、".join("用户级" if t == "user" else "项目级" for t in asset["targets"]) +
-                "安装")
+        targets = "、".join("用户级" if t == "user" else "项目级"
+                            for t in asset["targets"])
+        return i18n.localizable(
+            AssetError(i18n.t("api", "该资产只支持{targets}安装", "zh",
+                              targets=targets)),
+            "该资产只支持{targets}安装", {"targets": targets})
     if asset["type"] == "dsh_plugin":
-        return "dsh 插件资产只支持用户级（装进 dsh profile，与项目无关）"
-    return f"该资产（{asset['family']}）暂不支持此目标的安装"
+        return i18n.localizable(
+            AssetError(i18n.t("api", "dsh 插件资产只支持用户级（装进 dsh profile，与项目无关）",
+                              "zh")),
+            "dsh 插件资产只支持用户级（装进 dsh profile，与项目无关）")
+    family = asset["family"]
+    return i18n.localizable(
+        AssetError(i18n.t("api", "该资产（{family}）暂不支持此目标的安装", "zh",
+                          family=family)),
+        "该资产（{family}）暂不支持此目标的安装", {"family": family})
+
+
+def _unsupported_reason(asset, target):
+    """资产在目标下不可安装的用户可读原因（渲染后中文；payload 的 reason 字段用）。"""
+    return str(_unsupported_error(asset, target))
 
 
 def _installed_files(asset, root):
@@ -464,7 +494,8 @@ def _installed_files(asset, root):
         base = os.path.realpath(root)
         real = os.path.realpath(dst)
         if not (real == base or real.startswith(base + os.sep)):
-            raise AssetError(f"安装路径越界：{f['to']}", 500)
+            raise i18n.localizable(AssetError(f"安装路径越界：{f['to']}", 500),
+                                   "安装路径越界：{path}", {"path": f["to"]})
         src_hash = _sha256(os.path.join(asset["dir"], f["from"]))
         dst_hash = _sha256(dst)
         out.append({"to": f["to"], "path": dst, "exists": bool(dst_hash),
@@ -595,7 +626,9 @@ def asset_json(asset, target, project_dir=""):
 def list_assets(target, project_dir=""):
     """目标下的资产清单（含状态）；target 非法抛 AssetError(400)。"""
     if target not in ASSET_TARGETS:
-        raise AssetError(f"target 必须是 {'/'.join(ASSET_TARGETS)}")
+        targets = "/".join(ASSET_TARGETS)
+        raise i18n.localizable(AssetError(f"target 必须是 {targets}"),
+                               "target 必须是 {targets}", {"targets": targets})
     return [asset_json(a, target, project_dir) for a in load_assets()]
 
 
@@ -603,8 +636,12 @@ def _require_profile(asset):
     """dsh 插件安装的前置检查：目标 profile 目录必须存在（不存在则装了也不会被加载）。"""
     prof_dir = os.path.dirname(plugin_patch_path(asset))
     if not os.path.isdir(prof_dir):
-        raise AssetError(f"未找到 dsh profile「{asset['plugin']['profile']}」："
-                         f"{display_path(prof_dir)}")
+        profile = asset["plugin"]["profile"]
+        path = display_path(prof_dir)
+        raise i18n.localizable(
+            AssetError(f"未找到 dsh profile「{profile}」：{path}"),
+            "未找到 dsh profile「{profile}」：{path}",
+            {"profile": profile, "path": path})
 
 
 def _write_plugin_patch(asset):
@@ -741,7 +778,7 @@ def install(asset, target, project_dir=""):
     """安装/更新/修复资产（收敛到期望状态），返回结果 dict。"""
     root = install_root(asset, target, project_dir)
     if root is None:
-        raise AssetError(_unsupported_reason(asset, target))
+        raise _unsupported_error(asset, target)
     if target == "project":
         if not project_dir or not os.path.isdir(project_dir):
             raise AssetError("项目目录不存在")
@@ -756,7 +793,8 @@ def install(asset, target, project_dir=""):
         base = os.path.realpath(root)
         real = os.path.realpath(dst)
         if not (real == base or real.startswith(base + os.sep)):
-            raise AssetError(f"安装路径越界：{f['to']}", 500)
+            raise i18n.localizable(AssetError(f"安装路径越界：{f['to']}", 500),
+                                   "安装路径越界：{path}", {"path": f["to"]})
         src = os.path.join(asset["dir"], f["from"])
         with open(src, "rb") as fh:
             data = fh.read()
@@ -783,7 +821,7 @@ def uninstall(asset, target, project_dir=""):
     """
     root = install_root(asset, target, project_dir)
     if root is None:
-        raise AssetError(_unsupported_reason(asset, target))
+        raise _unsupported_error(asset, target)
     # dsh 插件：先判注册行——foreign（用户自定义写法）时**在删任何文件之前**拒绝，
     # 免得出现「包文件已删、注册行还在」的半残状态
     patch = plugin_patch_state(asset) if asset["type"] == "dsh_plugin" else None
@@ -796,7 +834,11 @@ def uninstall(asset, target, project_dir=""):
             try:
                 os.unlink(f["path"])
             except OSError as e:
-                raise AssetError(f"删除失败：{display_path(f['path'])}（{e}）", 500)
+                path = display_path(f["path"])
+                detail = str(e)
+                raise i18n.localizable(
+                    AssetError(f"删除失败：{path}（{detail}）", 500),
+                    "删除失败：{path}（{detail}）", {"path": path, "detail": detail})
             deleted.append(display_path(f["path"]))
     patch_action = ""
     if patch is not None:

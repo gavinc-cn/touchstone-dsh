@@ -1,20 +1,36 @@
 import { useState, useMemo, useEffect, useRef, useCallback, Fragment } from 'react'
 import { useLiveStore } from '../stores/live'
 import { bugStatusCls } from '../utils/bugStatus'
+import { caseStatusLabel, phaseLabel } from '../utils/dataLabels'
+import {
+  BUG_NONE, CASE_FAIL, CASE_PASS, CASE_PENDING, CASE_RETEST, CASE_SKIP,
+  isDomainCovered, retestLabel,
+} from '../utils/taskEnums'
+import { t, useI18n } from '../utils/i18n'
 
 /* ============ 常量 ============ */
-const PHASES = [
-  ['retest', 'R', '复测'], ['angle', '1', '角度'], ['scan', '2', '盘点'], ['generate', '3', '生成'],
-  ['review', '4', '判重'], ['execute', '5', '执行'], ['cluster', '6', '聚类'], ['analyze', '7', '分析'],
-  ['fix', '7b', '修复'], ['wrapup', '8', '收尾'],
-]
-const ST_CLASS = { '通过': 'pass', '失败': 'fail', '需要复测': 'retest', '跳过': 'skip', '未执行': 'pending' }
-const EV_META = {
-  round_start: ['轮次', 'ev-round'], phase: ['阶段', 'ev-phase'],
-  proposal: ['提案', ''], reject: ['拒绝', 'ev-reject'],
-  case_start: ['开始', ''], case_pass: ['通过', 'ev-pass'], case_fail: ['失败', 'ev-fail'], case_skip: ['跳过', ''],
-  bug_new: ['新Bug', 'ev-bug'], bug_append: ['补证据', 'ev-bug'],
-  analyze_done: ['分析', 'ev-fix'], fix_done: ['修复', 'ev-fix'], note: ['备注', ''],
+// 阶段轨（展示名按当前语言求值；key/序号不翻译）
+function phasesOf() {
+  return [
+    ['retest', 'R', t('复测')], ['angle', '1', t('角度')], ['scan', '2', t('盘点')], ['generate', '3', t('生成')],
+    ['review', '4', t('判重')], ['execute', '5', t('执行')], ['cluster', '6', t('聚类')], ['analyze', '7', t('分析')],
+    ['fix', '7b', t('修复')], ['wrapup', '8', t('收尾')],
+  ]
+}
+// 用例状态是后端下发的中文数据值（机器值，勿翻译；转义写法见 utils/taskEnums）
+const ST_CLASS = {
+  [CASE_PASS]: 'pass', [CASE_FAIL]: 'fail', [CASE_RETEST]: 'retest',
+  [CASE_SKIP]: 'skip', [CASE_PENDING]: 'pending',
+}
+// 事件类型 → [展示名, 样式类]（展示名按当前语言求值）
+function evMetaOf() {
+  return {
+    round_start: [t('轮次'), 'ev-round'], phase: [t('阶段'), 'ev-phase'],
+    proposal: [t('提案'), ''], reject: [t('拒绝'), 'ev-reject'],
+    case_start: [t('开始'), ''], case_pass: [t('通过'), 'ev-pass'], case_fail: [t('失败'), 'ev-fail'], case_skip: [t('跳过'), ''],
+    bug_new: [t('新Bug'), 'ev-bug'], bug_append: [t('补证据'), 'ev-bug'],
+    analyze_done: [t('分析'), 'ev-fix'], fix_done: [t('修复'), 'ev-fix'], note: [t('备注'), ''],
+  }
 }
 const FILTER_MAP = {
   all: null,
@@ -23,24 +39,36 @@ const FILTER_MAP = {
   phase: (e) => e.type === 'phase' || e.type === 'round_start',
   bug: (e) => e.type === 'bug_new' || e.type === 'bug_append' || e.type === 'analyze_done' || e.type === 'fix_done',
 }
-const FILTER_LABEL = { all: '全部', fail: '失败', case: '用例', phase: '阶段', bug: 'Bug' }
+// 事件流筛选 chip 的展示名
+function filterLabel(f) {
+  if (f === 'all') return t('全部')
+  if (f === 'fail') return t('失败')
+  if (f === 'case') return t('用例')
+  if (f === 'phase') return t('阶段')
+  return t('Bug')
+}
 const FILTERS = ['all', 'fail', 'case', 'phase', 'bug']
 /* ============ 图表注册表 ============ */
-// 3 个槽位可放的图与切换顺序(‹ › 沿此数组循环); CHART_META 提供各图标题
+// 3 个槽位可放的图与切换顺序(‹ › 沿此数组循环); 标题按当前语言求值
 const CHART_ORDER = ['status', 'module', 'trend', 'bug', 'funnel']
-const CHART_META = {
-  status: { title: '案例库状态' }, module: { title: '模块通过率' }, trend: { title: '轮次趋势' },
-  bug: { title: 'Bug 统计' }, funnel: { title: '产出漏斗' },
+function chartTitle(id) {
+  if (id === 'status') return t('案例库状态')
+  if (id === 'module') return t('模块通过率')
+  if (id === 'trend') return t('轮次趋势')
+  if (id === 'bug') return t('Bug 统计')
+  return t('产出漏斗')
 }
 // Bug 统计图的行定义: [bugStatusCls 类, 展示名, 颜色]（颜色均为 theme.css 已定义变量）
-const BUG_ROWS = [
-  ['pending', '待处理', 'var(--dim)'],
-  ['run', '已出方案', 'var(--run)'],
-  ['retest', '待分析/复测未过', 'var(--retest)'],
-  ['fix', '已修复', 'var(--fix)'],
-  ['pass', '复测通过', 'var(--pass)'],
-  ['reject', '已拒绝', 'var(--dim)'],
-]
+function bugRows() {
+  return [
+    ['pending', t('待处理'), 'var(--dim)'],
+    ['run', t('已出方案'), 'var(--run)'],
+    ['retest', t('待分析/复测未过'), 'var(--retest)'],
+    ['fix', t('已修复'), 'var(--fix)'],
+    ['pass', t('复测通过'), 'var(--pass)'],
+    ['reject', t('已拒绝'), 'var(--dim)'],
+  ]
+}
 const SLOTS_KEY = 'ts.chartSlots'
 // 从 localStorage 恢复槽位: 长度 3、id 全部合法且互不重复才采用, 否则回退默认布局
 function loadSlots() {
@@ -67,6 +95,8 @@ const fmtDur = (ms) => {
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
 
 export default function MonitorTab({ project }) {
+  // 订阅语言切换；HTML 片段用 useMemo 缓存，故 lang 也进依赖（切换语言要重绘 innerHTML）
+  const { lang } = useI18n()
   const projectId = project?.id
   // 不订阅整个 store(每次推送都会重渲染); connect/disconnect 走 getState() 取稳定 action
   const connected = useLiveStore((s) => s.connected)
@@ -112,22 +142,24 @@ export default function MonitorTab({ project }) {
   const feedRenderedRef = useRef(0)
   const feedFirstKeyRef = useRef('')
   const feedFilterRef = useRef('all')
+  // 事件流上次渲染时的语言：切语言要强制整段重绘（增量渲染判据不看语言）
+  const feedLangRef = useRef(lang)
   const caseRestoreDoneRef = useRef(false)
 
   const running = !!(liveState && liveState.phase && liveState.phase !== 'done' && liveState.phase !== 'idle')
-  const phaseIdx = PHASES.findIndex((p) => p[0] === liveState?.phase)
+  const phaseIdx = phasesOf().findIndex((p) => p[0] === liveState?.phase)
   const phaseDone = liveState?.phase === 'done'
   const runState = !liveState
-    ? { cls: 'idle', text: '空闲（未在运行）' }
+    ? { cls: 'idle', text: t('空闲（未在运行）') }
     : liveState.phase === 'done'
-      ? { cls: 'done', text: '本轮运行已结束' }
-      : { cls: 'running', text: liveState.phase_label || liveState.phase || '运行中' }
+      ? { cls: 'done', text: t('本轮运行已结束') }
+      : { cls: 'running', text: phaseLabel(t, liveState.phase_label) || liveState.phase || t('运行中') }
   const stopCondText = (() => {
     const sc = liveState?.stop_condition
     if (!sc?.label) return ''
-    return '停止条件: ' + sc.label +
-      (sc.new_bugs != null ? ' · 新Bug ' + sc.new_bugs : '') +
-      (sc.target_bugs != null ? '/' + sc.target_bugs : '')
+    return t('停止条件: {cond}', { cond: sc.label })
+      + (sc.new_bugs != null ? t(' · 新Bug {n}', { n: sc.new_bugs }) : '')
+      + (sc.target_bugs != null ? '/' + sc.target_bugs : '')
   })()
   const connCls = connected ? '' : 'down'
 
@@ -155,9 +187,9 @@ export default function MonitorTab({ project }) {
     }
     const html = lib.tree.children.length || lib.tree.cases.length
       ? renderNode(lib.tree)
-      : '<div class="empty">案例库为空——运行测试任务生成用例后在此展示。</div>'
+      : `<div class="empty">${t('案例库为空——运行测试任务生成用例后在此展示。')}</div>`
     return { __html: html }
-  }, [library, collapsed, selectedCase, curCaseId])
+  }, [library, collapsed, selectedCase, curCaseId, lang])
 
   function collectPaths(node) {
     const paths = []
@@ -210,20 +242,20 @@ export default function MonitorTab({ project }) {
   /* ============ 事件流(增量渲染) ============ */
   function payloadHtml(e) {
     if (!e.request && !e.response) return ''
-    return `<details class="payload"><summary>请求 / 返回</summary>`
-      + (e.request ? `<div class="plabel">请求</div><pre>${esc(e.request)}</pre>` : '')
-      + (e.response ? `<div class="plabel">返回</div><pre>${esc(e.response)}</pre>` : '') + '</details>'
+    return `<details class="payload"><summary>${t('请求 / 返回')}</summary>`
+      + (e.request ? `<div class="plabel">${t('请求')}</div><pre>${esc(e.request)}</pre>` : '')
+      + (e.response ? `<div class="plabel">${t('返回')}</div><pre>${esc(e.response)}</pre>` : '') + '</details>'
   }
   function evHtml(e) {
-    const meta = EV_META[e.type] || ['事件', '']
+    const meta = evMetaOf()[e.type] || [t('事件'), '']
     return `<div class="ev ${meta[1]}"><span class="ts">${esc(e.ts || '')}</span><span class="badge">${meta[0]}</span>`
       + (e.case_id ? `<span class="cid">${e.case_id}</span>` : '')
       + `<span class="msg">${esc(e.message || '')}</span>${payloadHtml(e)}</div>`
   }
   function emptyFeedHtml() {
     return '<div id="feed-empty">' + (liveState
-      ? '（当前筛选下暂无事件）'
-      : '当前没有运行中的测试。<br>在会话中开启实时监控后，运行期间的事件会实时出现在这里。') + '</div>'
+      ? t('（当前筛选下暂无事件）')
+      : t('当前没有运行中的测试。') + '<br>' + t('在会话中开启实时监控后，运行期间的事件会实时出现在这里。')) + '</div>'
   }
   function renderFeed() {
     const evts = liveState?.events || []
@@ -232,9 +264,11 @@ export default function MonitorTab({ project }) {
     const firstKey = list.length ? JSON.stringify(list[0]) : ''
     const f = feedEl.current
     if (!f) return
-    if (filter !== feedFilterRef.current || firstKey !== feedFirstKeyRef.current || list.length < feedRenderedRef.current) {
+    if (filter !== feedFilterRef.current || firstKey !== feedFirstKeyRef.current
+      || lang !== feedLangRef.current || list.length < feedRenderedRef.current) {
       feedFilterRef.current = filter
       feedFirstKeyRef.current = firstKey
+      feedLangRef.current = lang
       f.innerHTML = list.length ? list.map(evHtml).join('') : emptyFeedHtml()
       feedRenderedRef.current = list.length
     } else if (list.length > feedRenderedRef.current) {
@@ -244,11 +278,11 @@ export default function MonitorTab({ project }) {
     }
     if (autoScroll) f.scrollTop = f.scrollHeight
   }
-  // 库/实时/轮次/筛选变化时重绘事件流
+  // 库/实时/轮次/筛选变化时重绘事件流（语言切换也要重绘）
   useEffect(() => {
     renderFeed()
     restoreCasePick()
-  }, [filter, library, liveState, rounds])
+  }, [filter, library, liveState, rounds, lang])
 
   /* ============ 图表 ============ */
   function aggStatus(node) {
@@ -269,8 +303,8 @@ export default function MonitorTab({ project }) {
     if (!s) return { sub: '', body: '' }
     const total = s.total
     const passRate = total ? Math.round(s.passed / total * 100) : 0
-    const segs = [['通过', s.passed, 'var(--pass)'], ['失败', s.failed, 'var(--fail)'],
-      ['需复测', s.retest, 'var(--retest)'], ['未执行', s.pending + s.skipped, 'var(--dim)']]
+    const segs = [[t('通过'), s.passed, 'var(--pass)'], [t('失败'), s.failed, 'var(--fail)'],
+      [t('需复测'), s.retest, 'var(--retest)'], [t('未执行'), s.pending + s.skipped, 'var(--dim)']]
     let acc = 0
     // 环形: 段间留 1.5% 空隙(圆帽), 视觉上让每段独立可读
     const circles = segs.filter((g) => g[1] > 0).map((g) => {
@@ -280,42 +314,42 @@ export default function MonitorTab({ project }) {
       acc += frac
       return el
     }).join('')
-    return { sub: `通过率 <b class="hl-pass">${passRate}%</b>`
+    return { sub: t('通过率 {pct}', { pct: `<b class="hl-pass">${passRate}%</b>` })
       , body: `<div class="cbody">`
         + (total ? `<svg viewBox="0 0 42 42" class="donut">${circles}`
           + `<text x="21" y="19.5" class="dnum" text-anchor="middle">${total}</text>`
-          + `<text x="21" y="26" class="dsub" text-anchor="middle">用例</text></svg>`
+          + `<text x="21" y="26" class="dsub" text-anchor="middle">${t('用例')}</text></svg>`
           + `<div class="dlegend">${segs.map((g) => `<div class="li"><span class="sw" style="background:${g[2]}"></span>${g[0]}<span class="lm">${g[1]}</span><span class="pct">${total ? Math.round(g[1] / total * 100) : 0}%</span></div>`).join('')}</div>`
-          : '<div class="empty">案例库为空</div>')
+          : `<div class="empty">${t('案例库为空')}</div>`)
         + `</div>` }
-  }, [library])
+  }, [library, lang])
   const chartModule = useMemo(() => {
     const lib = library
     if (!lib) return { sub: '', body: '' }
     let level = lib.tree
     while (level.children.length === 1 && !level.cases.length && level.children[0].children.length) level = level.children[0]
     const rows = level.children.map((ch) => ({ name: ch.name, a: aggStatus(ch) })).filter((r) => r.a.total > 0)
-    if (level.cases.length) rows.push({ name: '(根目录)', a: aggStatus({ cases: level.cases, children: [] }) })
+    if (level.cases.length) rows.push({ name: t('(根目录)'), a: aggStatus({ cases: level.cases, children: [] }) })
     rows.sort((x, y) => y.a.total - x.a.total)
-    return { sub: `${rows.length} 个分类`
+    return { sub: t('{n} 个分类', { n: rows.length })
       , body: `<div class="cbody">`
         + (rows.length ? `<div class="mbars">${rows.map((r) => {
-          const t = r.a.total
-          const pct = t ? Math.round(r.a.pass / t * 100) : 0
-          const seg = (k, cls) => r.a[k] ? `<div class="seg ${cls}" style="width:${r.a[k] / t * 100}%"></div>` : ''
+          const total = r.a.total
+          const pct = total ? Math.round(r.a.pass / total * 100) : 0
+          const seg = (k, cls) => r.a[k] ? `<div class="seg ${cls}" style="width:${r.a[k] / total * 100}%"></div>` : ''
           return `<div class="mbar-row"><span class="mbar-label" title="${esc(r.name)}">${esc(r.name)}</span>`
             + `<div class="mbar-track"><div class="mbar-inner">${seg('pass', 'pass')}${seg('fail', 'fail')}${seg('retest', 'retest')}${seg('pending', 'pending')}</div></div>`
-            + `<span class="mbar-num" title="通过/总数"><b class="hl-pass">${r.a.pass}</b><em>/${t}</em><i class="pctn">${pct}%</i></span></div>`
+            + `<span class="mbar-num" title="${t('通过/总数')}"><b class="hl-pass">${r.a.pass}</b><em>/${total}</em><i class="pctn">${pct}%</i></span></div>`
         }).join('')}</div>`
-          : '<div class="empty">案例库为空</div>')
-        + `</div><div class="mlegend"><span><span class="sw" style="background:var(--pass)"></span>通过</span>`
-        + `<span><span class="sw" style="background:var(--fail)"></span>失败</span>`
-        + `<span><span class="sw" style="background:var(--retest)"></span>需复测</span>`
-        + `<span><span class="sw" style="background:var(--dim)"></span>未执行</span></div>` }
-  }, [library])
+          : `<div class="empty">${t('案例库为空')}</div>`)
+        + `</div><div class="mlegend"><span><span class="sw" style="background:var(--pass)"></span>${t('通过')}</span>`
+        + `<span><span class="sw" style="background:var(--fail)"></span>${t('失败')}</span>`
+        + `<span><span class="sw" style="background:var(--retest)"></span>${t('需复测')}</span>`
+        + `<span><span class="sw" style="background:var(--dim)"></span>${t('未执行')}</span></div>` }
+  }, [library, lang])
   const chartTrend = useMemo(() => {
     const rs = rounds || []
-    if (!rs.length) return { sub: '', body: '<div class="cbody"><div class="empty">暂无轮次记录</div></div>' }
+    if (!rs.length) return { sub: '', body: `<div class="cbody"><div class="empty">${t('暂无轮次记录')}</div></div>` }
     const W = 340, H = 126, padT = 30, padB = 20, padL = 22
     const max = Math.max(1, ...rs.map((r) => r.passed + r.failed))
     const slot = (W - padL) / rs.length
@@ -335,46 +369,47 @@ export default function MonitorTab({ project }) {
       const cx = Math.round(padL + i * slot + slot / 2)
       const ph = Math.round(r.passed / max * hmax)
       const fh = Math.round(r.failed / max * hmax)
-      if (ph) bars += `<rect x="${x}" y="${base - ph}" width="${bw}" height="${ph}" fill="url(#grad-pass)" rx="2"><title>第 ${r.round} 轮 通过 ${r.passed}</title></rect>`
-      if (fh) bars += `<rect x="${x}" y="${base - ph - fh}" width="${bw}" height="${fh}" fill="url(#grad-fail)" rx="2"><title>第 ${r.round} 轮 失败 ${r.failed}</title></rect>`
+      if (ph) bars += `<rect x="${x}" y="${base - ph}" width="${bw}" height="${ph}" fill="url(#grad-pass)" rx="2"><title>${t('第 {round} 轮 通过 {n}', { round: r.round, n: r.passed })}</title></rect>`
+      if (fh) bars += `<rect x="${x}" y="${base - ph - fh}" width="${bw}" height="${fh}" fill="url(#grad-fail)" rx="2"><title>${t('第 {round} 轮 失败 {n}', { round: r.round, n: r.failed })}</title></rect>`
       const exec = r.passed + r.failed
       const ty = base - ph - fh
       if (r.new_bugs > 0) bars += `<text x="${cx}" y="${ty - 16}" class="t-bug" text-anchor="middle">+${r.new_bugs}bug</text>`
       if (exec > 0) bars += `<text x="${cx}" y="${ty - 6}" class="t-val" text-anchor="middle">${exec}</text>`
       bars += `<text x="${cx}" y="${H - 5}" class="t-lab" text-anchor="middle">R${r.round}</text>`
     })
-    return { sub: `绿通过 / 红失败 · 黄字=新建Bug`
+    return { sub: t('绿通过 / 红失败 · 黄字=新建Bug')
       , body: `<div class="cbody"><svg viewBox="0 0 ${W} ${H}" class="trend" preserveAspectRatio="xMidYMid meet">`
         + `<defs>`
         + `<linearGradient id="grad-pass" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--grad-pass-1)"/><stop offset="1" stop-color="var(--grad-pass-2)"/></linearGradient>`
         + `<linearGradient id="grad-fail" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--grad-fail-1)"/><stop offset="1" stop-color="var(--grad-fail-2)"/></linearGradient>`
         + `</defs>`
         + `<line x1="${padL}" y1="${base}" x2="${W - 2}" y2="${base}" class="t-axis"/>${grid}${bars}</svg></div>` }
-  }, [rounds])
+  }, [rounds, lang])
   /* Bug 统计图: 按状态分类横向条形, 分类口径与 BugsTab 的 bugStatusCls 一致 */
   const chartBug = useMemo(() => {
     const list = bugs || []
-    if (!list.length) return { sub: '', body: '<div class="cbody"><div class="empty">暂无 bug 报告</div></div>' }
+    if (!list.length) return { sub: '', body: `<div class="cbody"><div class="empty">${t('暂无 bug 报告')}</div></div>` }
     const counts = {}
     for (const b of list) {
       const k = bugStatusCls(b.status)
       counts[k] = (counts[k] || 0) + 1
     }
-    const max = Math.max(1, ...BUG_ROWS.map((r) => counts[r[0]] || 0))
-    const rows = BUG_ROWS.filter((r) => counts[r[0]] > 0).map(([k, label, color]) =>
+    const rows = bugRows()
+    const max = Math.max(1, ...rows.map((r) => counts[r[0]] || 0))
+    const body = rows.filter((r) => counts[r[0]] > 0).map(([k, label, color]) =>
       `<div class="mbar-row"><span class="mbar-label" title="${label}">${label}</span>`
       + `<div class="mbar-track"><div class="bbar" style="width:${counts[k] / max * 100}%;background:${color}"></div></div>`
       + `<span class="mbar-num"><b>${counts[k]}</b><i class="pctn">${Math.round(counts[k] / list.length * 100)}%</i></span></div>`
     ).join('')
-    return { sub: `共 <b>${list.length}</b> 个`, body: `<div class="cbody"><div class="mbars">${rows}</div></div>` }
-  }, [bugs])
+    return { sub: t('共 {n} 个', { n: `<b>${list.length}</b>` }), body: `<div class="cbody"><div class="mbars">${body}</div></div>` }
+  }, [bugs, lang])
   /* 产出漏斗图: live.stats 的 提案→入库→执行→通过 四级; 右列为 数量 · 对上一级转化率 */
   const chartFunnel = useMemo(() => {
     const st = liveState?.stats
     if (!st || (st.proposed == null && st.accepted == null && st.executed == null)) {
-      return { sub: '', body: '<div class="cbody"><div class="empty">暂无运行统计</div></div>' }
+      return { sub: '', body: `<div class="cbody"><div class="empty">${t('暂无运行统计')}</div></div>` }
     }
-    const lv = [['提案', st.proposed], ['入库', st.accepted], ['执行', st.executed], ['通过', st.passed]]
+    const lv = [[t('提案'), st.proposed], [t('入库'), st.accepted], [t('执行'), st.executed], [t('通过'), st.passed]]
     const max = Math.max(1, ...lv.map((x) => x[1] || 0))
     let prev = null
     const rows = lv.map(([label, v]) => {
@@ -388,14 +423,14 @@ export default function MonitorTab({ project }) {
     let fixRow = ''
     if (liveState?.options?.auto_fix && st.fixed != null) {
       const base = Math.max(1, st.failed || 0)
-      fixRow = `<div class="frow fixbar"><span class="fl">已修复</span>`
+      fixRow = `<div class="frow fixbar"><span class="fl">${t('已修复')}</span>`
         + `<div class="ftrack"><div class="fbar" style="width:${Math.round((st.fixed || 0) / base * 100)}%"></div></div>`
         + `<span class="fr">${st.fixed} / ${st.failed ?? 0}</span></div>`
     }
-    return { sub: st.rejected > 0 ? `拒绝 <b>${st.rejected}</b>` : ''
+    return { sub: st.rejected > 0 ? t('拒绝 {n}', { n: `<b>${st.rejected}</b>` }) : ''
       , body: `<div class="cbody"><div class="funnel">${rows}${fixRow}</div></div>` }
-  }, [liveState])
-  // id → {sub, body}; h4 标题来自 CHART_META, 图体经 .cwrap 注入
+  }, [liveState, lang])
+  // id → {sub, body}; h4 标题来自 chartTitle, 图体经 .cwrap 注入
   const chartsMap = { status: chartStatus, module: chartModule, trend: chartTrend, bug: chartBug, funnel: chartFunnel }
 
   /* ============ 案例库统计 chip ============ */
@@ -406,8 +441,8 @@ export default function MonitorTab({ project }) {
       + `<span class="chip"><span class="dot fail"></span><b>${s.failed}</b></span>`
       + `<span class="chip"><span class="dot retest"></span><b>${s.retest}</b></span>`
       + `<span class="chip"><span class="dot pending"></span><b>${s.pending + s.skipped}</b></span>`
-      + `<span class="chip">共 <b>${s.total}</b></span>` }
-  }, [library])
+      + `<span class="chip">${t('共 {n}', { n: `<b>${s.total}</b>` })}</span>` }
+  }, [library, lang])
 
   /* ============ 用例详情 ============ */
   function lastPayload(caseId) {
@@ -424,37 +459,50 @@ export default function MonitorTab({ project }) {
     const c = id ? caseIndexRef.current[id] : null
     const isRunning = !!(l && l.current_case?.id === id && l.phase !== 'done')
     const ev = id ? lastPayload(id) : null
-    if (!id) return { __html: '<h3>用例详情</h3><div class="empty">点击左侧用例查看详情；运行中默认显示当前用例。</div>' }
+    if (!id) return { __html: `<h3>${t('用例详情')}</h3><div class="empty">${t('点击左侧用例查看详情；运行中默认显示当前用例。')}</div>` }
     const c2 = c || (l && l.current_case)
-    const status = isRunning ? '执行中' : (c ? c.status : '')
-    const bugLink = c && c.bug_report && c.bug_report !== '无' ? c.bug_report : ''
-    let html = '<h3>用例详情' + (selectedCase ? '' : '（当前执行）') + '</h3>'
+    const status = isRunning ? t('执行中') : (c ? c.status : '')
+    // 徽标样式仍按 canonical 中文值分类（stCls）；文字走显示层映射（英文界面显示 Pass 等）
+    const statusText = isRunning ? status : caseStatusLabel(t, status)
+    const bugLink = c && c.bug_report && c.bug_report !== BUG_NONE ? c.bug_report : ''
+    let html = '<h3>' + t('用例详情') + (selectedCase ? '' : t('（当前执行）')) + '</h3>'
       + `<div class="kv"><span class="k">ID</span><span class="v mono">${esc(id)}</span></div>`
-      + `<div class="kv"><span class="k">名称</span><span class="v">${esc(c ? c.name : (c2 && c2.name) || '')}</span></div>`
-      + (c && c.point ? `<div class="kv"><span class="k">测试点</span><span class="v">${esc(c.point)}</span></div>` : '')
-      + `<div class="kv"><span class="k">状态</span><span class="v"><span class="badge-st ${isRunning ? 'run' : stCls(status)}">${esc(status || '—')}</span></span></div>`
-      + (c && c.fail_reason ? `<div class="kv"><span class="k">失败原因</span><span class="v">${esc(c.fail_reason)}</span></div>` : '')
-      + (c && c.summary ? `<div class="kv"><span class="k">结果摘要</span><span class="v">${esc(c.summary)}</span></div>` : '')
-      + (c && c.last_run ? `<div class="kv"><span class="k">最近执行</span><span class="v mono">${esc(c.last_run)}</span></div>` : '')
+      + `<div class="kv"><span class="k">${t('名称')}</span><span class="v">${esc(c ? c.name : (c2 && c2.name) || '')}</span></div>`
+      + (c && c.point ? `<div class="kv"><span class="k">${t('测试点')}</span><span class="v">${esc(c.point)}</span></div>` : '')
+      + `<div class="kv"><span class="k">${t('状态')}</span><span class="v"><span class="badge-st ${isRunning ? 'run' : stCls(status)}">${esc(statusText || '—')}</span></span></div>`
+      + (c && c.fail_reason ? `<div class="kv"><span class="k">${t('失败原因')}</span><span class="v">${esc(c.fail_reason)}</span></div>` : '')
+      + (c && c.summary ? `<div class="kv"><span class="k">${t('结果摘要')}</span><span class="v">${esc(c.summary)}</span></div>` : '')
+      + (c && c.last_run ? `<div class="kv"><span class="k">${t('最近执行')}</span><span class="v mono">${esc(c.last_run)}</span></div>` : '')
       + (bugLink ? `<div class="kv"><span class="k">bug_report</span><span class="v mono">${esc(bugLink)}</span></div>` : '')
     if (ev) {
-      html += `<div class="plabel">请求</div><pre>${esc(ev.request || '（无记录）')}</pre>`
-        + `<div class="plabel">返回</div><pre>${esc(ev.response || '（无记录）')}</pre>`
+      html += `<div class="plabel">${t('请求')}</div><pre>${esc(ev.request || t('（无记录）'))}</pre>`
+        + `<div class="plabel">${t('返回')}</div><pre>${esc(ev.response || t('（无记录）'))}</pre>`
     }
     return { __html: html }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCase, liveState])
+  }, [selectedCase, liveState, lang])
 
   const statsHtml = useMemo(() => {
     const st = liveState?.stats
     return { __html: st
-      ? `本轮: 提案 <b>${st.proposed ?? '—'}</b> · 入库 <b>${st.accepted ?? '—'}</b> · 拒绝 <b>${st.rejected ?? '—'}</b>`
-      + ` · 已执行 <b>${st.executed ?? '—'}</b> · 通过 <b style="color:var(--pass)">${st.passed ?? 0}</b>`
-      + ` · 失败 <b style="color:var(--fail)">${st.failed ?? 0}</b> · 跳过 <b>${st.skipped ?? 0}</b>`
-      + ` · 新建Bug <b style="color:var(--fail)">${st.new_bug_reports ?? 0}</b>`
-      + (st.fixed != null && liveState?.options?.auto_fix ? ` · 已修复 <b style="color:var(--fix)">${st.fixed}</b>` : '')
-      : '案例库统计见左侧。' }
-  }, [liveState])
+      ? t('本轮: 提案 {proposed} · 入库 {accepted} · 拒绝 {rejected}', {
+        proposed: `<b>${st.proposed ?? '—'}</b>`,
+        accepted: `<b>${st.accepted ?? '—'}</b>`,
+        rejected: `<b>${st.rejected ?? '—'}</b>`,
+      })
+      + t(' · 已执行 {executed} · 通过 {passed}', {
+        executed: `<b>${st.executed ?? '—'}</b>`,
+        passed: `<b style="color:var(--pass)">${st.passed ?? 0}</b>`,
+      })
+      + t(' · 失败 {failed} · 跳过 {skipped}', {
+        failed: `<b style="color:var(--fail)">${st.failed ?? 0}</b>`,
+        skipped: `<b>${st.skipped ?? 0}</b>`,
+      })
+      + t(' · 新建Bug {n}', { n: `<b style="color:var(--fail)">${st.new_bug_reports ?? 0}</b>` })
+      + (st.fixed != null && liveState?.options?.auto_fix
+        ? t(' · 已修复 {n}', { n: `<b style="color:var(--fix)">${st.fixed}</b>` }) : '')
+      : t('案例库统计见左侧。') }
+  }, [liveState, lang])
 
   // 功能分级测试进度(先核心后细节的推进进度): live.json 无 priorities 字段时返回 null, 整条不渲染
   const prioHtml = useMemo(() => {
@@ -463,10 +511,10 @@ export default function MonitorTab({ project }) {
     const rows = levels.map((lv) => {
       const doms = Array.isArray(lv.domains) ? lv.domains : []
       const total = doms.length
-      const covered = doms.filter((d) => d.status === '已覆盖').length
+      const covered = doms.filter((d) => isDomainCovered(d.status)).length
       const pct = total ? Math.round(covered / total * 100) : 0
       const chips = doms.map((d) =>
-        `<span class="pchip${d.status === '已覆盖' ? ' ok' : ''}" title="${esc(d.name)}：${esc(d.status || '未覆盖')}">${esc(d.name)}</span>`
+        `<span class="pchip${isDomainCovered(d.status) ? ' ok' : ''}" title="${esc(d.name)}${t('：')}${esc(d.status || t('未覆盖'))}">${esc(d.name)}</span>`
       ).join('')
       return `<div class="prio-row"><span class="prio-level">${esc(lv.level || '')}</span>`
         + `<span class="prio-label">${esc(lv.label || '')}</span>`
@@ -474,8 +522,8 @@ export default function MonitorTab({ project }) {
         + `<span class="prio-num">${covered}<em>/${total}</em></span>`
         + `<span class="prio-chips">${chips}</span></div>`
     }).join('')
-    return { __html: '<div class="prio-title">测试进度（按功能分级）</div>' + rows }
-  }, [liveState])
+    return { __html: `<div class="prio-title">${t('测试进度（按功能分级）')}</div>` + rows }
+  }, [liveState, lang])
 
   /* ============ 分栏拖拽 ============ */
   // 三个图表用 fr 比例布局(--c1-fr/--c2-fr/--c3-fr): 侧栏宽度变化时 fr 自动等比缩放;
@@ -577,12 +625,12 @@ export default function MonitorTab({ project }) {
     const charts = chartsEl.current
     if (!main || !charts) return
     try {
-      const t = +localStorage.getItem(SIZE_KEYS.tree)
-      if (t > 0) main.style.setProperty('--tree-w', t + 'px')
-      const s = +localStorage.getItem(SIZE_KEYS.side)
-      if (s > 0) main.style.setProperty('--side-w', s + 'px')
-      const c = +localStorage.getItem(SIZE_KEYS.chartsH)
-      if (c > 0) charts.style.height = c + 'px'
+      const treeW = +localStorage.getItem(SIZE_KEYS.tree)
+      if (treeW > 0) main.style.setProperty('--tree-w', treeW + 'px')
+      const sideW = +localStorage.getItem(SIZE_KEYS.side)
+      if (sideW > 0) main.style.setProperty('--side-w', sideW + 'px')
+      const chartsH = +localStorage.getItem(SIZE_KEYS.chartsH)
+      if (chartsH > 0) charts.style.height = chartsH + 'px'
       const rr = JSON.parse(localStorage.getItem(SIZE_KEYS.c1) || 'null')
       if (Array.isArray(rr) && rr.length === 3) setChartRatio(rr)
     } catch { /* 忽略 */ }
@@ -605,11 +653,11 @@ export default function MonitorTab({ project }) {
     const liveNow = useLiveStore.getState().live
     liveAgeSecRef.current = (liveNow?.live_mtime != null) ? Date.now() / 1000 - liveNow.live_mtime : null
     if (runStartRef.current && elapsedEl.current) {
-      elapsedEl.current.textContent = '已运行 ' + fmtDur(Date.now() - runStartRef.current.getTime())
+      elapsedEl.current.textContent = t('已运行 {dur}', { dur: fmtDur(Date.now() - runStartRef.current.getTime()) })
     }
     const isRunning = liveNow && liveNow.phase && liveNow.phase !== 'done' && liveNow.phase !== 'idle'
     if (liveAgeSecRef.current != null && isRunning && liveAgeSecRef.current > 30) {
-      setStaleText('状态文件 ' + Math.round(liveAgeSecRef.current) + 's 未更新')
+      setStaleText(t('状态文件 {sec}s 未更新', { sec: Math.round(liveAgeSecRef.current) }))
     } else {
       setStaleText('')
     }
@@ -618,8 +666,8 @@ export default function MonitorTab({ project }) {
   /* ============ 生命周期 ============ */
   useEffect(() => {
     restoreSizes()
-    const t = setInterval(tickElapsed, 1000)
-    return () => clearInterval(t)
+    const timer = setInterval(tickElapsed, 1000)
+    return () => clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   useEffect(() => {
@@ -637,19 +685,19 @@ export default function MonitorTab({ project }) {
   return (
     <div className="monitor-tab" ref={rootEl}>
       <header className="m-head">
-        <div className="logo"><span className={'pulse' + (running ? ' on' : '')}></span>Free-Style 测试监控<span style={{ color: 'var(--dim)' }}> · {project?.name}</span></div>
+        <div className="logo"><span className={'pulse' + (running ? ' on' : '')}></span>{t('Free-Style 测试监控')}<span style={{ color: 'var(--dim)' }}> · {project?.name}</span></div>
         <span className={'pill ' + runState.cls}>{runState.text}</span>
-        {liveState?.round != null && <span className="pill mono">{'第 ' + liveState.round + ' 轮'}</span>}
+        {liveState?.round != null && <span className="pill mono">{t('第 {n} 轮', { n: liveState.round })}</span>}
         {runStartRef.current && <span className="pill mono" ref={elapsedEl}></span>}
         {stopCondText && <span className="pill">{stopCondText}</span>}
-        {liveState?.options && <span className="pill">{'自动修复: ' + (liveState.options.auto_fix ? '开' : '关')}</span>}
-        {liveState?.options && <span className="pill">{'复测: ' + (liveState.options.retest || '不复测')}</span>}
+        {liveState?.options && <span className="pill">{t('自动修复: {v}', { v: liveState.options.auto_fix ? t('开') : t('关') })}</span>}
+        {liveState?.options && <span className="pill">{t('复测: {v}', { v: retestLabel(liveState.options.retest) || t('不复测') })}</span>}
         <div className="spacer"></div>
         {staleText && <span className="pill warn">{staleText}</span>}
-        <span className={connCls} title="与监控服务器的连接状态"></span>
+        <span className={connCls} title={t('与监控服务器的连接状态')}></span>
       </header>
       <nav className="phases">
-        {PHASES.map((p, i) => (
+        {phasesOf().map((p, i) => (
           <span key={p[0]} className={'step' + (phaseDone || i < phaseIdx ? ' done' : '') + (!phaseDone && i === phaseIdx ? ' active' : '')}>
             <span className="no">{p[1]}</span>{p[2]}
           </span>
@@ -657,11 +705,11 @@ export default function MonitorTab({ project }) {
       </nav>
       <div className="m-main">
         <aside className="tree-panel">
-          <div className="panel-head">案例库 <span className="lib-stats" dangerouslySetInnerHTML={libStatsHtml || undefined}></span>
+          <div className="panel-head">{t('案例库')} <span className="lib-stats" dangerouslySetInnerHTML={libStatsHtml || undefined}></span>
             <div className="spacer"></div>
             <div className="tree-tools">
-              <span className="tbtn" onClick={expandAllTree}>全部展开</span>
-              <span className="tbtn" onClick={collapseAllTree}>全部折叠</span>
+              <span className="tbtn" onClick={expandAllTree}>{t('全部展开')}</span>
+              <span className="tbtn" onClick={collapseAllTree}>{t('全部折叠')}</span>
             </div>
           </div>
           <div className="panel-body" ref={treeEl} onClick={onTreeClick} dangerouslySetInnerHTML={treeHtml}></div>
@@ -679,11 +727,11 @@ export default function MonitorTab({ project }) {
                   )}
                   <div className="chart">
                     <h4>
-                      <span className="t">{CHART_META[cid].title}</span>
+                      <span className="t">{chartTitle(cid)}</span>
                       <span className="sub" dangerouslySetInnerHTML={{ __html: chart.sub || '' }}></span>
                       <span className="bswitch">
-                        <span className="swbtn" title="上一张图" onClick={() => switchChart(i, -1)}>‹</span>
-                        <span className="swbtn" title="下一张图" onClick={() => switchChart(i, 1)}>›</span>
+                        <span className="swbtn" title={t('上一张图')} onClick={() => switchChart(i, -1)}>‹</span>
+                        <span className="swbtn" title={t('下一张图')} onClick={() => switchChart(i, 1)}>›</span>
                       </span>
                     </h4>
                     <div className="cwrap" dangerouslySetInnerHTML={{ __html: chart.body }}></div>
@@ -694,15 +742,15 @@ export default function MonitorTab({ project }) {
           </div>
           <div className="hsplit" onMouseDown={(e) => startDrag(e, DRAG.chartsH)} onDoubleClick={() => resetDrag(DRAG.chartsH)}></div>
           <div className="panel-head">
-            实时事件流
+            {t('实时事件流')}
             <div className="feed-tools">
               {FILTERS.map((f) => (
-                <span key={f} className={'chip fchip' + (filter === f ? ' on' : '')} data-f={f} onClick={() => setFilter(f)}>{FILTER_LABEL[f]}</span>
+                <span key={f} className={'chip fchip' + (filter === f ? ' on' : '')} data-f={f} onClick={() => setFilter(f)}>{filterLabel(f)}</span>
               ))}
             </div>
             <div className="spacer"></div>
             <label className="chip fchip on" style={{ cursor: 'pointer' }}>
-              <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} style={{ verticalAlign: -1 }} /> 自动滚动
+              <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} style={{ verticalAlign: -1 }} /> {t('自动滚动')}
             </label>
           </div>
           <div className="feed" ref={feedEl}></div>
@@ -714,9 +762,8 @@ export default function MonitorTab({ project }) {
       <footer className="statusbar">
         <span dangerouslySetInnerHTML={statsHtml}></span>
         <div className="spacer"></div>
-        <span>{'数据更新于 ' + (updatedAt || '—')}</span>
+        <span>{t('数据更新于 {time}', { time: updatedAt || '—' })}</span>
       </footer>
     </div>
   )
 }
-

@@ -529,7 +529,9 @@ test('handleMessageEvent：单聊 image/post 走截图接收（下载 → routeT
     assert.equal(route.length, 1);
     assert.deepEqual(route[0].slice(1, 3), [db.getFeishuBindingByOpen('ou_a', h.options), '']);
     assert.equal(route[0][3], cfg);
-    assert.equal(route[0][4], h.options);
+    // Node 原第 4 参 options 现为浅拷贝（附加 lang，供 routeText 本地化回执）
+    assert.equal(route[0][4].db, h.options.db);
+    assert.equal(route[0][4].lang, 'zh');
     assert.equal(route[0][5].length, 1);
     assert.deepEqual(route[0][5][0], { data: png, mime: 'image/png' });
     // ③ 回执 = routeText 的返回值原样
@@ -706,7 +708,9 @@ test('onCardAction：t=sc 与 t=dp/ss **先于**卡号白名单（a/mq/p/s/d 才
     const cfg = { app_id: 'cli_x', app_secret: 's' };
     const out = await inbound.onCardAction(cardEvt({ t: 'sc', a: 'retry', u: 1 }), cfg, h.options);
     assert.deepEqual(out, { toast: { type: 'success', content: '注册完成' } });
-    assert.deepEqual(h.calls.slash, [[1, h.options]], 'sync_slash_commands(user_id) 实参自证');
+    // 语言随 options 透传（T12b：sync 的失败诊断按收件人语言）
+    assert.deepEqual(h.calls.slash, [[1, { ...h.options, lang: 'zh' }]],
+      'sync_slash_commands(user_id) 实参自证');
     assert.deepEqual(h.calls.dm, [['ou_a',
       '✅ 快捷指令注册完成：新增 2、更新 1、已是最新 1'
       + '\n约 5 分钟后在机器人私聊输入「/」即可看到（重启飞书客户端可加速）。', cfg]]);

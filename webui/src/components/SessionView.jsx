@@ -34,6 +34,7 @@ import { useDshHostCaps } from '../hooks/useDshHost'
 import { openSessionInDsh } from '../lib/dshHost'
 import { List, Wrench, CircleX, Check, Zap, TriangleAlert, Copy, Undo2, ChevronDown, ChevronUp,
          ExternalLink } from 'lucide-react'
+import { useI18n } from '../utils/i18n'
 
 /** token 数 → 紧凑文本(1234 → 1.2k) */
 function fmtTokens(n) {
@@ -43,12 +44,12 @@ function fmtTokens(n) {
   return String(v)
 }
 
-/** 毫秒 → 时长文本(3661 → 3.7s / 72500 → 1分12s) */
-function fmtDur(ms) {
+/** 毫秒 → 时长文本(3661 → 3.7s / 72500 → 1分12s)；t 必传（分/秒文案需要插值） */
+function fmtDur(ms, t) {
   const v = +ms || 0
   if (v < 1000) return ''
   if (v < 60000) return (v / 1000).toFixed(1) + 's'
-  return Math.floor(v / 60000) + '分' + Math.round((v % 60000) / 1000) + 's'
+  return t('{m}分{s}s', { m: Math.floor(v / 60000), s: Math.round((v % 60000) / 1000) })
 }
 
 /** tool_call 的 args JSON 美化(失败则原文) */
@@ -56,12 +57,13 @@ function prettyArgs(s) {
   try { return JSON.stringify(JSON.parse(s), null, 2) } catch { return s || '' }
 }
 
-/** found:false 原因 → 空态文案（P7b B5 单族化后只有 dsh：无 db_missing 分支） */
-const REASON_TEXT = {
-  family: '该智能体暂不支持会话查看',
-  no_session: '会话尚未生成（任务首轮执行后才有会话）',
-  missing: '未找到会话文件（可能已被清理）',
-}
+/** found:false 原因 → 空态文案（P7b B5 单族化后只有 dsh：无 db_missing 分支）。
+ *  工厂形式：render 时传 t，切换语言即重渲染。 */
+const reasonTextOf = (t) => ({
+  family: t('该智能体暂不支持会话查看'),
+  no_session: t('会话尚未生成（任务首轮执行后才有会话）'),
+  missing: t('未找到会话文件（可能已被清理）'),
+})
 
 /* ---------- 消息流虚拟滚动(2026-09-10) ----------
    会话可达上千条消息, 全量挂 DOM 时浏览器每次击键都要为整份消息树重算布局
@@ -98,6 +100,7 @@ function rowAt(off, y) {
 const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, roots, boardPid,
                                             boardSid, expand, rwState, copied,
                                             onCopy, onRewind, onOpenPath }) {
+  const { t } = useI18n()
   // 回答正文里的路径链接（.md-path）：点击开文件预览弹窗。内容由
   // dangerouslySetInnerHTML 生成，故用事件委托——只拦 .md-path，普通外链保持默认跳转
   const onBodyClick = useCallback((ev) => {
@@ -133,9 +136,9 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
               return mediaUrl ? (
                 <a key={i} href={mediaUrl} target="_blank" rel="noreferrer">
                   <img className="sess-img" src={mediaUrl}
-                    alt="图片" onError={(ev) => { ev.currentTarget.closest('a').replaceWith('[图片]') }} />
+                    alt={t('图片')} onError={(ev) => { ev.currentTarget.closest('a').replaceWith(t('[图片]')) }} />
                 </a>
-              ) : <span key={i} className="sess-img-ph">[图片]</span>
+              ) : <span key={i} className="sess-img-ph">{t('[图片]')}</span>
             })}
           </div>
         </div>
@@ -147,16 +150,16 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
               <button type="button"
                 className={'sess-act rw' + (rwState === 'on' ? '' : ' off')}
                 disabled={rwState !== 'on'}
-                title={rwState === 'busy' ? '会话运行中或有排队消息，稍后再试'
-                  : rwState === 'running' ? '回退中…'
-                  : '回退到该提问之前（撤销该提问及其后对话，不回退文件改动）'}
+                title={rwState === 'busy' ? t('会话运行中或有排队消息，稍后再试')
+                  : rwState === 'running' ? t('回退中…')
+                  : t('回退到该提问之前（撤销该提问及其后对话，不回退文件改动）')}
                 onClick={() => onRewind(e)}>
                 <Undo2 className="sess-act-i" />
               </button>
             )}
             {hasText && (
               <button type="button" className="sess-act cp"
-                title={copied ? '已复制' : '复制该提问'}
+                title={copied ? t('已复制') : t('复制该提问')}
                 onClick={() => onCopy(e)}>
                 {copied ? <Check className="sess-act-i" /> : <Copy className="sess-act-i" />}
               </button>
@@ -183,7 +186,7 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
     if (!e.text) return null
     return (
       <details className="sess-msg think">
-        <summary>思考过程</summary>
+        <summary>{t('思考过程')}</summary>
         <div className="think-text">{e.text}</div>
       </details>
     )
@@ -191,7 +194,7 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
   if (e.kind === 'tool_call') {
     return (
       <details className="sess-msg tool" ref={detRef}>
-        <summary><Wrench className="inline h-3 w-3" /> {e.name || '工具调用'}</summary>
+        <summary><Wrench className="inline h-3 w-3" /> {e.name || t('工具调用')}</summary>
         <pre>{prettyArgs(e.args)}</pre>
       </details>
     )
@@ -200,8 +203,8 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
     return (
       <details className={'sess-msg tool result' + (e.is_error ? ' err' : '')} ref={detRef}>
         <summary>
-          {e.is_error ? '错误' : '结果'}{e.name ? ` · ${e.name}` : ''}
-          （{String(e.text || '').trim().length} 字符{e.truncated ? ' · 已截断' : ''}）
+          {e.is_error ? t('错误') : t('结果')}{e.name ? ` · ${e.name}` : ''}
+          {t('（{n} 字符）', { n: String(e.text || '').trim().length })}{e.truncated ? t(' · 已截断') : ''}
         </summary>
         <pre>{String(e.text || '').trim()}</pre>
       </details>
@@ -211,8 +214,8 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
     const parts = []
     if (e.input) parts.push('↑' + fmtTokens(e.input))
     if (e.output) parts.push('↓' + fmtTokens(e.output))
-    if (e.cache_read) parts.push('缓存 ' + fmtTokens(e.cache_read))
-    if (e.duration_ms && fmtDur(e.duration_ms)) parts.push(fmtDur(e.duration_ms))
+    if (e.cache_read) parts.push(t('缓存 ') + fmtTokens(e.cache_read))
+    if (e.duration_ms && fmtDur(e.duration_ms, t)) parts.push(fmtDur(e.duration_ms, t))
     if (!parts.length) return null
     return <div className="sess-usage">{parts.join(' · ')}</div>
   }
@@ -222,14 +225,14 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
   if (e.kind === 'error') {
     // 模型请求失败/本轮对话中断(旧族错误通道的渲染分支; dsh 事件流不产出 error
     // 条目——sessparse 侧已无该通道, 此分支保留仅为渲染兜底); 无 detail 时只留标题
-    const detail = [e.text, e.code ? `[${e.code}]` : '', e.retryable ? '可重试' : '']
+    const detail = [e.text, e.code ? `[${e.code}]` : '', e.retryable ? t('可重试') : '']
       .filter(Boolean).join(' · ')
     return (
       <div className="sess-msg error">
         <div className="sess-errbox">
           <TriangleAlert className="sess-errbox-i" />
           <div>
-            <div className="sess-errbox-t">模型请求失败，本轮对话已中断</div>
+            <div className="sess-errbox-t">{t('模型请求失败，本轮对话已中断')}</div>
             {detail && <div className="sess-errbox-d">{detail}</div>}
           </div>
         </div>
@@ -250,12 +253,13 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
     取组内首条 seq —— 跳转落在组内任一条目时, 定位与闪烁都落在这一行上(见 MessageList) */
 const ProcRow = memo(function ProcRow({ row, flash, expandSeqs, taskId, agent, pid, roots,
                                         boardPid, boardSid, onOpenPath }) {
+  const { t } = useI18n()
   const ref = useRef(null)
   // 跳转落点在组内(提问索引的 agent 问答项) → 自动展开该组; 非受控写法: 只在 false→true
   // 时写一次 DOM open, 之后保持浏览器原生开合行为, 用户手动折叠后不被打扰
   const expand = !!expandSeqs && row.items.some((it) => expandSeqs.has(it.seq))
   useEffect(() => { if (expand && ref.current) ref.current.open = true }, [expand])
-  const s = summarizeProc(row.items)
+  const s = summarizeProc(row.items, t)
   return (
     <div className={'sess-entry' + (flash ? ' flash' : '')} data-seq={row.seq}>
       <details className={'sess-msg proc' + (s.errors ? ' has-err' : '')} ref={ref}>
@@ -290,6 +294,7 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
     jumpSeq, onJumpHandled, rwEnabled, rwBusy, rewindingMid, copiedSeq, onCopy, onRewind,
     onSwitchSession,
     onOpenPath }) {
+  const { t } = useI18n()
   // 展示行(纯派生, 有单测): rows = 行数组, rowIndexOf = 任意条目 seq → 所属行下标
   // (跳转目标可能落在组内, 只需定位到该组所在行)
   const { rows, rowIndexOf } = useMemo(() => buildRows(entries), [entries])
@@ -383,7 +388,7 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
   // 需重新贴底, 否则底部内容被遮住一截
   useEffect(() => {
     if (typeof ResizeObserver === 'undefined') return undefined
-    const ro = new ResizeObserver(() => setTick((t) => t + 1))
+    const ro = new ResizeObserver(() => setTick((v) => v + 1))
     roRef.current = ro
     if (boxRef.current) ro.observe(boxRef.current)
     return () => {
@@ -474,17 +479,17 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
         onJumpHandled(js.seq)
       }
     }
-    if (changed) setTick((t) => t + 1)
+    if (changed) setTick((v) => v + 1)
   })
 
   return (
     <div className="sess-body scroll" ref={boxRef} onScroll={handleScroll}>
       {metaNull ? (
-        <div className="sess-empty">加载中…</div>
+        <div className="sess-empty">{t('加载中…')}</div>
       ) : !found ? (
-        <div className="sess-empty">{REASON_TEXT[reason] || '会话不可用'}</div>
+        <div className="sess-empty">{reasonTextOf(t)[reason] || t('会话不可用')}</div>
       ) : !n ? (
-        <div className="sess-empty">会话暂无内容</div>
+        <div className="sess-empty">{t('会话暂无内容')}</div>
       ) : (
         <>
           {rs > 0 && <div className="sess-pad" style={{ height: off[rs] }}></div>}
@@ -511,10 +516,10 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
         </>
       )}
       {chatRunning && (
-        <div className="sess-running"><span className="sess-pulse"></span>工作中…</div>
+        <div className="sess-running"><span className="sess-pulse"></span>{t('工作中…')}</div>
       )}
       {!chatRunning && exitCode != null && exitCode !== 0 && (
-        <div className="sess-chaterr"><CircleX className="inline h-3 w-3" /> 对话进程异常结束（exit={exitCode}）</div>
+        <div className="sess-chaterr"><CircleX className="inline h-3 w-3" /> {t('对话进程异常结束（exit={code}）', { code: exitCode })}</div>
       )}
     </div>
   )
@@ -525,22 +530,23 @@ const MessageList = memo(function MessageList({ entries, metaNull, found, reason
    （未答/被中断为占位文案）。2026-10-16 起去掉 🤔 表情前缀，改为纯颜色标识：
    ask 项＝琥珀色文字 + 左侧色条（见 components.css 的 .sess-qitem.ask），未答整条压淡 */
 const QuestionBar = memo(function QuestionBar({ withQBar, qbarOpen, questions, flashSeq, onJump }) {
+  const { t } = useI18n()
   if (!withQBar || !qbarOpen) return null
   return (
     <aside className="sess-qbar">
-      <div className="sess-qbar-t">提问索引 <span className="sess-qbar-n">{questions.length}</span></div>
+      <div className="sess-qbar-t">{t('提问索引')} <span className="sess-qbar-n">{questions.length}</span></div>
       <div className="sess-qbar-list">
-        {questions.length === 0 && <div className="sess-qbar-empty">暂无提问</div>}
+        {questions.length === 0 && <div className="sess-qbar-empty">{t('暂无提问')}</div>}
         {questions.map((q, i) => {
           // 显示文案由 utils/sessionQa 出（user=提问原文；ask=回答/占位），此处只截断折叠
-          const label = questionLabel(q).replace(/\s+/g, ' ')
+          const label = questionLabel(q, t).replace(/\s+/g, ' ')
           const ask = q.kind === 'ask'
           return (
             <button key={q.key} type="button"
               className={'sess-qitem' + (ask ? ' ask' : '')
                 + (ask && q.state !== 'answered' ? ' pend' : '')
                 + (flashSeq === q.seq ? ' on' : '')}
-              onClick={() => onJump(q)} title={questionTitle(q)}>
+              onClick={() => onJump(q)} title={questionTitle(q, t)}>
               <span className="sess-qitem-i">{i + 1}</span>
               <span className="sess-qitem-t">
                 {label.slice(0, 60)}{label.length > 60 ? '…' : ''}
@@ -570,6 +576,7 @@ const QuestionBar = memo(function QuestionBar({ withQBar, qbarOpen, questions, f
    data = 会话端点下发的 interaction（见 board._iw_interaction）；answer 由 SessionView
    注入（board / task 各自端点），失败提示在调用方 toast；qid/approval_id 变化重置选择 */
 const InteractionCard = memo(function InteractionCard({ data, answer }) {
+  const { t } = useI18n()
   // 逐题作答态：{ [题 id]: {sel: [], other: '', useOther: false} }（单选也存数组，统一处理）
   const [ans, setAns] = useState({})
   const [busy, setBusy] = useState(false)
@@ -642,10 +649,10 @@ const InteractionCard = memo(function InteractionCard({ data, answer }) {
     // 最小化：收成一行摘要条（点条展开）
     if (min) {
       return (
-        <button type="button" className="sess-interaction-bar" title="展开"
+        <button type="button" className="sess-interaction-bar" title={t('展开')}
           onClick={() => setMin(false)}>
           <span className="sess-interaction-bar-t">
-            🛡 agent 请求审批：{data.action || data.tool || '工具调用'}
+            🛡 {t('agent 请求审批：{name}', { name: data.action || data.tool || t('工具调用') })}
           </span>
           <ChevronUp className="h-3.5 w-3.5" />
         </button>
@@ -655,9 +662,9 @@ const InteractionCard = memo(function InteractionCard({ data, answer }) {
       <div className="sess-interaction">
         <div className="sess-interaction-head">
           <div className="sess-interaction-q">
-            🛡 agent 请求审批：{data.action || data.tool || '工具调用'}
+            🛡 {t('agent 请求审批：{name}', { name: data.action || data.tool || t('工具调用') })}
           </div>
-          <button type="button" className="sess-interaction-min" title="最小化"
+          <button type="button" className="sess-interaction-min" title={t('最小化')}
             onClick={() => setMin(true)}>
             <ChevronDown className="h-3.5 w-3.5" />
           </button>
@@ -665,12 +672,12 @@ const InteractionCard = memo(function InteractionCard({ data, answer }) {
         {data.input && <pre className="sess-interaction-pre">{data.input}</pre>}
         <div className="sess-interaction-opts">
           <Button size="sm" disabled={busy}
-            onClick={() => run({ approval_id: aid, decision: 'approved' })}>批准</Button>
+            onClick={() => run({ approval_id: aid, decision: 'approved' })}>{t('批准')}</Button>
           <Button size="sm" variant="outline" disabled={busy}
             onClick={() => run({ approval_id: aid, decision: 'approved', scope: 'session' })}>
-            本会话内批准</Button>
+            {t('本会话内批准')}</Button>
           <Button size="sm" variant="outline" disabled={busy}
-            onClick={() => run({ approval_id: aid, decision: 'rejected' })}>拒绝</Button>
+            onClick={() => run({ approval_id: aid, decision: 'rejected' })}>{t('拒绝')}</Button>
         </div>
       </div>
     )
@@ -678,10 +685,11 @@ const InteractionCard = memo(function InteractionCard({ data, answer }) {
   // 最小化：收成一行摘要条（多题带已答进度；点条展开）
   if (min) {
     return (
-      <button type="button" className="sess-interaction-bar" title="展开"
+      <button type="button" className="sess-interaction-bar" title={t('展开')}
         onClick={() => setMin(false)}>
         <span className="sess-interaction-bar-t">
-          🤔 agent 等待你的回答{multiQ ? ` · 已答 ${answeredN}/${qs.length}` : ''}
+          🤔 {t('agent 等待你的回答')}{multiQ
+            ? t(' · 已答 {done}/{total}', { done: answeredN, total: qs.length }) : ''}
         </span>
         <ChevronUp className="h-3.5 w-3.5" />
       </button>
@@ -692,11 +700,12 @@ const InteractionCard = memo(function InteractionCard({ data, answer }) {
       <div className="sess-interaction-head">
         {/* 单题保持原文案；多题带序号并翻页（一次一题），便于对照多子题提问 */}
         <div className="sess-interaction-q">
-          🤔 {multiQ ? `问题 ${pageIdx + 1}/${qs.length}` : 'agent 等待你的回答'}
-          {cur.header ? `（${cur.header}）` : ''}：
-          {cur.question || '（详情见会话记录）'}
+          🤔 {multiQ ? t('问题 {cur}/{total}', { cur: pageIdx + 1, total: qs.length })
+            : t('agent 等待你的回答')}
+          {cur.header ? t('（{header}）：', { header: cur.header }) : t('：')}
+          {cur.question || t('（详情见会话记录）')}
         </div>
-        <button type="button" className="sess-interaction-min" title="最小化"
+        <button type="button" className="sess-interaction-min" title={t('最小化')}
           onClick={() => setMin(true)}>
           <ChevronDown className="h-3.5 w-3.5" />
         </button>
@@ -722,11 +731,11 @@ const InteractionCard = memo(function InteractionCard({ data, answer }) {
                 disabled={busy} onChange={() => pickOther(cur)} />
               <span className="sess-iopt-key">{opts.length + 1}</span>
               <span className="sess-iopt-text">
-                <span className="sess-iopt-label">{cur.other_label || '其他…'}</span>
+                <span className="sess-iopt-label">{cur.other_label || t('其他…')}</span>
                 {cur.other_description && (
                   <span className="sess-iopt-desc">{cur.other_description}</span>)}
                 <input className="sess-iopt-input" type="text" value={st.other}
-                  placeholder={cur.other_label || '其他…'} disabled={busy}
+                  placeholder={cur.other_label || t('其他…')} disabled={busy}
                   onFocus={() => pickOther(cur)}
                   onChange={(e) => typeOther(cur, e.target.value)} />
               </span>
@@ -741,27 +750,28 @@ const InteractionCard = memo(function InteractionCard({ data, answer }) {
           {multiQ ? (
             <div className="sess-inav">
               <button type="button" className="sess-inav-btn" disabled={pageIdx === 0}
-                onClick={() => setPage(pageIdx - 1)}>‹ 上一题</button>
+                onClick={() => setPage(pageIdx - 1)}>{t('‹ 上一题')}</button>
               {qs.map((qq, i) => (
                 <button key={qq.id} type="button"
                   className={'sess-inav-dot' + (i === pageIdx ? ' on' : '')
                     + (answers[i] ? ' done' : '')}
-                  title={`第 ${i + 1} 题${answers[i] ? '（已答）' : '（未答）'}`}
+                  title={t('第 {n} 题', { n: i + 1 })
+                    + (answers[i] ? t('（已答）') : t('（未答）'))}
                   onClick={() => setPage(i)}>{i + 1}</button>
               ))}
               <button type="button" className="sess-inav-btn"
                 disabled={pageIdx === qs.length - 1}
-                onClick={() => setPage(pageIdx + 1)}>下一题 ›</button>
+                onClick={() => setPage(pageIdx + 1)}>{t('下一题 ›')}</button>
             </div>
           ) : (
             <span className="sess-interaction-hint">
-              {cur.multi_select ? '可多选，选好后点「提交」' : '选择后点「提交」'}
+              {cur.multi_select ? t('可多选，选好后点「提交」') : t('选择后点「提交」')}
             </span>
           )}
           {data.answerable && (
             <Button size="sm" disabled={!canSubmit}
-              title={!busy && !canSubmit ? '还有题目未作答' : undefined}
-              onClick={submitQuestion}>提交</Button>
+              title={!busy && !canSubmit ? t('还有题目未作答') : undefined}
+              onClick={submitQuestion}>{t('提交')}</Button>
           )}
         </div>
       )}
@@ -771,6 +781,7 @@ const InteractionCard = memo(function InteractionCard({ data, answer }) {
 
 export default function SessionView({ task, board, withQBar = true, onUnitState,
                                      onCardColumn, onPassed }) {
+  const { t, lang } = useI18n()
   const taskId = task?.id
   const boardSid = board?.sid                 // board 模式: {projectId, sid, cid}
   const boardPid = board?.projectId
@@ -857,7 +868,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   // 会话归属（C 批 T8）：外部会话（用户在 dsh GUI 里直跑/接管）出顶部提示条 + 把
   // 「停止」置灰——轮次由 dsh GUI 持有，平台的停止/中断对它无效；注册表未知
   // （meta.owned 未下发/为 null）按池内渲染（未知 ≠ 外部，判定见 utils/sessionOwned）
-  const ownedTip = ownedHint(meta?.owned)
+  const ownedTip = ownedHint(meta?.owned, t)
   const stopDisabled = !canStop(meta?.owned)
   // 2026-09-10：会话消息统一进平台队列——项目忙/任务运行中不再锁输入（发出即排队，
   // 项目空闲后按入队顺序执行），只有会话不可用(meta.found=false)才锁输入；
@@ -942,16 +953,16 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   // / 指令表: 平台真实可执行项带 on()(当前环境可用性, 用于菜单显隐与 send 路由)与 run()(执行体);
   // kimi code web 命令面板同款的历史遗留占位全量置灰常显(dis:true, 描述照 kimi code web 截图, 见设计文档第四节)
   const SLASH_CMDS = [
-    { key: '/stop', desc: '停止当前对话', type: 'cmd', on: () => !!caps.chat, run: stopChat },
-    { key: '/compact', desc: '压缩会话历史', type: 'cmd', on: () => !!board && !!caps.compact,
+    { key: '/stop', desc: t('停止当前对话'), type: 'cmd', on: () => !!caps.chat, run: stopChat },
+    { key: '/compact', desc: t('压缩会话历史'), type: 'cmd', on: () => !!board && !!caps.compact,
       run: async () => { await boardApi.compact(boardPid, boardCid, boardSid) } },
-    { key: '/new', desc: '创建新会话', type: 'cmd', dis: true },
-    { key: '/clear', desc: '清空并新建会话', type: 'cmd', dis: true },
-    { key: '/plan', desc: '切换计划模式 开/关', type: 'cmd', dis: true },
-    { key: '/swarm', desc: '切换 swarm 模式；/swarm <任务> 直接在 swarm 下执行', type: 'cmd', dis: true },
-    { key: '/goal', desc: '创建/控制目标：/goal <目标>、/goal pause|resume|cancel', type: 'cmd', dis: true },
-    { key: '/btw', desc: '侧边聊天：/btw <问题> 向 fork 的侧边聊天提问', type: 'cmd', dis: true },
-    { key: '/undo', desc: '撤销上一条消息', type: 'cmd', dis: true },
+    { key: '/new', desc: t('创建新会话'), type: 'cmd', dis: true },
+    { key: '/clear', desc: t('清空并新建会话'), type: 'cmd', dis: true },
+    { key: '/plan', desc: t('切换计划模式 开/关'), type: 'cmd', dis: true },
+    { key: '/swarm', desc: t('切换 swarm 模式；/swarm <任务> 直接在 swarm 下执行'), type: 'cmd', dis: true },
+    { key: '/goal', desc: t('创建/控制目标：/goal <目标>、/goal pause|resume|cancel'), type: 'cmd', dis: true },
+    { key: '/btw', desc: t('侧边聊天：/btw <问题> 向 fork 的侧边聊天提问'), type: 'cmd', dis: true },
+    { key: '/undo', desc: t('撤销上一条消息'), type: 'cmd', dis: true },
   ]
   // 菜单动作组: 可执行项(当前环境 on() 为真) 并集 skills; 置灰项(dis)常显
   const slashCmds = SLASH_CMDS.filter((c) => c.dis || c.on())
@@ -1143,7 +1154,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     for (const m of errs) {
       if (errToastedRef.current.has(m.id)) continue
       errToastedRef.current.add(m.id)
-      toast(`消息发送失败：${m.error || '未知原因'}`)
+      toast(t('消息发送失败：{error}', { error: m.error || t('未知原因') }))
       if (m.id) setPendingMsgs((arr) => arr.filter((p) => p.id !== m.id))
     }
   }, [chatState])
@@ -1191,8 +1202,8 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   // 该模型真正支持的档位）；模型未知/目录无档位信息时回落内置档位表（见 utils/sessionEffort）。
   // 注意取的是模型值（modelSel/meta.sessionModel），不是档位值——档位只用来定当前选中项。
   const effortOpts = useMemo(
-    () => effortChoices(modelOpts, modelSel || meta?.sessionModel || modelOpts?.default || ''),
-    [modelOpts, modelSel, meta?.sessionModel])
+    () => effortChoices(modelOpts, modelSel || meta?.sessionModel || modelOpts?.default || '', t),
+    [modelOpts, modelSel, meta?.sessionModel, t, lang])
 
   // 新消息到达时贴底跟随(本来不在底部则不动) —— 已内聚到 MessageList 组件
   const onScroll = useCallback(() => {
@@ -1214,8 +1225,8 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   const queueRows = useMemo(() => {
     const out = []
     const taken = []
-    const dup = (text) => taken.some((t) => t && text
-      && t.slice(0, 40) === text.slice(0, 40))
+    const dup = (text) => taken.some((x) => x && text
+      && x.slice(0, 40) === text.slice(0, 40))
     for (const q of (meta?.queue || [])) {
       if (!q?.text) continue
       out.push({ key: 'k' + q.id, text: q.text, msgId: '', state: 'server' })
@@ -1305,10 +1316,11 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     const pid = board ? board.projectId : task?.project_id
     if (!pid) return
     for (const f of list) {
-      if (f.size > 10 * 1024 * 1024) { toast(`附件过大（>10MB）：${f.name}`); continue }
+      if (f.size > 10 * 1024 * 1024) { toast(t('附件过大（>10MB）：{name}', { name: f.name })); continue }
       // 占位图拦截（1x1/2x2 一类极小图，见 utils/media.js）：来源应用没给有效截图，跳过并提示
       if (await isPlaceholderImage(f)) {
-        toast(`已跳过占位图（极小尺寸）：${f.name}（剪贴板里不是有效截图，请重新截图或改用「+」选文件）`)
+        toast(t('已跳过占位图（极小尺寸）：{name}（剪贴板里不是有效截图，请重新截图或改用「+」选文件）',
+          { name: f.name }))
         continue
       }
       setUploading(true)
@@ -1316,7 +1328,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
         const data = await new Promise((res, rej) => {
           const fr = new FileReader()
           fr.onload = () => res(String(fr.result || '').split(',')[1] || '')
-          fr.onerror = () => rej(new Error('文件读取失败'))
+          fr.onerror = () => rej(new Error(t('文件读取失败')))
           fr.readAsDataURL(f)
         })
         const r = await boardApi.uploadMedia(pid, {
@@ -1342,8 +1354,8 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
           setCaretPos(-1)   // 输入框未聚焦: 光标未知, 按输入末尾处理
         }
         autoGrow()
-        toast(`已添加附件：${f.name}`)
-      } catch (e) { toast(e.message || '附件上传失败') }
+        toast(t('已添加附件：{name}', { name: f.name }))
+      } catch (e) { toast(e.message || t('附件上传失败')) }
       finally { setUploading(false) }
     }
   }
@@ -1373,14 +1385,14 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       const c = SLASH_CMDS.find((x) => x.key === msg)
       if (c) {
         // 命中: 置灰/当前环境不可用 → toast 提示并保留输入; 可执行 → 执行指令(清输入+toast)
-        if (c.dis || !(c.on && c.on())) { toast(`当前环境不支持 ${msg}`); return }
+        if (c.dis || !(c.on && c.on())) { toast(t('当前环境不支持 {cmd}', { cmd: msg })); return }
         setInput(''); setCaretPos(0); requestAnimationFrame(autoGrow)
         try {
           const ok = await c.run()
           if (ok === false) return   // 失败: 被调方已 toast(stopChat 语义)
-          toast(`已执行 ${msg}`)
+          toast(t('已执行 {cmd}', { cmd: msg }))
         }
-        catch (e) { toast(e.message || `指令执行失败：${msg}`) }
+        catch (e) { toast(e.message || t('指令执行失败：{cmd}', { cmd: msg })) }
         return   // 命令路由路径均不发送
       }
     }
@@ -1414,7 +1426,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       if (board) {
         const r = await boardApi.stopCard(boardPid, boardCid)
         // 后端 stopped=false：会话未在运行或中断失败——如实提示，不假装已停
-        if (r && r.stopped === false) { toast('该会话未在运行或无法停止'); return false }
+        if (r && r.stopped === false) { toast(t('该会话未在运行或无法停止')); return false }
       } else await taskApi.sessionChatStop(taskId)
       // 停止同时取消排队中的消息（后端 chat.stop / stop_card 同语义）：清掉乐观 chip
       setPendingMsgs([])
@@ -1435,7 +1447,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       if (sid !== boardSidRef.current) return   // 已切会话: 旧请求结果静默丢弃(防 stale 写)
       setPermMode(mode)
       // toast 用展示层档位名（目录 label → 内置中文名 → 原值）
-      toast(`权限已切换：${permissionLabel(permOpts, mode)}`)
+      toast(t('权限已切换：{label}', { label: permissionLabel(permOpts, mode) }))
     } catch (e) {
       if (sid === boardSidRef.current) toast(e.message)
     }
@@ -1447,7 +1459,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       await boardApi.setSessionProfile(boardPid, sid, { model: m })
       if (sid !== boardSidRef.current) return
       setModelSel(m)
-      toast(`模型已切换：${m}`)
+      toast(t('模型已切换：{model}', { model: m }))
     } catch (e) {
       if (sid === boardSidRef.current) toast(e.message)
     }
@@ -1463,7 +1475,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       else await taskApi.sessionProfile(taskId, { reasoning_effort: v })
       if (sid && sid !== boardSidRef.current) return   // 已切会话: 旧请求结果静默丢弃
       setEffortSel(v)
-      toast(`思考等级已切换：${effortText(v)}`)
+      toast(t('思考等级已切换：{level}', { level: effortText(v, '', t) }))
     } catch (e) {
       if (!sid || sid === boardSidRef.current) toast(e.message)
     }
@@ -1478,8 +1490,8 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
         ? await boardApi.answerInteraction(boardPid, boardCid, body)
         : await taskApi.answerInteraction(taskId, body)
       toast(r && r.queued
-        ? '已提交答案：项目忙，等待空闲后自动送达'
-        : '已回答')
+        ? t('已提交答案：项目忙，等待空闲后自动送达')
+        : t('已回答'))
     } catch (e) { toast(e.message) }
   }
   // 排队消息「立即注入」：平台统一队列消息单元（msgId）——撤销排队并立即投递到
@@ -1491,7 +1503,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     try {
       if (board) await boardApi.injectSessionMsg(boardPid, boardSid, row.msgId)
       else await taskApi.sessionChatInject(taskId, row.msgId)
-      toast('已注入当前上下文')
+      toast(t('已注入当前上下文'))
       // 平台排队行随下轮轮询消失（后端已标记完成）；乐观 chip 按 msg_id 立即清掉
       setPendingMsgs((arr) => arr.filter((p) => p.id !== row.msgId))
     } catch (e) { toast(e.message) } finally { setInjecting('') }
@@ -1507,7 +1519,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   //   ③ cancelled=0 如实提示「已不在排队中」（消息可能已被 worker 抢走执行），不假装成功。
   async function cancelQueue(rows) {
     const list = (rows && rows.length ? rows : queueRows).filter(cancellableRow)
-    if (!list.length) { toast('没有可取消的排队消息'); return }
+    if (!list.length) { toast(t('没有可取消的排队消息')); return }
     const single = !!(rows && rows.length === 1)
     const key = single ? list[0].key : '__all__'
     setCancelling(key)
@@ -1535,7 +1547,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     setDeliveringAnswer(true)
     try {
       await boardApi.deliverAnswer(boardPid, boardCid)
-      toast('已送达答案')
+      toast(t('已送达答案'))
     } catch (e) { toast(e.message) } finally { setDeliveringAnswer(false) }
   }
   // 通过: 把当前卡片移入「已完成」列（看板语义同款；卡片在跑则会先停会话），
@@ -1551,7 +1563,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
         if (p && p.merge && p.merge.ahead > 0) { setMergeFor(p.merge); return }
       }
       await boardApi.moveCard(boardPid, boardCid, 'done')
-      toast('已通过，卡片移入「已完成」')
+      toast(t('已通过，卡片移入「已完成」'))
       if (onPassed) onPassed()
     } catch (e) { toast(e.message) } finally { setPassing(false) }
   }
@@ -1563,7 +1575,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     try {
       await boardApi.mergeWorktree(boardPid, boardCid)
       setMergeFor(null)
-      toast('已交给 agent 合并：卡片回到开发队列排队，完成后自动回「待审核」')
+      toast(t('已交给 agent 合并：卡片回到开发队列排队，完成后自动回「待审核」'))
     } catch (e) { toast(e.message) } finally { setMerging(false) }
   }
   // 仅通过（不合并）：带 merge_ack 再走一次 move（后端跳过待合并闸，分支与工作树保留）
@@ -1572,7 +1584,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     setPassing(true)
     try {
       await boardApi.moveCard(boardPid, boardCid, 'done', undefined, null, true)
-      toast('已通过，卡片移入「已完成」')
+      toast(t('已通过，卡片移入「已完成」'))
       if (onPassed) onPassed()
     } catch (e) { toast(e.message) } finally { setPassing(false) }
   }
@@ -1584,7 +1596,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     const text = e?.text || ''
     if (!text.trim()) return
     const p = navigator.clipboard?.writeText(text)
-    if (p && p.catch) p.catch(() => toast('复制失败：浏览器未授予剪贴板权限'))
+    if (p && p.catch) p.catch(() => toast(t('复制失败：浏览器未授予剪贴板权限')))
     setCopiedSeq(e.seq)
     clearTimeout(copyTimerRef.current)
     copyTimerRef.current = setTimeout(() => setCopiedSeq(null), 1400)
@@ -1599,7 +1611,8 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     if (!mid || rewinding) return
     const n = entries.filter((x) => x.kind === 'user' && x.seq >= e.seq).length
     const excerpt = (e.text || '').trim().replace(/\s+/g, ' ').slice(0, 60)
-    if (!window.confirm(`回退到该提问之前？\n\n将撤销该提问及其后共 ${n} 轮对话：\n${excerpt}${excerpt.length >= 60 ? '…' : ''}\n\n只回退对话上下文，不回退文件改动；此操作不可撤销。`)) return
+    if (!window.confirm(t('回退到该提问之前？\n\n将撤销该提问及其后共 {n} 轮对话：\n{excerpt}\n\n只回退对话上下文，不回退文件改动；此操作不可撤销。',
+      { n, excerpt: excerpt + (excerpt.length >= 60 ? '…' : '') }))) return
     setRewinding(mid)
     try {
       // dsh 没有原地 undo：服务端按边界 fork 出新会话并回 new_session_id。
@@ -1609,10 +1622,10 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       const r = board ? await boardApi.rewindSession(boardPid, boardSid, mid)
                       : await taskApi.sessionRewind(taskId, mid)
       if (r?.new_session_id && !r.rebound) {
-        toast(`已回退 ${n} 轮对话：历史已复制为新会话，正在切换`)
+        toast(t('已回退 {n} 轮对话：历史已复制为新会话，正在切换', { n }))
         onSwitchSession?.(r.new_session_id)
       } else {
-        toast(`已回退 ${n} 轮对话，原提问已回填输入框`)
+        toast(t('已回退 {n} 轮对话，原提问已回填输入框', { n }))
       }
       setInput(e.text || '')      // kimi web 同款：被撤销的提问回填输入框，可改写后重发
       // 乐观截断：被回退的提问及其后条目立即从本地移除（截断点前的 seq 不变），
@@ -1622,7 +1635,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       lastSeqRef.current = e.seq - 1
       autoGrow()
     } catch (err) {
-      toast(`回退失败：${err?.message || '未知原因'}`)
+      toast(t('回退失败：{error}', { error: err?.message || t('未知原因') }))
     } finally {
       setRewinding('')
     }
@@ -1655,7 +1668,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   // 执行走 send() 本地路由, 由用户手动 Enter 触发; 菜单随即关闭(选中置抑制态)
   function onSlashSelect(it) {
     if (!slashToken) return
-    const ins = it.type === 'skill' ? `使用 skill「${it.label}」` : it.key
+    const ins = it.type === 'skill' ? t('使用 skill「{name}」', { name: it.label }) : it.key
     setSlashDismissed(true)
     setInput((prev) => prev.slice(0, slashToken.start) + ins
       + prev.slice(slashToken.start + slashToken.text.length))
@@ -1669,17 +1682,17 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   }
   // SlashMenu 置灰项(dis)点击/回车: 提示当前环境不支持, 不动输入
   function onSlashDisabled(it) {
-    toast(`当前环境不支持 ${it.key}`)
+    toast(t('当前环境不支持 {cmd}', { cmd: it.key }))
   }
 
   const agents = meta?.agents || []
   const totals = meta?.totals
   const totalsText = totals && meta?.found ? [
-    `共 ${meta.total} 条`,
+    t('共 {n} 条', { n: meta.total }),
     totals.input ? `↑${fmtTokens(totals.input)}` : '',
     totals.output ? `↓${fmtTokens(totals.output)}` : '',
-    totals.cache_read ? `缓存 ${fmtTokens(totals.cache_read)}` : '',
-    fmtDur(totals.duration_ms),
+    totals.cache_read ? t('缓存 {n}', { n: fmtTokens(totals.cache_read) }) : '',
+    fmtDur(totals.duration_ms, t),
   ].filter(Boolean).join(' · ') : ''
 
   return (
@@ -1692,13 +1705,13 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       {/* 头部信息行: 连接状态/session/模型/agent 切换/totals */}
       <div className="sess-sub">
         {withQBar && (
-          <button type="button" className="sess-qbar-toggle" title={qbarOpen ? '收起提问索引' : '展开提问索引'}
+          <button type="button" className="sess-qbar-toggle" title={qbarOpen ? t('收起提问索引') : t('展开提问索引')}
             onClick={() => setQbarOpen((v) => !v)}>
             <List className="h-3.5 w-3.5" />
           </button>
         )}
         <span className={'sess-conn' + (connected ? ' on' : '')}
-          title={connected ? 'SSE 已连接（实时更新）' : '连接中断，自动重连中…'}></span>
+          title={connected ? t('SSE 已连接（实时更新）') : t('连接中断，自动重连中…')}></span>
         {meta?.session_id && (
           <span className="sess-chip mono" title={meta.session_id}>
             {meta.session_id.replace(/^session_/, '').slice(0, 8)}
@@ -1711,7 +1724,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
               <button key={a.id} type="button"
                 className={'sess-agent' + ((meta?.agent || agent) === a.id ? ' on' : '')}
                 onClick={() => setAgent(a.id)}>
-                {a.id}{a.type === 'sub' ? ' (子)' : ''}
+                {a.id}{a.type === 'sub' ? t(' (子)') : ''}
               </button>
             ))}
           </span>
@@ -1723,7 +1736,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
             （契约见 spec/dsh_plugin/dsh插件形态.md §13） */}
         {!!dshCaps?.openSession && (
           <Button size="sm" variant="ghost" className="sess-open-dsh"
-            title={dshSid ? '在 dsh 界面打开当前会话' : '尚无会话'}
+            title={dshSid ? t('在 dsh 界面打开当前会话') : t('尚无会话')}
             disabled={!dshSid}
             onClick={() => openSessionInDsh(dshSid)}>
             <ExternalLink className="h-3.5 w-3.5" />
@@ -1733,11 +1746,11 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
             标题加 -- 前缀；仅在 正在开发/待审核 列显示） */}
         {board && ['doing', 'review'].includes(board.column) && (
           <Button size="sm" variant="outline" className="sess-pass" disabled={passing}
-            title="通过：卡片移入「已完成」" onClick={passCard}>
-            <Check className="h-3.5 w-3.5" /> 通过
+            title={t('通过：卡片移入「已完成」')} onClick={passCard}>
+            <Check className="h-3.5 w-3.5" /> {t('通过')}
           </Button>
         )}
-        {totalsText && <span className="sess-totals" title="输入 / 输出 / 缓存读取 / 总耗时">{totalsText}</span>}
+        {totalsText && <span className="sess-totals" title={t('输入 / 输出 / 缓存读取 / 总耗时')}>{totalsText}</span>}
       </div>
 
       {/* 外部会话提示条（C 批 T8）：本会话由用户在 dsh GUI 里直跑/接管（非平台启动），
@@ -1830,7 +1843,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
           卡片跑在独立 worktree 里、还有提交没回流主分支时弹出 */}
       <MergeHandoffDialog open={!!mergeFor} info={mergeFor} busy={merging}
         disabledReason={(meta?.running || chatState?.running)
-          ? '会话运行中：等这一轮跑完，或先点「停止」再交接' : ''}
+          ? t('会话运行中：等这一轮跑完，或先点「停止」再交接') : ''}
         onHandoff={handoffMerge} onPass={passWithoutMerge}
         onClose={() => !merging && setMergeFor(null)} />
     </div>

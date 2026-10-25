@@ -7,6 +7,7 @@
 //      （与 DSH 客户端 displayPermissionPreset 同规则）；旧库/旧帧的 manual/yolo 做显示兜底；
 //   2. 现值兜底项：目录里没有当前值时补一条，保证 Radix Select 触发器不回退成占位符。
 // 本模块**不参与写入**：项目弹窗/会话窗提交的都是宿主 preset key（`permission_mode`）。
+import { t } from './i18n'
 
 /** 旧三档 → 宿主 preset 的显示/兼容别名（auto 不在别名表：实验档按宿主目录的真实值走，
  *  契约 §5.3 歧义裁决；旧 auto 语义已由数据迁移消化） */
@@ -15,16 +16,15 @@ export const LEGACY_PERMISSION_ALIASES = {
   yolo: 'danger-full-access',
 }
 
-/** 内置档中文产品名（宿主目录里查不到时兜底；auto 恒用产品名） */
-export const BUILTIN_PERMISSION_LABELS = {
-  'read-only': '仅可查看',
-  'workspace-write': '工作区内修改',
-  'danger-full-access': '完全权限',
-  auto: '自动审查（实验）',
+/** 内置档产品名（宿主目录里查不到时兜底；auto 恒用产品名）；未命中返回空串。
+ *  函数形式：t 在调用时按当前语言求值，语言切换后重新渲染即更新。 */
+export function builtinPermissionLabel(value) {
+  if (value === 'read-only') return t('仅可查看')
+  if (value === 'workspace-write') return t('工作区内修改')
+  if (value === 'danger-full-access') return t('完全权限')
+  if (value === 'auto') return t('自动审查（实验）')
+  return ''
 }
-
-/** 宿主当前配置的哨兵档（自动审查等宿主自定义组合下的展示名） */
-const CUSTOM_PERMISSION_LABEL = '自定义（宿主当前配置）'
 
 /** 值归一：null/undefined/非字符串 → ''，去首尾空白 */
 function text(v) {
@@ -53,13 +53,14 @@ export function permissionOption(options, value) {
  * 空 → fallback；命中目录项 → 目录 label（宿主自定义档原样透传）；
  * canonical 命中内置档 → 内置中文产品名；custom → 固定文案；其余原样值。
  */
-export function permissionLabel(options, value, fallback = '权限') {
+export function permissionLabel(options, value, fallback) {
   const opt = permissionOption(options, value)
   if (opt && opt.label) return opt.label
   const v = canonicalPermission(value)
-  if (!v) return fallback
-  if (BUILTIN_PERMISSION_LABELS[v]) return BUILTIN_PERMISSION_LABELS[v]
-  if (v === 'custom') return CUSTOM_PERMISSION_LABEL
+  if (!v) return fallback || t('权限')
+  const builtin = builtinPermissionLabel(v)
+  if (builtin) return builtin
+  if (v === 'custom') return t('自定义（宿主当前配置）')
   return v
 }
 
@@ -78,7 +79,7 @@ export function permissionDesc(options, value) {
  */
 export function permissionDefaultLabel(catalog) {
   const label = text(catalog && catalog.default_label)
-  return label ? `默认（${label}）` : '默认（宿主默认）'
+  return label ? t('默认（{label}）', { label }) : t('默认（宿主默认）')
 }
 
 /**

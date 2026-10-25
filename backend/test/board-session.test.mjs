@@ -180,7 +180,7 @@ async function useDriver() {
  * 「缝的形参形状」钉成契约——形状改了这里就红。
  *
  * 形参口径（与 M5-1 的 canonical 修复同批）：
- *   - `enterDoing(project, card, extra, force, worktree, queueWorktree, options)` 逐位 7 参；
+ *   - `enterDoing(project, card, extra, force, worktree, queueWorktree, lang, options)` 逐位 8 参；
  *   - `stopCard(cardId, options)` 第 2 参＝db options 袋（**不嵌套** `{options}`）；
  *   - `finish(key, reason, opts)` 第 3 参＝收尾 opts（`toColumn`/`markUnread` + 平铺的 db 袋）。
  * `archiveCardSessions` **保持未注入**（M5-3 的口，响亮失败由专门用例覆盖）。
@@ -190,9 +190,9 @@ function installHooks() {
   const prod = board.boardHooks();
   board.setBoardHooks({
     enterDoing: (project, card, extra = '', force = false, worktree = false,
-      queueWorktree = false, options = {}) => {
-      calls.push(['enterDoing', card.id, extra, force, worktree, queueWorktree, options]);
-      return prod.enterDoing(project, card, extra, force, worktree, queueWorktree, options);
+      queueWorktree = false, lang = '', options = {}) => {
+      calls.push(['enterDoing', card.id, extra, force, worktree, queueWorktree, lang, options]);
+      return prod.enterDoing(project, card, extra, force, worktree, queueWorktree, lang, options);
     },
     stopCard: (cardId, options = {}) => {
       calls.push(['stopCard', cardId, options]);
@@ -558,7 +558,7 @@ test('enterDoing：runner 缺位时直起（走真驱动）；落 doing + cardSt
     });
     const proj = db.getProject(s.pid, s.opts);
     const [res, err] = await board.enterDoing(proj, db.getBoardCard(card, s.opts), '', false, false,
-      false, s.opts);
+      false, '', s.opts);
     assert.equal(err, null);
     assert.equal(res.column, 'doing');
     assert.equal(cardRow(s.fx, card).block_kind, null);
@@ -576,7 +576,7 @@ test('enterDoing：runner 缺位时直起（走真驱动）；落 doing + cardSt
     // 已入队（doing+queue）幂等分支：不重复起会话
     db.updateBoardCard(card, false, { block_kind: 'queue' }, s.opts);
     const [res2, err2] = await board.enterDoing(proj, db.getBoardCard(card, s.opts), '', false,
-      false, false, s.opts);
+      false, false, '', s.opts);
     assert.equal(err2, null);
     assert.equal(res2.block_kind, 'queue');
     assert.equal(d.drv.byPath('/session').length, 1);           // 未再起会话
@@ -593,7 +593,7 @@ test('enterDoing：在管预检拦下（活跃 c: 行/在管条目）⇒ 带卡�
   const card = insertCard(s.fx.db, s.pid, { title: 'T', columnKey: 'doing' });
   insertWait(s.fx.db, { projectId: s.pid, kind: 'card', targetId: card, state: 'starting', seq: 1 });
   const [res, err] = await board.enterDoing(proj, db.getBoardCard(card, s.opts), '', false, false,
-    false, s.opts);
+    false, '', s.opts);
   assert.equal(res.id, card);
   assert.deepEqual(err, { error: '会话运行中，请等待完成或先停止' });
   // 在管条目分支
@@ -611,7 +611,7 @@ test('enterDoing：父依赖未完成 ⇒ blocked（review 卡放行）', async 
   const parent = insertCard(s.fx.db, s.pid, { title: 'P', columnKey: 'doing' });
   const child = insertCard(s.fx.db, s.pid, { title: 'C', columnKey: 'todo', parentCardId: parent });
   const [res, err] = await board.enterDoing(proj, db.getBoardCard(child, s.opts), '', false, false,
-    false, s.opts);
+    false, '', s.opts);
   assert.equal(res, null);
   assert.deepEqual(err, { blocked: 'parent-not-done' });
   // review 卡打回续改放行（父依赖不拦）——但会真起会话 ⇒ 这里只验证「不返回 blocked」
@@ -626,7 +626,7 @@ test('enterDoing：退场族 ⇒ RETIRED_MSG（不落任何起会话路径）', 
   const proj = db.getProject(pid, s.opts);
   const card = insertCard(s.fx.db, pid, { title: 'T', columnKey: 'todo' });
   const [res, err] = await board.enterDoing(proj, db.getBoardCard(card, s.opts), '', false, false,
-    false, s.opts);
+    false, '', s.opts);
   assert.equal(res, null);
   assert.equal(err.error, '该智能体族已下线，请在项目设置里改绑 dsh 插件');
   assert.equal(cardRow(s.fx, card).column_key, 'todo');        // 列不动
@@ -716,7 +716,7 @@ test('enterDoing：队列分支（runner 单例在场）⇒ 委托 submitCard，
     const proj = db.getProject(s.pid, s.opts);
     const card = insertCard(s.fx.db, s.pid, { title: 'T', columnKey: 'todo' });
     const [res, err] = await board.enterDoing(proj, db.getBoardCard(card, s.opts), 'ex', false,
-      false, false, s.opts);
+      false, false, '', s.opts);
     assert.equal(err, null);
     assert.deepEqual(submitted[0], [card, 'ex', '', false]);      // todo ⇒ 落等待区末尾
     const row = cardRow(s.fx, card);
@@ -726,7 +726,8 @@ test('enterDoing：队列分支（runner 单例在场）⇒ 委托 submitCard，
     // review ⇒ 插前缀后
     submitted.length = 0;
     const card2 = insertCard(s.fx.db, s.pid, { title: 'T2', columnKey: 'review' });
-    await board.enterDoing(proj, db.getBoardCard(card2, s.opts), '', false, false, false, s.opts);
+    await board.enterDoing(proj, db.getBoardCard(card2, s.opts), '', false, false, false, '',
+      s.opts);
     assert.deepEqual(submitted[0], [card2, '', '', true]);
   } finally {
     board.setRunnerInstance(null);
@@ -744,7 +745,7 @@ test('stopCard：在管条目 ⇒ 驱动 cancel 命中；返回 true；登记 ST
   try {
     const card = insertCard(s.fx.db, s.pid, { title: 'T', columnKey: 'doing' });
     const proj = db.getProject(s.pid, s.opts);
-    await board.startCard(proj, db.getBoardCard(card, s.opts), '', s.opts);
+    await board.startCard(proj, db.getBoardCard(card, s.opts), '', '', s.opts);   // T13：第 4 参 lang
     assert.equal(board.hasActiveRun(card), true);
     assert.equal(await board.stopCard(card, s.opts), true);
     assert.equal(d.drv.byPath('/cancel').length, 1);
@@ -1076,7 +1077,7 @@ test('archiveCardSessions 未注入 ⇒ BoardHookMissing（缝缺失必须响亮
     const card = insertCard(s.fx.db, s.pid, { title: 'C', columnKey: 'doing' });
     const proj = db.getProject(s.pid, s.opts);
     await assert.rejects(
-      () => board.moveCard(proj, card, 'done', '', null, false, s.opts),
+      () => board.moveCard(proj, card, 'done', '', null, false, '', s.opts),
       (e) => e instanceof board.BoardHookMissing && e.hook === 'archiveCardSessions',
     );
   } finally {
@@ -1103,22 +1104,29 @@ test('moveCard（async）后：同列早退 / doing 不可拖回 todo / 交给 e
   const s = setup('movecard-async');
   const proj = db.getProject(s.pid, s.opts);
   const c1 = insertCard(s.fx.db, s.pid, { title: 'C1', columnKey: 'review' });
-  const [same, errSame] = await board.moveCard(proj, c1, 'review', '', null, false, s.opts);
+  const [same, errSame] = await board.moveCard(proj, c1, 'review', '', null, false, '',
+    s.opts);
   assert.equal(errSame, null);
   assert.equal(same.column, 'review');
   const c2 = insertCard(s.fx.db, s.pid, { title: 'C2', columnKey: 'doing' });
-  const [blocked, errTodo] = await board.moveCard(proj, c2, 'todo', '', null, false, s.opts);
+  const [blocked, errTodo] = await board.moveCard(proj, c2, 'todo', '', null, false, '',
+    s.opts);
   assert.equal(blocked, null);
   assert.deepEqual(errTodo, { error: 'doing 不可直接拖回 todo' });
   // 进 doing 委托 enterDoing（真实现，经安装的记录桩包一层）：无驱动 ⇒ 起会话失败回滚，
   // 返回 [null, {error}] 且**列不动**（M5-1 的「硬错误、列未变」契约在 async 化后不变）
   const c3 = insertCard(s.fx.db, s.pid, { title: 'C3', columnKey: 'todo' });
   s.calls.length = 0;
-  const [none, errDoing] = await board.moveCard(proj, c3, 'doing', '', null, false, s.opts);
+  const [none, errDoing] = await board.moveCard(proj, c3, 'doing', '', null, false, '',
+    s.opts);
   assert.equal(none, null);
-  assert.ok(errDoing && typeof errDoing.error === 'string', '未返回硬错误');
-  // 委托点逐位 7 参（enterDoing 形参口径的契约钉子）
-  assert.deepEqual(s.calls[0], ['enterDoing', c3, '', false, false, false, s.opts]);
+  // 起会话失败的包装文案已按 key+vars 契约承载（会话启动失败: {detail}）；
+  // 路由层会把它渲染成字符串，HTTP 形状不变。
+  const startErr = errDoing && errDoing.error;
+  assert.ok(typeof startErr === 'string'
+    || (startErr && typeof startErr.message === 'string'), '未返回硬错误');
+  // 委托点逐位 8 参（enterDoing 形参口径的契约钉子；lang 由请求层传入）
+  assert.deepEqual(s.calls[0], ['enterDoing', c3, '', false, false, false, '', s.opts]);
   assert.equal(cardRow(s.fx, c3).column_key, 'todo');           // 列未变
   assert.equal(board.hasActiveRun(c3), false);                  // 无残留在管条目
   s.close();

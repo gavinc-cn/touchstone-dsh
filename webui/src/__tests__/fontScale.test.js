@@ -3,12 +3,17 @@
 // CSS 变量与 localStorage；initFontScale 在渲染前按持久化值应用（避免字号闪烁）。
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { FONT_SCALES, applyFontScale, getFontScale, initFontScale } from '../utils/fontScale'
+import { FONT_SCALES, applyFontScale, fontScaleLabel, getFontScale, initFontScale } from '../utils/fontScale'
+import { setLang } from '../utils/i18n'
+
 
 beforeEach(() => {
   localStorage.clear()
   document.documentElement.style.removeProperty('--fs')
 })
+
+// 语言钉在中文：必须注册在清 localStorage 的 beforeEach 之后（否则 ts_lang 被清掉）
+beforeEach(() => setLang('zh'))
 
 describe('fontScale', () => {
   it('getFontScale：无持久值时默认 1（标准），合法值回读，非法值回落', () => {
@@ -34,7 +39,7 @@ describe('fontScale', () => {
   })
 
   it('FONT_SCALES 四档（小/标准/大/特大），标准档为 1', () => {
-    expect(FONT_SCALES.map((s) => s.label)).toEqual(['小', '标准', '大', '特大'])
+    expect(FONT_SCALES.map((s) => fontScaleLabel(s.value))).toEqual(['小', '标准', '大', '特大'])
     expect(FONT_SCALES.map((s) => s.value)).toEqual([0.9, 1, 1.15, 1.3])
     expect(FONT_SCALES.some((s) => s.value === 1)).toBe(true)
   })

@@ -5,10 +5,10 @@
 // default, default_label}；前端只做「展示层映射 + 现值兜底项」，不重复算宿主默认名。
 // 重点覆盖：内置中文名、宿主自定义档（label/description 原样透传）、旧值 manual/yolo
 // 兜底（auto 不再当旧档，见契约 §5.3 歧义裁决）、custom 哨兵、未知值原样回退、空值。
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
-  BUILTIN_PERMISSION_LABELS,
   LEGACY_PERMISSION_ALIASES,
+  builtinPermissionLabel,
   canonicalPermission,
   permissionDefaultLabel,
   permissionDesc,
@@ -16,6 +16,10 @@ import {
   permissionLabel,
   permissionOption,
 } from '../utils/permission'
+
+import { setLang } from '../utils/i18n'
+// 文案断言按中文跑（zh 直接返回中文 key）
+beforeEach(() => setLang('zh'))
 
 // 本机宿主目录（契约 §2 实测形状，后端已把 name/description 归一为 label/description）
 const CATALOG_OPTIONS = [
@@ -37,7 +41,12 @@ describe('常量', () => {
   })
 
   it('内置档中文产品名与契约逐字一致', () => {
-    expect(BUILTIN_PERMISSION_LABELS).toEqual({
+    expect({
+      'read-only': builtinPermissionLabel('read-only'),
+      'workspace-write': builtinPermissionLabel('workspace-write'),
+      'danger-full-access': builtinPermissionLabel('danger-full-access'),
+      auto: builtinPermissionLabel('auto'),
+    }).toEqual({
       'read-only': '仅可查看',
       'workspace-write': '工作区内修改',
       'danger-full-access': '完全权限',

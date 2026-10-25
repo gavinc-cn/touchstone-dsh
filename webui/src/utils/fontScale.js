@@ -6,15 +6,26 @@
 //   - index.css :root 定义 --fs 默认 1；
 //   - Tailwind 字号 token（@theme inline 的 --text-*）与 theme/components.css 里
 //     全部 font-size 声明均写成 calc(N * var(--fs))，行高/间距随文字自然回流。
+import { t } from './i18n'
+
 const KEY = 'ts_fs'
 
-// 档位定义：value 为 --fs 乘数（1 = 出厂字号）
+// 档位定义：value 为 --fs 乘数（1 = 出厂字号）；展示名见 fontScaleLabel（按当前语言求值）
 export const FONT_SCALES = [
-  { value: 0.9, label: '小' },
-  { value: 1, label: '标准' },
-  { value: 1.15, label: '大' },
-  { value: 1.3, label: '特大' },
+  { value: 0.9 },
+  { value: 1 },
+  { value: 1.15 },
+  { value: 1.3 },
 ]
+
+// 档位乘数 → 展示名（设置页档位卡用；未知值原样返回）
+export function fontScaleLabel(value) {
+  if (value === 0.9) return t('小')
+  if (value === 1) return t('标准')
+  if (value === 1.15) return t('大')
+  if (value === 1.3) return t('特大')
+  return String(value)
+}
 
 // 读取当前档位（非法/未设置回落标准 1）
 export function getFontScale() {

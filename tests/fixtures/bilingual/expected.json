@@ -1,0 +1,303 @@
+{
+  "doc": [
+    "T14 双端（Python tests/test_contract_bilingual.py / Node backend/test/contract-bilingual.test.mjs）共享的机器契约双语用例表；两端读取同一份 fixture 与同一份期望，任何一端语义分叉都会失败。",
+    "parseStatus/parseFields 的键是内部中文 canonical；英文状态值必须归一到中文 canonical。",
+    "setMdField：按文件已有语言写回（英文表头 ⇒ 英文键+英文值；混写跟目标字段/文件主语言），expectedText 是写入后的**整文件字节**（LF）。",
+    "zh 档期望是改前基线（生成时用改前 lib.py 真跑核对过）。"
+  ],
+  "parseStatus": {
+    "zh/status.md": {
+      "status": "需要复测",
+      "last_run": "2026-10-01 10:00",
+      "round": "第 3 轮（20261001_1000）",
+      "fail_reason": "接口返回 500",
+      "bug_report": "bug_report/20261001_1000_FS0001_登录异常",
+      "summary": "code=500"
+    },
+    "en/status.md": {
+      "status": "需要复测",
+      "last_run": "2026-10-01 10:00",
+      "round": "Round 3 (20261001_1000)",
+      "fail_reason": "API returned 500",
+      "bug_report": "bug_report/20261001_1000_FS0001_login-timeout",
+      "summary": "code=500"
+    },
+    "mixed/status.md": {
+      "status": "失败",
+      "last_run": "2026-10-01 10:00",
+      "round": "",
+      "fail_reason": "接口返回 500",
+      "bug_report": "",
+      "summary": "code=500"
+    }
+  },
+  "parseFields": {
+    "zh/case.md": {
+      "用例 ID": "FS0001",
+      "接口": "POST /api/login",
+      "分类": "异常场景",
+      "所属模块/功能": "登录模块 / 鉴权",
+      "测试目标": "验证登录超时被拒绝",
+      "依据代码": "src/login.py:10-20",
+      "脚本": "verify.py",
+      "测试方法": "1. 构造超时请求",
+      "输入参数": "```json",
+      "预期输出": "返回 401",
+      "输出获取方式": "直接返回",
+      "验证逻辑": "code == 401",
+      "备注": "无"
+    },
+    "en/case.md": {
+      "用例 ID": "FS0001",
+      "接口": "POST /api/login",
+      "分类": "Exception scenario",
+      "所属模块/功能": "Login module / Auth",
+      "测试目标": "Verify login timeout is rejected",
+      "依据代码": "src/login.py:10-20",
+      "脚本": "verify.py",
+      "测试方法": "1. Build timeout request",
+      "输入参数": "```json",
+      "预期输出": "Returns 401",
+      "输出获取方式": "Direct response",
+      "验证逻辑": "code == 401",
+      "备注": "none"
+    },
+    "mixed/case.md": {
+      "用例 ID": "FS0001",
+      "接口": "POST /api/login",
+      "分类": "异常场景",
+      "测试目标": "中文目标",
+      "备注": "none"
+    },
+    "zh/bug_report.md": {
+      "状态": "已分析，待修复",
+      "严重程度": "高",
+      "报告时间": "2026-10-01 10:00",
+      "执行环境": "测试环境 A",
+      "错误签名": "login timeout"
+    },
+    "en/bug_report.md": {
+      "状态": "已分析，待修复",
+      "严重程度": "High",
+      "报告时间": "2026-10-01 10:00",
+      "执行环境": "Test environment A",
+      "错误签名": "login timeout"
+    },
+    "mixed/bug_report.md": {
+      "状态": "已拒绝",
+      "严重程度": "High",
+      "错误签名": "login timeout"
+    }
+  },
+  "normStatus": [
+    {
+      "input": "",
+      "expected": "未执行"
+    },
+    {
+      "input": "未执行",
+      "expected": "未执行"
+    },
+    {
+      "input": "通过",
+      "expected": "通过"
+    },
+    {
+      "input": "失败",
+      "expected": "失败"
+    },
+    {
+      "input": "跳过",
+      "expected": "跳过"
+    },
+    {
+      "input": "需要复测",
+      "expected": "需要复测"
+    },
+    {
+      "input": "Not run",
+      "expected": "未执行"
+    },
+    {
+      "input": "Not started",
+      "expected": "未执行"
+    },
+    {
+      "input": "Pass",
+      "expected": "通过"
+    },
+    {
+      "input": "Passed",
+      "expected": "通过"
+    },
+    {
+      "input": "pass",
+      "expected": "通过"
+    },
+    {
+      "input": "  Passed  ",
+      "expected": "通过"
+    },
+    {
+      "input": "Fail",
+      "expected": "失败"
+    },
+    {
+      "input": "Failed",
+      "expected": "失败"
+    },
+    {
+      "input": "Skip",
+      "expected": "跳过"
+    },
+    {
+      "input": "Skipped",
+      "expected": "跳过"
+    },
+    {
+      "input": "Need retest",
+      "expected": "需要复测"
+    },
+    {
+      "input": "Needs retest",
+      "expected": "需要复测"
+    },
+    {
+      "input": "Retest",
+      "expected": "需要复测"
+    },
+    {
+      "input": "Not run / Pass / Fail / Skip / Need retest",
+      "expected": "未执行"
+    },
+    {
+      "input": "未执行 / 通过 / 失败 / 跳过 / 需要复测",
+      "expected": "未执行"
+    },
+    {
+      "input": "通过 / 失败 / 跳过",
+      "expected": "通过"
+    },
+    {
+      "input": "Passed / Failed",
+      "expected": "通过"
+    },
+    {
+      "input": "To analyze",
+      "expected": "待分析"
+    },
+    {
+      "input": "Analyzed, to fix",
+      "expected": "已分析，待修复"
+    },
+    {
+      "input": "Analyzed, pending fix",
+      "expected": "已分析，待修复"
+    },
+    {
+      "input": "Analyzed",
+      "expected": "已分析"
+    },
+    {
+      "input": "Fixed (unverified)",
+      "expected": "已修复（未验证）"
+    },
+    {
+      "input": "Fixed (retest passed)",
+      "expected": "已修复（复测通过）"
+    },
+    {
+      "input": "Fix complete, pending retest",
+      "expected": "修复完成，待复测"
+    },
+    {
+      "input": "Retest passed",
+      "expected": "复测通过"
+    },
+    {
+      "input": "Retest failed",
+      "expected": "复测未通过"
+    },
+    {
+      "input": "Rejected",
+      "expected": "已拒绝"
+    },
+    {
+      "input": "Rejected (false positive, not a defect)",
+      "expected": "已拒绝"
+    },
+    {
+      "input": "Fixed",
+      "expected": "已修复"
+    },
+    {
+      "input": "Some new value",
+      "expected": "Some new value"
+    }
+  ],
+  "setMdField": [
+    {
+      "fixture": "zh/status.md",
+      "field": "状态",
+      "value": "通过",
+      "expectedText": "# FS0001 状态\n\n- **状态**: 通过\n- **最近执行时间**: 2026-10-01 10:00\n- **执行环境**: 测试环境 A\n- **执行轮次**: 第 3 轮（20261001_1000）\n\n## 最近结果\n\n- **失败原因**: 接口返回 500\n- **关联 bug_report**: bug_report/20261001_1000_FS0001_登录异常\n- **结果摘要**: code=500\n",
+      "expectedHit": true
+    },
+    {
+      "fixture": "en/status.md",
+      "field": "状态",
+      "value": "失败",
+      "expectedText": "# FS0001 Status\n\n- **Status**: Failed\n- **Last run time**: 2026-10-01 10:00\n- **Execution environment**: Test environment A\n- **Round**: Round 3 (20261001_1000)\n\n## Latest result\n\n- **Failure reason**: API returned 500\n- **Related bug_report**: bug_report/20261001_1000_FS0001_login-timeout\n- **Result summary**: code=500\n",
+      "expectedHit": true
+    },
+    {
+      "fixture": "en/status.md",
+      "field": "失败原因",
+      "value": "新的失败原因",
+      "expectedText": "# FS0001 Status\n\n- **Status**: Needs retest\n- **Last run time**: 2026-10-01 10:00\n- **Execution environment**: Test environment A\n- **Round**: Round 3 (20261001_1000)\n\n## Latest result\n\n- **Failure reason**: 新的失败原因\n- **Related bug_report**: bug_report/20261001_1000_FS0001_login-timeout\n- **Result summary**: code=500\n",
+      "expectedHit": true
+    },
+    {
+      "fixture": "mixed/status.md",
+      "field": "状态",
+      "value": "通过",
+      "expectedText": "# FS0001 状态\n\n- **Status**: Pass\n- **状态**: 通过\n- **Last run time**: 2026-10-02 11:00\n- **最近执行时间**: 2026-10-01 10:00\n- **失败原因**: 接口返回 500\n- **结果摘要**: code=500\n",
+      "expectedHit": true
+    },
+    {
+      "fixture": "mixed/en_target_zh_major.md",
+      "field": "状态",
+      "value": "失败",
+      "expectedText": "# FS0001 状态\n\n- **Status**: Failed\n- **执行环境**: 测试环境 A\n- **结果摘要**: code=0\n",
+      "expectedHit": true
+    },
+    {
+      "fixture": "en/append.md",
+      "field": "状态",
+      "value": "跳过",
+      "expectedText": "# FS0001_Login timeout\n\n- **Last run time**: 2026-10-01 10:00\n- **Failure reason**: timeout\n\n- **Status**: Skipped\n",
+      "expectedHit": true
+    },
+    {
+      "fixture": "zh/append.md",
+      "field": "状态",
+      "value": "需要复测",
+      "expectedText": "# FS0001_登录超时\n\n- **执行环境**: 测试环境 A\n\n- **状态**: 需要复测\n",
+      "expectedHit": true
+    },
+    {
+      "fixture": "mixed/en_major_append.md",
+      "field": "状态",
+      "value": "失败",
+      "expectedText": "# FS0002 Status\n\n- **Last run time**: 2026-10-02 10:00\n- **Failure reason**: timeout\n- **执行环境**: 测试环境 A\n\n- **Status**: Failed\n",
+      "expectedHit": true
+    },
+    {
+      "fixture": "__missing__.md",
+      "field": "状态",
+      "value": "通过",
+      "expectedText": null,
+      "expectedHit": false
+    }
+  ]
+}

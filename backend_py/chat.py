@@ -38,6 +38,7 @@ import time
 import db
 import dshevents
 import dshdriver
+import i18n
 import lib
 import runner
 import waitq
@@ -153,9 +154,14 @@ def _external_preflight(sid):
         return                      # 平台自持会话：池内原路
     # —— 以下为外部会话（用户在 dsh GUI 直跑/接管）：需要显式许可 ——
     if not _external_deliver_enabled():
-        raise DeliveryRefused(
-            "该会话是 dsh 直跑会话，平台已关闭外部会话投递"
-            f"（{EXTERNAL_DELIVER_ENV}=0），请到 dsh 会话窗口发送")
+        # key+vars：.message 仍是渲染后的中文（日志口径不变），i18n_key 供响应层
+        # 按请求语言查共享词条（Node chat.js 同一 key / 同一 env 变量）
+        raise i18n.localizable(
+            DeliveryRefused(
+                "该会话是 dsh 直跑会话，平台已关闭外部会话投递"
+                f"（{EXTERNAL_DELIVER_ENV}=0），请到 dsh 会话窗口发送"),
+            "该会话是 dsh 直跑会话，平台已关闭外部会话投递（{env}=0），请到 dsh 会话窗口发送",
+            {"env": EXTERNAL_DELIVER_ENV})
     if str(st.get("status") or "") == "unknown":
         # 宿主里没有活 agent（会话已结束/被销毁）：投递必然 404，别让用户白等
         raise DeliveryRefused("会话已结束，无法投递（宿主无活动 agent）")

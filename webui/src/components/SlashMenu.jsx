@@ -5,8 +5,10 @@
 //   键盘 ↑↓ 跳过置灰项(高亮只落在可执行项上); 非置灰项选中行为不变: onSelect(item)
 // 键盘: ↑↓ 移动, Enter 选中, Esc 关闭; 鼠标点击选中; 子串过滤(指令名/技能名)
 import { useEffect, useRef, useState } from 'react'
+import { useI18n } from '../utils/i18n'
 
 export default function SlashMenu({ open, query, items, onSelect, onClose, onDisabled }) {
+  const { t } = useI18n()
   const [idx, setIdx] = useState(0)
   const listRef = useRef(null)
 
@@ -61,7 +63,7 @@ export default function SlashMenu({ open, query, items, onSelect, onClose, onDis
   return (
     <div className="sess-slashmenu">
       {filtered.length === 0 ? (
-        <div className="sess-slash-empty">无匹配项</div>
+        <div className="sess-slash-empty">{t('无匹配项')}</div>
       ) : filtered.map((it, i) => (
         <button key={it.key} type="button" ref={i === idx ? listRef : undefined}
           className={'sess-slash-item' + (i === idx ? ' on' : '') + (it.dis ? ' dis' : '')}
@@ -69,7 +71,7 @@ export default function SlashMenu({ open, query, items, onSelect, onClose, onDis
           onClick={() => { if (it.dis) onDisabled?.(it); else onSelect(it) }}>
           <span className="sess-slash-key">{it.key || it.label}</span>
           <span className="sess-slash-desc">{it.desc}</span>
-          {it.type === 'cmd' && <span className="sess-slash-tag">命令</span>}
+          {it.type === 'cmd' && <span className="sess-slash-tag">{t('命令')}</span>}
           {it.type === 'skill' && <span className="sess-slash-tag">skill</span>}
         </button>
       ))}

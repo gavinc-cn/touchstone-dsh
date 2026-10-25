@@ -2,8 +2,13 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { useAppStore } from '../stores/app'
 import { bugApi, taskApi } from '../api'
 import { toast } from '../utils/toast'
-import { ST_LABEL, fmtTime, renderMd } from '../utils/renderMd'
+import { fmtTime, renderMd, stLabel } from '../utils/renderMd'
 import { absToMedia, projectRoots } from '../utils/mediaText'
+import { bugStatusLabel, caseStatusLabel } from '../utils/dataLabels'
+import {
+  BUG_FIXED, BUG_RETEST_PASS, CASE_FAIL, CASE_PASS, CASE_RETEST,
+} from '../utils/taskEnums'
+import { t, useI18n } from '../utils/i18n'
 import SessionView from './SessionView'
 import { Button } from '@/components/ui/button'
 import {
@@ -28,14 +33,32 @@ function lastTaskCls(s) {
   return 'pending'
 }
 function caseStatusCls(s) {
-  if (s === '通过') return 'pass'
-  if (s === '失败') return 'retest'
-  if (s === '需要复测') return 'run'
+  if (s === CASE_PASS) return 'pass'
+  if (s === CASE_FAIL) return 'retest'
+  if (s === CASE_RETEST) return 'run'
   return 'pending'
 }
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
 
+// 修复任务终点选项（与后端 STAGE_MATRIX['fix'] 一致；机器值不翻译）
+function fixEndOptions() {
+  return [
+    { v: 'analyze', label: t('报告分析') }, { v: 'fix', label: t('问题修复') },
+    { v: 'deploy', label: t('重新部署') }, { v: 'retest', label: t('复测') },
+  ]
+}
+// 复测范围选项（机器值 retest_only/deploy_retest/deploy_only 不翻译）
+function retestScopeOptions() {
+  return [
+    { v: 'retest_only', label: t('仅复测（现状行为，不部署）') },
+    { v: 'deploy_retest', label: t('重新部署 → 复测') },
+    { v: 'deploy_only', label: t('仅重新部署（不复测）') },
+  ]
+}
+
 export default function BugsTab({ project }) {
+  // 订阅语言切换（lang 变化即重渲染；文案用模块级 t 按当前语言求值）
+  useI18n()
   const projectId = project?.id
   const store = useAppStore()
   const bugs = store.bugs
@@ -64,16 +87,8 @@ export default function BugsTab({ project }) {
   const [rejectReason, setRejectReason] = useState('')
   const [retestDlg, setRetestDlg] = useState(false)
   const [retestScope, setRetestScope] = useState('retest_only')
-  // 任务终点选项（与后端 STAGE_MATRIX['fix'] 一致）
-  const FIX_ENDS = [
-    { v: 'analyze', label: '报告分析' }, { v: 'fix', label: '问题修复' },
-    { v: 'deploy', label: '重新部署' }, { v: 'retest', label: '复测' },
-  ]
-  const RETEST_SCOPES = [
-    { v: 'retest_only', label: '仅复测（现状行为，不部署）' },
-    { v: 'deploy_retest', label: '重新部署 → 复测' },
-    { v: 'deploy_only', label: '仅重新部署（不复测）' },
-  ]
+  const FIX_ENDS = fixEndOptions()
+  const RETEST_SCOPES = retestScopeOptions()
   // 模型已移到项目设置(项目弹窗), 修复任务创建时由服务端按项目模型回落
   // 用户是否手动改过控件(仅用于"不覆盖", 用 ref 避免轮询闭包读到旧 state);
   // 勾选即保存, 保存成功后清除对应 touched 标记
@@ -94,11 +109,19 @@ export default function BugsTab({ project }) {
   const chatRunning = chatTask?.status === 'running'
   const chatQueued = chatTask?.status === 'queued'
   // 对话页状态行：修例任务无提交/部署/复测选项，只在修复任务上展示
-  const chatStatusText = !chatTask ? '尚无修复/修例任务'
-    : `任务「${chatTask?.name}」 ${ST_LABEL[chatTask?.status] || chatTask?.status} · 轮次 ${chatTask?.current_round}`
-    + ` · 会话 ${chatTask?.session_id || '（首轮后生成）'}`
+  const chatStatusText = !chatTask ? t('尚无修复/修例任务')
+    : t('任务「{name}」 {status} · 轮次 {round}', {
+      name: chatTask?.name,
+      status: stLabel(chatTask?.status),
+      round: chatTask?.current_round,
+    })
+    + t(' · 会话 {sid}', { sid: chatTask?.session_id || t('（首轮后生成）') })
     + (chatTask?.task_type === 'fix'
-      ? ` · ${chatTask?.auto_commit ? '自动提交' : '不提交'}/${chatTask?.auto_deploy ? '自动部署' : '不部署'}/${chatTask?.auto_retest ? '自动复测' : '不复测'}`
+      ? t(' · {commit}/{deploy}/{retest}', {
+        commit: chatTask?.auto_commit ? t('自动提交') : t('不提交'),
+        deploy: chatTask?.auto_deploy ? t('自动部署') : t('不部署'),
+        retest: chatTask?.auto_retest ? t('自动复测') : t('不复测'),
+      })
       : '')
 
   /* ---------- 状态保存与恢复 ---------- */
@@ -167,18 +190,18 @@ export default function BugsTab({ project }) {
   // 修复任务 2s 轮询(仅修复 tab 打开时, 保持按钮/会话输入区状态新鲜)
   useEffect(() => {
     if (stab !== 'fix') return
-    const t = setInterval(() => { refreshFixPanel().catch(() => {}) }, 2000)
-    return () => clearInterval(t)
+    const timer = setInterval(() => { refreshFixPanel().catch(() => {}) }, 2000)
+    return () => clearInterval(timer)
   }, [stab, curBugDir, projectId])
   // bug 详情 5s 轮询
   useEffect(() => {
-    const t = setInterval(() => { if (curBugDir) reloadDetail().catch(() => {}) }, 5000)
-    return () => clearInterval(t)
+    const timer = setInterval(() => { if (curBugDir) reloadDetail().catch(() => {}) }, 5000)
+    return () => clearInterval(timer)
   }, [curBugDir, projectId])
 
   /* ---------- 操作 ---------- */
   function openRetestDlg() {
-    if (!curBugDir) { toast('请先选择 bug 报告'); return }
+    if (!curBugDir) { toast(t('请先选择 bug 报告')); return }
     setRetestScope('retest_only')
     setRetestDlg(true)
   }
@@ -187,7 +210,7 @@ export default function BugsTab({ project }) {
       await taskApi.create(projectId, {
         task_type: 'retest_bug', bug_dir: curBugDir, retest_scope: retestScope,
       })
-      toast('复测任务已入队，可在「任务」标签页查看')
+      toast(t('复测任务已入队，可在「任务」标签页查看'))
       setRetestDlg(false)
       await store.loadTasks()
       await refreshFixPanel()
@@ -197,7 +220,7 @@ export default function BugsTab({ project }) {
   // 「用户附加要求」附加到首轮 prompt; 无任务则创建入队, 已结束则先写入意见与
   // 起止阶段再重启重跑(重启从第一轮开始, 用完整首轮 prompt, 意见随之下达 agent)
   function openFixDlg() {
-    if (!curBugDir) { toast('请先选择 bug 报告'); return }
+    if (!curBugDir) { toast(t('请先选择 bug 报告')); return }
     setFixOpinion(fixTask?.extra || '')
     setFixEnd(fixTask?.end_stage || 'fix')
     setFixDlg(true)
@@ -212,15 +235,15 @@ export default function BugsTab({ project }) {
           auto_commit: fixDraft.auto_commit,
           extra: opinion,
         })
-        toast('修复任务已入队')
+        toast(t('修复任务已入队'))
       } else {
-        if (fixRunning || fixQueued) { toast('任务运行中，请先停止再修复'); return }
+        if (fixRunning || fixQueued) { toast(t('任务运行中，请先停止再修复')); return }
         await taskApi.update(fixTaskId, {
           extra: opinion, auto_commit: fixDraft.auto_commit,
           start_stage: 'analyze', end_stage: fixEnd,
         })
         await taskApi.restart(fixTaskId)
-        toast('修复任务已重启入队')
+        toast(t('修复任务已重启入队'))
       }
       setFixDlg(false)
       setFixOpinion('')
@@ -234,10 +257,10 @@ export default function BugsTab({ project }) {
   // 沉淀 PITFALLS.md); 修例会话同样在「对话」标签常驻展示
   async function submitRejectDlg() {
     const reason = rejectReason.trim()
-    if (!reason) { toast('请填写拒绝理由'); return }
+    if (!reason) { toast(t('请填写拒绝理由')); return }
     try {
       await bugApi.reject(projectId, curBugDir, reason)
-      toast('已标记拒绝，修例任务已入队')
+      toast(t('已标记拒绝，修例任务已入队'))
       setRejectDlg(false)
       setRejectReason('')
       await store.loadTasks()
@@ -255,7 +278,7 @@ export default function BugsTab({ project }) {
     try {
       await taskApi.update(fixTaskIdRef.current, { [key]: val })
       fixTouchedRef.current = { ...fixTouchedRef.current, [key]: false }
-      toast('已保存，下次向 agent 发送指令时生效')
+      toast(t('已保存，下次向 agent 发送指令时生效'))
       await refreshFixPanel()
     } catch (e) { toast(e.message) }
   }
@@ -264,16 +287,16 @@ export default function BugsTab({ project }) {
     if (!chatTask) return
     try {
       await taskApi.stop(chatTask.id)
-      toast('已请求停止')
+      toast(t('已请求停止'))
       setTimeout(() => refreshFixPanel().catch(() => {}), 800)
     } catch (e) { toast(e.message) }
   }
   async function restartChat() {
-    if (!chatTask) { toast('尚无修复/修例任务'); return }
-    if (chatRunning || chatQueued) { toast('任务运行中，请先停止再重启'); return }
+    if (!chatTask) { toast(t('尚无修复/修例任务')); return }
+    if (chatRunning || chatQueued) { toast(t('任务运行中，请先停止再重启')); return }
     try {
       await taskApi.restart(chatTask.id)
-      toast('任务已重启入队')
+      toast(t('任务已重启入队'))
       await refreshFixPanel()
     } catch (e) { toast(e.message) }
   }
@@ -336,9 +359,9 @@ export default function BugsTab({ project }) {
       <label style={{ display: 'flex', gap: 5, alignItems: 'center', cursor: 'pointer', color: 'var(--text)' }}>
         <input type="checkbox" checked={fixDraft.auto_commit}
           onChange={(e) => toggleFixOpt('auto_commit', e.target.checked)} />
-        自动提交（修复完成后 git commit，不 push）
+        {t('自动提交（修复完成后 git commit，不 push）')}
       </label>
-      <span className="hint">部署/复测是否执行由「修复」弹窗中的任务终点决定（终点≥重新部署即部署、终点=复测即任务内复测）</span>
+      <span className="hint">{t('部署/复测是否执行由「修复」弹窗中的任务终点决定（终点≥重新部署即部署、终点=复测即任务内复测）')}</span>
     </div>
   )
 
@@ -347,25 +370,25 @@ export default function BugsTab({ project }) {
       {project && (
         <div className="bugwrap" ref={bugwrapEl}>
           <div className="bug-left">
-            <div className="bug-head">Bug 报告 <span className="dim">{bugs.length ? '共 ' + bugs.length : ''}</span></div>
+            <div className="bug-head">{t('Bug 报告')} <span className="dim">{bugs.length ? t('共 {n}', { n: bugs.length }) : ''}</span></div>
             <div className="bug-list scroll">
-              {!bugs.length && <div className="hint" style={{ padding: 12 }}>暂无 bug 报告</div>}
+              {!bugs.length && <div className="hint" style={{ padding: 12 }}>{t('暂无 bug 报告')}</div>}
               {bugs.map((b) => (
                 <div key={b.dir}
                   className={'bugitem' + (curBugDir === b.dir ? ' sel' : '')
                     + (isBugHistory(b.status) ? ' history' : '')}
-                  title={/已拒绝/.test(b.status || '') ? '已被拒绝的报告'
-                    : /复测通过/.test(b.status || '') ? '复测通过的历史报告' : undefined}
+                  title={/已拒绝/.test(b.status || '') ? t('已被拒绝的报告')
+                    : /复测通过/.test(b.status || '') ? t('复测通过的历史报告') : undefined}
                   onClick={() => selectBug(b.dir)}>
                   <div className="bt">{b.title}</div>
                   <div className="bmeta">
-                    <span className={'bug-status ' + bugStatusCls(b.status)}>{b.status || '—'}</span>
+                    <span className={'bug-status ' + bugStatusCls(b.status)}>{bugStatusLabel(t, b.status) || '—'}</span>
                     {b.last_task && (
                       <span className={'bug-status ' + lastTaskCls(b.last_task.status)}>
-                        {b.last_task.name} · {ST_LABEL[b.last_task.status] || b.last_task.status}
+                        {b.last_task.name} · {stLabel(b.last_task.status)}
                       </span>
                     )}
-                    <span>{b.cases.length} 用例</span>
+                    <span>{t('{n} 用例', { n: b.cases.length })}</span>
                   </div>
                 </div>
               ))}
@@ -377,18 +400,21 @@ export default function BugsTab({ project }) {
               <div className={'bug-content scroll' + (stab === 'fix' ? ' fix-mode' : '')}>
                 <div className="head">
                   <h3>{detail.title}</h3>
-                  <span className={'bug-status ' + bugStatusCls(detail.status)}>{detail.status || '—'}</span>
+                  <span className={'bug-status ' + bugStatusCls(detail.status)}>{bugStatusLabel(t, detail.status) || '—'}</span>
                 </div>
                 <div className="mut">
                   bug_report/{detail.dir}
-                  {detail.last_task && <> · 最近任务「{detail.last_task.name}」:{ST_LABEL[detail.last_task.status] || detail.last_task.status}</>}
+                  {detail.last_task && <> · {t('最近任务「{name}」:{status}', {
+                    name: detail.last_task.name,
+                    status: stLabel(detail.last_task.status),
+                  })}</>}
                   · <Button variant="ghost" size="sm" className="inline-flex h-5 px-1.5 text-[calc(11px*var(--fs))]" onClick={() => reloadDetail()}>
-                    <RefreshCw /> 刷新
+                    <RefreshCw /> {t('刷新')}
                   </Button>
                 </div>
                 <div className="sub-tabs">
-                  <span className={'sub-tab' + (stab === 'report' ? ' on' : '')} onClick={() => openStab('report')}>报告</span>
-                  <span className={'sub-tab' + (stab === 'fix' ? ' on' : '')} onClick={() => openStab('fix')}>对话</span>
+                  <span className={'sub-tab' + (stab === 'report' ? ' on' : '')} onClick={() => openStab('report')}>{t('报告')}</span>
+                  <span className={'sub-tab' + (stab === 'fix' ? ' on' : '')} onClick={() => openStab('fix')}>{t('对话')}</span>
                 </div>
                 {stab === 'report' ? (
                   <>
@@ -396,36 +422,33 @@ export default function BugsTab({ project }) {
                       {/* 已拒绝的报告不再提供复测/拒绝入口，修复仍可用（重新打开的处理路径） */}
                       {!/已拒绝/.test(detail.status || '') && (
                         <Button variant="outline" size="sm" onClick={openRetestDlg}>
-                          <Play /> 复测
+                          <Play /> {t('复测')}
                         </Button>
                       )}
                       {/* 未修复完成(待分析/已分析/复测未通过/已拒绝)时直接提供修复入口 */}
-                      {!['复测通过', '已修复'].some((s) => (detail.status || '').includes(s)) && (
+                      {![BUG_RETEST_PASS, BUG_FIXED].some((s) => (detail.status || '').includes(s)) && (
                         <Button size="sm" onClick={openFixDlg}>
-                          <Wrench /> 修复
+                          <Wrench /> {t('修复')}
                         </Button>
                       )}
                       {!/已拒绝/.test(detail.status || '') && (
                         <Button variant="outline" size="sm"
                           onClick={() => { setRejectReason(''); setRejectDlg(true) }}>
-                          <Ban /> 拒绝
+                          <Ban /> {t('拒绝')}
                         </Button>
                       )}
-                      <span className="hint">复测/修复/拒绝都会创建任务（固定一轮）执行；
-                        复测后若关联用例全部通过，bug 状态自动改为「已修复」；
-                        拒绝会标记「已拒绝」并按理由修正关联用例；
-                        修复/修例过程在「对话」标签页实时查看</span>
+                      <span className="hint">{t('复测/修复/拒绝都会创建任务（固定一轮）执行；\n复测后若关联用例全部通过，bug 状态自动改为「已修复（复测通过）」；\n修复任务非复测终点完成时标记「修复完成，待复测」；\n拒绝会标记「已拒绝」并按理由修正关联用例；\n修复/修例过程在「对话」标签页实时查看')}</span>
                     </div>
                     {fixOptsBlock}
-                    <div className="sec-title">关联用例（{detail.cases.length}）</div>
+                    <div className="sec-title">{t('关联用例（{n}）', { n: detail.cases.length })}</div>
                     {detail.cases.length ? (
                       <Table className="text-xs">
                         <TableHeader>
                           <TableRow className="hover:bg-transparent">
                             <TableHead className="px-2">ID</TableHead>
-                            <TableHead className="px-2">名称</TableHead>
-                            <TableHead className="px-2">状态</TableHead>
-                            <TableHead className="px-2">最近执行</TableHead>
+                            <TableHead className="px-2">{t('名称')}</TableHead>
+                            <TableHead className="px-2">{t('状态')}</TableHead>
+                            <TableHead className="px-2">{t('最近执行')}</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -434,15 +457,15 @@ export default function BugsTab({ project }) {
                               <TableCell className="px-2 font-mono text-xs">{c.id}</TableCell>
                               <TableCell className="px-2">{c.name}</TableCell>
                               <TableCell className="px-2">
-                                <span className={'bug-status ' + caseStatusCls(c.status)}>{c.status || '—'}</span>
+                                <span className={'bug-status ' + caseStatusCls(c.status)}>{caseStatusLabel(t, c.status) || '—'}</span>
                               </TableCell>
                               <TableCell className="px-2 font-mono text-xs">{fmtTime(c.last_run)}</TableCell>
                             </TableRow>
                           ))}
                         </TableBody>
                       </Table>
-                    ) : <div className="hint">未解析到关联用例</div>}
-                    <div className="sec-title">完整内容（bug_report.md）</div>
+                    ) : <div className="hint">{t('未解析到关联用例')}</div>}
+                    <div className="sec-title">{t('完整内容（bug_report.md）')}</div>
                     <div className="md-body" dangerouslySetInnerHTML={mdHtml}></div>
                   </>
                 ) : (
@@ -451,12 +474,12 @@ export default function BugsTab({ project }) {
                     <div className="fix-controls">
                       {chatTask && (chatRunning || chatQueued) && (
                         <Button size="sm" variant="outline" onClick={stopChat}>
-                          <Square /> 停止
+                          <Square /> {t('停止')}
                         </Button>
                       )}
                       {chatTask && ['stopped', 'failed', 'done', 'interrupted'].includes(chatTask?.status) && (
                         <Button size="sm" variant="outline" onClick={restartChat}>
-                          <RotateCcw /> 重启任务
+                          <RotateCcw /> {t('重启任务')}
                         </Button>
                       )}
                       <span className="hint fix-status">{chatStatusText}</span>
@@ -467,14 +490,14 @@ export default function BugsTab({ project }) {
                       <SessionView task={chatTask} withQBar={false} />
                     ) : (
                       <div className="sess-empty" style={{ flex: 1 }}>
-                        尚无修复/修例会话。在「报告」标签页点击「修复」或「拒绝」创建任务后，对话会在这里实时展示。
+                        {t('尚无修复/修例会话。在「报告」标签页点击「修复」或「拒绝」创建任务后，对话会在这里实时展示。')}
                       </div>
                     )}
                   </div>
                 )}
               </div>
             ) : (
-              <div className="bug-empty">← 选择左侧 bug 报告查看详情；修复 / 复测会创建任务并放入「任务」标签页执行</div>
+              <div className="bug-empty">{t('← 选择左侧 bug 报告查看详情；修复 / 复测会创建任务并放入「任务」标签页执行')}</div>
             )}
           </div>
         </div>
@@ -483,16 +506,16 @@ export default function BugsTab({ project }) {
       <Dialog open={fixDlg} onOpenChange={setFixDlg}>
         <DialogContent className="modal">
           <DialogHeader className="text-left">
-            <DialogTitle className="text-sm">修复「{detail?.title}」</DialogTitle>
+            <DialogTitle className="text-sm">{t('修复「{title}」', { title: detail?.title })}</DialogTitle>
           </DialogHeader>
           <div className="form-col">
-            <label>修改意见（可选）</label>
+            <label>{t('修改意见（可选）')}</label>
             <Textarea rows={4} value={fixOpinion}
               onChange={(e) => setFixOpinion(e.target.value)}
-              placeholder="例如：只修第 3 节指出的空指针判断，不要动缓存层；留空则按报告推荐方案修复" />
+              placeholder={t('例如：只修第 3 节指出的空指针判断，不要动缓存层；留空则按报告推荐方案修复')} />
           </div>
           <div className="form-col">
-            <label>任务终点</label>
+            <label>{t('任务终点')}</label>
             <Select value={fixEnd} onValueChange={setFixEnd}>
               <SelectTrigger size="sm" className="min-w-[160px]"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -500,11 +523,11 @@ export default function BugsTab({ project }) {
               </SelectContent>
             </Select>
             <span className="hint" style={{ textAlign: 'left' }}>
-              起点=报告分析；终点≥重新部署时自动部署、终点=复测时任务内复测（复测通过自动标记已修复）
+              {t('起点=报告分析；终点=分析时标记「已分析」；终点≥重新部署时自动部署；终点=问题修复/重新部署时任务完成标记「修复完成，待复测」；终点=复测时任务内复测，全部用例通过标记「已修复（复测通过）」')}
             </span>
           </div>
           <DialogFooter className="flex-none">
-            <Button onClick={submitFixDlg}>{fixTaskId ? '重启修复' : '开始修复'}</Button>
+            <Button onClick={submitFixDlg}>{fixTaskId ? t('重启修复') : t('开始修复')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -512,20 +535,19 @@ export default function BugsTab({ project }) {
       <Dialog open={rejectDlg} onOpenChange={setRejectDlg}>
         <DialogContent className="modal">
           <DialogHeader className="text-left">
-            <DialogTitle className="text-sm">拒绝「{detail?.title}」</DialogTitle>
+            <DialogTitle className="text-sm">{t('拒绝「{title}」', { title: detail?.title })}</DialogTitle>
           </DialogHeader>
           <div className="form-col">
-            <label>拒绝理由（必填）</label>
+            <label>{t('拒绝理由（必填）')}</label>
             <Textarea rows={4} value={rejectReason}
               onChange={(e) => setRejectReason(e.target.value)}
-              placeholder="例如：误报——MCP 超时是环境抖动，不是协议实现问题" />
+              placeholder={t('例如：误报——MCP 超时是环境抖动，不是协议实现问题')} />
             <span className="hint" style={{ textAlign: 'left' }}>
-              确认后报告标记为「已拒绝」并调暗沉底；平台将创建修例任务：按理由修正关联用例，
-              并把教训记入案例库 PITFALLS.md，后续生成用例时避开同类误报
+              {t('确认后报告标记为「已拒绝」并调暗沉底；平台将创建修例任务：按理由修正关联用例，\n并把教训记入案例库 PITFALLS.md，后续生成用例时避开同类误报')}
             </span>
           </div>
           <DialogFooter className="flex-none">
-            <Button variant="destructive" onClick={submitRejectDlg}>确认拒绝</Button>
+            <Button variant="destructive" onClick={submitRejectDlg}>{t('确认拒绝')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -533,10 +555,10 @@ export default function BugsTab({ project }) {
       <Dialog open={retestDlg} onOpenChange={setRetestDlg}>
         <DialogContent className="modal">
           <DialogHeader className="text-left">
-            <DialogTitle className="text-sm">复测「{detail?.title}」</DialogTitle>
+            <DialogTitle className="text-sm">{t('复测「{title}」', { title: detail?.title })}</DialogTitle>
           </DialogHeader>
           <div className="form-col">
-            <label>任务范围</label>
+            <label>{t('任务范围')}</label>
             <Select value={retestScope} onValueChange={setRetestScope}>
               <SelectTrigger size="sm" className="min-w-[220px]"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -544,15 +566,14 @@ export default function BugsTab({ project }) {
               </SelectContent>
             </Select>
             <span className="hint" style={{ textAlign: 'left' }}>
-              仅复测且关联用例全部已固化 verify.py 时走平台脚本复测；范围含重新部署时由 agent 先按项目部署说明部署再复测
+              {t('仅复测且关联用例全部已固化 verify.py 时走平台脚本复测；范围含重新部署时由 agent 先按项目部署说明部署再复测')}
             </span>
           </div>
           <DialogFooter className="flex-none">
-            <Button onClick={submitRetestDlg}>开始复测</Button>
+            <Button onClick={submitRetestDlg}>{t('开始复测')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
   )
 }
-

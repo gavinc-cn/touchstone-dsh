@@ -67,7 +67,8 @@ import {
   MQ_MAX_BUCKETS, MQ_TTL, NO_REMOTE_ANSWER_HINT,
 } from './feishu.js';
 import { appConfig, inboundRunner, inboundStatus, inboundThreadAppId,
-  setInboundThread } from './feishu_cfg.js';
+  setInboundThread, userLang } from './feishu_cfg.js';
+import * as i18n from './i18n.js';
 import { _LAST_EVENT_TS, doctor, provisionApply,
   provisionPublish } from './feishu_provision.js';
 import { FeishuRestError } from './feishu_rest.js';
@@ -475,6 +476,18 @@ export const HELP_TEXT = 'Touchstone 指令（单聊可用）：\n'
   + '（参数用法与上面对应中文指令一致）';
 
 /**
+ * 帮助文本（T12b）：`HELP_TEXT` 是中文原文（即词典 key），`lang` 决定查表。
+ * **指令词不译**（帮助/接入/绑定/作答…）：`INTENT_RULES` 只认这些中文词与 `/别名`，
+ * 英文说明里保留原词用户才照着发得出来（R23：slash 注册 schema 仍是中文，只有
+ * 回复/帮助本地化）。zh 分支与旧常量逐字节相同。
+ * @param {'zh'|'en'|string} [lang]
+ * @returns {string}
+ */
+export function helpText(lang = 'zh') {
+  return i18n.t('api', HELP_TEXT, lang);
+}
+
+/**
  * 规则意图表（**顺序即优先级**，首个命中即返回）。**存 Python 原文**（与 oracle 的
  * `(action, pattern)` 元组同形，便于对拍）；匹配走 `INTENT_RES` 的翻译版。
  */
@@ -626,6 +639,22 @@ export function parseIntent(text) {
 // toast / DM（`feishu.py:1865-1881` / `2202-2204`）
 // ==========================================================================
 
+/**
+ * 绑定身份 → 出站语言（绝不抛错）：`options.lang` 显式传入优先（单测/对拍用），否则按
+ * 绑定用户偏好解析（R22：`user_prefs(user_id, 0)["lang"]`，缺失/坏值/读库异常 ⇒ zh）。
+ * @param {object} binding
+ * @param {{lang?: string, db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
+ * @returns {'zh'|'en'}
+ */
+function langOfBinding(binding, options = {}) {
+  if (options.lang) return options.lang;
+  try {
+    return userLang(requireKey(binding, 'user_id'), options);
+  } catch {
+    return 'zh';
+  }
+}
+
 /** `_toast`（2202-2204）：键序 `type → content`，kind 不校验 */
 export function toast(kind, content) {
   return { toast: { type: kind, content } };
@@ -636,13 +665,15 @@ export function toast(kind, content) {
  * `ok = reply.startswith(("已收下", "✅"))`（元组 = OR）；`reply is None` ⇒ `null`；
  * **空串走 error 分支**（1868 只判 `is None`）。
  */
-export function toastFor(reply) {
+export function toastFor(reply, lang = 'zh') {
   if (reply === null || reply === undefined) return null;
+  // 成功前缀与执行器约定对齐；英文成功回执同样以 ✅ 开头（见各执行器英文译法）
   const ok = reply.startsWith('已收下') || reply.startsWith('✅');
   return {
     toast: {
       type: ok ? 'success' : 'error',
-      content: ok ? '已收下，详情看机器人单聊' : '操作失败，详情看机器人单聊',
+      content: i18n.t('api', ok ? '已收下，详情看机器人单聊'
+        : '操作失败，详情看机器人单聊', lang),
     },
   };
 }
@@ -821,20 +852,26 @@ export function multiAnswerParts(token) {
  * 返回 `[answers, err]`；**err 非空即 answers 为 `null`**（不提交半份）。阶段一归一/查重/缺题，
  * 阶段二按**题号升序**逐题造载荷（`wire` 走 `str()`，序号形态不去重）。
  */
-export function multiAnswers(qs, parts) {
+export function multiAnswers(qs, parts, options = {}) {
+  const lang = options.lang || 'zh';
   const n = qs.length;
   const seen = new Map();
   for (const [no, val] of parts) {
-    if (no < 1 || no > n) return [null, `题号 ${no} 无效（本提问共 ${n} 题）`];
-    if (seen.has(no)) return [null, `第 ${no} 题重复作答`];
+    if (no < 1 || no > n) {
+      return [null, i18n.t('api', '题号 {no} 无效（本提问共 {n} 题）', lang, { no, n })];
+    }
+    if (seen.has(no)) return [null, i18n.t('api', '第 {no} 题重复作答', lang, { no })];
     seen.set(no, pyStripStrict(pyOr(val, '')));
   }
   const missing = [];
   for (let i = 1; i <= n; i += 1) if (!seen.has(i)) missing.push(i);
   if (missing.length > 0) {
-    const heads = missing.map((i) =>
-      `第 ${i} 题（${pyOr(dget(pyOr(qs[i - 1], {}), 'header'), '未命名')}）`).join('、');
-    return [null, `还差 ${heads} 未作答，请一次答全 ${n} 题`];
+    const unnamed = i18n.t('api', '未命名', lang);
+    const sep = i18n.t('api', '、', lang);
+    const heads = missing.map((i) => i18n.t('api', '第 {no} 题（{name}）', lang,
+      { no: i, name: pyOr(dget(pyOr(qs[i - 1], {}), 'header'), unnamed) })).join(sep);
+    return [null, i18n.t('api', '还差 {heads} 未作答，请一次答全 {n} 题', lang,
+      { heads, n })];
   }
   const out = [];
   for (let i = 1; i <= n; i += 1) {
@@ -844,23 +881,34 @@ export function multiAnswers(qs, parts) {
     const opts = pyOr(dget(q, 'options'), []);
     const multi = pyTruthy(dget(q, 'multi_select'));
     if (INDEX_CSV.test(val)) {                              // 序号形态（单个/逗号多选）
-      if (!pyTruthy(opts)) return [null, `第 ${i} 题没有选项，请直接写回答文字`];
+      if (!pyTruthy(opts)) {
+        return [null, i18n.t('api', '第 {no} 题没有选项，请直接写回答文字', lang,
+          { no: i })];
+      }
       const idxs = val.split(INDEX_CSV_SPLIT).map(pyInt);
       if (idxs.some((x) => x < 1 || x > opts.length)) {
         return [null, opts.length > 1
-          ? `第 ${i} 题选项序号无效（共 ${opts.length} 个选项）`
-          : `第 ${i} 题只有一个选项，序号填 1`];
+          ? i18n.t('api', '第 {no} 题选项序号无效（共 {count} 个选项）', lang,
+            { no: i, count: opts.length })
+          : i18n.t('api', '第 {no} 题只有一个选项，序号填 1', lang, { no: i })];
       }
-      if (idxs.length > 1 && !multi) return [null, `第 ${i} 题为单选，请只给一个序号`];
+      if (idxs.length > 1 && !multi) {
+        return [null, i18n.t('api', '第 {no} 题为单选，请只给一个序号', lang, { no: i })];
+      }
       const ids = idxs.map((x) => pyStr(pyOr(dget(pyOr(opts[x - 1], {}), 'id'), '')));
       if (ids.length > 1) out.push({ wire, kind: 'multi', option_ids: ids });
       else out.push({ wire, kind: 'single', option_id: ids[0] });
       continue;
     }
-    if (!pyTruthy(val)) return [null, `第 ${i} 题未作答`];
-    if (pyLen(val) > 2000) return [null, `第 ${i} 题自定义输入过长（限 2000 字）`];
+    if (!pyTruthy(val)) {
+      return [null, i18n.t('api', '第 {no} 题未作答', lang, { no: i })];
+    }
+    if (pyLen(val) > 2000) {
+      return [null, i18n.t('api', '第 {no} 题自定义输入过长（限 2000 字）', lang, { no: i })];
+    }
     if (!pyTruthy(dget(q, 'allow_other', true))) {
-      return [null, `第 ${i} 题不支持自定义输入，请给选项序号`];
+      return [null, i18n.t('api', '第 {no} 题不支持自定义输入，请给选项序号', lang,
+        { no: i })];
     }
     out.push({ wire, kind: 'other', text: val });
   }
@@ -893,12 +941,15 @@ export async function findCards(userId, key, options = {}) {
  * 成功时第二项是**空串**（2093）⇒ 调用方必须用 `is None` 判（本文件两处都判 `null`）。
  */
 export async function findUserCard(userId, key, options = {}) {
+  const lang = options.lang || 'zh';
   const hits = await findCards(userId, key, options);
   if (hits.length === 0) {
-    return [null, `没有找到匹配「${pyStr(key)}」的卡片（仅搜你自己的项目；支持 id 前缀/标题包含）`];
+    return [null, i18n.t('api',
+      '没有找到匹配「{key}」的卡片（仅搜你自己的项目；支持 id 前缀/标题包含）',
+      lang, { key: pyStr(key) })];
   }
   if (hits.length > 1) {
-    const lines = ['匹配到多张卡，请用更精确的 id 或关键字：'];
+    const lines = [i18n.t('api', '匹配到多张卡，请用更精确的 id 或关键字：', lang)];
     for (const [p, c] of hits.slice(0, 6)) {          // 最多 6 条
       lines.push(`· #${c.id} [${p.name}] ${pySlice(pyOr(c.title, ''), 30)}`);
     }
@@ -907,32 +958,58 @@ export async function findUserCard(userId, key, options = {}) {
   return [hits[0], ''];
 }
 
+/** 看板列展示值（键 = 协议 token `todo/doing/…`，不译；未知键原样返回）。 */
+function colLabel(key, lang = 'zh') {
+  const label = lookupLabel(COL_LABELS, key);
+  return label === key ? key : i18n.t('api', label, lang);
+}
+
+/** 任务状态展示值（键 = DB 状态 token；未知键原样返回）。 */
+function taskStatus(key, lang = 'zh') {
+  const label = lookupLabel(TASK_STATUS, key);
+  return label === key ? key : i18n.t('api', label, lang);
+}
+
 /** `_card_detail`（2563-2574）：列位/阻塞原因/最近错误，末尾一行固定引导（`%s` 五次同值） */
-export function cardDetail(p, c) {
+export function cardDetail(p, c, lang = 'zh') {
   const lines = [
-    `卡片 #${c.id} [${p.name}] ${pySlice(pyOr(c.title, ''), 40)}`,
-    `状态：${lookupLabel(COL_LABELS, c.column_key)}`,
+    i18n.t('api', '卡片 #{cid} [{project}] {title}', lang,
+      { cid: c.id, project: p.name, title: pySlice(pyOr(c.title, ''), 40) }),
+    i18n.t('api', '状态：{status}', lang,
+      { status: colLabel(c.column_key, lang) }),
   ];
   if (c.column_key === 'blocked') {
-    lines.push(`阻塞原因：${pyOr(pyOr(dget(c, 'block_text'), dget(c, 'block_kind')), '未知')}`);
+    lines.push(i18n.t('api', '阻塞原因：{reason}', lang, {
+      reason: pyOr(pyOr(dget(c, 'block_text'), dget(c, 'block_kind')),
+        i18n.t('api', '未知', lang)),
+    }));
   }
-  if (pyTruthy(dget(c, 'last_error'))) lines.push(`最近错误：${pySlice(c.last_error, 120)}`);
-  lines.push('回复「作答 %s <选项序号|文字>」回复提问；「同意 %s」/「拒绝 %s」'
-    .concat('处理审批；「通过 %s」完成审核；「驳回 %s 意见」打回')
-    .replaceAll('%s', pyStr(c.id)));
+  if (pyTruthy(dget(c, 'last_error'))) {
+    lines.push(i18n.t('api', '最近错误：{error}', lang,
+      { error: pySlice(c.last_error, 120) }));
+  }
+  lines.push(i18n.t('api',
+    '回复「作答 {cid} <选项序号|文字>」回复提问；「同意 {cid}」/「拒绝 {cid}」'
+    + '处理审批；「通过 {cid}」完成审核；「驳回 {cid} 意见」打回',
+    lang, { cid: c.id }));
   return lines.join('\n');
 }
 
 /** `_board_summary`（2577-2596）：任务计数 + 逐任务点名（不截条数）+ 五列计数 + 阻塞卡（≤5） */
 export async function boardSummary(p, options = {}) {
   const d = dep(options);
+  const lang = options.lang || 'zh';
   const tasks = pyOr(d.db.listTasks(dget(p, 'id'), options), []);
   const nRun = tasks.filter((t) => t.status === 'running').length;
   const nQue = tasks.filter((t) => t.status === 'queued').length;
-  const lines = [`[${p.name}] 任务：运行中 ${nRun} / 排队 ${nQue}（共 ${tasks.length}）`];
+  const lines = [i18n.t('api',
+    '[{name}] 任务：运行中 {running} / 排队 {queued}（共 {total}）', lang,
+    { name: p.name, running: nRun, queued: nQue, total: tasks.length })];
   for (const t of tasks) {
     if (t.status === 'running' || t.status === 'queued') {
-      lines.push(`· #${t.id} ${pySlice(t.name, 30)}（${lookupLabel(TASK_STATUS, t.status)}）`);
+      lines.push(i18n.t('api', '· #{tid} {name}（{status}）', lang, {
+        tid: t.id, name: pySlice(t.name, 30), status: taskStatus(t.status, lang),
+      }));
     }
   }
   const cards = d.db.listBoardCards(dget(p, 'id'), options).map((c) => ({ ...c }));
@@ -940,12 +1017,18 @@ export async function boardSummary(p, options = {}) {
   for (const c of cards) {
     byCol[c.column_key] = (Object.hasOwn(byCol, c.column_key) ? byCol[c.column_key] : 0) + 1;
   }
-  lines.push('看板：' + COL_ORDER.map((k) =>
-    `${lookupLabel(COL_LABELS, k)}${Object.hasOwn(byCol, k) ? byCol[k] : 0}`).join(' '));
+  lines.push(i18n.t('api', '看板：', lang) + COL_ORDER.map((k) =>
+    i18n.t('api', '{label}{count}', lang, {
+      label: colLabel(k, lang),
+      count: Object.hasOwn(byCol, k) ? byCol[k] : 0,
+    })).join(' '));
   const blocked = cards.filter((c) => c.column_key === 'blocked');
   for (const c of blocked.slice(0, 5)) {
-    lines.push(`⛔ #${c.id} ${pySlice(pyOr(c.title, ''), 30)}`
-      + `（${pyOr(pyOr(dget(c, 'block_text'), dget(c, 'block_kind')), '')}）`);
+    lines.push(i18n.t('api', '⛔ #{cid} {title}（{reason}）', lang, {
+      cid: c.id,
+      title: pySlice(pyOr(c.title, ''), 30),
+      reason: pyOr(pyOr(dget(c, 'block_text'), dget(c, 'block_kind')), ''),
+    }));
   }
   return lines.join('\n');
 }
@@ -956,13 +1039,15 @@ export async function boardSummary(p, options = {}) {
  */
 export async function resolveProject(binding, name, options = {}) {
   const d = dep(options);
+  const lang = options.lang || 'zh';
   const userId = requireKey(binding, 'user_id');
   const projects = d.db.listProjects(userId, options);
   if (pyTruthy(name)) {
     for (const p of projects) if (p.name === name) return [p, ''];
     const hits = projects.filter((p) => p.name.includes(name));
     if (hits.length === 1) return [hits[0], ''];
-    return [null, `项目「${pyStr(name)}」不在你的项目列表`];
+    return [null, i18n.t('api', '项目「{name}」不在你的项目列表', lang,
+      { name: pyStr(name) })];
   }
   if (pyTruthy(requireKey(binding, 'default_project_id'))) {
     for (const p of projects) {
@@ -970,29 +1055,37 @@ export async function resolveProject(binding, name, options = {}) {
     }
   }
   if (projects.length === 1) return [projects[0], ''];
-  if (projects.length === 0) return [null, '你还没有项目，请先到站点创建'];
-  return [null, '请指明项目（回复「状态 项目名」），可选：'
-    + projects.slice(0, 8).map((p) => p.name).join('、')];
+  if (projects.length === 0) {
+    return [null, i18n.t('api', '你还没有项目，请先到站点创建', lang)];
+  }
+  return [null, i18n.t('api', '请指明项目（回复「状态 项目名」），可选：', lang)
+    + projects.slice(0, 8).map((p) => p.name)
+      .join(i18n.t('api', '、', lang))];
 }
 
 /** `_set_default_project`（2062-2079）：`project_id` 非 0 按 id，否则按名（精确 → 唯一包含） */
 export async function setDefaultProject(binding, name, projectId = 0, options = {}) {
   const d = dep(options);
+  // 回执语言 = 收件人（入口 executeIntent 已解析并向下传；直调时在此兜底解析一次）
+  const lang = langOfBinding(binding, options);
+  const opts = { ...options, lang };
   if (pyTruthy(projectId)) {
-    const project = await d.conv.projectById(binding, projectId, options);
-    if (project === null || project === undefined) return '项目不在你的项目列表';
+    const project = await d.conv.projectById(binding, projectId, opts);
+    if (project === null || project === undefined) {
+      return i18n.t('api', '项目不在你的项目列表', lang);
+    }
     // 必须走 R3 的同一个 set_default_project（换项目自动清当前会话在该函数内，2064-2065）
-    return await d.conv.setDefaultProject(binding, project, options);
+    return await d.conv.setDefaultProject(binding, project, opts);
   }
   const userId = requireKey(binding, 'user_id');
-  const projects = d.db.listProjects(userId, options);
+  const projects = d.db.listProjects(userId, opts);
   for (const p of projects) {
-    if (p.name === name) return await d.conv.setDefaultProject(binding, p, options);
+    if (p.name === name) return await d.conv.setDefaultProject(binding, p, opts);
   }
   const hits = projects.filter((p) => p.name.includes(name));
-  if (hits.length === 1) return await d.conv.setDefaultProject(binding, hits[0], options);
+  if (hits.length === 1) return await d.conv.setDefaultProject(binding, hits[0], opts);
   // ⚠歧义（≥2 命中）与零命中**同一文案**（与 `_resolve_project` 的「列可选」不同）
-  return `项目「${pyStr(name)}」不在你的项目列表`;
+  return i18n.t('api', '项目「{name}」不在你的项目列表', lang, { name: pyStr(name) });
 }
 
 // ==========================================================================
@@ -1002,41 +1095,50 @@ export async function setDefaultProject(binding, name, projectId = 0, options = 
 /** `_answer_by_token`（2362-2448）：作答单题/多题提问，返回回执文案（恒非 None） */
 export async function answerByToken(p, c, token, options = {}) {
   const d = dep(options);
+  const lang = options.lang || 'zh';
   const st = d.board.interactionOfSid(pyOr(c.session_id, ''));
   if (!pyTruthy(st) || !pyTruthy(dget(st, 'pending'))) {
-    return `卡片 #${c.id} 当前没有等待中的提问`;
+    return i18n.t('api', '卡片 #{cid} 当前没有等待中的提问', lang, { cid: c.id });
   }
   if (dget(st, 'kind') === 'approval') {
-    return `该等待是工具审批，请回复「同意 ${c.id}」或「拒绝 ${c.id}」`;
+    return i18n.t('api', '该等待是工具审批，请回复「同意 {cid}」或「拒绝 {cid}」', lang,
+      { cid: c.id });
   }
-  if (!pyTruthy(dget(st, 'answerable'))) return NO_REMOTE_ANSWER_HINT;
+  if (!pyTruthy(dget(st, 'answerable'))) return d.feishu.noRemoteAnswerHint(lang);
   const qs = pyOr(dget(st, 'questions'), []);      // 单题分支**不过滤假值**（2378/2406）
   if (qs.length > 1) {
     let parts = multiAnswerParts(token);
     const staged = mqPeek(c.id, dget(st, 'qid'), options);   // 同一个 st 快照（2381/2397/2398）
     if (parts === null) {
-      if (!pyTruthy(staged)) return d.feishu.multiAnswerHelp(c.id, qs);   // 复用 M7 实现（2384）
+      if (!pyTruthy(staged)) {
+        return d.feishu.multiAnswerHelp(c.id, qs, lang);   // 复用 M7 实现（2384）
+      }
       parts = Object.entries(staged).map(([k, v]) => [Number(k), v])
         .sort((a, b) => a[0] - b[0]);
     } else {
       const nos = parts.map(([no]) => no);
       const dupAt = nos.findIndex((x) => nos.filter((y) => y === x).length > 1);
-      if (dupAt >= 0) return `第 ${nos[dupAt]} 题重复作答`;
+      if (dupAt >= 0) {
+        return i18n.t('api', '第 {no} 题重复作答', lang, { no: nos[dupAt] });
+      }
       const merged = new Map(Object.entries(staged).map(([k, v]) => [Number(k), v]));
       for (const [no, val] of parts) merged.set(no, val);          // 文本值覆盖暂存值
       parts = [...merged.entries()].sort((a, b) => a[0] - b[0]);
     }
-    const [answers, err] = multiAnswers(qs, parts);
+    const [answers, err] = multiAnswers(qs, parts, options);
     if (pyTruthy(err)) return err;                    // ⚠多题分支的 err **无前缀**（2396）
     const err2 = await d.board.answerInteraction(p, c, dget(st, 'qid'), answers, options);
     mqDrop(c.id, dget(st, 'qid'), options);           // 提交后被消费（成功与否都清，2398）
-    if (pyTruthy(err2)) return `作答失败：${err2}`;
-    return `已收下：卡片 #${c.id} ${answers.length} 道作答，排队送达中`;
+    if (pyTruthy(err2)) {
+      return i18n.t('api', '作答失败：{err}', lang, { err: pyStr(err2) });
+    }
+    return i18n.t('api', '已收下：卡片 #{cid} {n} 道作答，排队送达中', lang,
+      { cid: c.id, n: answers.length });
   }
   if (multiAnswerParts(token) !== null) {
     // 单题收到「1:2」这类逐题语法：明确纠正，别当自由文本提交（2402-2405）
-    return `该提问只有一道题，请回复「作答 ${c.id} <选项序号>」`
-      + `或「作答 ${c.id} <文字>」`;
+    return i18n.t('api', '该提问只有一道题，请回复「作答 {cid} <选项序号>」'
+      + '或「作答 {cid} <文字>」', lang, { cid: c.id });
   }
   const q0 = qs.length > 0 ? qs[0] : {};
   const opts = pyOr(pyOr(dget(q0, 'options'), null), pyOr(dget(st, 'options'), []));  // 两级兜底
@@ -1045,32 +1147,49 @@ export async function answerByToken(p, c, token, options = {}) {
   if (INDEX_CSV.test(token)) {
     const idxs = token.split(INDEX_CSV_SPLIT).map(pyInt);
     if (idxs.some((i) => i < 1 || i > opts.length)) {
-      return pyTruthy(opts) ? `选项序号无效，可回复：${optList}` : '该提问没有可选选项';
+      return pyTruthy(opts)
+        ? i18n.t('api', '选项序号无效，可回复：{options}', lang, { options: optList })
+        : i18n.t('api', '该提问没有可选选项', lang);
     }
     if (idxs.length === 1) {
       const opt = opts[idxs[0] - 1];
       const err = await d.board.answerInteraction(p, c, dget(st, 'qid'),
         [{ wire, kind: 'single', option_id: dget(pyOr(opt, {}), 'id') }], options);
-      if (pyTruthy(err)) return `作答失败：${err}`;
-      return `已收下：卡片 #${c.id} 选择「${dget(pyOr(opt, {}), 'label', '')}」，排队送达中`;
+      if (pyTruthy(err)) {
+        return i18n.t('api', '作答失败：{err}', lang, { err: pyStr(err) });
+      }
+      return i18n.t('api', '已收下：卡片 #{cid} 选择「{label}」，排队送达中', lang,
+        { cid: c.id, label: dget(pyOr(opt, {}), 'label', '') });
     }
-    if (!pyTruthy(dget(q0, 'multi_select'))) return '该问题不支持多选，请回复单个选项序号';
+    if (!pyTruthy(dget(q0, 'multi_select'))) {
+      return i18n.t('api', '该问题不支持多选，请回复单个选项序号', lang);
+    }
     const chosen = idxs.map((i) => opts[i - 1]);
     const err = await d.board.answerInteraction(p, c, dget(st, 'qid'),
       [{ wire, kind: 'multi', option_ids: chosen.map((o) => dget(pyOr(o, {}), 'id')) }], options);
-    if (pyTruthy(err)) return `作答失败：${err}`;
-    const labels = chosen.map((o) => dget(pyOr(o, {}), 'label', '')).join('、');
-    return `已收下：卡片 #${c.id} 多选「${labels}」，排队送达中`;
+    if (pyTruthy(err)) {
+      return i18n.t('api', '作答失败：{err}', lang, { err: pyStr(err) });
+    }
+    const labels = chosen.map((o) => dget(pyOr(o, {}), 'label', ''))
+      .join(i18n.t('api', '、', lang));
+    return i18n.t('api', '已收下：卡片 #{cid} 多选「{labels}」，排队送达中', lang,
+      { cid: c.id, labels });
   }
   if (!pyTruthy(dget(q0, 'allow_other'))) {          // 文本形态：须题目 allow_other（2437）
-    if (pyTruthy(opts)) return `该问题不支持自定义输入，可回复选项序号：${optList}`;
-    return '该提问无选项且不支持自定义输入，请到站点会话窗口处理';
+    if (pyTruthy(opts)) {
+      return i18n.t('api', '该问题不支持自定义输入，可回复选项序号：{options}', lang,
+        { options: optList });
+    }
+    return i18n.t('api', '该提问无选项且不支持自定义输入，请到站点会话窗口处理', lang);
   }
-  if (pyLen(token) > 2000) return '输入内容过长（限 2000 字）';
+  if (pyLen(token) > 2000) return i18n.t('api', '输入内容过长（限 2000 字）', lang);
   const err = await d.board.answerInteraction(p, c, dget(st, 'qid'),
     [{ wire, kind: 'other', text: token }], options);
-  if (pyTruthy(err)) return `作答失败：${err}`;
-  return `已收下：卡片 #${c.id} 自定义回答，排队送达中`;
+  if (pyTruthy(err)) {
+    return i18n.t('api', '作答失败：{err}', lang, { err: pyStr(err) });
+  }
+  return i18n.t('api', '已收下：卡片 #{cid} 自定义回答，排队送达中', lang,
+    { cid: c.id });
 }
 
 /**
@@ -1080,23 +1199,31 @@ export async function answerByToken(p, c, token, options = {}) {
  */
 export async function answerMultiClick(p, c, value, action, options = {}) {
   const d = dep(options);
+  const lang = options.lang || 'zh';
   const st = d.board.interactionOfSid(pyOr(c.session_id, ''));
   if (!pyTruthy(st) || !pyTruthy(dget(st, 'pending'))) {
-    return [`卡片 #${c.id} 当前没有等待中的提问`, toast('error', '提问已结束')];
+    return [i18n.t('api', '卡片 #{cid} 当前没有等待中的提问', lang, { cid: c.id }),
+      toast('error', i18n.t('api', '提问已结束', lang))];
   }
   if (dget(st, 'kind') !== 'question') {
-    return [`卡片 #${c.id} 当前等待的不是提问，请回复「同意 ${c.id}」或「拒绝 ${c.id}」`,
-      toast('error', '该等待是审批')];
+    return [i18n.t('api', '卡片 #{cid} 当前等待的不是提问，请回复「同意 {cid}」'
+      + '或「拒绝 {cid}」', lang, { cid: c.id }),
+    toast('error', i18n.t('api', '该等待是审批', lang))];
   }
   if (!pyTruthy(dget(st, 'answerable'))) {
-    return [NO_REMOTE_ANSWER_HINT, toast('error', '请到 dsh 会话窗口作答')];
+    return [d.feishu.noRemoteAnswerHint(lang),
+      toast('error', i18n.t('api', '请到 dsh 会话窗口作答', lang))];
   }
   const qs = pyOr(dget(st, 'questions'), []).filter((q) => pyTruthy(q));   // 过滤假值题（2227）
   const n = qs.length;
-  if (n < 1) return [`卡片 #${c.id} 当前没有等待中的提问`, toast('error', '提问已结束')];
+  if (n < 1) {
+    return [i18n.t('api', '卡片 #{cid} 当前没有等待中的提问', lang, { cid: c.id }),
+      toast('error', i18n.t('api', '提问已结束', lang))];
+  }
   if (n === 1 && !pyTruthy(dget(pyOr(qs[0], {}), 'multi_select'))) {
-    return [`该提问是单选题，请用卡片上的选项按钮，或回复「作答 ${c.id} <选项序号>」`,
-      toast('error', '单题单选请用按钮')];
+    return [i18n.t('api', '该提问是单选题，请用卡片上的选项按钮，或回复'
+      + '「作答 {cid} <选项序号>」', lang, { cid: c.id }),
+    toast('error', i18n.t('api', '单题单选请用按钮', lang))];
   }
   let no = 0;
   try {
@@ -1107,58 +1234,80 @@ export async function answerMultiClick(p, c, value, action, options = {}) {
     else throw e;
   }
   if (no < 1 || no > n) {
-    return ['题号无效（卡片可能已过期），请重新作答', toast('error', '题号无效')];
+    return [i18n.t('api', '题号无效（卡片可能已过期），请重新作答', lang),
+      toast('error', i18n.t('api', '题号无效', lang))];
   }
   const q = pyOr(qs[no - 1], {});
   const opts = pyOr(dget(q, 'options'), []);
   if (!pyTruthy(opts)) {
-    return [`第 ${no} 题没有选项，请回复「作答 ${c.id} ${no}:<文字>」`,
-      toast('error', '该题请写文字')];
+    return [i18n.t('api', '第 {no} 题没有选项，请回复「作答 {cid} {no}:<文字>」', lang,
+      { no, cid: c.id }),
+    toast('error', i18n.t('api', '该题请写文字', lang))];
   }
   const idxs = multiClickIndex(action, pyTruthy(dget(q, 'multi_select')), `mq${c.id}_${no}`);
   if (idxs === null) {
-    return [`没收到你选的选项，请改用「作答 ${c.id} ${no}:<选项序号>」`,
-      toast('error', '未收到选项，请看单聊')];
+    return [i18n.t('api', '没收到你选的选项，请改用「作答 {cid} {no}:<选项序号>」', lang,
+      { cid: c.id, no }),
+    toast('error', i18n.t('api', '未收到选项，请看单聊', lang))];
   }
   if (idxs.some((i) => i < 1 || i > opts.length)) {
-    return [`第 ${no} 题选项序号无效（共 ${opts.length} 个选项）`, toast('error', '选项无效')];
+    return [i18n.t('api', '第 {no} 题选项序号无效（共 {count} 个选项）', lang,
+      { no, count: opts.length }), toast('error', i18n.t('api', '选项无效', lang))];
   }
   if (idxs.length > 1 && !pyTruthy(dget(q, 'multi_select'))) {
-    return [`第 ${no} 题为单选，请只选一项`, toast('error', '单选只能选一项')];
+    return [i18n.t('api', '第 {no} 题为单选，请只选一项', lang, { no }),
+      toast('error', i18n.t('api', '单选只能选一项', lang))];
   }
   // 与文本指令同一形态：去重 + 升序 + 半角逗号无空格（2257）
   const val = [...new Set(idxs)].sort((a, b) => a - b).map((i) => pyStr(i)).join(',');
   const [done, total, ready] = mqPut(c.id, dget(st, 'qid'), n, no, val, options);
   if (!ready) {
-    return ['', toast('success', `已记下第 ${no} 题（${done}/${total}）`)];  // 全角括号 + 半角斜杠
+    return ['', toast('success', i18n.t('api', '已记下第 {no} 题（{done}/{total}）', lang,
+      { no, done, total }))];  // 全角括号 + 半角斜杠
   }
   const parts = mqTake(c.id, dget(st, 'qid'), n, options);
   if (parts.length < n) {
     // 极端竞态（取走前被 TTL 清掉/并发取走）：不提交半份，让用户重选（2262-2265）
-    return ['作答未提交（暂存已过期），请重新逐题选择', toast('error', '暂存过期，请重选')];
+    return [i18n.t('api', '作答未提交（暂存已过期），请重新逐题选择', lang),
+      toast('error', i18n.t('api', '暂存过期，请重选', lang))];
   }
-  const [answers, err] = multiAnswers(qs, parts);
-  if (pyTruthy(err)) return [`作答未提交：${err}`, toast('error', '作答未提交')];
+  const [answers, err] = multiAnswers(qs, parts, options);
+  if (pyTruthy(err)) {
+    return [i18n.t('api', '作答未提交：{err}', lang, { err }), 
+      toast('error', i18n.t('api', '作答未提交', lang))];
+  }
   const err2 = await d.board.answerInteraction(p, c, dget(st, 'qid'), answers, options);
-  if (pyTruthy(err2)) return [`作答失败：${err2}`, toast('error', '作答失败')];
-  return [`已收下：卡片 #${c.id} ${answers.length} 道作答，排队送达中`,
-    toast('success', `${answers.length} 题已答完，已送达`)];
+  if (pyTruthy(err2)) {
+    return [i18n.t('api', '作答失败：{err}', lang, { err: pyStr(err2) }),
+      toast('error', i18n.t('api', '作答失败', lang))];
+  }
+  return [i18n.t('api', '已收下：卡片 #{cid} {n} 道作答，排队送达中', lang,
+    { cid: c.id, n: answers.length }),
+  toast('success', i18n.t('api', '{n} 题已答完，已送达', lang,
+    { n: answers.length }))];
 }
 
 /** `_decide_approval`（2451-2468）：审批决定（文本与卡片按钮共用）；`decision` 不校验 */
 export async function decideApproval(p, c, decision, scope, options = {}) {
   const d = dep(options);
+  const lang = options.lang || 'zh';
   const st = d.board.interactionOfSid(pyOr(c.session_id, ''));
   if (!pyTruthy(st) || !pyTruthy(dget(st, 'pending')) || dget(st, 'kind') !== 'approval') {
-    return `卡片 #${c.id} 当前没有等待中的审批（提问类请回复「作答 ${c.id} <选项序号|文字>」）`;
+    return i18n.t('api', '卡片 #{cid} 当前没有等待中的审批'
+      + '（提问类请回复「作答 {cid} <选项序号|文字>」）', lang, { cid: c.id });
   }
   const aid = pyStr(pyOr(dget(st, 'approval_id'), ''));
-  if (!pyTruthy(aid)) return '审批不存在或已过期，请到站点会话窗口处理';
+  if (!pyTruthy(aid)) {
+    return i18n.t('api', '审批不存在或已过期，请到站点会话窗口处理', lang);
+  }
   const err = await d.board.answerApproval(p, c, aid, decision, scope, options);
-  if (pyTruthy(err)) return `审批失败：${err}`;
-  const verb = decision === 'approved' ? '已批准' : '已拒绝';
-  const tail = scope === 'session' ? '（本会话内同类调用自动放行）' : '';
-  return `✅ 卡片 #${c.id} 审批${verb}${tail}，排队送达中`;
+  if (pyTruthy(err)) {
+    return i18n.t('api', '审批失败：{err}', lang, { err: pyStr(err) });
+  }
+  const verb = i18n.t('api', decision === 'approved' ? '已批准' : '已拒绝', lang);
+  const tail = scope === 'session' ? i18n.t('api', '（本会话内同类调用自动放行）', lang) : '';
+  return i18n.t('api', '✅ 卡片 #{cid} 审批{verb}{tail}，排队送达中', lang,
+    { cid: c.id, verb, tail });
 }
 
 // ==========================================================================
@@ -1172,6 +1321,7 @@ export async function decideApproval(p, c, decision, scope, options = {}) {
  */
 export async function executeBoardAction(binding, intent, senderOpenId, options = {}) {
   const d = dep(options);
+  const lang = options.lang || 'zh';
   const action = requireKey(intent, 'action');      // 2477 在 try 之外 ⇒ 缺键穿透
   const g = requireKey(intent, 'groups');
   const userId = requireKey(binding, 'user_id');
@@ -1184,43 +1334,61 @@ export async function executeBoardAction(binding, intent, senderOpenId, options 
   const [found, err] = await findUserCard(userId, key, options);
   if (found === null || found === undefined) return err;
   const [p, c] = found;
-  if (action === 'card') return cardDetail(p, c);
+  if (action === 'card') return cardDetail(p, c, lang);
   if (action === 'approve') {
     if (c.column_key !== 'review') {
-      return `卡片 #${c.id} 不在「待审核」列（当前 ${c.column_key}），无法通过`;
+      return i18n.t('api', '卡片 #{cid} 不在「待审核」列（当前 {column}），无法通过',
+        lang, { cid: c.id, column: c.column_key });
     }
-    const [, moveErr] = await d.board.moveCard(p, c.id, 'done', '', null, false, options);
+    const [, moveErr] = await d.board.moveCard(p, c.id, 'done', '', null, false, '', options);
     if (pyTruthy(moveErr)) {
       if (Object.hasOwn(moveErr, 'merge_pending')) {
         const mp = pyOr(dget(moveErr, 'merge_pending'), {});
-        return `卡片 #${pyStr(c.id)} 还有 ${pyStr(dget(mp, 'ahead', 0))} 个提交没回流主分支`
-          + `（${pyStr(dget(mp, 'branch', ''))} → ${pyStr(dget(mp, 'target', ''))}）；`
-          + '请在网页看板上点「通过」，选择「交给 agent 合并」或「仅通过（不合并）」';
+        return i18n.t('api',
+          '卡片 #{cid} 还有 {ahead} 个提交没回流主分支（{branch} → {target}）；'
+          + '请在网页看板上点「通过」，选择「交给 agent 合并」或「仅通过（不合并）」',
+          lang, {
+            cid: c.id,
+            ahead: pyStr(dget(mp, 'ahead', 0)),
+            branch: pyStr(dget(mp, 'branch', '')),
+            target: pyStr(dget(mp, 'target', '')),
+          });
       }
-      return '审核失败：' + pyStr(pyOr(pyOr(dget(moveErr, 'error'), dget(moveErr, 'blocked')),
-        '门禁拦截'));
+      return i18n.t('api', '审核失败：{error}', lang, {
+        error: pyStr(pyOr(pyOr(dget(moveErr, 'error'), dget(moveErr, 'blocked')),
+          i18n.t('api', '门禁拦截', lang))),
+      });
     }
-    return `✅ 卡片 #${c.id} ${pySlice(pyOr(c.title, ''), 30)} 已审核通过`;
+    return i18n.t('api', '✅ 卡片 #{cid} {title} 已审核通过', lang,
+      { cid: c.id, title: pySlice(pyOr(c.title, ''), 30) });
   }
   if (action === 'reject') {
     if (c.column_key !== 'review') {
-      return `卡片 #${c.id} 不在「待审核」列（当前 ${c.column_key}），无法驳回`;
+      return i18n.t('api', '卡片 #{cid} 不在「待审核」列（当前 {column}），无法驳回',
+        lang, { cid: c.id, column: c.column_key });
     }
     try {
-      await d.board.startCard(p, c, pyOr(g[1], ''), options);
+      // T13：卡片语言首轮冻结＝本入口已解析的**收件人**语言（R22 语言源），
+      // 不是命令文案/展示值；打回起跑同样走 startCard 的统一冻结点。
+      await d.board.startCard(p, c, pyOr(g[1], ''), lang, options);
     } catch (e) {
-      if (e instanceof Error) return `打回失败：${e.message}`;   // Python `str(RuntimeError)`
+      if (e instanceof Error) {
+        return i18n.t('api', '打回失败：{error}', lang, { error: e.message });
+      }
       throw e;
     }
-    return `↩️ 卡片 #${c.id} 已打回继续开发，打回意见将注入 agent`;
+    return i18n.t('api', '↩️ 卡片 #{cid} 已打回继续开发，打回意见将注入 agent',
+      lang, { cid: c.id });
   }
-  if (action === 'answer') return await answerByToken(p, c, pyStripStrict(pyOr(g[1], '')), options);
+  if (action === 'answer') {
+    return await answerByToken(p, c, pyStripStrict(pyOr(g[1], '')), options);
+  }
   if (action === 'agree' || action === 'deny') {
     const decision = action === 'agree' ? 'approved' : 'rejected';
     const scope = (action === 'agree' && (g.length > 1 ? g[1] : '') === '会话') ? 'session' : '';
     return await decideApproval(p, c, decision, scope, options);
   }
-  return HELP_TEXT;
+  return helpText(lang);
 }
 
 // ==========================================================================
@@ -1236,23 +1404,30 @@ export async function executeIntent(binding, intent, senderOpenId, cfg = null, o
   const d = dep(options);
   const action = requireKey(intent, 'action');
   const g = requireKey(intent, 'groups');
+  // 入口解析一次、向下传：同一动作内的多条回执必须同语言
+  const lang = langOfBinding(binding, options);
+  const opts = { ...options, lang };
   try {
-    if (action === 'help') return HELP_TEXT;
-    if (action === 'bind') return '当前账号已绑定，无需重复绑定';     // 第二道（2047）
+    if (action === 'help') return helpText(lang);
+    if (action === 'bind') {
+      return i18n.t('api', '当前账号已绑定，无需重复绑定', lang);     // 第二道（2047）
+    }
     if (action === 'unbind') {
       d.db.delFeishuBindingByOpen(senderOpenId, options);
-      return '已解绑。重新绑定请到站点生成新的绑定码';
+      return i18n.t('api', '已解绑。重新绑定请到站点生成新的绑定码', lang);
     }
     if (action === 'default_project') {
-      return await setDefaultProject(binding, pyOr(g[0], ''), 0, options);
+      return await setDefaultProject(binding, pyOr(g[0], ''), 0, opts);
     }
     if (['current', 'projects', 'sessions', 'new', 'use', 'leave'].includes(action)) {
-      return await d.conv.convIntent(binding, action, g, senderOpenId, cfg, options);
+      return await d.conv.convIntent(binding, action, g, senderOpenId, cfg, opts);
     }
-    return await executeBoardAction(binding, intent, senderOpenId, options);
+    return await executeBoardAction(binding, intent, senderOpenId, opts);
   } catch (e) {
-    if (e instanceof FeishuRestError) return '飞书接口调用失败，请稍后重试';
-    return '指令执行失败，请稍后重试';
+    if (e instanceof FeishuRestError) {
+      return i18n.t('api', '飞书接口调用失败，请稍后重试', lang);
+    }
+    return i18n.t('api', '指令执行失败，请稍后重试', lang);
   }
 }
 
@@ -1495,12 +1670,40 @@ function mediaErrText(error) {
 }
 
 /**
+ * 媒体**早退档**（功能关/类型不支持/对话关）回执的语言。
+ *
+ * 为什么单独一个函数：这三档的判定必须与旧版同序（在绑定校验之前），但它们都要回
+ * 同一条可本地化的提示，所以需要语言。约束：
+ *   - `TS_I18N=0` ⇒ 恒 `'zh'`，**连绑定行都不读**（回滚开关下与旧版零读库一致）；
+ *   - 读绑定行/偏好失败 ⇒ `'zh'` 兜底，保证固定提示仍发得出去（旧版 DB 故障时也不静默）；
+ *   - 正常路径只读一次绑定行；真正投递的档位在早退判定之后照旧再读一次（旧版位置）。
+ * @param {string} sender 发送者 open_id
+ * @param {object} d `dep(options)` 的依赖集合
+ * @param {object} options
+ * @returns {string}
+ */
+function mediaHintLang(sender, d, options) {
+  if (i18n.isI18nDisabled()) return 'zh';
+  try {
+    const binding = d.db.getFeishuBindingByOpen(sender, options);
+    return (binding === null || binding === undefined)
+      ? 'zh' : userLang(requireKey(binding, 'user_id'), options);
+  } catch {
+    return 'zh';
+  }
+}
+
+/**
  * 单聊 `image`/`post` 消息：解析 → 逐张下载（全有或全无）→ 投递绑定会话
  * （`feishu.py:2069-2110` 的 `_handle_media_message`，契约 §3.2）。
  *
  * 判定顺序（与 Python 严格同序）：功能开关 → 类型 → 通用对话开关 → 绑定校验 →
  * 解析（`post` 纯文字当普通文本投递）→ 张数截断 → 逐张下载 → `routeText(images=…)`。
- * 任一张失败就一张都不投递（避免半截图文）；失败一律回中文文案，绝不静默。
+ * 任一张失败就一张都不投递（避免半截图文）；失败一律回执，绝不静默。
+ *
+ * 语言（T12b）：发送者（回执收件人）；未绑定 ⇒ R22 中文兜底。早退档的提示语言走
+ * `mediaHintLang`（`TS_I18N=0` 零读库）；需要真正投递的档位在早退判定之后才读绑定行
+ * （与旧版同一位置，不提前读）。
  *
  * 依赖缝：`d.rest.restBytes` / `d.rest.restReply` / `d.db.getFeishuBindingByOpen` /
  * `d.conv.enabled` / `d.conv.routeText`（单测零网络打桩；产线不传 options）。
@@ -1513,24 +1716,28 @@ export async function handleMediaMessage(evt, cfg = null, options = {}) {
   const d = dep(options);
   const mid = dget(evt, 'message_id');
   const mtype = dget(evt, 'message_type');
+  const sender = pyOr(dget(evt, 'sender_open_id'), '');
   if (!mediaEnabled(options)) {                                  // ① 回滚阀
-    await d.rest.restReply(mid, MEDIA_TYPE_HINT, cfg);
+    await d.rest.restReply(mid,
+      i18n.t('api', MEDIA_TYPE_HINT, mediaHintLang(sender, d, options)), cfg);
     return;
   }
   if (mtype !== 'image' && mtype !== 'post') {                   // ② 不在本批范围
-    await d.rest.restReply(mid, MEDIA_TYPE_HINT, cfg);
+    await d.rest.restReply(mid,
+      i18n.t('api', MEDIA_TYPE_HINT, mediaHintLang(sender, d, options)), cfg);
     return;
   }
   if (!pyTruthy(await d.conv.enabled(options))) {                // ③ 通用对话关 = 无处可投
-    await d.rest.restReply(mid, MEDIA_TYPE_HINT, cfg);
+    await d.rest.restReply(mid,
+      i18n.t('api', MEDIA_TYPE_HINT, mediaHintLang(sender, d, options)), cfg);
     return;
   }
-  const sender = pyOr(dget(evt, 'sender_open_id'), '');
   const binding = d.db.getFeishuBindingByOpen(sender, options);  // ④ 绑定校验
   if (binding === null || binding === undefined) {
     await d.rest.restReply(mid, UNBOUND_DM_MSG, cfg);
     return;
   }
+  const lang = userLang(requireKey(binding, 'user_id'), options);
   const parsed = mediaItems(evt);                                // ⑤ 解析
   const text = parsed[0];
   const found = parsed[1];
@@ -1538,9 +1745,12 @@ export async function handleMediaMessage(evt, cfg = null, options = {}) {
   if (found.length === 0) {                                      // ⑥ 无图
     if (mtype === 'post' && pyTruthy(text)) {
       // post 纯文字：当普通文本走同一套路由/自动新建/排队语义
-      await d.rest.restReply(mid, await d.conv.routeText(binding, text, cfg, options), cfg);
+      await d.rest.restReply(mid,
+        await d.conv.routeText(binding, text, cfg, { ...options, lang }), cfg);
     } else {
-      await d.rest.restReply(mid, MEDIA_FAIL_PREFIX + MEDIA_NO_IMAGE, cfg);
+      await d.rest.restReply(mid,
+        i18n.t('api', MEDIA_FAIL_PREFIX, lang)
+        + i18n.t('api', MEDIA_NO_IMAGE, lang), cfg);
     }
     return;
   }
@@ -1552,19 +1762,23 @@ export async function handleMediaMessage(evt, cfg = null, options = {}) {
     } catch (e) {
       let reply;
       if (e instanceof MediaTooLarge) {
-        reply = MEDIA_FAIL_PREFIX + MEDIA_TOO_LARGE;
+        reply = i18n.t('api', MEDIA_FAIL_PREFIX, lang)
+          + i18n.t('api', MEDIA_TOO_LARGE, lang);
       } else if (e instanceof FeishuRestError) {
-        reply = MEDIA_SCOPE_CODES.has(e.code) ? MEDIA_SCOPE_HINT
-          : MEDIA_FAIL_PREFIX + mediaErrText(e);
+        reply = MEDIA_SCOPE_CODES.has(e.code)
+          ? i18n.t('api', MEDIA_SCOPE_HINT, lang)
+          : i18n.t('api', MEDIA_FAIL_PREFIX, lang) + mediaErrText(e);
       } else {
-        reply = MEDIA_FAIL_PREFIX + mediaErrText(e);
+        reply = i18n.t('api', MEDIA_FAIL_PREFIX, lang) + mediaErrText(e);
       }
       await d.rest.restReply(mid, reply, cfg);
       return;
     }
   }
   await d.rest.restReply(                                  // ⑨ 投递绑定会话
-    mid, await d.conv.routeText(binding, text, cfg, options, images), cfg,
+    mid,
+    await d.conv.routeText(binding, text, cfg, { ...options, lang }, images),
+    cfg,
   );
 }
 
@@ -1665,38 +1879,52 @@ export async function handleMessageEvent(evt, cfg = null, options = {}) {
     // 绑定指令先于绑定校验（1835-1843）：否则未绑定者永远绑不上（死锁）
     if (pyTruthy(intent) && dget(intent, 'action') === 'bind') {
       if (binding !== null && binding !== undefined) {
-        await d.rest.restReply(mid, '当前账号已绑定，无需重复绑定（解绑后可重新绑定）', cfg);
+        await d.rest.restReply(mid, i18n.t('api',
+          '当前账号已绑定，无需重复绑定（解绑后可重新绑定）',
+          langOfBinding(binding, options)), cfg);
         return;
       }
       const err = d.feishu.bindUser(dget(intent, 'groups')[0], sender, options);
-      await d.rest.restReply(mid, (err === null || err === undefined)
-        ? '绑定成功，发「帮助」查看可用指令' : err, cfg);
+      if (err === null || err === undefined) {
+        // 绑定刚写成 ⇒ 现在能解析出用户语言（绑定回执按收件人语言）
+        const row = d.db.getFeishuBindingByOpen(sender, options);
+        const lang = (row !== null && row !== undefined)
+          ? langOfBinding(row, options) : 'zh';
+        await d.rest.restReply(mid,
+          i18n.t('api', '绑定成功，发「帮助」查看可用指令', lang), cfg);
+      } else {
+        await d.rest.restReply(mid, err, cfg);
+      }
       return;
     }
     if (binding === null || binding === undefined) {
       await d.rest.restReply(mid, UNBOUND_DM_MSG, cfg);
       return;
     }
+    // 入口解析一次、向下传：同一动作内的多条回执必须同语言
+    const lang = langOfBinding(binding, options);
+    const opts = { ...options, lang };
     // M11「接入」：发一张可点的飞书接入操作卡片（换应用/重连/绑定码/自检/补齐/发布），
     // 用**当前这条连接**的应用凭据发——卡片按钮回调会回到同一条连接
     if (pyTruthy(intent) && dget(intent, 'action') === 'setup') {
-      const [ok, err] = await sendSetupCard(requireKey(binding, 'user_id'), cfg, options);
+      const [ok, err] = await sendSetupCard(requireKey(binding, 'user_id'), cfg, opts);
       await d.rest.restReply(mid, pyTruthy(ok)
-        ? '🛠 已发送「飞书接入操作卡片」，请在卡片上操作。'
-        : `卡片发送失败：${pyStr(err)}`, cfg);
+        ? i18n.t('api', '🛠 已发送「飞书接入操作卡片」，请在卡片上操作。', lang)
+        : i18n.t('api', '卡片发送失败：{err}', lang, { err: pyStr(err) }), cfg);
       return;
     }
     if (intent === null) {
       let reply;
       if (dget(evt, 'chat_type') !== 'group' && pyTruthy(await d.conv.enabled(options))) {
-        reply = await d.conv.routeText(binding, text, cfg, options);
+        reply = await d.conv.routeText(binding, text, cfg, opts);
       } else {
-        reply = HELP_TEXT;         // 群聊保持原行为：不落会话（1853）
+        // 群聊保持原行为：不落会话；回复语言 = 发送者（已绑定）偏好
+        reply = helpText(lang);
       }
       await d.rest.restReply(mid, reply, cfg);
       return;
     }
-    const reply = await executeIntent(binding, intent, sender, cfg, options);
+    const reply = await executeIntent(binding, intent, sender, cfg, opts);
     if (pyTruthy(reply)) await d.rest.restReply(mid, reply, cfg);   // 空串不回复（1857）
   } catch (e) {
     d.log(`feishu inbound: 处理异常: ${errorRepr(e)}`);
@@ -1760,37 +1988,41 @@ export async function onCardAction(data, cfg, options = {}) {
     if (t === 'dp' || t === 'ss') {
       const binding = d.db.getFeishuBindingByOpen(sender, options);
       if (binding === null || binding === undefined) {
-        await dmText(sender, UNBOUND_DM_CARD, cfg, options);
-        return toast('error', '尚未绑定站点账号');
+        // 未绑定者没有用户偏好可言 ⇒ 语言按 R22 兜底中文（不读库）
+        await dmText(sender, i18n.t('api', UNBOUND_DM_CARD, 'zh'), cfg, options);
+        return toast('error', i18n.t('api', '尚未绑定站点账号', 'zh'));
       }
-      return await d.conv.onCardAction(sender, binding, value, action, cfg, options);
+      return await d.conv.onCardAction(sender, binding, value, action, cfg,
+        { ...options, lang: langOfBinding(binding, options) });
     }
     if (!['a', 'mq', 'p', 's', 'd'].includes(t) || !pyTruthy(key)) return null;
     const binding = d.db.getFeishuBindingByOpen(sender, options);
     if (binding === null || binding === undefined) {
-      await dmText(sender, UNBOUND_DM_CARD, cfg, options);
-      return toast('error', '尚未绑定站点账号');
+      await dmText(sender, i18n.t('api', UNBOUND_DM_CARD, 'zh'), cfg, options);
+      return toast('error', i18n.t('api', '尚未绑定站点账号', 'zh'));
     }
-    const [found, err] = await findUserCard(requireKey(binding, 'user_id'), key, options);
+    // 入口解析一次、向下传：同一动作内的 DM 回执与 toast 必须同语言
+    const opts = { ...options, lang: langOfBinding(binding, options) };
+    const [found, err] = await findUserCard(requireKey(binding, 'user_id'), key, opts);
     if (found === null || found === undefined) {
-      await dmText(sender, err, cfg, options);
-      return toast('error', '没找到对应卡片');
+      await dmText(sender, err, cfg, opts);
+      return toast('error', i18n.t('api', '没找到对应卡片', opts.lang));
     }
     const [p, c] = found;
     let reply;
     if (t === 'mq') {
-      const [dm, replyToast] = await answerMultiClick(p, c, value, action, options);
-      if (pyTruthy(dm)) await dmText(sender, dm, cfg, options);
+      const [dm, replyToast] = await answerMultiClick(p, c, value, action, opts);
+      if (pyTruthy(dm)) await dmText(sender, dm, cfg, opts);
       return replyToast;                 // 每次点击都回 toast（含进度）（1932-1937）
     }
     if (t === 'a') {
-      reply = await answerByToken(p, c, pyStr(pyOr(dget(value, 'i'), '')), options);
+      reply = await answerByToken(p, c, pyStr(pyOr(dget(value, 'i'), '')), opts);
     } else {
       const decision = (t === 'p' || t === 's') ? 'approved' : 'rejected';
-      reply = await decideApproval(p, c, decision, t === 's' ? 'session' : '', options);
+      reply = await decideApproval(p, c, decision, t === 's' ? 'session' : '', opts);
     }
-    if (pyTruthy(reply)) await dmText(sender, reply, cfg, options);
-    return toastFor(reply);
+    if (pyTruthy(reply)) await dmText(sender, reply, cfg, opts);
+    return toastFor(reply, opts.lang);
   } catch (e) {
     d.log(`feishu inbound: 卡片回调处理异常: ${errorRepr(e)}`);
     return null;
@@ -1802,11 +2034,16 @@ export async function onCardAction(data, cfg, options = {}) {
 // ==========================================================================
 
 /** `_slash_summary`（1495-1503）：同步结果一句话摘要（DM 回执与设置页提示共用） */
-export function slashSummary(out) {
-  let s = `新增 ${pyLen(pyOr(dget(out, 'created'), []))}、`
-    + `更新 ${pyLen(pyOr(dget(out, 'updated'), []))}、`
-    + `已是最新 ${pyLen(pyOr(dget(out, 'kept'), []))}`;
-  if (pyTruthy(dget(out, 'failed'))) s += `、失败 ${pyLen(dget(out, 'failed'))}`;
+export function slashSummary(out, lang = 'zh') {
+  let s = i18n.t('api', '新增 {created}、更新 {updated}、已是最新 {kept}', lang, {
+    created: pyLen(pyOr(dget(out, 'created'), [])),
+    updated: pyLen(pyOr(dget(out, 'updated'), [])),
+    kept: pyLen(pyOr(dget(out, 'kept'), [])),
+  });
+  if (pyTruthy(dget(out, 'failed'))) {
+    s += i18n.t('api', '、失败 {failed}', lang,
+      { failed: pyLen(dget(out, 'failed')) });
+  }
   return s;
 }
 
@@ -1818,27 +2055,32 @@ export async function onSlashPermAction(sender, value, cfg, options = {}) {
   const d = dep(options);
   const binding = d.db.getFeishuBindingByOpen(sender, options);
   if (binding === null || binding === undefined) {
-    await dmText(sender, UNBOUND_DM_MSG, cfg, options);
-    return toast('error', '尚未绑定站点账号');
+    await dmText(sender, i18n.t('api', UNBOUND_DM_MSG, 'zh'), cfg, options);
+    return toast('error', i18n.t('api', '尚未绑定站点账号', 'zh'));
   }
   const userId = requireKey(binding, 'user_id');
+  const lang = userLang(userId, options);
   const uid = pyInt(pyOr(dget(value, 'u'), 0));
   if (pyTruthy(uid) && uid !== pyInt(userId)) {
-    return toast('error', '该卡片不属于当前账号');       // 防串号（1562-1564）
+    return toast('error', i18n.t('api', '该卡片不属于当前账号', lang));  // 防串号
   }
-  const out = await d.slash.syncSlashCommands(userId, options);
+  // 重试失败的诊断（slashErrorHint / 未配凭据）随收件人语言本地化（zh 原文不变）
+  const out = await d.slash.syncSlashCommands(userId, { ...options, lang });
   if (pyTruthy(dget(out, 'ok'))) {
-    await dmText(sender, '✅ 快捷指令注册完成：' + slashSummary(out)
-      + '\n约 5 分钟后在机器人私聊输入「/」即可看到（重启飞书客户端可加速）。', cfg, options);
-    return toast('success', '注册完成');
+    await dmText(sender, i18n.t('api',
+      '✅ 快捷指令注册完成：{summary}\n约 5 分钟后在机器人私聊输入「/」即可看到'
+      + '（重启飞书客户端可加速）。', lang, { summary: slashSummary(out, lang) }),
+    cfg, options);
+    return toast('success', i18n.t('api', '注册完成', lang));
   }
-  let text = '❌ 仍未成功：' + pyOr(dget(out, 'error'), '未知错误');
+  let text = i18n.t('api', '❌ 仍未成功：{error}', lang,
+    { error: pyOr(dget(out, 'error'), i18n.t('api', '未知错误', lang)) });
   if (pyTruthy(dget(out, 'need_scope'))) {
-    text += '\n看起来权限还没生效：确认已在权限管理里添加读+写并**创建版本发布**，'
-      + '稍等约 1 分钟再点一次卡片上的按钮。';
+    text += i18n.t('api', '\n看起来权限还没生效：确认已在权限管理里添加读+写并'
+      + '**创建版本发布**，稍等约 1 分钟再点一次卡片上的按钮。', lang);
   }
   await dmText(sender, text, cfg, options);
-  return toast('error', '仍未成功，看私聊回复');
+  return toast('error', i18n.t('api', '仍未成功，看私聊回复', lang));
 }
 
 // ==========================================================================
@@ -2077,42 +2319,57 @@ function setupButton(uid, nonce, label, action, style = 'default') {
  * @param {string} threadApp 入站长连接**当前绑的**应用（空=连接未运行）
  * @param {string} nonce 按钮防伪令牌（回调时校验 uid+nonce）
  */
-export function setupCard(userId, appId, threadApp, nonce) {
+export function setupCard(userId, appId, threadApp, nonce, lang = 'zh') {
   const app = pyStr(pyOr(appId, ''));
   const thread = pyStr(pyOr(threadApp, ''));
   const switching = pyTruthy(app) && pyTruthy(thread) && app !== thread;
   const uid = pyInt(userId);
-  const elements = [{
-    tag: 'markdown',
-    content: '**当前应用**：' + (pyTruthy(app) ? '`' + app + '`' : '（未配置）') + '\n'
-      + '**入站长连接**：' + (pyTruthy(thread) ? '运行中 · 绑在 `' + thread + '`' : '未运行'),
-  }];
+  const appLine = i18n.t('api', '**当前应用**：', lang)
+    + (pyTruthy(app) ? '`' + app + '`' : i18n.t('api', '（未配置）', lang));
+  const connLine = i18n.t('api', '**入站长连接**：', lang)
+    + (pyTruthy(thread)
+      ? i18n.t('api', '运行中 · 绑在 `{app}`', lang, { app: thread })
+      : i18n.t('api', '未运行', lang));
+  const elements = [{ tag: 'markdown', content: `${appLine}\n${connLine}` }];
   if (switching) {
     elements.push({
       tag: 'markdown',
-      content: `检测到应用凭据已换为 \`${app}\`，但长连接还绑在旧应用 `
-        + `\`${thread}\` 上。点「换用新应用」：我会先把新绑定码发到本会话，`
-        + '再用新应用重连——之后在新机器人单聊里回复「绑定 <码>」即可。',
+      content: i18n.t('api',
+        '检测到应用凭据已换为 `{app}`，但长连接还绑在旧应用 `{thread}` 上。'
+        + '点「换用新应用」：我会先把新绑定码发到本会话，再用新应用重连——'
+        + '之后在新机器人单聊里回复「绑定 <码>」即可。', lang,
+        { app, thread }),
     });
-    elements.push(setupButton(uid, nonce, '🔁 换用新应用', 'switch', 'primary'));
+    elements.push(setupButton(uid, nonce, i18n.t('api', '🔁 换用新应用', lang),
+      'switch', 'primary'));
   } else {
     elements.push({
       tag: 'markdown',
-      content: '需要时点下面的按钮；换应用后我会自动发一张新的确认卡片。',
+      content: i18n.t('api',
+        '需要时点下面的按钮；换应用后我会自动发一张新的确认卡片。', lang),
     });
-    elements.push(setupButton(uid, nonce, '🔄 重连入站', 'restart', 'primary'));
+    elements.push(setupButton(uid, nonce, i18n.t('api', '🔄 重连入站', lang),
+      'restart', 'primary'));
   }
-  elements.push(setupButton(uid, nonce, '🔑 生成绑定码', 'bindcode'));
-  elements.push(setupButton(uid, nonce, '🩺 配置自检', 'doctor'));
-  elements.push(setupButton(uid, nonce, '🧩 补齐配置', 'apply'));
-  elements.push(setupButton(uid, nonce, '🚀 提交发布', 'publish'));
-  elements.push({ tag: 'markdown', content: '卡片 10 分钟内有效；过期后发「接入」重新获取。' });
+  elements.push(setupButton(uid, nonce, i18n.t('api', '🔑 生成绑定码', lang),
+    'bindcode'));
+  elements.push(setupButton(uid, nonce, i18n.t('api', '🩺 配置自检', lang),
+    'doctor'));
+  elements.push(setupButton(uid, nonce, i18n.t('api', '🧩 补齐配置', lang),
+    'apply'));
+  elements.push(setupButton(uid, nonce, i18n.t('api', '🚀 提交发布', lang),
+    'publish'));
+  elements.push({
+    tag: 'markdown',
+    content: i18n.t('api', '卡片 10 分钟内有效；过期后发「接入」重新获取。', lang),
+  });
   return {
     schema: '2.0',
     header: {
       title: {
         tag: 'plain_text',
-        content: switching ? '🔁 飞书应用已变更' : '🛠 飞书接入操作',
+        content: i18n.t('api',
+          switching ? '🔁 飞书应用已变更' : '🛠 飞书接入操作', lang),
       },
       template: switching ? 'orange' : 'blue',
     },
@@ -2124,26 +2381,40 @@ export function setupCard(userId, appId, threadApp, nonce) {
  * `feishu.send_setup_card`（M11）：给该用户 DM 发接入卡片。返回 `[ok, err]`。
  * `cfg` 缺省=当前配置；**换应用自动发送时必须传旧应用的 cfg**（绑定行的 open_id
  * 属于旧应用，新凭据发不进这个单聊）。
+ *
+ * 语言（T12b）：失败文案按收件人语言出。zh 逐字节保持历史形态——REST 失败时内层
+ * 仍带 `卡片发送失败：` 前缀（调用方外层再包一次，存量断言即此形态）；en 的内层只留
+ * 诊断，前缀由调用方的英文包装统一负责（否则会出现
+ * `Failed to send the card: 卡片发送失败：…` 的中英拼接）。
  */
 export async function sendSetupCard(userId, cfg = null, options = {}) {
   const d = dep(options);
+  // 语言 = 收件人（卡片所属用户）；入口没有显式 lang 时在此解析一次
+  const lang = (options.lang === null || options.lang === undefined)
+    ? userLang(userId, options) : options.lang;
   const sendCfg = (cfg === null || cfg === undefined) ? appConfig(userId, options) : cfg;
   if (sendCfg === null || sendCfg === undefined) {
-    return [false, '未配置应用凭据（App ID / App Secret），先保存配置再发卡片'];
+    return [false, i18n.t('api',
+      '未配置应用凭据（App ID / App Secret），先保存配置再发卡片', lang)];
   }
   const binding = d.db.getFeishuBindingByUser(userId, options);
   if (binding === null || binding === undefined) {
-    return [false, '尚未绑定飞书账号：设置页生成绑定码后在机器人单聊回复「绑定 <码>」'];
+    return [false, i18n.t('api',
+      '尚未绑定飞书账号：设置页生成绑定码后在机器人单聊回复「绑定 <码>」', lang)];
   }
   const cur = appConfig(userId, options) || {};
   const threadApp = pyTruthy(inboundStatus(userId, options).thread)
     ? inboundThreadAppId(userId) : '';
-  const card = setupCard(userId, pyOr(dget(cur, 'app_id'), ''), threadApp, setupNonce(userId));
+  const card = setupCard(userId, pyOr(dget(cur, 'app_id'), ''), threadApp,
+    setupNonce(userId), lang);
   try {
     await d.rest.restSendCard(binding.open_id, card, sendCfg);
     return [true, ''];
   } catch (e) {
     if (!(e instanceof FeishuRestError)) throw e;
+    if (i18n.normalizeLang(lang) === 'en' && !i18n.isI18nDisabled()) {
+      return [false, pyStr(e.message)];
+    }
     return [false, `卡片发送失败：${pyStr(e.message)}`];
   }
 }
@@ -2164,7 +2435,8 @@ export async function maybeSendSwitchCard(userId, oldCfg, options = {}) {
     if (inboundThreadAppId(userId) === newApp) return false;
     const binding = d.db.getFeishuBindingByUser(userId, options);
     if (binding === null || binding === undefined) return false;
-    const card = setupCard(userId, newApp, oldApp, setupNonce(userId));
+    const card = setupCard(userId, newApp, oldApp, setupNonce(userId),
+      userLang(userId, options));
     await d.rest.restSendCard(binding.open_id, card, oldCfg);
     return true;
   } catch (e) {
@@ -2178,74 +2450,84 @@ export async function maybeSendSwitchCard(userId, oldCfg, options = {}) {
  * → 停旧连接、用新凭据重连。顺序是设计要点：码必须先到用户手上（旧应用通道），
  * 再断旧连接（断完就发不出了）。返回 `[toast, dmText]`；dmText 空=不再重复发。
  */
-async function setupSwitchAction(userId, sender, cfg, options = {}) {
+async function setupSwitchAction(userId, sender, cfg, options = {}, lang = 'zh') {
   const d = dep(options);
   const cur = appConfig(userId, options);
   const newApp = pyStr(pyOr(dget(cur, 'app_id'), ''));
   const oldApp = pyStr(pyOr(dget(cfg, 'app_id'), ''));
   if (cur === null || cur === undefined || !pyTruthy(newApp)) {
-    return [toast('error', '新应用凭据不完整'),
-      '❌ 应用凭据不完整：先在设置页保存新应用的 App ID / App Secret，再点本按钮。'];
+    return [toast('error', i18n.t('api', '新应用凭据不完整', lang)),
+      i18n.t('api', '❌ 应用凭据不完整：先在设置页保存新应用的 App ID / App Secret，'
+        + '再点本按钮。', lang)];
   }
   if (oldApp === newApp) {                 // 同应用（只换了 secret）：直接重连，绑定关系不变
     if (await d.restart(userId, options)) {
-      return [toast('success', '已重连'),
-        `🔄 已用当前应用 \`${newApp}\` 重新建立长连接，绑定关系不变。`];
+      return [toast('success', i18n.t('api', '已重连', lang)),
+        i18n.t('api', '🔄 已用当前应用 `{app}` 重新建立长连接，绑定关系不变。',
+          lang, { app: newApp })];
     }
-    return [toast('error', '重连失败，看私聊'),
-      '❌ 重连失败：旧连接未在超时内退出；稍后再点一次，仍不行请重启站点。'];
+    return [toast('error', i18n.t('api', '重连失败，看私聊', lang)),
+      i18n.t('api', '❌ 重连失败：旧连接未在超时内退出；稍后再点一次，'
+        + '仍不行请重启站点。', lang)];
   }
   const code = d.feishu.makeBindCode(userId);
-  const text = `🔁 已切换到新应用 \`${newApp}\`。\n`
-    + `**新的绑定码：${code}**（10 分钟内有效）\n`
+  const text = i18n.t('api', '🔁 已切换到新应用 `{app}`。\n'
+    + '**新的绑定码：{code}**（10 分钟内有效）\n'
     + '本（旧）机器人的连接马上断开；请到新机器人单聊里回复：\n'
-    + `绑定 ${code}`;
+    + '绑定 {code}', lang, { app: newApp, code });
   try {
     await d.rest.restSendText(sender, text, cfg);
   } catch (e) {
     if (!(e instanceof FeishuRestError)) throw e;
     // 码没送到就不动连接（否则用户既进不去新机器人、旧机器人也断了）
-    return [toast('error', '绑定码发送失败'),
-      `❌ 绑定码没能发进本会话（${pyStr(e.message)}）；重连未执行，可重试本按钮。`];
+    return [toast('error', i18n.t('api', '绑定码发送失败', lang)),
+      i18n.t('api', '❌ 绑定码没能发进本会话（{err}）；重连未执行，可重试本按钮。',
+        lang, { err: pyStr(e.message) })];
   }
   if (await d.restart(userId, options)) {
-    return [toast('success', '已切换，去新机器人绑定'), ''];
+    return [toast('success', i18n.t('api', '已切换，去新机器人绑定', lang)), ''];
   }
-  return [toast('error', '已换应用但重连失败，看私聊'),
-    `⚠️ 新应用 \`${newApp}\` 重连失败（旧连接未退出）；绑定码 ${code} 仍有效，`
-    + '可稍后再点本按钮，或重启站点。'];
+  return [toast('error', i18n.t('api', '已换应用但重连失败，看私聊', lang)),
+    i18n.t('api', '⚠️ 新应用 `{app}` 重连失败（旧连接未退出）；绑定码 {code} '
+      + '仍有效，可稍后再点本按钮，或重启站点。', lang, { app: newApp, code })];
 }
 
 /** `feishu._setup_restart`（M11）：「重连入站」——停旧连接、用当前凭据重连。 */
-async function setupRestartAction(userId, options = {}) {
+async function setupRestartAction(userId, options = {}, lang = 'zh') {
   const cur = appConfig(userId, options);
   if (cur === null || cur === undefined) {
-    return [toast('error', '应用凭据未配置'),
-      '❌ 应用凭据未配置（App ID / App Secret）：先在设置页保存，再点本按钮。'];
+    return [toast('error', i18n.t('api', '应用凭据未配置', lang)),
+      i18n.t('api', '❌ 应用凭据未配置（App ID / App Secret）：先在设置页保存，'
+        + '再点本按钮。', lang)];
   }
   const appId = pyStr(pyOr(dget(cur, 'app_id'), ''));
   if (await dep(options).restart(userId, options)) {
-    return [toast('success', '已重连'),
-      `🔄 已用当前应用 \`${appId}\` 重新建立长连接。`];
+    return [toast('success', i18n.t('api', '已重连', lang)),
+      i18n.t('api', '🔄 已用当前应用 `{app}` 重新建立长连接。', lang,
+        { app: appId })];
   }
-  return [toast('error', '重连失败，看私聊'),
-    '❌ 重连失败：旧连接未在超时内退出，稍后再点一次；仍不行请重启站点。'];
+  return [toast('error', i18n.t('api', '重连失败，看私聊', lang)),
+    i18n.t('api', '❌ 重连失败：旧连接未在超时内退出，稍后再点一次；'
+      + '仍不行请重启站点。', lang)];
 }
 
 /** `feishu._setup_bindcode`（M11）：「生成绑定码」——发新码 + 两条使用指引。 */
-function setupBindcodeAction(userId, options = {}) {
+function setupBindcodeAction(userId, options = {}, lang = 'zh') {
   const code = dep(options).feishu.makeBindCode(userId);
-  return [toast('success', '绑定码已私聊发你'),
-    `🔑 新的绑定码：${code}（10 分钟内有效）\n`
-    + '· 未绑定：在本机器人单聊回复「绑定 <码>」\n'
-    + '· 已绑定换号：先发「解绑」，再发「绑定 <码>」'];
+  return [toast('success', i18n.t('api', '绑定码已私聊发你', lang)),
+    i18n.t('api', '🔑 新的绑定码：{code}（10 分钟内有效）\n'
+      + '· 未绑定：在本机器人单聊回复「绑定 <码>」\n'
+      + '· 已绑定换号：先发「解绑」，再发「绑定 <码>」', lang, { code })];
 }
 
 /**
  * `feishu._setup_slow_action`（M11）：慢动作（自检/补齐配置/提交发布）后台执行，
  * 结果 DM 回执。卡片回调要尽快 ACK，这几项是多次 REST（2~5s）⇒ 不占回调。
+ * doctor/provision 的逐项数据（label/detail/hint、error 原文）属站点设置页文案面
+ * （T12d），这里只本地化飞书消息的框与回执句。
  */
-export async function setupSlowAction(userId, sender, action, cfg, options = {}) {
+export async function setupSlowAction(userId, sender, action, cfg, options = {},
+  lang = 'zh') {
   const d = dep(options);
   try {
     let text;
@@ -2256,27 +2538,36 @@ export async function setupSlowAction(userId, sender, action, cfg, options = {})
         const state = dget(it, 'state');
         return state === 'fail' || state === 'warn';
       });
-      const lines = [`🩺 配置自检：ok ${pyOr(dget(summary, 'ok'), 0)} / `
-        + `fail ${pyOr(dget(summary, 'fail'), 0)} / `
-        + `warn ${pyOr(dget(summary, 'warn'), 0)} / `
-        + `skip ${pyOr(dget(summary, 'skip'), 0)}`];
+      const lines = [i18n.t('api', '🩺 配置自检：ok {ok} / fail {fail} / '
+        + 'warn {warn} / skip {skip}', lang, {
+        ok: pyOr(dget(summary, 'ok'), 0),
+        fail: pyOr(dget(summary, 'fail'), 0),
+        warn: pyOr(dget(summary, 'warn'), 0),
+        skip: pyOr(dget(summary, 'skip'), 0),
+      })];
       for (const it of bad) {
         const hint = dget(it, 'hint');
-        lines.push(`· ${pyStr(pyOr(dget(it, 'label'), ''))}：`
-          + `${pyStr(pyOr(dget(it, 'detail'), ''))}`
-          + (pyTruthy(hint) ? `（${pyStr(hint)}）` : ''));
+        lines.push(i18n.t('api', '· {label}：{detail}', lang, {
+          label: pyStr(pyOr(dget(it, 'label'), '')),
+          detail: pyStr(pyOr(dget(it, 'detail'), '')),
+        }) + (pyTruthy(hint)
+          ? i18n.t('api', '（{hint}）', lang, { hint: pyStr(hint) }) : ''));
       }
       text = lines.join('\n');
     } else if (action === 'apply') {
       const out = await d.provision.provisionApply(userId, options);
       text = pyTruthy(dget(out, 'ok'))
-        ? '🧩 配置补齐成功：机器人能力 / 权限 / 长连接订阅 / 事件 / 回调已写入（需发布新版本生效）。'
-        : `❌ 配置补齐失败：${pyStr(pyOr(dget(out, 'error'), '未知错误'))}`;
+        ? i18n.t('api', '🧩 配置补齐成功：机器人能力 / 权限 / 长连接订阅 / 事件 / '
+          + '回调已写入（需发布新版本生效）。', lang)
+        : i18n.t('api', '❌ 配置补齐失败：{err}', lang,
+          { err: pyStr(pyOr(dget(out, 'error'), i18n.t('api', '未知错误', lang))) });
     } else {
       const out = await d.provision.provisionPublish(userId, options);
       text = pyTruthy(dget(out, 'ok'))
-        ? `🚀 已提交发布版本 ${pyStr(pyOr(dget(out, 'version'), ''))}；仍需租户管理员审批后线上生效。`
-        : `❌ 提交发布失败：${pyStr(pyOr(dget(out, 'error'), '未知错误'))}`;
+        ? i18n.t('api', '🚀 已提交发布版本 {version}；仍需租户管理员审批后线上生效。',
+          lang, { version: pyStr(pyOr(dget(out, 'version'), '')) })
+        : i18n.t('api', '❌ 提交发布失败：{err}', lang,
+          { err: pyStr(pyOr(dget(out, 'error'), i18n.t('api', '未知错误', lang))) });
     }
     await dmText(sender, text, cfg, options);
   } catch (e) {
@@ -2287,43 +2578,45 @@ export async function setupSlowAction(userId, sender, action, cfg, options = {})
 /**
  * `feishu._on_setup_card_action`（M11）：接入卡片按钮回调——
  * open_id→binding + nonce 双重复核 → 动作分发。`cfg` = 点击到达那条连接的应用凭据。
+ * 语言：入口按点击者（= 卡片所属用户）解析一次并向下传；未绑定 ⇒ R22 中文兜底。
  */
 export async function onSetupCardAction(sender, value, cfg, options = {}) {
   const d = dep(options);
   const binding = d.db.getFeishuBindingByOpen(sender, options);
   if (binding === null || binding === undefined) {
-    await dmText(sender, UNBOUND_DM_CARD, cfg, options);
-    return toast('error', '尚未绑定站点账号');
+    await dmText(sender, i18n.t('api', UNBOUND_DM_CARD, 'zh'), cfg, options);
+    return toast('error', i18n.t('api', '尚未绑定站点账号', 'zh'));
   }
   const userId = requireKey(binding, 'user_id');
+  const lang = userLang(userId, options);
   const uid = pyInt(pyOr(dget(value, 'u'), 0));
   if (pyTruthy(uid) && uid !== pyInt(userId)) {
-    return toast('error', '该卡片不属于当前账号');       // 防串号
+    return toast('error', i18n.t('api', '该卡片不属于当前账号', lang));  // 防串号
   }
   const nonce = pyStr(pyOr(dget(value, 'n'), ''));
   const item = _SETUP_NONCES.get(nonce);
   if (item === undefined || item === null || item[0] !== pyInt(userId)) {
-    return toast('error', '卡片已失效，发「接入」重新获取');
+    return toast('error', i18n.t('api', '卡片已失效，发「接入」重新获取', lang));
   }
   if (Date.now() / 1000 > item[1]) {
     _SETUP_NONCES.delete(nonce);
-    return toast('error', '卡片已过期，发「接入」重新获取');
+    return toast('error', i18n.t('api', '卡片已过期，发「接入」重新获取', lang));
   }
   const action = pyStr(pyOr(dget(value, 'a'), ''));
   try {
     let out;
     if (action === 'switch') {
-      out = await setupSwitchAction(userId, sender, cfg, options);
+      out = await setupSwitchAction(userId, sender, cfg, options, lang);
     } else if (action === 'restart') {
-      out = await setupRestartAction(userId, options);
+      out = await setupRestartAction(userId, options, lang);
     } else if (action === 'bindcode') {
-      out = setupBindcodeAction(userId, options);
+      out = setupBindcodeAction(userId, options, lang);
     } else if (action === 'doctor' || action === 'apply' || action === 'publish') {
       // 慢动作：后台执行 + 立即 toast（避免卡片回调 ACK 超时）
-      void setupSlowAction(userId, sender, action, cfg, options).catch((e) => {
+      void setupSlowAction(userId, sender, action, cfg, options, lang).catch((e) => {
         d.log(`feishu inbound: 接入卡片后台动作异常: ${errorRepr(e)}`);
       });
-      return toast('success', '已收到，结果稍后私聊发你');
+      return toast('success', i18n.t('api', '已收到，结果稍后私聊发你', lang));
     } else {
       return null;
     }
@@ -2332,7 +2625,7 @@ export async function onSetupCardAction(sender, value, cfg, options = {}) {
     return toastOut;
   } catch (e) {
     d.log(`feishu inbound: 接入卡片动作异常: ${errorRepr(e)}`);
-    return toast('error', '操作失败，详情看站点日志');
+    return toast('error', i18n.t('api', '操作失败，详情看站点日志', lang));
   }
 }
 

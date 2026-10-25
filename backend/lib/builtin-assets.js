@@ -63,6 +63,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { SKILL_DIRS_BY_FAMILY } from './agents.js';
+import { localizable, t } from './i18n.js';
 import {
   PY_WS, isDir, isFile, pathExists, pyIsAbs, pyJoin, pySorted, pyStrip, realpathOrResolve,
 } from './lib.js';
@@ -730,9 +731,13 @@ export function plugin_patch_state(asset) {
 
 /** 遇到用户自定义注册写法时的统一拒绝原因（安装/卸载共用）。 */
 export function _patch_foreign_error(asset, patch) {
-  return new AssetError(
-    `「${asset.name}」在 ${display_path(patch.path)} 里已有自定义写法的注册行，`
-    + '平台不覆盖、也不删除用户手写的 patch 配置；请先手工移除该条目再试', 409);
+  const where = display_path(patch.path);
+  return localizable(new AssetError(
+    `「${asset.name}」在 ${where} 里已有自定义写法的注册行，`
+    + '平台不覆盖、也不删除用户手写的 patch 配置；请先手工移除该条目再试', 409),
+  '「{name}」在 {path} 里已有自定义写法的注册行，'
+  + '平台不覆盖、也不删除用户手写的 patch 配置；请先手工移除该条目再试',
+  { name: asset.name, path: where });
 }
 
 /** 推导该资产在指定目标下的落点根；不支持返回 `None`。 */
@@ -745,16 +750,32 @@ export function install_root(asset, target, project_dir = '') {
   return _skill_root(asset.family, target, project_dir);
 }
 
-/** 资产在目标下不可安装的用户可读原因。 */
-export function _unsupported_reason(asset, target) {
+/** 资产在目标下不可安装的原因（key+vars）；`reason` 字段与异常共用同一份真相源。 */
+function unsupportedInfo(asset, target) {
   if (!asset.targets.includes(target)) {
-    return `该资产只支持${asset.targets
-      .map((t) => (t === 'user' ? '用户级' : '项目级')).join('、')}安装`;
+    return {
+      key: '该资产只支持{targets}安装',
+      vars: {
+        targets: asset.targets.map((x) => (x === 'user' ? '用户级' : '项目级')).join('、'),
+      },
+    };
   }
   if (asset.type === 'dsh_plugin') {
-    return 'dsh 插件资产只支持用户级（装进 dsh profile，与项目无关）';
+    return { key: 'dsh 插件资产只支持用户级（装进 dsh profile，与项目无关）', vars: null };
   }
-  return `该资产（${asset.family}）暂不支持此目标的安装`;
+  return { key: '该资产（{family}）暂不支持此目标的安装', vars: { family: asset.family } };
+}
+
+/** 资产在目标下不可安装的用户可读原因（渲染后的中文，供 `reason` 字段/旧调用方）。 */
+export function _unsupported_reason(asset, target) {
+  const info = unsupportedInfo(asset, target);
+  return t('api', info.key, 'zh', info.vars);
+}
+
+/** 不可安装原因的**异常**形态：`.message` 是渲染后中文，`i18nKey/.i18nVars` 供响应层本地化。 */
+function unsupportedError(asset, target) {
+  const info = unsupportedInfo(asset, target);
+  return localizable(new AssetError(_unsupported_reason(asset, target)), info.key, info.vars);
 }
 
 /** 清单文件在该落点根下的安装信息列表。 */
@@ -766,7 +787,8 @@ export function _installed_files(asset, root) {
     const base = realpathOrResolve(root);
     const real = realpathOrResolve(dst);
     if (!(real === base || real.startsWith(base + path.sep))) {
-      throw new AssetError(`安装路径越界：${f.to}`, 500);
+      throw localizable(new AssetError(`安装路径越界：${f.to}`, 500),
+        '安装路径越界：{path}', { path: f.to });
     }
     const src_hash = _sha256(pyJoin(asset.dir, f.from));
     const dst_hash = _sha256(dst);
@@ -897,7 +919,9 @@ export function asset_json(asset, target, project_dir = '') {
 /** 目标下的资产清单（含状态）；`target` 非法抛 `AssetError(400)`。 */
 export function list_assets(target, project_dir = '') {
   if (!ASSET_TARGETS.includes(target)) {
-    throw new AssetError(`target 必须是 ${ASSET_TARGETS.join('/')}`);
+    const targets = ASSET_TARGETS.join('/');
+    throw localizable(new AssetError(`target 必须是 ${targets}`),
+      'target 必须是 {targets}', { targets });
   }
   return load_assets().map((a) => asset_json(a, target, project_dir));
 }
@@ -906,8 +930,10 @@ export function list_assets(target, project_dir = '') {
 export function _require_profile(asset) {
   const prof_dir = path.dirname(plugin_patch_path(asset));
   if (!isDir(prof_dir)) {
-    throw new AssetError(
-      `未找到 dsh profile「${asset.plugin.profile}」：${display_path(prof_dir)}`);
+    const where = display_path(prof_dir);
+    throw localizable(new AssetError(
+      `未找到 dsh profile「${asset.plugin.profile}」：${where}`),
+    '未找到 dsh profile「{profile}」：{path}', { profile: asset.plugin.profile, path: where });
   }
 }
 
@@ -1051,7 +1077,7 @@ export function _prune_empty_dirs(p, stop_at) {
 export function install(asset, target, project_dir = '') {
   const root = install_root(asset, target, project_dir);
   if (root === null) {
-    throw new AssetError(_unsupported_reason(asset, target));
+    throw unsupportedError(asset, target);
   }
   if (target === 'project') {
     if (!pyTruthy(project_dir) || !isDir(project_dir)) {
@@ -1070,7 +1096,8 @@ export function install(asset, target, project_dir = '') {
     const base = realpathOrResolve(root);
     const real = realpathOrResolve(dst);
     if (!(real === base || real.startsWith(base + path.sep))) {
-      throw new AssetError(`安装路径越界：${f.to}`, 500);
+      throw localizable(new AssetError(`安装路径越界：${f.to}`, 500),
+        '安装路径越界：{path}', { path: f.to });
     }
     const src = pyJoin(asset.dir, f.from);
     const data = fs.readFileSync(src);
@@ -1097,7 +1124,7 @@ export function install(asset, target, project_dir = '') {
 export function uninstall(asset, target, project_dir = '') {
   const root = install_root(asset, target, project_dir);
   if (root === null) {
-    throw new AssetError(_unsupported_reason(asset, target));
+    throw unsupportedError(asset, target);
   }
   // dsh 插件：先判注册行——foreign（用户自定义写法）时**在删任何文件之前**拒绝，
   // 免得出现「包文件已删、注册行还在」的半残状态
@@ -1112,9 +1139,10 @@ export function uninstall(asset, target, project_dir = '') {
       try {
         fs.unlinkSync(f.path);
       } catch (e) {
-        throw new AssetError(
-          `删除失败：${display_path(f.path)}（${e && e.message !== undefined ? e.message : e}）`,
-          500);
+        const where = display_path(f.path);
+        const detail = e && e.message !== undefined ? e.message : e;
+        throw localizable(new AssetError(`删除失败：${where}（${detail}）`, 500),
+          '删除失败：{path}（{detail}）', { path: where, detail });
       }
       deleted.push(display_path(f.path));
     }

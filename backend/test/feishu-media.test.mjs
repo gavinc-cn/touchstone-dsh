@@ -446,6 +446,11 @@ function mhHarness(tag, over = {}) {
     cur_bound_at: '', default_project_id: 0,
   };
   const options = {
+    // 只读空库句柄：`feishu_cfg.userLang` 在 options 无 `db` 时会落到默认库（真实
+    // `~/.touchstone/touchstone.db`）——用户把界面切成 en 后，本文件的「默认中文」
+    // 断言会随真实偏好变红。注入空库恢复文件头「依赖全注入、不碰真库」的合同
+    // （不改任何断言；en 档仍由显式 options.lang 覆盖）。
+    db: { prepare: () => ({ all: () => [], get: () => undefined }) },
     dbmod: { getFeishuBindingByOpen: () => binding },
     rest, conv: convStub, env: over.env ? { ...over.env } : {},
     log: (line) => log.push(line), now: () => 1000,

@@ -19,9 +19,12 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Loader2, KeyRound } from 'lucide-react'
+import { useI18n } from '../utils/i18n'
 
 export default function ForcePasswordChange() {
   const auth = useAuthStore()
+  // 文案取 t()：切换语言即时重渲染
+  const { t } = useI18n()
   const [oldPw, setOldPw] = useState('')
   const [newPw, setNewPw] = useState('')
   const [newPw2, setNewPw2] = useState('')
@@ -33,20 +36,20 @@ export default function ForcePasswordChange() {
     setError('')
     // 前端先校验（与后端同规则：新密码至少 6 位），减少一次无谓请求
     if (newPw.length < 6) {
-      setError('新密码至少 6 位')
+      setError(t('新密码至少 6 位'))
       return
     }
     if (newPw !== newPw2) {
-      setError('两次输入的新密码不一致')
+      setError(t('两次输入的新密码不一致'))
       return
     }
     setBusy(true)
     try {
       await authApi.changePassword(oldPw, newPw)
       await auth.load() // me 回读 must_change_password=false → 路由守卫放行进入应用
-      toast('密码已修改')
+      toast(t('密码已修改'))
     } catch (e) {
-      setError(e.message || '修改失败')
+      setError(e.message || t('修改失败'))
     } finally {
       setBusy(false)
     }
@@ -59,17 +62,17 @@ export default function ForcePasswordChange() {
           <div className="justify-self-center"><TouchstoneLogo size={40} /></div>
           <div className="text-center">
             <CardTitle className="flex items-center justify-center gap-2 font-serif text-lg">
-              <KeyRound className="size-4 text-[var(--star-text)]" /> 首次登录须修改密码
+              <KeyRound className="size-4 text-[var(--star-text)]" /> {t('首次登录须修改密码')}
             </CardTitle>
             <CardDescription className="mt-1">
-              账号 {auth.username} 仍在使用一次性初始口令
+              {t('账号 {user} 仍在使用一次性初始口令', { user: auth.username })}
             </CardDescription>
           </div>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <div className="grid gap-2">
             <Label htmlFor="force-old-pw" className="text-xs text-muted-foreground">
-              当前口令（启动横幅里的一次性口令）
+              {t('当前口令（启动横幅里的一次性口令）')}
             </Label>
             <Input id="force-old-pw" value={oldPw} type="password"
               onChange={(e) => setOldPw(e.target.value)}
@@ -77,7 +80,7 @@ export default function ForcePasswordChange() {
           </div>
           <div className="grid gap-2">
             <Label htmlFor="force-new-pw" className="text-xs text-muted-foreground">
-              新密码（至少 6 位）
+              {t('新密码（至少 6 位）')}
             </Label>
             <Input id="force-new-pw" value={newPw} type="password"
               onChange={(e) => setNewPw(e.target.value)}
@@ -85,7 +88,7 @@ export default function ForcePasswordChange() {
           </div>
           <div className="grid gap-2">
             <Label htmlFor="force-new-pw2" className="text-xs text-muted-foreground">
-              确认新密码
+              {t('确认新密码')}
             </Label>
             <Input id="force-new-pw2" value={newPw2} type="password"
               onChange={(e) => setNewPw2(e.target.value)}
@@ -95,14 +98,14 @@ export default function ForcePasswordChange() {
           <div className="min-h-5 text-[calc(13px*var(--fs))] leading-5 text-destructive">{error}</div>
           <Button size="lg" className="w-full" disabled={busy} onClick={submit}>
             {busy && <Loader2 className="size-4 animate-spin" />}
-            修改并进入
+            {t('修改并进入')}
           </Button>
         </CardContent>
         <CardFooter className="flex-col items-center pt-0">
           <button type="button"
             className="text-sm text-[var(--run)] underline-offset-4 hover:underline"
             onClick={() => auth.logout()}>
-            退出登录
+            {t('退出登录')}
           </button>
         </CardFooter>
       </Card>

@@ -33,6 +33,7 @@ import { queueRowTag } from '../utils/queueRowTag'
 import { cancellableRow } from '../utils/queueRestore'
 import { canonicalPermission, permissionDesc, permissionItems, permissionLabel }
   from '../utils/permission'
+import { useI18n } from '../utils/i18n'
 
 /** token 数 → 紧凑文本(32876 → 32.9k), 用于圈圈 tooltip 展示上下文用量 */
 function fmtTok(n) {
@@ -52,6 +53,7 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
     answerPending, deliveringAnswer, onDeliverAnswer,
     slashOpen, slashQuery, slashItems, onSlashSelect, onSlashClose, onSlashDisabled,
     onPasteFiles, onDropFiles, onUploadFiles, taRef }) {
+  const { t } = useI18n()
   const fileRef = useRef(null)        // 「+」按钮触发的隐藏 file input
   /* ---------- 底栏三控件(Task 4)派生 ---------- */
   // 可交互判定（2026-10-03 起全部按能力位，不再按族名硬编码）：
@@ -69,8 +71,9 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
   const permText = permissionLabel(permOpts, permMode)
   const permDesc = permissionDesc(permOpts, permMode)
   // 收起态 title = 命中档位的描述（无描述回退档位名；未回读提示读取中）
-  const permTitle = !permMode ? '权限模式读取中…'
-    : (permDesc ? `权限：${permText}（${permDesc}）` : `权限：${permText}`)
+  const permTitle = !permMode ? t('权限模式读取中…')
+    : (permDesc ? t('权限：{label}（{desc}）', { label: permText, desc: permDesc })
+      : t('权限：{label}', { label: permText }))
   // 思考等级展示值: 回读值(meta.sessionEffort/乐观选择) → 空=该模型默认档（宿主有默认
   // 档时括注出来，如「默认（最高）」）——与 dsh 自己的控件同口径（显示生效档位）
   const effortVal = effortSel || meta?.sessionEffort || ''
@@ -79,11 +82,15 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
     ? (((effortOpts.options || []).find((o) => o.value === effortOpts.defaultEffort) || {}).label
        || effortOpts.defaultEffort)
     : ''
-  const effortText = effortOpt?.label
-    || (effortDefaultLabel ? `默认（${effortDefaultLabel}）` : '默认')
+  // 展示文案与哨兵解耦：默认模型只是展示文本，选择值走固定 '__default__'
+  const effortTextLabel = effortOpt?.label
+    || (effortDefaultLabel ? t('默认（{name}）', { name: effortDefaultLabel }) : t('默认'))
   // 模型展示值: 乐观选择 → meta 回读模型 → 项目默认 → 兜底文本(radix Select 值必须落在选项内)
-  const modelText = modelSel || meta?.sessionModel || modelOpts?.default || '默认模型'
-  const modelVal = modelText === '默认模型' ? '__default__' : modelText
+  const modelText = modelSel || meta?.sessionModel || modelOpts?.default || ''
+  const modelVal = modelText || '__default__'
+  // 置灰 chip 的展示语义与迁移前一致：只显示会话回读模型（meta.sessionModel），
+  // 缺回读才兜底「默认模型」；不沿用下拉框的乐观选择/项目默认（那只是选项值语义）
+  const modelLabel = meta?.sessionModel || t('默认模型')
   // 上下文圈圈: ctx={used,max} 有效才按比例画进度弧, 缺失(后端未给 ctx/无数据) → 0% 灰环
   const ctx = meta?.ctx
   const ctxPct = ctx && +ctx.max > 0
@@ -104,21 +111,22 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
   const queueMode = busy || chatRunning || (queuedN || 0) > 0
   const placeholder = queueStatePlaceholder(qstate, {
     found: !!meta?.found, board: !!board, canQueue: !!caps.queue, chatRunning,
-    projectBusy })
+    projectBusy }, t)
   // 停止按钮：有排队消息=取消排队；会话运行中=停止当前对话（board 恒显示；
   // 有 queue 能力的族在任务运行中不显示——那是任务级停止，走任务列表的停止按钮）
   const canStop = (queuedN || 0) > 0 || (chatRunning && (board || !(caps.queue && taskRunning)))
   // 按钮文案（两种语义共用一个按钮）：有排队消息且当前无运行 turn ⇒「取消排队」
-  const stopLabel = (queuedN || 0) > 0 && !chatRunning ? '取消排队' : '停止'
+  const cancelMode = (queuedN || 0) > 0 && !chatRunning
+  const stopLabel = cancelMode ? t('取消排队') : t('停止')
   // 两个语义的**分派点**（2026-10-17）：文案为「取消排队」时点击走纯平台侧取消动作
   // （onCancelQueue），不再借用停止链路——没有在跑的轮次时停止回执必是 stopped=false，
   // 用户拿到「该会话未在运行或无法停止」而排队消息其实已被取消（用户报障）。
   // 文案为「停止」时语义不变（打断当前轮），停止的排队副作用按既有计划另批拆开。
-  const cancelOnly = stopLabel === '取消排队' && !!onCancelQueue
+  const cancelOnly = cancelMode && !!onCancelQueue
   // 外部会话置灰（C 批 T8）：轮次归 dsh GUI 持有，平台的停止/中断对它无效——文案为
   // 「停止」时置灰（仅置灰不隐藏，用户看得见按钮在、但停不了）；「取消排队」是平台侧
   // 动作（撤销 m: 行，不碰 dsh 侧轮次），对外部会话照常有效，不连坐
-  const stopGreyed = !!stopDisabled && stopLabel === '停止'
+  const stopGreyed = !!stopDisabled && !cancelMode
   return (
     <div className="sess-composer">
       {/* 已作答·待送达行（2026-09-14，board 卡片会话）：答案已被平台收下、等项目
@@ -126,14 +134,14 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
           等待中的会话；送达成功后随下轮轮询消失） */}
       {answerPending && (
         <div className="sess-queue">
-          <div className="sess-queue-row" title="答案已提交，等项目空闲送达">
-            <span className="sess-queue-tag on">待送达</span>
-            <span className="sess-queue-text">已作答，等待送达（项目忙，空闲后自动送达）</span>
+          <div className="sess-queue-row" title={t('答案已提交，等项目空闲送达')}>
+            <span className="sess-queue-tag on">{t('待送达')}</span>
+            <span className="sess-queue-text">{t('已作答，等待送达（项目忙，空闲后自动送达）')}</span>
             <Button size="sm" variant="outline" className="sess-queue-btn"
               disabled={deliveringAnswer}
-              title="立即送达：不等项目空闲，立即把答案交给等待中的会话"
+              title={t('立即送达：不等项目空闲，立即把答案交给等待中的会话')}
               onClick={onDeliverAnswer}>
-              <Zap className="h-3 w-3" /> 立即送达
+              <Zap className="h-3 w-3" /> {t('立即送达')}
             </Button>
           </div>
         </div>
@@ -164,17 +172,17 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
                 {canInject && (
                   <Button size="sm" variant="outline" className="sess-queue-btn"
                     disabled={injecting === q.key}
-                    title="立即注入：不等队列，直接投递到会话当前上下文"
+                    title={t('立即注入：不等队列，直接投递到会话当前上下文')}
                     onClick={() => onInject(q)}>
-                    <Zap className="h-3 w-3" /> 立即注入
+                    <Zap className="h-3 w-3" /> {t('立即注入')}
                   </Button>
                 )}
                 {canCancel && (
                   <Button size="sm" variant="outline" className="sess-queue-btn"
                     disabled={cancelling === q.key}
-                    title="取消这条排队消息：撤销排队，并把原文放回输入框"
+                    title={t('取消这条排队消息：撤销排队，并把原文放回输入框')}
                     onClick={() => onCancelQueuedRow(q)}>
-                    <X className="h-3 w-3" /> 取消
+                    <X className="h-3 w-3" /> {t('取消')}
                   </Button>
                 )}
               </div>
@@ -191,7 +199,7 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
                 ? <img src={a.url} alt={a.name} />
                 : <FileText className="h-3.5 w-3.5" />}
               <span className="sess-chip-name">{a.name}</span>
-              <button type="button" className="sess-chip-x" title="移除附件"
+              <button type="button" className="sess-chip-x" title={t('移除附件')}
                 onClick={() => onRemoveAtt(a.md)}>
                 <X className="h-3 w-3" />
               </button>
@@ -227,7 +235,7 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
         {/* 「+」附加文件: 上传后光标处插入 markdown(图片/文件, 引用落盘绝对路径供 agent 直读) */}
         <input ref={fileRef} type="file" multiple className="hidden"
           onChange={(e) => { onUploadFiles(e.target.files); e.target.value = '' }} />
-        <Button variant="ghost" size="icon" className="sess-attach" title="添加附件（粘贴/拖入亦可）"
+        <Button variant="ghost" size="icon" className="sess-attach" title={t('添加附件（粘贴/拖入亦可）')}
           disabled={uploading || inputLocked}
           onClick={() => fileRef.current?.click()}>
           <Plus className="h-4 w-4" />
@@ -246,7 +254,7 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
               title={permTitle}>
               {/* 收起态只显示档位名：Radix 默认把选中项内容（含描述）portal 进触发器，
                   显式给 SelectValue children 覆盖；描述仅在展开列表内显示 */}
-              <SelectValue className="sess-ctl-value" placeholder="权限">{permText}</SelectValue>
+              <SelectValue className="sess-ctl-value" placeholder={t('权限')}>{permText}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               {/* 选项=宿主目录 + 现值兜底项（utils/permission.permissionItems） */}
@@ -262,7 +270,7 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
             </SelectContent>
           </Select>
         ) : (
-          <span className="sess-chip" title="权限模式（会话级）">{permText}</span>
+          <span className="sess-chip" title={t('权限模式（会话级）')}>{permText}</span>
         )}
         {/* 模型选择: 可交互=chip 样式下拉(选项=项目 agent 模型列表 /api/agents/models;
             现值不在列表时补当前项兜底, 未知模型=disabled「默认模型」占位);
@@ -270,11 +278,11 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
         {modelInteractive ? (
           <Select value={modelVal} onValueChange={onSetModel}>
             <SelectTrigger size="sm" className="h-8 max-w-[180px] px-2 text-xs gap-1"
-              title="切换会话模型（即时生效）">
+              title={t('切换会话模型（即时生效）')}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {modelVal === '__default__' && <SelectItem value="__default__" disabled>默认模型</SelectItem>}
+              {modelVal === '__default__' && <SelectItem value="__default__" disabled>{t('默认模型')}</SelectItem>}
               {modelVal !== '__default__' && !(modelOpts?.models || []).some((m) => m.name === modelVal) && (
                 <SelectItem value={modelVal}>{modelVal}</SelectItem>
               )}
@@ -284,7 +292,7 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
             </SelectContent>
           </Select>
         ) : (
-          <span className="sess-chip" title="当前会话模型">{meta?.sessionModel || '默认模型'}</span>
+          <span className="sess-chip" title={t('当前会话模型')}>{modelLabel}</span>
         )}
         {/* 思考等级（2026-10-04）：选项=当前模型支持的档位（/api/agents/models 的
             efforts，缺省用内置档位表）；可交互=有 profile 能力位（看板卡与任务会话都开，
@@ -293,13 +301,13 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
         {effortInteractive ? (
           <Select value={effortVal || '__default__'} onValueChange={onSetEffort}>
             <SelectTrigger size="sm" className="h-8 max-w-[130px] px-2 text-xs gap-1"
-              title="切换会话思考等级（即时生效）">
-              <SelectValue className="sess-ctl-value" placeholder="思考等级">{effortText}</SelectValue>
+              title={t('切换会话思考等级（即时生效）')}>
+              <SelectValue className="sess-ctl-value" placeholder={t('思考等级')}>{effortTextLabel}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               {/* 默认档哨兵：Radix Select 不允许空串值；置灰（与模型下拉的「默认模型」同款） */}
               <SelectItem value="__default__" disabled>
-                {effortDefaultLabel ? `默认（${effortDefaultLabel}）` : '默认'}
+                {effortDefaultLabel ? t('默认（{name}）', { name: effortDefaultLabel }) : t('默认')}
               </SelectItem>
               {/* 回读档位不在当前选项里（模型目录还没拉到/老插件）：补一条兜底项，防触发器空值 */}
               {effortVal && !effortOpt && (
@@ -313,12 +321,14 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
             </SelectContent>
           </Select>
         ) : (
-          <span className="sess-chip" title="思考等级（会话级）">{effortText}</span>
+          <span className="sess-chip" title={t('思考等级（会话级）')}>{effortTextLabel}</span>
         )}
         {/* 上下文圈圈: 当前上下文占用比例(整数 %), 缺失 → 0% 灰环(仅底轨) */}
         <svg className="sess-ring" viewBox="0 0 18 18" width="18" height="18"
-          title={ctx ? `上下文 ${fmtTok(ctx.used)} / ${fmtTok(ctx.max)}（${ctxPct}%）` : '暂无上下文用量数据'}>
-          <title>{ctx ? `上下文 ${fmtTok(ctx.used)} / ${fmtTok(ctx.max)}（${ctxPct}%）` : '暂无上下文用量数据'}</title>
+          title={ctx ? t('上下文 {used} / {max}（{pct}%）', {
+            used: fmtTok(ctx.used), max: fmtTok(ctx.max), pct: ctxPct }) : t('暂无上下文用量数据')}>
+          <title>{ctx ? t('上下文 {used} / {max}（{pct}%）', {
+            used: fmtTok(ctx.used), max: fmtTok(ctx.max), pct: ctxPct }) : t('暂无上下文用量数据')}</title>
           <circle cx="9" cy="9" r="7" fill="none" stroke="var(--border)" strokeWidth="2" />
           {ctxPct > 0 && (
             <circle cx="9" cy="9" r="7" fill="none" stroke="var(--run)" strokeWidth="2"
@@ -332,8 +342,8 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
             外部会话（stopGreyed）仍显示按钮但置灰：那是 dsh GUI 持有的轮次，平台停不了 */}
         {canStop && (
           <Button variant="outline" size="sm" title={cancelOnly
-              ? '取消排队：撤销本会话全部排队消息，并把原文放回输入框（不打断当前轮次）'
-              : '停止当前对话（打断当前轮次）'}
+              ? t('取消排队：撤销本会话全部排队消息，并把原文放回输入框（不打断当前轮次）')
+              : t('停止当前对话（打断当前轮次）')}
             onClick={cancelOnly ? onCancelQueue : onStop}
             disabled={cancelOnly ? cancelling === '__all__' : stopGreyed}>
             <Square /> {stopLabel}
@@ -341,7 +351,7 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
         )}
         <Button size="sm" onClick={onSend}
           disabled={!value.trim() || sending || inputLocked}>
-          <Send /> {queueMode ? '排队' : '发送'}
+          <Send /> {queueMode ? t('排队') : t('发送')}
         </Button>
       </div>
     </div>

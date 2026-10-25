@@ -8,9 +8,13 @@
 // 真数据出处：dsh 会话存储的事件流解析出的 entry 模型（sessparse.py 头注释）：
 //   user / assistant / think / tool_call{name,args,call_id} / tool_result{call_id,name,text,is_error,truncated}
 // 这里按真实形态造数据：一次工具调用后紧跟它的结果，思考条目夹在中间。
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import { buildRows, summarizeProc } from '../utils/sessionGroups'
+import { setLang, t } from '../utils/i18n'
+
+// 文案断言按中文跑（zh 原样返回 key 并插值）
+beforeEach(() => setLang('zh'))
 
 /** 造一条 entry（只带被测逻辑关心的字段） */
 function ent(seq, kind, extra = {}) {
@@ -105,7 +109,7 @@ describe('sessionGroups：summarizeProc 摘要与错误标记', () => {
       ...pair(3, 'bash'),
       ...pair(5, 'skill'),
     ]
-    const s = summarizeProc(items)
+    const s = summarizeProc(items, t)
     expect(s.text).toBe('工具 3 次 · bash ×2, skill · 思考 1 段')
     expect(s.calls).toBe(3)
     expect(s.thinks).toBe(1)
@@ -114,30 +118,30 @@ describe('sessionGroups：summarizeProc 摘要与错误标记', () => {
 
   it('结果报错时进摘要并置错误标记（错误不被静默埋掉）', () => {
     const items = [...pair(0, 'bash', { error: true }), ...pair(2, 'bash')]
-    const s = summarizeProc(items)
+    const s = summarizeProc(items, t)
     expect(s.text).toBe('工具 2 次 · bash ×2 · 错误 1 次')
     expect(s.errors).toBe(1)
   })
 
   it('只有思考的组：只出思考段数', () => {
-    const s = summarizeProc([ent(0, 'think', { text: 'a' }), ent(1, 'think', { text: 'b' })])
+    const s = summarizeProc([ent(0, 'think', { text: 'a' }), ent(1, 'think', { text: 'b' })], t)
     expect(s.text).toBe('思考 2 段')
   })
 
   it('无正文的思考条目不计数（渲染层对空思考返回 null，摘要也不该虚报）', () => {
     const items = [ent(0, 'think', { text: '   ' }), ...pair(1, 'bash')]
-    expect(summarizeProc(items).text).toBe('工具 1 次 · bash')
+    expect(summarizeProc(items, t).text).toBe('工具 1 次 · bash')
   })
 
   it('只有结果没有调用（异常形态）时用结果里的工具名兜底', () => {
     const items = [ent(0, 'tool_result', { name: 'bash', text: 'ok' }),
       ent(1, 'tool_result', { name: 'bash', text: 'ok2' })]
-    expect(summarizeProc(items).text).toBe('bash ×2')
+    expect(summarizeProc(items, t).text).toBe('bash ×2')
   })
 
   it('工具名过长时按段截断并加省略号（摘要行不撑爆）', () => {
     const items = [...pair(0, 'a'.repeat(30)), ...pair(2, 'b'.repeat(30)), ...pair(4, 'c'.repeat(30))]
-    const s = summarizeProc(items)
+    const s = summarizeProc(items, t)
     // 首个名称 30 字符已占满预算（60），后续段整体省略为「, …」
     expect(s.text).toBe('工具 3 次 · ' + 'a'.repeat(30) + ', …')
     expect(s.text.length).toBeLessThan(80)
@@ -145,6 +149,6 @@ describe('sessionGroups：summarizeProc 摘要与错误标记', () => {
 
   it('工具名为空时用「工具」兜底', () => {
     const items = [ent(0, 'tool_call', { name: '' }), ent(1, 'tool_result', { text: 'ok' })]
-    expect(summarizeProc(items).text).toBe('工具 1 次 · 工具')
+    expect(summarizeProc(items, t).text).toBe('工具 1 次 · 工具')
   })
 })

@@ -15,6 +15,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { ArrowLeft, Copy, ExternalLink, FileWarning, TriangleAlert, X } from 'lucide-react'
+import { useI18n } from '../utils/i18n'
 
 const MD_RE = /\.(md|markdown)$/i
 
@@ -26,13 +27,14 @@ function fmtSize(n) {
   return (v / 1024 / 1024).toFixed(1) + ' MB'
 }
 
-/** 时间戳（秒）→ 本地时间文本 */
-function fmtMtime(t) {
-  const d = new Date((+t || 0) * 1000)
+/** 时间戳（秒）→ 本地时间文本；参数不用 t（避免遮蔽 i18n 翻译函数） */
+function fmtMtime(secs) {
+  const d = new Date((+secs || 0) * 1000)
   return isNaN(d.getTime()) ? '' : d.toLocaleString()
 }
 
 export default function FilePreview({ pid, path, roots = null, onClose }) {
+  const { t } = useI18n()
   const [stack, setStack] = useState([path])      // 预览栈（预览内跳转让路径压栈）
   const cur = stack[stack.length - 1]
   const [state, setState] = useState({ loading: true })
@@ -43,7 +45,7 @@ export default function FilePreview({ pid, path, roots = null, onClose }) {
     setState({ loading: true })
     projectApi.filePreview(pid, cur)
       .then((d) => { if (alive) setState({ data: d }) })
-      .catch((e) => { if (alive) setState({ error: e.message || '读取失败' }) })
+      .catch((e) => { if (alive) setState({ error: e.message || t('读取失败') }) })
     return () => { alive = false }
   }, [pid, cur])
 
@@ -60,9 +62,9 @@ export default function FilePreview({ pid, path, roots = null, onClose }) {
   const rawUrl = projectApi.fileRawUrl(pid, cur)
   const copyPath = useCallback(() => {
     const p = (data && data.path) || cur
-    navigator.clipboard?.writeText(p).then(() => toast('已复制路径'),
-      () => toast('复制失败，请手动选择'))
-  }, [data, cur])
+    navigator.clipboard?.writeText(p).then(() => toast(t('已复制路径')),
+      () => toast(t('复制失败，请手动选择')))
+  }, [data, cur, t])
 
   return (
     <Dialog open onOpenChange={(v) => { if (!v) onClose() }}>
@@ -71,7 +73,7 @@ export default function FilePreview({ pid, path, roots = null, onClose }) {
         <DialogHeader className="text-left fv-head">
           <div className="fv-titlebar">
             {stack.length > 1 && (
-              <button type="button" className="fv-act" title="返回上一个文件"
+              <button type="button" className="fv-act" title={t('返回上一个文件')}
                 onClick={() => setStack((s) => s.slice(0, -1))}>
                 <ArrowLeft className="fv-act-i" />
               </button>
@@ -79,29 +81,29 @@ export default function FilePreview({ pid, path, roots = null, onClose }) {
             <DialogTitle className="fv-title" title={(data && data.path) || cur}>
               {(data && data.rel) || cur}
             </DialogTitle>
-            <button type="button" className="fv-act" title="复制完整路径" onClick={copyPath}>
+            <button type="button" className="fv-act" title={t('复制完整路径')} onClick={copyPath}>
               <Copy className="fv-act-i" />
             </button>
             <a className="fv-act" href={rawUrl} target="_blank" rel="noreferrer"
-              title="在新标签页打开原文（文本按纯文本展示；二进制下载）">
+              title={t('在新标签页打开原文（文本按纯文本展示；二进制下载）')}>
               <ExternalLink className="fv-act-i" />
             </a>
-            <button type="button" className="fv-act" title="关闭（Esc）" onClick={onClose}>
+            <button type="button" className="fv-act" title={t('关闭（Esc）')} onClick={onClose}>
               <X className="fv-act-i" />
             </button>
           </div>
           {data && (
             <div className="fv-meta">
               {fmtSize(data.size)} · {fmtMtime(data.mtime)}
-              {data.root === 'work' ? ' · 工作目录' : ' · 项目目录'}
-              {data.truncated ? ' · 仅显示前 256KB' : ''}
+              {data.root === 'work' ? t(' · 工作目录') : t(' · 项目目录')}
+              {data.truncated ? t(' · 仅显示前 256KB') : ''}
             </div>
           )}
         </DialogHeader>
 
         <div className="fv-body">
           {state.loading ? (
-            <div className="fv-hint">读取中…</div>
+            <div className="fv-hint">{t('读取中…')}</div>
           ) : state.error ? (
             <div className="fv-hint err">
               <TriangleAlert className="fv-hint-i" />
@@ -110,8 +112,8 @@ export default function FilePreview({ pid, path, roots = null, onClose }) {
           ) : data.binary ? (
             <div className="fv-hint">
               <FileWarning className="fv-hint-i" />
-              <span>二进制文件（{fmtSize(data.size)}），无法预览。
-                <a className="md-path" href={rawUrl} target="_blank" rel="noreferrer">下载</a>
+              <span>{t('二进制文件（{size}），无法预览。', { size: fmtSize(data.size) })}
+                <a className="md-path" href={rawUrl} target="_blank" rel="noreferrer">{t('下载')}</a>
               </span>
             </div>
           ) : MD_RE.test(cur) ? (

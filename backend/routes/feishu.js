@@ -140,7 +140,7 @@ function apiMeFeishuCfgGet(ctx) {
 async function apiMeFeishuCfgSet(ctx) {
   // 读体时机照 `do_POST:1048` / `do_PATCH:1262`（都在调用 handler 之前）
   const body = await ctx.readBody();
-  const out = await saveUserConfig(ctx.user.id, body, { db: ctx.db });
+  const out = await saveUserConfig(ctx.user.id, body, { db: ctx.db, lang: ctx.lang });
   ctx.json(200, { ok: true, ...out });
 }
 

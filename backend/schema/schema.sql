@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     date_to      TEXT NOT NULL DEFAULT '',
     -- 复压标记（2026-10-06）：1=下一次执行只跑发压运行（跳过 agent 轮），用后即清
     load_rerun   INTEGER NOT NULL DEFAULT 0,
+    -- 界面语言（T13，2026-10-23）：任务创建时冻结（'zh'/'en'），存量行 DEFAULT 'zh'；
+    -- 读侧一律经 i18n.task_lang 归一，创建后不可改（不在 update_task 白名单）。
+    lang         TEXT NOT NULL DEFAULT 'zh',
     created_at   TEXT NOT NULL,
     started_at   TEXT,
     ended_at     TEXT,
@@ -105,6 +108,9 @@ CREATE TABLE IF NOT EXISTS board_cards (
     done_at        TEXT,
     trashed        INTEGER NOT NULL DEFAULT 0,
     trashed_at     TEXT,
+    -- 界面语言（T13，2026-10-23）：卡片**新建时为 ''=未冻结**，首次 start 才写入
+    -- 请求语言（之后不覆盖）；存量行 DEFAULT 'zh'。读侧一律经 i18n.card_lang 归一。
+    lang           TEXT NOT NULL DEFAULT 'zh',
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL,
     -- 2026-10-07 起：卡片状态（列）被平台/agent 改动、而用户还没打开过卡片 ⇒ 1

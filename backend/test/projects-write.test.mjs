@@ -63,10 +63,12 @@ function fakeRes() {
  * `readState` 是「体有没有被消费」的探针：`end` 只有在流被读空后才触发，而**只挂 `end`
  * 监听不会让暂停态的流开始流动**——所以它精确对应「handler 有没有调 `ctx.readBody()`」。
  */
-function fakeReq(method, body) {
+function fakeReq(method, body, headers = {}) {
   const text = body === undefined ? null : Buffer.from(JSON.stringify(body), 'utf8');
   const stream = Readable.from(text === null ? [] : [text], { objectMode: false });
-  stream.headers = text === null ? {} : { 'content-length': String(text.length) };
+  stream.headers = text === null
+    ? { ...headers }
+    : { 'content-length': String(text.length), ...headers };
   stream.method = method;
   const readState = { ended: false };
   stream.on('end', () => { readState.ended = true; });
@@ -78,8 +80,8 @@ function fakeReq(method, body) {
  * @returns {Promise<{status:number, headers:object, hit:boolean, readState:object,
  *                    text:Function, json:Function}>}
  */
-async function call(env, method, target, { body, user } = {}) {
-  const { stream, readState } = fakeReq(method, body);
+async function call(env, method, target, { body, user, headers = {} } = {}) {
+  const { stream, readState } = fakeReq(method, body, headers);
   const { res, cap } = fakeRes();
   const ctx = makeContext({
     req: stream,
@@ -740,6 +742,23 @@ test('fs/mkdir：七档 400 的中文文案逐字节（带空格错误体）', a
     const r = await expectBody(env, 'POST', '/api/fs/mkdir', { body }, 400, expected);
     assert.equal(r.hit, true);
   }
+});
+
+test('fs/mkdir：OSError ⇒ 英文模式输出 "Failed to create: …"（key+vars 插值）', async (t) => {
+  const env = setup('mkdir-en-os');
+  t.after(() => env.close());
+  const dir = path.join(env.dat, 'en-d');
+  fs.mkdirSync(dir, { recursive: true });
+  const r = await call(env, 'POST', '/api/fs/mkdir',
+    { body: { path: dir, name: 'x'.repeat(300) }, headers: { 'X-TS-Lang': 'en' } });
+  assert.equal(r.status, 400);
+  assert.ok(r.text().startsWith('{"error": "Failed to create: '), r.text());
+  assert.ok(!r.text().includes('新建失败：'), '英文模式不该再出现中文前缀');
+  // 无头请求仍是旧中文前缀（逐字节口径不变）
+  const zh = await call(env, 'POST', '/api/fs/mkdir',
+    { body: { path: dir, name: 'y'.repeat(300) } });
+  assert.equal(zh.status, 400);
+  assert.ok(zh.text().startsWith('{"error": "新建失败：'), zh.text());
 });
 
 // --------------------------------------------------------------------------

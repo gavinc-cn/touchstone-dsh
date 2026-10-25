@@ -15,6 +15,7 @@ import agents
 import db
 import dshevents
 import dshdriver
+import i18n
 import sessparse
 import waitq
 
@@ -56,37 +57,69 @@ def enabled():
     return (os.environ.get(CONV_ENV) or "").strip() != "0"
 
 
-def current_text(binding):
+def _text(template, lang="zh", **vars):
+    """固定文案本地化：`template` 是中文原文（即词典 key），`vars` 只放插值变量。
+
+    对 `zh` 而言就是原串插值（逐字节等价于旧 f-string）；对 `en` 查 `i18n/en.json`
+    的 `api` 命名空间。缺失词条时 `i18n.t` 自动回落中文，绝不抛错。
+    """
+    return i18n.t("api", template, lang, **vars)
+
+
+def _num_text(template, n, lang="zh"):
+    """`%d` 老式模板的本地化（T12a 兼容线：中文源串里的 `%d` 一律不改）。
+
+    中文仍走原 `%d` 格式化（与旧实现逐字节相同）；英文词典里同一条 key 的译文用
+    `{n}` 占位，交给 `i18n.t` 插值。`n` 限定整数（出站文案里的计数都是 int）。
+    """
+    if i18n.normalize_lang(lang) == "en":
+        return i18n.t("api", template, lang, n=n)
+    return template % n
+
+
+def _str_text(template, value, lang="zh"):
+    """`%s` 老式模板的本地化（同 `_num_text`；英文词典同一条 key 用 `{token}` 占位）。"""
+    if i18n.normalize_lang(lang) == "en":
+        return i18n.t("api", template, lang, token=value)
+    return template % value
+
+
+def current_text(binding, lang="zh"):
     """「当前」回执：默认项目 + 当前会话（标题 / sid 前 12 位 / 绑定时间 / 所属项目）；
     未绑定会话时明说「未绑定会话，发消息将自动新建」。"""
     project = _default_project(binding)
-    lines = [f"默认项目：{project['name'] if project else '未设置'}"]
+    lines = [_text("默认项目：{name}", lang,
+                   name=project["name"] if project else _text("未设置", lang))]
     sid = (binding["cur_sid"] or "").strip()
     if not sid:
-        lines.append("当前会话：未绑定会话，发消息将自动新建")
+        lines.append(_text("当前会话：未绑定会话，发消息将自动新建", lang))
         return "\n".join(lines)
     title = (binding["cur_title"] or "").strip() or sid[:12]
-    lines.append(f"当前会话：{title}（{sid[:12]}）")
+    lines.append(_text("当前会话：{title}（{sid}）", lang,
+                       title=title, sid=sid[:12]))
     bound_at = (binding["cur_bound_at"] or "").strip()
     if bound_at:
-        lines.append(f"绑定时间：{bound_at}")
+        lines.append(_text("绑定时间：{bound_at}", lang, bound_at=bound_at))
     owner = _project_by_id(binding, binding["cur_project_id"])
-    lines.append(f"所属项目：{owner['name'] if owner else '（项目已不在你的列表）'}")
+    lines.append(_text("所属项目：{name}", lang,
+                       name=owner["name"] if owner
+                       else _text("（项目已不在你的列表）", lang)))
     return "\n".join(lines)
 
 
-def new_session(binding, title=""):
+def new_session(binding, title="", lang="zh"):
     """「新建会话 [标题]」：默认项目下新建 dsh 会话并绑定，回执写明项目与看板副作用
     （新会话落在项目 project_dir，看板 sync_sessions 会自动建一张 sync 卡，不占运行位）。"""
-    project, err = _locate_project(binding)
+    project, err = _locate_project(binding, lang)
     if project is None:
         return err
-    title = (title or "").strip() or _new_title()
-    sid, err = _create_in_project(binding, project, title)
+    title = (title or "").strip() or _new_title(lang)
+    sid, err = _create_in_project(binding, project, title, lang)
     if err:
         return err
-    return (f"已新建并绑定「{title}」（项目：{project['name']}），接下来发消息都进这个会话；"
-            f"它也会出现在看板（sync 卡，不占运行位）")
+    return _text("已新建并绑定「{title}」（项目：{project}），接下来发消息都进这个会话；"
+                 "它也会出现在看板（sync 卡，不占运行位）",
+                 lang, title=title, project=project["name"])
 
 
 def _media_dir(project):
@@ -101,7 +134,7 @@ def _media_dir(project):
                         "board_media")
 
 
-def _store_images(project, text, images):
+def _store_images(project, text, images, lang="zh"):
     """把入站下载好的图片存进 board_media 并组装投递文案（契约 §3.5/§3.6）。
 
     返回 `(composed, "")` 成功 / `("", 失败文案)` 失败。文件名
@@ -122,16 +155,17 @@ def _store_images(project, text, images):
             path = os.path.join(mdir, fid)
             with open(path, "wb") as f:
                 f.write(data)
-            lines.append(f"![飞书截图{k}.{ext}]({path})")
+            lines.append(_text("![飞书截图{k}.{ext}]({path})", lang,
+                               k=k, ext=ext, path=path))
     except OSError as e:
-        return "", feishu.MEDIA_SAVE_FAIL_PREFIX + str(e)
-    header = feishu.MEDIA_HEADER_FMT % len(images) + \
-        ("" if text else feishu.MEDIA_HEADER_NOTE)
-    block = header + "：\n" + "\n".join(lines)
+        return "", _text(feishu.MEDIA_SAVE_FAIL_PREFIX, lang) + str(e)
+    header = _num_text(feishu.MEDIA_HEADER_FMT, len(images), lang) + \
+        ("" if text else _text(feishu.MEDIA_HEADER_NOTE, lang))
+    block = header + _text("：", lang) + "\n" + "\n".join(lines)
     return (text + "\n\n" + block) if text else block, ""
 
 
-def route_text(binding, text, cfg=None, images=None):
+def route_text(binding, text, cfg=None, images=None, lang="zh"):
     """单聊自由文本路由（四分支）：有会话直投 → 无会话按默认项目自动新建 → 投递 → 引导。
     截图支持（2026-10-22）：`images` 非空表示本次消息带图（元素 `{"data","mime"}`），
     在**目标项目解析成功之后**（无项目仍回引导、不落盘）存进该项目 board_media/ 并
@@ -149,7 +183,7 @@ def route_text(binding, text, cfg=None, images=None):
     """
     import chat       # 函数内懒 import：feishu → runner → chat 已成环（chat.py:166 先例）
     if len(text or "") > chat.MESSAGE_MAX:
-        return MESSAGE_TOO_LONG % chat.MESSAGE_MAX
+        return _num_text(MESSAGE_TOO_LONG, chat.MESSAGE_MAX, lang)
     open_id = binding["open_id"]
     note = ""
     sid = (binding["cur_sid"] or "").strip()
@@ -160,18 +194,18 @@ def route_text(binding, text, cfg=None, images=None):
         if project is None or not sessparse.session_exists("dsh", sid):
             db.clear_feishu_cur_session(open_id)
             sid, title, project = "", "", None
-            note = STALE_NOTE
+            note = _text(STALE_NOTE, lang)
     if not sid:
-        project, _err = _locate_project(binding)
+        project, _err = _locate_project(binding, lang)
         if project is None:
             # 设计 §3.4 分支 4：引导文案 + 项目总览卡（无项目时 projects_card 为 None，
             # 只回文案，绝不给一张空卡）；卡片发送走凭据闸，缺凭据只留痕
-            card = projects_card(binding)
+            card = projects_card(binding, lang)
             if card is not None:
                 send_card(open_id, card, cfg)
-            return NO_DEFAULT_GUIDE + (("\n" + note) if note else "")
-        title = _new_title()
-        sid, err = _create_in_project(binding, project, title)
+            return _text(NO_DEFAULT_GUIDE, lang) + (("\n" + note) if note else "")
+        title = _new_title(lang)
+        sid, err = _create_in_project(binding, project, title, lang)
         if err:
             return err + (("\n" + note) if note else "")
         # 创建路径内已写绑定；这里重申一次（幂等）：路由侧不依赖创建函数的副作用
@@ -182,7 +216,7 @@ def route_text(binding, text, cfg=None, images=None):
     composed = text
     if images:
         # 目标项目已解析成功 ⇒ 才落盘（无项目分支在上面已返回，不产生孤儿文件）
-        composed, err = _store_images(project, text or "", images)
+        composed, err = _store_images(project, text or "", images, lang)
         if err:
             return err + (("\n" + note) if note else "")
     baseline = _baseline_of(sid)
@@ -196,16 +230,17 @@ def route_text(binding, text, cfg=None, images=None):
                                                  "title": title}})
     except Exception as e:
         _trace(f"投递失败 sid={sid}: {e!r}")
-        return f"投递失败：{e}" + (("\n" + note) if note else "")
+        return _text("投递失败：{err}", lang, err=str(e)) + (("\n" + note) if note else "")
     if images:
         # 真机核对日志（契约 §3.2）：投递成功才打，带上的 sid/project 只在此层可知
         print(f"[feishu] 截图 {len(images)} 张已存 board_media 并投递 sid={sid}"
               f"（project={project['id']}）", file=sys.stderr, flush=True)
-    state = "排队中" if res.get("queued") else "执行中"
-    return f"已投递到「{title}」（{state}），跑完把答复发回这里" + note
+    state = _text("排队中" if res.get("queued") else "执行中", lang)
+    return _text("已投递到「{title}」（{state}），跑完把答复发回这里", lang,
+                 title=title, state=state) + note
 
 
-def conv_intent(binding, action, groups, sender_open_id, cfg=None):
+def conv_intent(binding, action, groups, sender_open_id, cfg=None, lang="zh"):
     """六条新指令的执行器（feishu.execute_intent 分派进来）。
 
     `current` / `new` / `use` / `leave` 回文本；`projects` / `sessions` 发对应卡片
@@ -213,30 +248,30 @@ def conv_intent(binding, action, groups, sender_open_id, cfg=None):
     """
     g = groups or []
     if action == "current":
-        return current_text(binding)
+        return current_text(binding, lang)
     if action == "projects":
         # 项目总览卡：卡片自带点选控件（t=dp 回调设默认项目）；无项目才回文本
-        card = projects_card(binding)
+        card = projects_card(binding, lang)
         if card is None:
-            return NO_PROJECTS_GUIDE
+            return _text(NO_PROJECTS_GUIDE, lang)
         if not send_card(binding["open_id"], card, cfg):
-            return _projects_text(binding)      # 卡片没被受理 ⇒ 文本兜底，绝不静默
+            return _projects_text(binding, lang)   # 卡片没被受理 ⇒ 文本兜底，绝不静默
         return ""      # 卡片即回执，不另发文本（execute_intent 见空串不发）
     if action == "sessions":
         # 会话列表卡（t=ss 回调绑定）：无默认项目回文本引导（卡片无处可列）
-        card = sessions_card(binding)
+        card = sessions_card(binding, lang)
         if card is None:
-            return NO_DEFAULT_GUIDE
+            return _text(NO_DEFAULT_GUIDE, lang)
         if not send_card(binding["open_id"], card, cfg):
-            return _sessions_text(binding)      # 卡片没被受理 ⇒ 文本兜底，绝不静默
+            return _sessions_text(binding, lang)   # 卡片没被受理 ⇒ 文本兜底，绝不静默
         return ""      # 同上：卡片即回执
     if action == "new":
-        return new_session(binding, ((g or [None])[0] or "").strip())
+        return new_session(binding, ((g or [None])[0] or "").strip(), lang)
     if action == "use":
         # 文本兜底绑定：序号（上一张列表卡的顺序）/ 标题包含 / sid 前缀
-        return use_by_token(binding, g[0] if g else "")
+        return use_by_token(binding, g[0] if g else "", lang)
     if action == "leave":
-        return leave_session(binding)
+        return leave_session(binding, lang)
     import feishu     # 函数内懒 import（同 route_text）：未知动作兜底回帮助
     return feishu.HELP_TEXT
 
@@ -273,7 +308,7 @@ def _card_bytes(card):
     return len(json.dumps(card, ensure_ascii=False).encode("utf-8"))
 
 
-def projects_card(binding):
+def projects_card(binding, lang="zh"):
     """项目总览卡（`项目` 指令）：用户没有任何项目时返回 None（调用方回文本引导）。
 
     排序：默认项目置顶，其余按 id 升序（下拉选项同序）。体积三道闸（飞书对超限
@@ -296,24 +331,29 @@ def projects_card(binding):
              [m for m, on in (("✅", int(p["id"]) == default_id),
                               ("💬", bool(cur_pid) and int(p["id"]) == cur_pid)) if on])
             for p in ordered]
-    counts = [_counts_line(p) for p in ordered[:PROJECTS_MAX]]   # 只算会展示的前 N 个
-    title = _clip_name(default["name"]) if default else "未设置"
-    header = {"title": {"tag": "plain_text", "content": f"项目总览（默认：{title}）"},
+    counts = [_counts_line(p, lang)
+              for p in ordered[:PROJECTS_MAX]]   # 只算会展示的前 N 个
+    title = _clip_name(default["name"]) if default else _text("未设置", lang)
+    header = {"title": {"tag": "plain_text",
+                        "content": _text("项目总览（默认：{title}）", lang,
+                                         title=title)},
               "template": "orange"}
     total = len(rows)
     shown = min(total, PROJECTS_MAX)
-    card = _card(header, _projects_elements(binding, rows, counts, shown, True))
+    card = _card(header, _projects_elements(binding, rows, counts, shown, True, lang))
     if _card_bytes(card) > CARD_MAX_BYTES:                      # 降级 ②：删计数行
-        card = _card(header, _projects_elements(binding, rows, counts, shown, False))
+        card = _card(header, _projects_elements(binding, rows, counts, shown, False,
+                                               lang))
     limit = PROJECTS_FALLBACK                                   # 降级 ③：收缩项目数
     while _card_bytes(card) > CARD_MAX_BYTES and shown > 1:
         shown = min(shown, limit)
-        card = _card(header, _projects_elements(binding, rows, counts, shown, False))
+        card = _card(header, _projects_elements(binding, rows, counts, shown, False,
+                                               lang))
         limit = max(1, limit // 2)
     return card
 
 
-def _projects_elements(binding, rows, counts, shown, with_counts):
+def _projects_elements(binding, rows, counts, shown, with_counts, lang="zh"):
     """总览卡根级元素：前 shown 个项目各一块 markdown（`**名称** ✅/💬` [+ 计数行]），
     有项目没列全时补一行文本引导，末尾是唯一的根级下拉控件（value=项目 id）。"""
     els = []
@@ -323,9 +363,11 @@ def _projects_elements(binding, rows, counts, shown, with_counts):
                     "content": head + (("\n" + counts[i]) if with_counts else "")})
     extra = len(rows) - shown
     if extra > 0:
-        els.append({"tag": "markdown", "content": PROJECTS_MORE_FMT % extra})
+        els.append({"tag": "markdown",
+                    "content": _num_text(PROJECTS_MORE_FMT, extra, lang)})
     els.append({"tag": "select_static", "name": "ts_projects",
-                "placeholder": {"tag": "plain_text", "content": "选择项目设为默认"},
+                "placeholder": {"tag": "plain_text",
+                                "content": _text("选择项目设为默认", lang)},
                 "options": [{"text": {"tag": "plain_text", "content": name[:24]},
                              "value": str(pid)} for pid, name, _m in rows[:shown]],
                 "behaviors": [{"type": "callback",
@@ -333,7 +375,7 @@ def _projects_elements(binding, rows, counts, shown, with_counts):
     return els
 
 
-def _projects_text(binding):
+def _projects_text(binding, lang="zh"):
     """总览卡的**纯文本兜底**（卡片未被受理时）：项目清单 + 文本设置指引。
 
     排序与卡片一致（默认项目置顶，其余按 id 升序），默认项目打 ✅；项目名同样过
@@ -341,20 +383,21 @@ def _projects_text(binding):
     """
     projects = _projects_of(binding)
     if not projects:
-        return NO_PROJECTS_GUIDE
+        return _text(NO_PROJECTS_GUIDE, lang)
     default = _default_project(binding)
     default_id = int(default["id"]) if default else 0
     ordered = sorted(projects,
                      key=lambda p: (0 if int(p["id"]) == default_id else 1, int(p["id"])))
-    lines = ["项目列表："]
+    lines = [_text("项目列表：", lang)]
     for p in ordered:
-        mark = " ✅默认" if int(p["id"]) == default_id else ""
-        lines.append(f"· {_clip_name(p['name'])}{mark}")
-    lines.append(PROJECTS_TEXT_HINT)
+        mark = _text(" ✅默认", lang) if int(p["id"]) == default_id else ""
+        lines.append(_text("· {name}{mark}", lang,
+                           name=_clip_name(p["name"]), mark=mark))
+    lines.append(_text(PROJECTS_TEXT_HINT, lang))
     return "\n".join(lines)
 
 
-def _counts_line(project):
+def _counts_line(project, lang="zh"):
     """单项目计数行：任务（运行中/排队）· 看板五列 · 队列四类活跃行。
 
     口径：任务取 `db.list_tasks` 的 status（与站点「运行中/排队」一致）；队列行取
@@ -375,11 +418,14 @@ def _counts_line(project):
         kind = str(it["kind"] or "")
         if kind in kinds:
             kinds[kind] += 1
-    return (f"任务 运行 {running}/排队 {queued} · "
-            f"看板 待开发 {board['todo']}/开发中 {board['doing']}"
-            f"/阻塞 {board['blocked']}/待审核 {board['review']}/已完成 {board['done']} · "
-            f"队列 卡 {kinds[waitq.KIND_CARD]}/消息 {kinds[waitq.KIND_MSG]}"
-            f"/作答 {kinds[waitq.KIND_ANSWER]}/外部 {kinds[waitq.KIND_EXT]}")
+    return _text(
+        "任务 运行 {running}/排队 {queued} · "
+        "看板 待开发 {todo}/开发中 {doing}/阻塞 {blocked}/待审核 {review}/已完成 {done} · "
+        "队列 卡 {card}/消息 {msg}/作答 {answer}/外部 {ext}", lang,
+        running=running, queued=queued, todo=board["todo"], doing=board["doing"],
+        blocked=board["blocked"], review=board["review"], done=board["done"],
+        card=kinds[waitq.KIND_CARD], msg=kinds[waitq.KIND_MSG],
+        answer=kinds[waitq.KIND_ANSWER], ext=kinds[waitq.KIND_EXT])
 
 
 def _board_counts(pid):
@@ -397,7 +443,7 @@ def _board_counts(pid):
     return counts
 
 
-def set_default_project(binding, project):
+def set_default_project(binding, project, lang="zh"):
     """设默认项目（卡片回调与文本指令共用同一段写路径）。返回回执文案。
 
     跨项目自动解绑（设计 §3.2）：当前已绑定会话且会话属于**另一个**项目时，
@@ -412,15 +458,15 @@ def set_default_project(binding, project):
     db.set_feishu_default_project(open_id, project["id"])
     if changed:
         _LAST_LIST.pop(open_id, None)
-    reply = f"默认项目已设为「{project['name']}」"
+    reply = _text("默认项目已设为「{name}」", lang, name=project["name"])
     sid = str(_binding_value(binding, "cur_sid", "") or "").strip()
     if sid and int(_binding_value(binding, "cur_project_id", 0) or 0) != int(project["id"]):
         db.clear_feishu_cur_session(open_id)
-        reply += "\n" + UNBIND_NOTE
+        reply += "\n" + _text(UNBIND_NOTE, lang)
     return reply
 
 
-def on_card_action(sender, binding, value, action, cfg):
+def on_card_action(sender, binding, value, action, cfg, lang="zh"):
     """通用对话卡片回调（`t=dp` 项目总览 / `t=ss` 会话列表）：返回 toast；未知 t 返回 None。
 
     写操作前两道归属复核（多用户隔离，仿 `feishu._on_slash_perm_action`）：卡片
@@ -433,25 +479,31 @@ def on_card_action(sender, binding, value, action, cfg):
     value = value or {}
     action = action or {}
     if str(value.get("u") or "") != str(binding["user_id"]):
-        return {"toast": {"type": "error", "content": "这张卡片不属于当前账号"}}
+        return {"toast": {"type": "error",
+                          "content": _text("这张卡片不属于当前账号", lang)}}
     if str(value.get("t") or "") == "dp":
         project = _project_by_id(binding, _selected_project_id(action))
         if project is None:
-            return {"toast": {"type": "error", "content": "项目不在你的列表里"}}
-        reply = set_default_project(binding, project)
+            return {"toast": {"type": "error",
+                              "content": _text("项目不在你的列表里", lang)}}
+        reply = set_default_project(binding, project, lang)
         _dm(binding["open_id"], reply, cfg)
-        return {"toast": {"type": "success", "content": "已设为默认项目"}}
+        return {"toast": {"type": "success",
+                          "content": _text("已设为默认项目", lang)}}
     if str(value.get("t") or "") == "ss":
         sid = _selected_session(action)
         if not sid:
-            return {"toast": {"type": "error", "content": "没有取到要绑定的会话"}}
-        reply = bind_session(binding, sid)
+            return {"toast": {"type": "error",
+                              "content": _text("没有取到要绑定的会话", lang)}}
+        reply = bind_session(binding, sid, "", lang)
         _dm(binding["open_id"], reply, cfg)     # 完整回执走私聊（toast 只做轻提示）
-        if reply == SESSION_GONE:
-            return {"toast": {"type": "error", "content": "会话已不存在，发「会话」刷新列表"}}
-        if reply in SESSION_FAIL_TEXTS:
-            return {"toast": {"type": "error", "content": "绑定失败"}}
-        return {"toast": {"type": "success", "content": "已绑定该会话"}}
+        if reply == _text(SESSION_GONE, lang):
+            return {"toast": {"type": "error",
+                              "content": _text("会话已不存在，发「会话」刷新列表", lang)}}
+        if reply in {_text(t, lang) for t in SESSION_FAIL_TEXTS}:
+            return {"toast": {"type": "error", "content": _text("绑定失败", lang)}}
+        return {"toast": {"type": "success",
+                          "content": _text("已绑定该会话", lang)}}
     return None        # 未知 t：交给飞书卡片回调兜底（不更新卡片）
 
 
@@ -488,7 +540,7 @@ def _selected_session(action):
 # 控件、只发一块引导 markdown（空下拉点不出东西）。看卡**只读**：绑定态只由显式写口改。
 
 
-def sessions_card(binding):
+def sessions_card(binding, lang="zh"):
     """会话列表卡（`会话` 指令）：无默认项目返回 None（调用方回「先设默认项目」文本）；
     零会话返回**有卡片无控件**（一块引导 markdown）。
 
@@ -504,32 +556,37 @@ def sessions_card(binding):
     items = sessparse.list_sessions("dsh", project["project_dir"])[:SESSIONS_MAX]
     open_id = binding["open_id"]
     header = {"title": {"tag": "plain_text",
-                        "content": f"会话列表（默认：{_clip_name(project['name'])}）"},
+                        "content": _text("会话列表（默认：{name}）", lang,
+                                         name=_clip_name(project["name"]))},
               "template": "blue"}
     if not items:
         _remember_list(open_id, [])                 # 空列表也登记（序号必然越界）
-        return _card(header, [{"tag": "markdown", "content": SESSION_EMPTY}])
+        return _card(header, [{"tag": "markdown",
+                               "content": _text(SESSION_EMPTY, lang)}])
     cur_sid = str(_binding_value(binding, "cur_sid", "") or "").strip()
     # 行内容（含 🏃 运行标记）只算一次：体积降级只裁条数，不重复读会话状态
     # （标记读本地 dshevents 注册表，零请求；未知/未连接一律不标）
-    rows = [_session_row(i, it, cur_sid) for i, it in enumerate(items, 1)]
+    rows = [_session_row(i, it, cur_sid, lang) for i, it in enumerate(items, 1)]
     shown = len(items)
-    card = _card(header, _sessions_elements(rows, items, shown, binding["user_id"]))
+    card = _card(header, _sessions_elements(rows, items, shown, binding["user_id"],
+                                           lang))
     limit = shown // 2
     while _card_bytes(card) > CARD_MAX_BYTES and shown > 1:
         shown = min(shown, limit)
-        card = _card(header, _sessions_elements(rows, items, shown, binding["user_id"]))
+        card = _card(header, _sessions_elements(rows, items, shown,
+                                               binding["user_id"], lang))
         limit = max(1, limit // 2)
     _remember_list(open_id, [it["sid"] for it in items[:shown]])
     return card
 
 
-def _sessions_elements(rows, items, shown, user_id):
+def _sessions_elements(rows, items, shown, user_id, lang="zh"):
     """列表卡根级元素：前 shown 条各一块 markdown（rows 已渲染好）+ 唯一的根级下拉
     （option.value = 会话 id，behaviors 带 `t=ss` 与点击者 user_id 供防串号复核）。"""
     els = list(rows[:shown])
     els.append({"tag": "select_static", "name": "ts_sessions",
-                "placeholder": {"tag": "plain_text", "content": "选择要绑定的会话"},
+                "placeholder": {"tag": "plain_text",
+                                "content": _text("选择要绑定的会话", lang)},
                 "options": [{"text": {"tag": "plain_text",
                                       "content": _session_name(it)[:24]},
                              "value": str(it["sid"])} for it in items[:shown]],
@@ -538,7 +595,7 @@ def _sessions_elements(rows, items, shown, user_id):
     return els
 
 
-def _session_row(index, item, cur_sid):
+def _session_row(index, item, cur_sid, lang="zh"):
     """单行 markdown：`**序号. 名称** · 相对时间 · 状态标`。
 
     状态标：🏃 运行中（`_session_busy`）、📦 已归档（`item["archived"]`）、✅ 当前
@@ -546,14 +603,14 @@ def _session_row(index, item, cur_sid):
     """
     marks = []
     if _session_busy(item["sid"]):
-        marks.append("🏃 运行中")
+        marks.append(_text("🏃 运行中", lang))
     if item.get("archived"):
-        marks.append("📦 已归档")
+        marks.append(_text("📦 已归档", lang))
     if str(item["sid"]) == str(cur_sid or ""):
-        marks.append("✅ 当前")
+        marks.append(_text("✅ 当前", lang))
     return {"tag": "markdown",
             "content": "**%d. %s** · %s%s" % (index, _session_name(item),
-                                              _rel_time(item.get("mtime")),
+                                              _rel_time(item.get("mtime"), lang),
                                               (" · " + " ".join(marks)) if marks else "")}
 
 
@@ -568,7 +625,7 @@ def _session_name(item):
     return name[:SESSION_NAME_MAX]
 
 
-def _sessions_text(binding):
+def _sessions_text(binding, lang="zh"):
     """列表卡的**纯文本兜底**（卡片未被受理时）：会话清单 + 文本绑定指引。
 
     序号取自 `_LAST_LIST[open_id]`（`sessions_card` 刚登记的那份：与卡片下拉严格同序，
@@ -583,14 +640,16 @@ def _sessions_text(binding):
     else:
         sids = [str(it["sid"]) for it in _project_sessions(binding)[:SESSIONS_MAX]]
     if not sids:
-        return SESSION_EMPTY
+        return _text(SESSION_EMPTY, lang)
     by_sid = {str(it["sid"]): it for it in _project_sessions(binding)}
     project = _default_project(binding)
-    lines = [(f"「{_clip_name(project['name'])}」最近会话：" if project else "最近会话：")]
+    lines = [(_text("「{name}」最近会话：", lang, name=_clip_name(project["name"]))
+              if project else _text("最近会话：", lang))]
     for i, sid in enumerate(sids, 1):
         item = by_sid.get(sid) or {"sid": sid}
-        lines.append(f"{i}. {_session_name(item)}（{sid[:12]}）")
-    lines.append(SESSIONS_TEXT_HINT)
+        lines.append(_text("{index}. {name}（{sid}）", lang,
+                           index=i, name=_session_name(item), sid=sid[:12]))
+    lines.append(_text(SESSIONS_TEXT_HINT, lang))
     return "\n".join(lines)
 
 
@@ -619,22 +678,22 @@ def _session_busy(sid):
         return False
 
 
-def _rel_time(mtime):
+def _rel_time(mtime, lang="zh"):
     """相对活跃时间：刚刚 / N 分钟前 / N 小时前 / N 天前（脏值/未来/缺值一律「刚刚」）。"""
     try:
         ts = float(mtime)
     except (TypeError, ValueError):
-        return "刚刚"
+        return _text("刚刚", lang)
     if ts <= 0:
-        return "刚刚"
+        return _text("刚刚", lang)
     delta = time.time() - ts
     if delta < 60:
-        return "刚刚"
+        return _text("刚刚", lang)
     if delta < 3600:
-        return "%d 分钟前" % int(delta // 60)
+        return _num_text("%d 分钟前", int(delta // 60), lang)
     if delta < 86400:
-        return "%d 小时前" % int(delta // 3600)
-    return "%d 天前" % int(delta // 86400)
+        return _num_text("%d 小时前", int(delta // 3600), lang)
+    return _num_text("%d 天前", int(delta // 86400), lang)
 
 
 def _session_project(binding):
@@ -660,7 +719,7 @@ def _project_sessions(binding):
     return sessparse.list_sessions("dsh", project["project_dir"])
 
 
-def bind_session(binding, sid, title=""):
+def bind_session(binding, sid, title="", lang="zh"):
     """绑定会话（`t=ss` 回调与「绑定会话 …」文本兜底共用）：返回回执文案。
 
     **所有「选中一个 sid 写绑定」的路径都必须走这里**（`on_card_action` 的 `t=ss`
@@ -681,16 +740,16 @@ def bind_session(binding, sid, title=""):
     sid = str(sid or "").strip()
     project = _session_project(binding)
     if project is None:
-        return NO_DEFAULT_GUIDE
+        return _text(NO_DEFAULT_GUIDE, lang)
     if sid not in {str(it["sid"]) for it in _project_sessions(binding)}:
-        return SESSION_GONE
+        return _text(SESSION_GONE, lang)
     title = str(title or "").strip() or sessparse.session_title("dsh", sid)
     db.set_feishu_cur_session(binding["open_id"], project["id"], sid, title)
-    return (f"已绑定「{title or sid[:12]}」（项目：{project['name']}），"
-            f"接下来发消息都进这个会话")
+    return _text("已绑定「{title}」（项目：{project}），接下来发消息都进这个会话",
+                 lang, title=title or sid[:12], project=project["name"])
 
 
-def use_by_token(binding, token):
+def use_by_token(binding, token, lang="zh"):
     """文本兜底绑定（「绑定会话 <序号|标题关键字|会话id前缀>」）：返回回执文案。
 
     三分支（设计 §3.7）：① 纯数字 ⇒ 上一张列表卡的序号（`_LAST_LIST`，TTL LIST_TTL；
@@ -700,34 +759,40 @@ def use_by_token(binding, token):
     """
     token = str(token or "").strip()
     if not token:
-        return SESSION_STALE
+        return _text(SESSION_STALE, lang)
     if token.isdigit():
         entry = _LAST_LIST.get(binding["open_id"])
         idx = int(token) - 1
         if not entry or (time.time() - entry[0]) > LIST_TTL or not 0 <= idx < len(entry[1]):
-            return SESSION_STALE
-        return bind_session(binding, entry[1][idx])
+            return _text(SESSION_STALE, lang)
+        return bind_session(binding, entry[1][idx], "", lang)
     items = _project_sessions(binding)
     hits = [it for it in items if token in str(it.get("title") or "")]
     if not hits:
         hits = [it for it in items if str(it.get("sid") or "").startswith(token)]
     if len(hits) == 1:
-        return bind_session(binding, hits[0]["sid"], hits[0].get("title") or "")
+        return bind_session(binding, hits[0]["sid"], hits[0].get("title") or "", lang)
     if len(hits) > 1:
-        return SESSION_MULTI_FMT % (token, "\n".join(
-            f"· {_session_name(it)}（{str(it['sid'])[:12]}）" for it in hits[:8]))
-    return SESSION_MISS_FMT % token
+        options = "\n".join(
+            _text("· {name}（{sid}）", lang, name=_session_name(it),
+                  sid=str(it["sid"])[:12]) for it in hits[:8])
+        if i18n.normalize_lang(lang) == "en":
+            return i18n.t("api", SESSION_MULTI_FMT, lang,
+                          token=token, options=options)
+        return SESSION_MULTI_FMT % (token, options)
+    return _str_text(SESSION_MISS_FMT, token, lang)
 
 
-def leave_session(binding):
+def leave_session(binding, lang="zh"):
     """「解绑会话」：只清当前会话绑定（默认项目原样保留）；未绑定时给明确回执。"""
     sid = str(_binding_value(binding, "cur_sid", "") or "").strip()
     if not sid:
-        return "当前未绑定会话"
+        return _text("当前未绑定会话", lang)
     project = _default_project(binding)
-    name = project["name"] if project is not None else "未设置"
+    name = project["name"] if project is not None else _text("未设置", lang)
     db.clear_feishu_cur_session(binding["open_id"])
-    return f"已解绑当前会话（默认项目保持为「{name}」），下次发消息将自动新建"
+    return _text("已解绑当前会话（默认项目保持为「{name}」），下次发消息将自动新建",
+                 lang, name=name)
 
 
 def send_card(open_id, card, cfg):
@@ -811,7 +876,7 @@ def _default_project(binding):
     return _project_by_id(binding, binding["default_project_id"])
 
 
-def _locate_project(binding):
+def _locate_project(binding, lang="zh"):
     """项目定位（口径同 feishu._resolve_project）：默认项目 → 用户唯一项目 →
     (None, 错误文案)；报错分支列出可选项目名。返回 (project, "") 或 (None, 文案)。"""
     project = _default_project(binding)
@@ -821,12 +886,13 @@ def _locate_project(binding):
     if len(owned) == 1:
         return owned[0], ""
     if not owned:
-        return None, NO_PROJECTS_GUIDE
-    return None, ("请指明项目（回复「默认项目 <项目名>」），可选：" +
-                  "、".join(p["name"] for p in owned[:8]))
+        return None, _text(NO_PROJECTS_GUIDE, lang)
+    sep = _text("、", lang)
+    return None, _text("请指明项目（回复「默认项目 <项目名>」），可选：{names}",
+                       lang, names=sep.join(p["name"] for p in owned[:8]))
 
 
-def _create_in_project(binding, project, title):
+def _create_in_project(binding, project, title, lang="zh"):
     """在项目目录下新建 dsh 会话并写「当前会话」绑定。返回 (sid, err)，err 非空=失败。
 
     步骤：驱动可用性闸（中文引导，绝不抛异常栈）→ `create_session` → 项目级会话
@@ -834,8 +900,8 @@ def _create_in_project(binding, project, title):
     （同上）→ `db.set_feishu_cur_session`。失败路径一律不写绑定。
     """
     if not dshdriver.configured():
-        return "", DRIVER_NEEDED
-    title = (title or "").strip() or _new_title()
+        return "", _text(DRIVER_NEEDED, lang)
+    title = (title or "").strip() or _new_title(lang)
     # 项目级模型必须在**建会话时**下传（口径同 board._start_web）：宿主 `/session`
     # 不拆 `provider/id` 前缀，故先 split_model 拆成 provider + 裸 id；
     # 只喂 apply_session_defaults 会漏——它仅在 reasoning_effort 非空时才调
@@ -846,7 +912,7 @@ def _create_in_project(binding, project, title):
                                        model=model_id, provider=model_provider)
     except Exception as e:
         _trace(f"新建会话失败 project={project['id']}: {e!r}")
-        return "", f"新建会话失败：{e}"
+        return "", _text("新建会话失败：{err}", lang, err=str(e))
     try:
         dshdriver.apply_session_defaults(
             sid, model=model_id, provider=model_provider,
@@ -897,13 +963,15 @@ def notify_msg_done(msg_id, state):
     chat_msgs.error 摘要）；done＝抽 baseline 之后的新增 assistant 文本推出。
     任何异常都不外抛（钩子是旁路，队列收口不因推送失败受影响）。
     """
-    import chat, waitq
+    import chat, feishu, waitq
     meta = (waitq.msg_meta(msg_id) or {}).get("feishu") or {}
     if not meta:
         return
     open_id = meta.get("open_id") or ""
     if not open_id:
         return
+    # 答复回流的语言归属 = 提交者（载荷里定格的 user_id）；入口解析一次、向下传
+    lang = feishu.user_lang(meta.get("user_id") or 0)
     if not _binding_current(open_id, meta.get("user_id")):
         _trace(f"答复跳过（绑定已变更）open_id={str(open_id)[:12]}")
         return
@@ -913,12 +981,13 @@ def notify_msg_done(msg_id, state):
     if state == "error":
         row = waitq.msg_get(msg_id)
         err = ((row["error"] if row is not None else "") or "")[:200]
-        _dm(open_id, f"本轮执行失败：{err or '未知原因'}（可在站点会话窗查看详情）",
+        _dm(open_id, _text("本轮执行失败：{err}（可在站点会话窗查看详情）", lang,
+                           err=err or _text("未知原因", lang)),
             None, meta.get("user_id"))
         return
     row = waitq.msg_get(msg_id)
     sid = (row["sid"] if row is not None else "") or ""
-    reply = _clip_reply(_reply_of(sid, int(meta.get("baseline") or 0)))
+    reply = _clip_reply(_reply_of(sid, int(meta.get("baseline") or 0)), lang)
     if reply:
         _dm(open_id, reply, None, meta.get("user_id"))
 
@@ -959,17 +1028,18 @@ def _reply_of(sid, baseline):
     return "\n\n".join(p for p in parts if p.strip())
 
 
-def _clip_reply(text):
+def _clip_reply(text, lang="zh"):
     """答复截断：超 REPLY_MAX_CHARS 保留首段并附站点指引（飞书单条消息不宜过长）。"""
     text = (text or "").strip()
     if len(text) <= REPLY_MAX_CHARS:
         return text
-    return text[:REPLY_MAX_CHARS - 200] + "\n……（内容过长已截断，完整内容见站点会话窗 / 看板）"
+    return text[:REPLY_MAX_CHARS - 200] + _text(
+        "\n……（内容过长已截断，完整内容见站点会话窗 / 看板）", lang)
 
 
-def _new_title():
+def _new_title(lang="zh"):
     """新建会话的缺省标题（本地时间；与 dsh 侧栏 / 会话列表卡里可辨认）。"""
-    return time.strftime(TITLE_FMT)
+    return time.strftime(_text(TITLE_FMT, lang))
 
 
 def _trace(text):

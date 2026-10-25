@@ -28,16 +28,231 @@ def read_text(path):
         return ""
 
 
+# ---------------------------------------------------------------------------
+# 机器契约双语别名表（T14；设计 §5.4）
+#
+# 机器契约 = status.md / case.md / bug_report.md 的字段名与状态值。英文模板只换 IO 层
+# 写法，**内部 canonical 永远是现有中文常量**（消费方一行不用改）；解析时先归一到中文，
+# 写回时再按文件已有语言翻回去。
+#
+# `_FIELD_ALIASES`：字段名（中文 canonical 或英文写法）→ 中文 canonical 键；中文键映射
+# 到自身，保证存量中文文件解析逐字段不变。T15 的英文模板字段名取 `_FIELD_EN` 右列。
+# `_STATUS_ALIASES`：状态值（中文 canonical 或英文写法）→ 中文 canonical 值；英文写法
+# 覆盖 T15 模板与平台/webui 既有英文（dataLabels.js），ASCII 大小写不敏感。
+# 两份表在 backend/lib/lib.js 有逐字镜像；任何一端改表都要同步另一端。
+# ---------------------------------------------------------------------------
+
+_FIELD_ALIASES = {
+    # status.md
+    "状态": "状态",
+    "Status": "状态",
+    "最近执行时间": "最近执行时间",
+    "Last run time": "最近执行时间",
+    "Last run": "最近执行时间",
+    "执行环境": "执行环境",
+    "Execution environment": "执行环境",
+    "执行轮次": "执行轮次",
+    "Round": "执行轮次",
+    "Execution round": "执行轮次",
+    "失败原因": "失败原因",
+    "Failure reason": "失败原因",
+    "关联 bug_report": "关联 bug_report",
+    "Related bug_report": "关联 bug_report",
+    "Related bug report": "关联 bug_report",
+    "结果摘要": "结果摘要",
+    "Result summary": "结果摘要",
+    # case.md
+    "用例 ID": "用例 ID",
+    "Case ID": "用例 ID",
+    "接口": "接口",
+    "Interface": "接口",
+    "分类": "分类",
+    "Category": "分类",
+    "所属模块/功能": "所属模块/功能",
+    "Module / Function": "所属模块/功能",
+    "Module/Function": "所属模块/功能",
+    "测试目标": "测试目标",
+    "Test objective": "测试目标",
+    "Test goal": "测试目标",
+    "依据代码": "依据代码",
+    "Code reference": "依据代码",
+    "脚本": "脚本",
+    "Script": "脚本",
+    "测试方法": "测试方法",
+    "Test method": "测试方法",
+    "输入参数": "输入参数",
+    "Input parameters": "输入参数",
+    "预期输出": "预期输出",
+    "Expected output": "预期输出",
+    "输出获取方式": "输出获取方式",
+    "Output retrieval": "输出获取方式",
+    "验证逻辑": "验证逻辑",
+    "Verification logic": "验证逻辑",
+    "备注": "备注",
+    "Note": "备注",
+    # bug_report.md
+    "严重程度": "严重程度",
+    "Severity": "严重程度",
+    "报告时间": "报告时间",
+    "Reported at": "报告时间",
+    "Report time": "报告时间",
+    "错误签名": "错误签名",
+    "Error signature": "错误签名",
+    "用例名称": "用例名称",
+    "Case name": "用例名称",
+}
+
+# 中文 canonical 字段名 → 写回英文文件时优先使用的英文键（set_md_field 用；与上表互补）
+_FIELD_EN = {
+    "状态": "Status",
+    "最近执行时间": "Last run time",
+    "执行环境": "Execution environment",
+    "执行轮次": "Round",
+    "失败原因": "Failure reason",
+    "关联 bug_report": "Related bug_report",
+    "结果摘要": "Result summary",
+    "用例 ID": "Case ID",
+    "接口": "Interface",
+    "分类": "Category",
+    "所属模块/功能": "Module / Function",
+    "测试目标": "Test objective",
+    "依据代码": "Code reference",
+    "脚本": "Script",
+    "测试方法": "Test method",
+    "输入参数": "Input parameters",
+    "预期输出": "Expected output",
+    "输出获取方式": "Output retrieval",
+    "验证逻辑": "Verification logic",
+    "备注": "Note",
+    "严重程度": "Severity",
+    "报告时间": "Reported at",
+    "错误签名": "Error signature",
+    "用例名称": "Case name",
+}
+
+# 中文 canonical 字段名集合（文件主语言判定用）
+_FIELD_ZH_NAMES = frozenset(k for k, v in _FIELD_ALIASES.items() if k == v)
+
+_STATUS_ALIASES = {
+    # 中文 canonical → 自身（存量中文文件零变化）
+    "未执行": "未执行",
+    "通过": "通过",
+    "失败": "失败",
+    "跳过": "跳过",
+    "需要复测": "需要复测",
+    "待分析": "待分析",
+    "已分析，待修复": "已分析，待修复",
+    "已修复（未验证）": "已修复（未验证）",
+    "复测通过": "复测通过",
+    "已拒绝": "已拒绝",
+    "已分析": "已分析",
+    "已修复（复测通过）": "已修复（复测通过）",
+    "复测未通过": "复测未通过",
+    "修复完成，待复测": "修复完成，待复测",
+    "已修复": "已修复",
+    # 英文 → 中文 canonical（Case / status.md）
+    "Not run": "未执行",
+    "Not started": "未执行",
+    "Pass": "通过",
+    "Passed": "通过",
+    "Fail": "失败",
+    "Failed": "失败",
+    "Skip": "跳过",
+    "Skipped": "跳过",
+    "Need retest": "需要复测",
+    "Needs retest": "需要复测",
+    "Retest": "需要复测",
+    "Retest needed": "需要复测",
+    "Pending retest": "需要复测",
+    # 英文 → 中文 canonical（bug_report.md；与 webui/src/utils/dataLabels.js 既有英文对齐）
+    "To analyze": "待分析",
+    "Analyzed, to fix": "已分析，待修复",
+    "Analyzed, pending fix": "已分析，待修复",
+    "Analyzed, to be fixed": "已分析，待修复",
+    "Fixed (unverified)": "已修复（未验证）",
+    "Retest passed": "复测通过",
+    "Rejected": "已拒绝",
+    "Rejected (false positive, not a defect)": "已拒绝",
+    "Rejected (false positive)": "已拒绝",
+    "Analyzed": "已分析",
+    "Fixed (retest passed)": "已修复（复测通过）",
+    "Retest failed": "复测未通过",
+    "Fix complete, pending retest": "修复完成，待复测",
+    "Fixed": "已修复",
+}
+
+# ASCII 大小写不敏感索引（"Pass"/"pass" 都认；中文键不参与，避免改变中文匹配语义）
+_STATUS_ALIASES_LOWER = {k.lower(): v for k, v in _STATUS_ALIASES.items() if k.isascii()}
+
+# 中文 canonical 状态值 → 写回英文文件时的英文写法（set_md_field 用）
+_STATUS_EN = {
+    "未执行": "Not run",
+    "通过": "Pass",
+    "失败": "Failed",
+    "跳过": "Skipped",
+    "需要复测": "Needs retest",
+    "待分析": "To analyze",
+    "已分析，待修复": "Analyzed, to fix",
+    "已修复（未验证）": "Fixed (unverified)",
+    "复测通过": "Retest passed",
+    "已拒绝": "Rejected",
+    "已分析": "Analyzed",
+    "已修复（复测通过）": "Fixed (retest passed)",
+    "复测未通过": "Retest failed",
+    "修复完成，待复测": "Fix complete, pending retest",
+    "已修复": "Fixed",
+}
+
+
+def _canonical_field(name):
+    """字段名 → 内部中文 canonical 键；未登记字段名原样返回（不丢字段）。"""
+    return _FIELD_ALIASES.get(name, name)
+
+
+def _canonical_status_value(value):
+    """状态值 → 中文 canonical；中文 canonical 原样返回；未知值原样返回（不丢）。
+
+    精确匹配优先，其次 ASCII 大小写不敏感（`Pass`/`pass`）；不做前缀/模糊匹配，
+    免得把未知自定义状态误判成平台枚举。
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return value
+    mapped = _STATUS_ALIASES.get(text)
+    if mapped is not None:
+        return mapped
+    mapped = _STATUS_ALIASES_LOWER.get(text.lower())
+    return mapped if mapped is not None else value
+
+
 def parse_fields(text):
-    """把 '- **字段**: 值' 列表解析成 dict。"""
-    return {m.group(1).strip(): m.group(2).strip() for m in FIELD_RE.finditer(text)}
+    """把 '- **字段**: 值' 列表解析成 dict（键统一为内部中文 canonical）。
+
+    - 英文/中文字段名都识别，归一到中文 canonical 键（同键混写时后者覆盖前者）；
+    - `状态` 字段的英文枚举值归一到中文 canonical（中文/未知值原样）；
+    - 其他字段的值不做任何翻译（用例正文按任务语言书写，原样透传）。
+    """
+    fields = {}
+    for m in FIELD_RE.finditer(text):
+        key = _canonical_field(m.group(1).strip())
+        value = m.group(2).strip()
+        if key == "状态":
+            value = _canonical_status_value(value)
+        fields[key] = value
+    return fields
 
 
 def norm_status(value):
-    """状态字段归一化：模板未填写时是 '未执行 / 通过 / ...'，取第一项。"""
+    """状态字段归一化：模板未填写时是 '未执行 / 通过 / ...'，取第一项。
+
+    第一段再经 `_STATUS_ALIASES` 归一（英文 `Not run / Pass / ...` 同样取第一项并
+    映射回中文 canonical）；未知值保留第一段原文，不丢失。
+    """
     if not value:
         return "未执行"
-    return value.split("/")[0].strip()
+    return _canonical_status_value(value.split("/")[0].strip())
 
 
 def parse_status_md(path):
@@ -53,22 +268,76 @@ def parse_status_md(path):
     }
 
 
+def _field_lang(text):
+    """文件主语言：按已登记字段行的语言计数（英文写法 vs 中文 canonical），平局按 zh。"""
+    zh = en = 0
+    for m in FIELD_RE.finditer(text):
+        name = m.group(1).strip()
+        if name in _FIELD_ZH_NAMES:
+            zh += 1
+        elif _FIELD_ALIASES.get(name) in _FIELD_ZH_NAMES:
+            en += 1
+    return "en" if en > zh else "zh"
+
+
+def _target_field_lang(text, canonical):
+    """目标字段的写回语言与实际字段名。
+
+    优先级：目标字段只在英文写法里出现 → en；只在中文写法里出现 → zh；
+    两边都有 / 都不存在（混写或缺失）→ 文件主语言 `_field_lang`（平局按 zh）。
+    英文侧返回文件里实际使用的写法（保留作者用词），字段缺失时用 `_FIELD_EN` 的规范英文键。
+    """
+    zh_hit = en_hit = False
+    en_name = ""
+    for m in FIELD_RE.finditer(text):
+        name = m.group(1).strip()
+        if name == canonical:
+            zh_hit = True
+        elif _FIELD_ALIASES.get(name) == canonical:
+            en_hit = True
+            en_name = name
+    if en_hit and not zh_hit:
+        return "en", en_name
+    if zh_hit and not en_hit:
+        return "zh", canonical
+    if _field_lang(text) == "en":
+        return "en", en_name or _FIELD_EN.get(canonical, canonical)
+    return "zh", canonical
+
+
+def _status_value_in_lang(value, lang):
+    """状态值按目标语言写回：先归一到中文 canonical，再取 zh/en 写法；未知值原样。"""
+    canonical = _canonical_status_value(value)
+    if canonical in _STATUS_EN:
+        return _STATUS_EN[canonical] if lang == "en" else canonical
+    return value
+
+
 def set_md_field(path, field, value):
     """改写 md 中 `**field**: 值`（含 '- **field**' 前缀形式）一行。
 
-    行不存在时在文末追加 '- **field**: 值'。返回是否命中已有行。
+    字段名先经 `_FIELD_ALIASES` 归一到内部中文 canonical；写回语言跟随**目标字段已有
+    写法**（英文行 → 英文键 + 英文状态值；中文行 → 中文键 + 中文值）。目标字段缺失或
+    中英两种写法并存时跟随文件主语言（`_field_lang`，平局按 zh）。只有 `状态` 字段的值
+    做语言换算（其他字段值原样写入：时间/环境标签/摘要等）。行不存在时按目标语言在
+    文末追加。保留原行前缀/格式/编码/换行。返回是否写入成功（文件不存在/读空返回 False）。
     """
     text = read_text(path)
     if not text:
         return False
+    canonical = _FIELD_ALIASES.get(field, field)
+    lang, write_field = _target_field_lang(text, canonical)
+    write_value = value
+    if canonical == "状态" and isinstance(value, str):
+        write_value = _status_value_in_lang(value, lang)
     # 只匹配目标字段的行；保留原行前缀（'- ' 或 ''）
-    pattern = re.compile(r"^(\s*(?:-\s*)?\*\*" + re.escape(field) + r"\*\*\s*[:：]\s*).*$",
+    pattern = re.compile(r"^(\s*(?:-\s*)?\*\*" + re.escape(write_field) + r"\*\*\s*[:：]\s*).*$",
                          re.M)
-    new_line = r"\g<1>" + value
+    new_line = r"\g<1>" + write_value
     if pattern.search(text):
         text = pattern.sub(new_line, text)
     else:
-        text = text.rstrip("\n") + f"\n\n- **{field}**: {value}\n"
+        text = text.rstrip("\n") + f"\n\n- **{write_field}**: {write_value}\n"
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)

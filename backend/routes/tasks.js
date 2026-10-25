@@ -509,6 +509,8 @@ async function apiCreateTask(ctx, projectId) {
     endStage,
     dateFrom,
     dateTo,
+    // T13：任务语言＝本请求语言（ctx.lang 惰性解析一次，与 Python `_request_lang` 同源）
+    lang: ctx.lang,
   }, { db: ctx.db });
   runner.INSTANCE.submit(taskId);
 
@@ -528,6 +530,8 @@ async function apiCreateTask(ctx, projectId) {
       payload: pyJsonDumps({ parent_task_id: taskId }),
       startStage: 'analyze',
       endStage,
+      // 后段任务继承父任务刚冻结的语言（= 同一 ctx.lang）
+      lang: ctx.lang,
     }, { db: ctx.db });
     runner.INSTANCE.submit(pipelineId);
   }
@@ -1131,11 +1135,11 @@ async function apiLoadRerun(ctx, taskId) {
   const row = ctx.ownedTask(taskId);
   if (row === null) return;
   if ((row.task_type || 'normal') !== 'stress') {
-    ctx.text(400, '{"error":"仅压测任务支持复压"}', 'application/json; charset=utf-8');
+    ctx.error(400, '仅压测任务支持复压');      // 紧凑形态不变，且走 ctx 单点本地化
     return;
   }
   if (row.status === 'running' || row.status === 'queued') {
-    ctx.text(400, '{"error":"任务运行中或排队中，请先停止"}', 'application/json; charset=utf-8');
+    ctx.error(400, '任务运行中或排队中，请先停止');
     return;
   }
   runner.INSTANCE.rerunLoad(taskId);

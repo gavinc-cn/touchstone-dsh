@@ -34,7 +34,8 @@
  *     残留、靠 `is_alive()` 判死 ⇒ 这里同形（不自动清扫），差别只是 Node 要显式注销。
  *   - 未覆盖：本文件不实现 `start_inbound_all()` 的遍历拉起（M7.5）。
  */
-import { getFeishuHook, getFeishuUserCfg, getProject } from './db.js';
+import { getFeishuHook, getFeishuUserCfg, getProject, getUserPrefs } from './db.js';
+import { isI18nDisabled, resolveLang } from './i18n.js';
 
 /** 全部可选事件类别（对齐 `feishu.FEISHU_EVENTS`(feishu.py:31)，顺序即渲染/对拍顺序） */
 export const FEISHU_EVENTS = Object.freeze([
@@ -93,6 +94,53 @@ function rstripSlashes(value) {
     throw new TypeError('base_url 必须是字符串（Python 侧非 str 会抛 AttributeError）');
   }
   return value.replace(/\/+$/, '');
+}
+
+/**
+ * 飞书出站文案的**用户语言**（R22：绑定用户的 `user_prefs(user_id, 0)["lang"]`）。
+ *
+ * 口径（与 Python `feishu.user_lang` 逐字对应）：
+ *   - `TS_I18N=0`（回滚开关）⇒ 恒 `'zh'`，且**连偏好都不读**；
+ *   - 无偏好行 / 偏好里没有 `lang` / 形状不是 `{v: string}` / 读库异常 ⇒ `'zh'`；
+ *   - 合法值经 `resolveLang({userPref})` 归一（`zh`/`en` 及大小写/地区变体）。
+ * 本函数**绝不抛错**：出站文案是旁路能力，不能因读偏好失败影响主流程。
+ * @param {number} userId
+ * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
+ * @returns {'zh'|'en'}
+ */
+export function userLang(userId, options = {}) {
+  if (isI18nDisabled()) return 'zh';
+  let pref = null;
+  try {
+    const prefs = getUserPrefs(Number(userId) || 0, 0, options);
+    pref = prefs === null || typeof prefs !== 'object' ? null : prefs.lang;
+  } catch {
+    pref = null;
+  }
+  // 只认站点的持久化形状 `{v: 'zh'|'en'}`：裸字符串/数组/其它对象一律按坏值回落中文
+  const raw = pref !== null && typeof pref === 'object' && !Array.isArray(pref)
+    && Object.hasOwn(pref, 'v') && typeof pref.v === 'string' ? pref.v : null;
+  return resolveLang({ userPref: raw });
+}
+
+/**
+ * **项目级**出站文案语言（群推送 / 项目卡）：取项目所有者（与 `hookOf` 同一身份）。
+ *
+ * 与 `userLang` 拆开只为调用点可读：DM/回执用 `userLang(binding.user_id)`，群/项目推送用
+ * `projectLang(projectId)`（所有者 = 项目 `user_id`；项目被删 ⇒ 0）。项目不存在/读库异常 ⇒ `'zh'`；
+ * `TS_I18N=0` 时**连项目行都不读**（R22：先判开关，再决定是否读库；镜像 Python `project_lang`）。
+ * @param {number} projectId
+ * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
+ * @returns {'zh'|'en'}
+ */
+export function projectLang(projectId, options = {}) {
+  if (isI18nDisabled()) return 'zh';
+  try {
+    const proj = getProject(projectId, options);
+    return userLang(proj ? proj.user_id : 0, options);
+  } catch {
+    return 'zh';
+  }
 }
 
 /**

@@ -54,6 +54,7 @@ import * as dbMod from './db.js';
 import * as dshdriverMod from './dshdriver.js';
 import * as dsheventsMod from './dshevents.js';
 import * as cfgMod from './feishu_cfg.js';
+import * as i18n from './i18n.js';
 import * as restMod from './feishu_rest.js';
 import { PY_WS } from './lib.js';
 import { pyJsonDumps } from './pyjson.js';
@@ -498,6 +499,56 @@ function trace(text, options = {}) {
   deps(options).log(`feishu_conv: ${text}`);
 }
 
+/** 出站语言：`options.lang` 显式传入优先，否则中文（生产入口都在进来前解析好）。 */
+function convLang(options = {}) {
+  return options.lang || 'zh';
+}
+
+/** 固定文案（key = 中文原文）；`t` 永不抛错，缺词条自动回落中文。 */
+function txt(template, lang = 'zh', vars) {
+  return i18n.t('api', template, lang, vars);
+}
+
+/**
+ * `%d` 老式模板的本地化（与 Python `_num_text` 同口径，T12a 兼容线：中文源串里的
+ * `%d` 一律不改）。中文仍走 `fmtD`（与旧实现逐字节相同）；英文词典里同一条 key 用
+ * `{n}` 占位，交给 `i18n.t` 插值。
+ */
+function numText(template, n, lang = 'zh') {
+  if (i18n.normalizeLang(lang) === 'en') return i18n.t('api', template, lang, { n });
+  return fmtD(template, n);
+}
+
+/** `%s` 老式模板的本地化（同 `numText`；英文词典用 `{token}` 占位）。 */
+function strText(template, value, lang = 'zh') {
+  if (i18n.normalizeLang(lang) === 'en') {
+    return i18n.t('api', template, lang, { token: value });
+  }
+  return fmtS(template, value);
+}
+
+/**
+ * 绑定身份 → 出站语言（绝不抛错）：`options.lang` 显式优先，否则按绑定用户偏好
+ * （R22：`user_prefs(user_id, 0)["lang"]`，缺失/坏值/读库异常 ⇒ zh）。
+ */
+function langOf(binding, options = {}) {
+  try {
+    const cfg = deps(options).cfg;
+    if (cfg && typeof cfg.userLang === 'function') {
+      return cfg.userLang(requireKey(binding, 'user_id'), options);
+    }
+    return cfgMod.userLang(requireKey(binding, 'user_id'), options);
+  } catch {
+    return 'zh';
+  }
+}
+
+/** 生产入口统一在首位解析语言：显式 `options.lang` 不覆盖（单测/对拍可直达 builder）。 */
+function withLang(options, binding) {
+  if (options.lang) return options;
+  return { ...options, lang: langOf(binding, options) };
+}
+
 // ==========================================================================
 // 卡片对象族（`feishu_conv.py:194-216`）
 // ==========================================================================
@@ -571,9 +622,11 @@ function locateProject(binding, options = {}) {
   if (project !== null) return [project, ''];
   const owned = projectsOf(binding, options);
   if (owned.length === 1) return [owned[0], ''];
-  if (owned.length === 0) return [null, NO_PROJECTS_GUIDE];
-  return [null, '请指明项目（回复「默认项目 <项目名>」），可选：'
-    + owned.slice(0, 8).map((p) => p.name).join('、')];
+  const lang = convLang(options);
+  if (owned.length === 0) return [null, txt(NO_PROJECTS_GUIDE, lang)];
+  const sep = txt('、', lang);
+  return [null, txt('请指明项目（回复「默认项目 <项目名>」），可选：{names}', lang,
+    { names: owned.slice(0, 8).map((p) => p.name).join(sep) })];
 }
 
 /**
@@ -615,10 +668,21 @@ function countsLine(project, options = {}) {
     const kind = pyStr(pyOr(it.kind, ''));
     if (Object.hasOwn(kinds, kind)) kinds[kind] += 1;
   }
-  return `任务 运行 ${running}/排队 ${queued} · 看板 待开发 ${board.todo}/开发中 ${board.doing}`
-    + `/阻塞 ${board.blocked}/待审核 ${board.review}/已完成 ${board.done} · `
-    + `队列 卡 ${kinds[d.waitq.KIND_CARD]}/消息 ${kinds[d.waitq.KIND_MSG]}`
-    + `/作答 ${kinds[d.waitq.KIND_ANSWER]}/外部 ${kinds[d.waitq.KIND_EXT]}`;
+  return txt('任务 运行 {running}/排队 {queued} · 看板 待开发 {todo}/开发中 {doing}'
+    + '/阻塞 {blocked}/待审核 {review}/已完成 {done} · 队列 卡 {card}/消息 {msg}'
+    + '/作答 {answer}/外部 {ext}', convLang(options), {
+    running,
+    queued,
+    todo: board.todo,
+    doing: board.doing,
+    blocked: board.blocked,
+    review: board.review,
+    done: board.done,
+    card: kinds[d.waitq.KIND_CARD],
+    msg: kinds[d.waitq.KIND_MSG],
+    answer: kinds[d.waitq.KIND_ANSWER],
+    ext: kinds[d.waitq.KIND_EXT],
+  });
 }
 
 /** 默认项目置顶、其余按 id 升序（`feishu_conv.py:236-237` 的 `sorted(key=...)`） */
@@ -635,7 +699,8 @@ function orderedProjects(projects, defaultId) {
  * 总览卡根级元素（`feishu_conv.py:259-276`）：每项目一块 markdown（`**名称** ✅/💬` [+ 计数行]），
  * 有项目没列全时补一行文本引导，末尾是**唯一**的根级下拉控件（option.value = 项目 id）。
  */
-function projectsElements(binding, rows, counts, shown, withCounts) {
+function projectsElements(binding, rows, counts, shown, withCounts, options = {}) {
+  const lang = convLang(options);
   const els = [];
   rows.slice(0, shown).forEach((row, i) => {
     const [, name, marks] = row;
@@ -643,11 +708,13 @@ function projectsElements(binding, rows, counts, shown, withCounts) {
     els.push({ tag: 'markdown', content: head + (withCounts ? `\n${counts[i]}` : '') });
   });
   const extra = rows.length - shown;
-  if (extra > 0) els.push({ tag: 'markdown', content: fmtD(PROJECTS_MORE_FMT, extra) });
+  if (extra > 0) {
+    els.push({ tag: 'markdown', content: numText(PROJECTS_MORE_FMT, extra, lang) });
+  }
   els.push({
     tag: 'select_static',
     name: 'ts_projects',
-    placeholder: { tag: 'plain_text', content: '选择项目设为默认' },
+    placeholder: { tag: 'plain_text', content: txt('选择项目设为默认', lang) },
     options: rows.slice(0, shown).map(([pid, name]) => ({
       text: { tag: 'plain_text', content: pySlice(name, 24) }, value: pyStr(pid),
     })),
@@ -664,6 +731,8 @@ function projectsElements(binding, rows, counts, shown, withCounts) {
  * 计数行；`counts` 按全量算好，降级只裁展示条数。
  */
 function projectsCard(binding, options = {}) {
+  options = withLang(options, binding);
+  const lang = convLang(options);
   const projects = projectsOf(binding, options);
   if (!projects.length) return null;
   const def = defaultProject(binding, options);
@@ -681,21 +750,27 @@ function projectsCard(binding, options = {}) {
     return [pid, clipName(p.name), marks];
   });
   const counts = ordered.slice(0, PROJECTS_MAX).map((p) => countsLine(p, options));
-  const title = def ? clipName(def.name) : '未设置';
+  const title = def ? clipName(def.name) : txt('未设置', lang);
   const header = {
-    title: { tag: 'plain_text', content: `项目总览（默认：${title}）` },
+    title: {
+      tag: 'plain_text',
+      content: txt('项目总览（默认：{title}）', lang, { title }),
+    },
     template: 'orange',
   };
   const total = rows.length;
   let shown = Math.min(total, PROJECTS_MAX);
-  let card = makeCard(header, projectsElements(binding, rows, counts, shown, true));
+  let card = makeCard(header,
+    projectsElements(binding, rows, counts, shown, true, options));
   if (cardBytes(card) > CARD_MAX_BYTES) {                       // 降级 ②：删计数行
-    card = makeCard(header, projectsElements(binding, rows, counts, shown, false));
+    card = makeCard(header,
+      projectsElements(binding, rows, counts, shown, false, options));
   }
   let limit = PROJECTS_FALLBACK;                                // 降级 ③：收缩项目数
   while (cardBytes(card) > CARD_MAX_BYTES && shown > 1) {
     shown = Math.min(shown, limit);
-    card = makeCard(header, projectsElements(binding, rows, counts, shown, false));
+    card = makeCard(header,
+      projectsElements(binding, rows, counts, shown, false, options));
     limit = Math.max(1, Math.floor(limit / 2));
   }
   return card;
@@ -706,16 +781,18 @@ function projectsCard(binding, options = {}) {
  * 排序与卡片一致；项目名同样过 `clipName`；文本没有 8000 字节预算问题 ⇒ 不降级、不裁条数。
  */
 function projectsText(binding, options = {}) {
+  options = withLang(options, binding);
+  const lang = convLang(options);
   const projects = projectsOf(binding, options);
-  if (!projects.length) return NO_PROJECTS_GUIDE;
+  if (!projects.length) return txt(NO_PROJECTS_GUIDE, lang);
   const def = defaultProject(binding, options);
   const defaultId = def ? pyIntStrict(def.id) : 0;
-  const lines = ['项目列表：'];
+  const lines = [txt('项目列表：', lang)];
   for (const p of orderedProjects(projects, defaultId)) {
-    const mark = pyIntStrict(p.id) === defaultId ? ' ✅默认' : '';
-    lines.push(`· ${clipName(p.name)}${mark}`);
+    const mark = pyIntStrict(p.id) === defaultId ? txt(' ✅默认', lang) : '';
+    lines.push(txt('· {name}{mark}', lang, { name: clipName(p.name), mark }));
   }
-  lines.push(PROJECTS_TEXT_HINT);
+  lines.push(txt(PROJECTS_TEXT_HINT, lang));
   return lines.join('\n');
 }
 
@@ -733,18 +810,20 @@ function projectsText(binding, options = {}) {
  * `int()` 失败**不 try**（照 oracle）：由调用方 `execute_intent` 的 `except Exception` 兜住。
  */
 export function setDefaultProject(binding, project, options = {}) {
+  options = withLang(options, binding);
   const d = deps(options);
+  const lang = convLang(options);
   const openId = requireKey(binding, 'open_id');
   const changed = pyIntStrict(pyOr(bindingValue(binding, 'default_project_id', 0), 0))
     !== pyIntStrict(project.id);
   d.db.setFeishuDefaultProject(openId, project.id, options);
   if (changed) _LAST_LIST.delete(openId);
-  let reply = `默认项目已设为「${project.name}」`;
+  let reply = txt('默认项目已设为「{name}」', lang, { name: project.name });
   const sid = pyStrStrip(pyStr(pyOr(bindingValue(binding, 'cur_sid', ''), '')));
   if (pyTruthy(sid)
     && pyIntStrict(pyOr(bindingValue(binding, 'cur_project_id', 0), 0)) !== pyIntStrict(project.id)) {
     d.db.clearFeishuCurSession(openId, options);
-    reply += `\n${UNBIND_NOTE}`;
+    reply += `\n${txt(UNBIND_NOTE, lang)}`;
   }
   return reply;
 }
@@ -758,30 +837,37 @@ export function setDefaultProject(binding, project, options = {}) {
  * `sender` 未用（open_id 从 binding 取），保留以固定回调签名。
  */
 export async function onCardAction(sender, binding, value, action, cfg = null, options = {}) {
+  options = withLang(options, binding);
+  const lang = convLang(options);
   const v = pyOr(value, {});
   const a = pyOr(action, {});
   if (pyStr(pyOr(dget(v, 'u'), '')) !== pyStr(requireKey(binding, 'user_id'))) {
-    return { toast: { type: 'error', content: '这张卡片不属于当前账号' } };
+    return { toast: { type: 'error', content: txt('这张卡片不属于当前账号', lang) } };
   }
   if (pyStr(pyOr(dget(v, 't'), '')) === 'dp') {
     const project = projectById(binding, selectedProjectId(a), options);
-    if (project === null) return { toast: { type: 'error', content: '项目不在你的列表里' } };
+    if (project === null) {
+      return { toast: { type: 'error', content: txt('项目不在你的列表里', lang) } };
+    }
     const reply = setDefaultProject(binding, project, options);
     await dm(requireKey(binding, 'open_id'), reply, cfg, 0, options);
-    return { toast: { type: 'success', content: '已设为默认项目' } };
+    return { toast: { type: 'success', content: txt('已设为默认项目', lang) } };
   }
   if (pyStr(pyOr(dget(v, 't'), '')) === 'ss') {
     const sid = selectedSession(a);
-    if (!pyTruthy(sid)) return { toast: { type: 'error', content: '没有取到要绑定的会话' } };
+    if (!pyTruthy(sid)) {
+      return { toast: { type: 'error', content: txt('没有取到要绑定的会话', lang) } };
+    }
     const reply = bindSession(binding, sid, '', options);
     await dm(requireKey(binding, 'open_id'), reply, cfg, 0, options);   // 完整回执走私聊
-    if (reply === SESSION_GONE) {
-      return { toast: { type: 'error', content: '会话已不存在，发「会话」刷新列表' } };
+    if (reply === txt(SESSION_GONE, lang)) {
+      return { toast: { type: 'error', content: txt('会话已不存在，发「会话」刷新列表', lang) } };
     }
-    if (SESSION_FAIL_TEXTS.includes(reply)) {
-      return { toast: { type: 'error', content: '绑定失败' } };
+    const failTexts = SESSION_FAIL_TEXTS.map((key) => txt(key, lang));
+    if (failTexts.includes(reply)) {
+      return { toast: { type: 'error', content: txt('绑定失败', lang) } };
     }
-    return { toast: { type: 'success', content: '已绑定该会话' } };
+    return { toast: { type: 'success', content: txt('已绑定该会话', lang) } };
   }
   void sender;      // oracle 留形参以固定回调签名；open_id 一律从 binding 取
   return null;
@@ -881,19 +967,22 @@ function sessionName(item) {
  */
 function relTime(mtime, options = {}) {
   const d = deps(options);
+  const lang = convLang(options);
   let ts;
   try {
     ts = pyFloat(mtime);
   } catch (e) {
-    if (e instanceof TypeError || (e && e.pyName === 'ValueError')) return '刚刚';
+    if (e instanceof TypeError || (e && e.pyName === 'ValueError')) {
+      return txt('刚刚', lang);
+    }
     throw e;
   }
-  if (ts <= 0) return '刚刚';
+  if (ts <= 0) return txt('刚刚', lang);
   const delta = d.now() - ts;
-  if (delta < 60) return '刚刚';
-  if (delta < 3600) return fmtD('%d 分钟前', Math.floor(delta / 60));
-  if (delta < 86400) return fmtD('%d 小时前', Math.floor(delta / 3600));
-  return fmtD('%d 天前', Math.floor(delta / 86400));
+  if (delta < 60) return txt('刚刚', lang);
+  if (delta < 3600) return numText('%d 分钟前', Math.floor(delta / 60), lang);
+  if (delta < 86400) return numText('%d 小时前', Math.floor(delta / 3600), lang);
+  return numText('%d 天前', Math.floor(delta / 86400), lang);
 }
 
 /**
@@ -919,22 +1008,26 @@ function sessionBusy(sid, options = {}) {
  * 状态标顺序固定：🏃 运行中 → 📦 已归档 → ✅ 当前（`" · "` 连接；无标记时整段为空）。
  */
 function sessionRow(index, item, curSid, options = {}) {
+  const lang = convLang(options);
   const marks = [];
-  if (sessionBusy(item.sid, options)) marks.push('🏃 运行中');
-  if (pyTruthy(dget(item, 'archived'))) marks.push('📦 已归档');
-  if (pyStr(item.sid) === pyStr(pyOr(curSid, ''))) marks.push('✅ 当前');
+  if (sessionBusy(item.sid, options)) marks.push(txt('🏃 运行中', lang));
+  if (pyTruthy(dget(item, 'archived'))) marks.push(txt('📦 已归档', lang));
+  if (pyStr(item.sid) === pyStr(pyOr(curSid, ''))) marks.push(txt('✅ 当前', lang));
   const content = `**${fmtD('%d', index)}. ${sessionName(item)}** · ${relTime(dget(item, 'mtime'), options)}`
     + (marks.length ? ` · ${marks.join(' ')}` : '');
   return { tag: 'markdown', content };
 }
 
 /** 列表卡根级元素（`feishu_conv.py:470-481`）：`rows[:shown]` + **唯一**根级下拉 */
-function sessionsElements(rows, items, shown, userId) {
+function sessionsElements(rows, items, shown, userId, options = {}) {
   const els = rows.slice(0, shown);
   els.push({
     tag: 'select_static',
     name: 'ts_sessions',
-    placeholder: { tag: 'plain_text', content: '选择要绑定的会话' },
+    placeholder: {
+      tag: 'plain_text',
+      content: txt('选择要绑定的会话', convLang(options)),
+    },
     options: items.slice(0, shown).map((it) => ({
       text: { tag: 'plain_text', content: pySlice(sessionName(it), 24) },
       value: pyStr(it.sid),
@@ -963,27 +1056,34 @@ function rememberList(openId, sids, options = {}) {
  * 列出的条数**始终一致**（体积降级后同步收缩，防序号错位）。行内容只算一次：降级只裁条数。
  */
 function sessionsCard(binding, options = {}) {
+  options = withLang(options, binding);
   const d = deps(options);
+  const lang = convLang(options);
   const project = defaultProject(binding, options);
   if (project === null) return null;
   const items = d.sessparse.list_sessions('dsh', project.project_dir).slice(0, SESSIONS_MAX);
   const openId = requireKey(binding, 'open_id');
   const header = {
-    title: { tag: 'plain_text', content: `会话列表（默认：${clipName(project.name)}）` },
+    title: {
+      tag: 'plain_text',
+      content: txt('会话列表（默认：{name}）', lang, { name: clipName(project.name) }),
+    },
     template: 'blue',
   };
   if (!items.length) {
     rememberList(openId, [], options);
-    return makeCard(header, [{ tag: 'markdown', content: SESSION_EMPTY }]);
+    return makeCard(header, [{ tag: 'markdown', content: txt(SESSION_EMPTY, lang) }]);
   }
   const curSid = pyStrStrip(pyStr(pyOr(bindingValue(binding, 'cur_sid', ''), '')));
   const rows = items.map((it, i) => sessionRow(i + 1, it, curSid, options));
   let shown = items.length;
-  let card = makeCard(header, sessionsElements(rows, items, shown, requireKey(binding, 'user_id')));
+  let card = makeCard(header,
+    sessionsElements(rows, items, shown, requireKey(binding, 'user_id'), options));
   let limit = Math.floor(shown / 2);
   while (cardBytes(card) > CARD_MAX_BYTES && shown > 1) {
     shown = Math.min(shown, limit);
-    card = makeCard(header, sessionsElements(rows, items, shown, requireKey(binding, 'user_id')));
+    card = makeCard(header,
+      sessionsElements(rows, items, shown, requireKey(binding, 'user_id'), options));
     limit = Math.max(1, Math.floor(limit / 2));
   }
   rememberList(openId, items.slice(0, shown).map((it) => it.sid), options);
@@ -996,19 +1096,24 @@ function sessionsCard(binding, options = {}) {
  * 记忆缺失（理论不可达）才现取一份。标题按 sid 从当前会话集**回查**（第二次读盘）。
  */
 function sessionsText(binding, options = {}) {
+  options = withLang(options, binding);
+  const lang = convLang(options);
   const entry = _LAST_LIST.get(requireKey(binding, 'open_id'));
   const sids = entry
     ? entry[1].map((s) => pyStr(s))
     : projectSessions(binding, options).slice(0, SESSIONS_MAX).map((it) => pyStr(it.sid));
-  if (!sids.length) return SESSION_EMPTY;
+  if (!sids.length) return txt(SESSION_EMPTY, lang);
   const bySid = new Map(projectSessions(binding, options).map((it) => [pyStr(it.sid), it]));
   const project = defaultProject(binding, options);
-  const lines = [project ? `「${clipName(project.name)}」最近会话：` : '最近会话：'];
+  const lines = [project
+    ? txt('「{name}」最近会话：', lang, { name: clipName(project.name) })
+    : txt('最近会话：', lang)];
   sids.forEach((sid, i) => {
     const item = bySid.get(sid) || { sid };
-    lines.push(`${i + 1}. ${sessionName(item)}（${pySlice(sid, 12)}）`);
+    lines.push(txt('{index}. {name}（{sid}）', lang,
+      { index: i + 1, name: sessionName(item), sid: pySlice(sid, 12) }));
   });
-  lines.push(SESSIONS_TEXT_HINT);
+  lines.push(txt(SESSIONS_TEXT_HINT, lang));
   return lines.join('\n');
 }
 
@@ -1046,16 +1151,18 @@ function projectSessions(binding, options = {}) {
  * 唯一不经此处的写路径是**新建**会话（`createInProject`）。
  */
 function bindSession(binding, sid, title = '', options = {}) {
+  options = withLang(options, binding);
   const d = deps(options);
+  const lang = convLang(options);
   const want = pyStrStrip(pyStr(pyOr(sid, '')));
   const project = sessionProject(binding, options);
-  if (project === null) return NO_DEFAULT_GUIDE;
+  if (project === null) return txt(NO_DEFAULT_GUIDE, lang);
   const known = new Set(projectSessions(binding, options).map((it) => pyStr(it.sid)));
-  if (!known.has(want)) return SESSION_GONE;
+  if (!known.has(want)) return txt(SESSION_GONE, lang);
   const finalTitle = pyStrStrip(pyStr(pyOr(title, ''))) || d.sessparse.session_title('dsh', want);
   d.db.setFeishuCurSession(requireKey(binding, 'open_id'), project.id, want, finalTitle, options);
-  return `已绑定「${finalTitle || pySlice(want, 12)}」（项目：${project.name}），`
-    + '接下来发消息都进这个会话';
+  return txt('已绑定「{title}」（项目：{project}），接下来发消息都进这个会话', lang,
+    { title: finalTitle || pySlice(want, 12), project: project.name });
 }
 
 /**
@@ -1066,14 +1173,16 @@ function bindSession(binding, sid, title = '', options = {}) {
  * ③ sid **前缀**唯一命中 ⇒ 绑定（`startswith` 不是 `in`）。都不中 ⇒ 引导发「会话」。
  */
 function useByToken(binding, token, options = {}) {
+  options = withLang(options, binding);
   const d = deps(options);
+  const lang = convLang(options);
   const want = pyStrStrip(pyStr(pyOr(token, '')));
-  if (!want) return SESSION_STALE;
+  if (!want) return txt(SESSION_STALE, lang);
   if (pyIsDigit(want)) {
     const entry = _LAST_LIST.get(requireKey(binding, 'open_id'));
     const idx = pyIntStrict(want) - 1;
     if (!pyTruthy(entry) || (d.now() - entry[0]) > LIST_TTL || !(idx >= 0 && idx < entry[1].length)) {
-      return SESSION_STALE;
+      return txt(SESSION_STALE, lang);
     }
     return bindSession(binding, entry[1][idx], '', options);
   }
@@ -1087,21 +1196,28 @@ function useByToken(binding, token, options = {}) {
   }
   if (hits.length > 1) {
     const body = hits.slice(0, 8)
-      .map((it) => `· ${sessionName(it)}（${pySlice(pyStr(it.sid), 12)}）`).join('\n');
+      .map((it) => txt('· {name}（{sid}）', lang,
+        { name: sessionName(it), sid: pySlice(pyStr(it.sid), 12) })).join('\n');
+    if (i18n.normalizeLang(lang) === 'en') {
+      return i18n.t('api', SESSION_MULTI_FMT, lang, { token: want, options: body });
+    }
     return fmtS2(SESSION_MULTI_FMT, want, body);
   }
-  return fmtS(SESSION_MISS_FMT, want);
+  return strText(SESSION_MISS_FMT, want, lang);
 }
 
 /** 「解绑会话」（`feishu_conv.py:665-673`）：只清当前会话绑定（默认项目原样保留） */
 function leaveSession(binding, options = {}) {
+  options = withLang(options, binding);
   const d = deps(options);
+  const lang = convLang(options);
   const sid = pyStrStrip(pyStr(pyOr(bindingValue(binding, 'cur_sid', ''), '')));
-  if (!pyTruthy(sid)) return '当前未绑定会话';
+  if (!pyTruthy(sid)) return txt('当前未绑定会话', lang);
   const project = defaultProject(binding, options);
-  const name = project !== null ? project.name : '未设置';
+  const name = project !== null ? project.name : txt('未设置', lang);
   d.db.clearFeishuCurSession(requireKey(binding, 'open_id'), options);
-  return `已解绑当前会话（默认项目保持为「${name}」），下次发消息将自动新建`;
+  return txt('已解绑当前会话（默认项目保持为「{name}」），下次发消息将自动新建', lang,
+    { name });
 }
 
 // ==========================================================================
@@ -1113,19 +1229,23 @@ function leaveSession(binding, options = {}) {
  * 绑定时间 / 所属项目）；未绑定会话时明说「未绑定会话，发消息将自动新建」。
  */
 function currentText(binding, options = {}) {
+  options = withLang(options, binding);
+  const lang = convLang(options);
   const project = defaultProject(binding, options);
-  const lines = [`默认项目：${project ? project.name : '未设置'}`];
+  const lines = [txt('默认项目：{name}', lang,
+    { name: project ? project.name : txt('未设置', lang) })];
   const sid = pyStrStrip(pyOr(requireKey(binding, 'cur_sid'), ''));
   if (!pyTruthy(sid)) {
-    lines.push('当前会话：未绑定会话，发消息将自动新建');
+    lines.push(txt('当前会话：未绑定会话，发消息将自动新建', lang));
     return lines.join('\n');
   }
   const title = pyStrStrip(pyOr(requireKey(binding, 'cur_title'), '')) || pySlice(sid, 12);
-  lines.push(`当前会话：${title}（${pySlice(sid, 12)}）`);
+  lines.push(txt('当前会话：{title}（{sid}）', lang, { title, sid: pySlice(sid, 12) }));
   const boundAt = pyStrStrip(pyOr(requireKey(binding, 'cur_bound_at'), ''));
-  if (pyTruthy(boundAt)) lines.push(`绑定时间：${boundAt}`);
+  if (pyTruthy(boundAt)) lines.push(txt('绑定时间：{bound_at}', lang, { bound_at: boundAt }));
   const owner = projectById(binding, requireKey(binding, 'cur_project_id'), options);
-  lines.push(`所属项目：${owner ? owner.name : '（项目已不在你的列表）'}`);
+  lines.push(txt('所属项目：{name}', lang,
+    { name: owner ? owner.name : txt('（项目已不在你的列表）', lang) }));
   return lines.join('\n');
 }
 
@@ -1145,8 +1265,10 @@ function baselineOf(sid, options = {}) {
  * @returns {Promise<[string, string]>} `[sid, err]`，err 非空 = 失败（失败路径一律不写绑定）
  */
 async function createInProject(binding, project, title, options = {}) {
+  options = withLang(options, binding);
   const d = deps(options);
-  if (!pyTruthy(d.dshdriver.configured())) return ['', DRIVER_NEEDED];
+  const lang = convLang(options);
+  if (!pyTruthy(d.dshdriver.configured())) return ['', txt(DRIVER_NEEDED, lang)];
   const finalTitle = pyStrStrip(pyOr(title, '')) || newTitle(options);
   // 项目级模型必须在**建会话时**下传：宿主 `/session` 不拆 `provider/id` 前缀，故先
   // `splitModel` 拆成 provider + 裸 id；只喂 applySessionDefaults 会漏（它仅在
@@ -1157,7 +1279,7 @@ async function createInProject(binding, project, title, options = {}) {
     sid = await d.dshdriver.createSession(project.project_dir, finalTitle, modelId, modelProvider);
   } catch (e) {
     trace(`新建会话失败 project=${project.id}: ${errorRepr(e)}`, options);
-    return ['', `新建会话失败：${errText(e)}`];
+    return ['', txt('新建会话失败：{err}', lang, { err: errText(e) })];
   }
   try {
     await d.dshdriver.applySessionDefaults(
@@ -1182,8 +1304,13 @@ async function createInProject(binding, project, title, options = {}) {
 function newTitle(options = {}) {
   const dt = new Date(deps(options).now() * 1000);
   const pad = (n) => String(n).padStart(2, '0');
-  return `飞书对话 ${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} `
-    + `${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+  // 模板里的 %m/%d/%H/%M 是「新建会话缺省标题」的时间格式（中文原串不改，英文查词典）
+  const template = txt(TITLE_FMT, convLang(options));
+  return template
+    .replace('%m', pad(dt.getMonth() + 1))
+    .replace('%d', pad(dt.getDate()))
+    .replace('%H', pad(dt.getHours()))
+    .replace('%M', pad(dt.getMinutes()));
 }
 
 /**
@@ -1191,14 +1318,17 @@ function newTitle(options = {}) {
  * 与看板副作用（新会话落在 `project_dir`，看板 `sync_sessions` 会自动建一张 sync 卡，不占运行位）。
  */
 async function newSession(binding, title = '', options = {}) {
+  options = withLang(options, binding);
+  const lang = convLang(options);
   const [project, err] = locateProject(binding, options);
   if (project === null) return err;
   const finalTitle = pyStrStrip(pyOr(title, '')) || newTitle(options);
   const [sid, createErr] = await createInProject(binding, project, finalTitle, options);
   if (pyTruthy(createErr)) return createErr;
   void sid;
-  return `已新建并绑定「${finalTitle}」（项目：${project.name}），接下来发消息都进这个会话；`
-    + '它也会出现在看板（sync 卡，不占运行位）';
+  return txt('已新建并绑定「{title}」（项目：{project}），接下来发消息都进这个会话；'
+    + '它也会出现在看板（sync 卡，不占运行位）', lang,
+  { title: finalTitle, project: project.name });
 }
 
 // ==========================================================================
@@ -1236,9 +1366,10 @@ function mediaDirOf(project) {
  * @param {object[]} images 元素 `{data: Buffer, mime: string}`
  * @returns {Promise<[string, string]>} `[composed, ""]` 成功 / `["", MEDIA_SAVE_FAIL_PREFIX+原因]`
  */
-async function storeImages(project, text, images) {
+async function storeImages(project, text, images, options = {}) {
   const media = await import('./feishu_inbound.js');
   const mdir = mediaDirOf(project);
+  const lang = convLang(options);
   const lines = [];
   try {
     fs.mkdirSync(mdir, { recursive: true });
@@ -1251,14 +1382,15 @@ async function storeImages(project, text, images) {
       const fid = `m${Date.now()}_${crypto.randomBytes(5).toString('hex')}.${ext}`;
       const abs = path.join(mdir, fid);
       fs.writeFileSync(abs, data);
-      lines.push(`![飞书截图${k}.${ext}](${abs})`);
+      lines.push(txt('![飞书截图{k}.{ext}]({path})', lang,
+        { k, ext, path: abs }));
     }
   } catch (e) {
-    return ['', media.MEDIA_SAVE_FAIL_PREFIX + errText(e)];
+    return ['', txt(media.MEDIA_SAVE_FAIL_PREFIX, lang) + errText(e)];
   }
-  const header = media.MEDIA_HEADER_FMT.replace('%d', pyStr(images.length))
-    + (pyTruthy(text) ? '' : media.MEDIA_HEADER_NOTE);
-  const block = `${header}：\n${lines.join('\n')}`;
+  const header = numText(media.MEDIA_HEADER_FMT, images.length, lang)
+    + (pyTruthy(text) ? '' : txt(media.MEDIA_HEADER_NOTE, lang));
+  const block = `${header}${txt('：', lang)}\n${lines.join('\n')}`;
   return [pyTruthy(text) ? `${text}\n\n${block}` : block, ''];
 }
 
@@ -1294,9 +1426,11 @@ async function storeImages(project, text, images) {
  *   `handleMessageEvent`，条件「单聊 + 意图未识别 + 总开关开」）
  */
 export async function routeText(binding, text, cfg = null, options = {}, images = null) {
+  options = withLang(options, binding);
   const d = deps(options);
+  const lang = convLang(options);
   if (pyLen(pyOr(text, '')) > d.chat.MESSAGE_MAX) {
-    return fmtD(MESSAGE_TOO_LONG, d.chat.MESSAGE_MAX);
+    return numText(MESSAGE_TOO_LONG, d.chat.MESSAGE_MAX, lang);
   }
   const openId = requireKey(binding, 'open_id');
   let note = '';
@@ -1310,7 +1444,7 @@ export async function routeText(binding, text, cfg = null, options = {}, images 
       sid = '';
       title = '';
       project = null;
-      note = STALE_NOTE;
+      note = txt(STALE_NOTE, lang);
     }
   }
   if (!pyTruthy(sid)) {
@@ -1321,7 +1455,7 @@ export async function routeText(binding, text, cfg = null, options = {}, images 
     if (project === null) {
       const card = projectsCard(binding, options);
       if (card !== null) await sendCard(openId, card, cfg, options);
-      return NO_DEFAULT_GUIDE + (pyTruthy(note) ? `\n${note}` : '');
+      return txt(NO_DEFAULT_GUIDE, lang) + (pyTruthy(note) ? `\n${note}` : '');
     }
     title = newTitle(options);
     const created = await createInProject(binding, project, title, options);
@@ -1335,7 +1469,7 @@ export async function routeText(binding, text, cfg = null, options = {}, images 
   let composed = text;
   if (pyTruthy(images)) {
     // 目标项目已解析成功 ⇒ 才落盘（无项目分支在上面已返回，不产生孤儿文件）
-    const stored = await storeImages(project, pyOr(text, ''), images);
+    const stored = await storeImages(project, pyOr(text, ''), images, options);
     composed = stored[0];
     if (pyTruthy(stored[1])) return stored[1] + (pyTruthy(note) ? `\n${note}` : '');
   }
@@ -1357,15 +1491,17 @@ export async function routeText(binding, text, cfg = null, options = {}, images 
     });
   } catch (e) {
     trace(`投递失败 sid=${sid}: ${errorRepr(e)}`, options);
-    return `投递失败：${errText(e)}` + (pyTruthy(note) ? `\n${note}` : '');
+    return txt('投递失败：{err}', lang, { err: errText(e) })
+      + (pyTruthy(note) ? `\n${note}` : '');
   }
   if (pyTruthy(images)) {
     // 真机核对日志（契约 §3.2）：投递成功才打，sid/project 只在此层可知（stderr）
     d.log(`[feishu] 截图 ${images.length} 张已存 board_media 并投递 sid=${sid}`
       + `（project=${project.id}）`);
   }
-  const state = pyTruthy(res.queued) ? '排队中' : '执行中';
-  return `已投递到「${title}」（${state}），跑完把答复发回这里` + note;
+  const state = txt(pyTruthy(res.queued) ? '排队中' : '执行中', lang);
+  return txt('已投递到「{title}」（{state}），跑完把答复发回这里', lang,
+    { title, state }) + note;
 }
 
 // ==========================================================================
@@ -1382,11 +1518,13 @@ export async function routeText(binding, text, cfg = null, options = {}, images 
  * @returns {Promise<string>} 回复文案（**空串 = 不回复**）
  */
 export async function convIntent(binding, action, groups, senderOpenId, cfg = null, options = {}) {
+  options = withLang(options, binding);
+  const lang = convLang(options);
   const g = pyOr(groups, []);
   if (action === 'current') return currentText(binding, options);
   if (action === 'projects') {
     const card = projectsCard(binding, options);
-    if (card === null) return NO_PROJECTS_GUIDE;
+    if (card === null) return txt(NO_PROJECTS_GUIDE, lang);
     if (!await sendCard(requireKey(binding, 'open_id'), card, cfg, options)) {
       return projectsText(binding, options);      // 卡片没被受理 ⇒ 文本兜底，绝不静默
     }
@@ -1394,7 +1532,7 @@ export async function convIntent(binding, action, groups, senderOpenId, cfg = nu
   }
   if (action === 'sessions') {
     const card = sessionsCard(binding, options);
-    if (card === null) return NO_DEFAULT_GUIDE;
+    if (card === null) return txt(NO_DEFAULT_GUIDE, lang);
     if (!await sendCard(requireKey(binding, 'open_id'), card, cfg, options)) {
       return sessionsText(binding, options);      // 同上：卡片没被受理 ⇒ 文本兜底
     }
@@ -1448,6 +1586,8 @@ export async function notifyMsgDone(msgId, state, options = {}) {
   if (!pyTruthy(meta)) return;
   const openId = pyOr(dget(meta, 'open_id'), '');
   if (!pyTruthy(openId)) return;
+  // 答复回流的语言归属 = 提交者（载荷里定格的 user_id）；入口解析一次、向下传
+  const lang = langOf({ user_id: dget(meta, 'user_id') }, options);
   if (!bindingCurrent(openId, dget(meta, 'user_id'), options)) {
     trace(`答复跳过（绑定已变更）open_id=${pySlice(pyStr(openId), 12)}`, options);
     return;
@@ -1460,13 +1600,18 @@ export async function notifyMsgDone(msgId, state, options = {}) {
   if (state === 'error') {
     const row = d.waitq.msgGet(msgId, options);
     const err = pySlice(pyOr(row !== null && row !== undefined ? row.error : '', ''), 200);
-    await dm(openId, `本轮执行失败：${pyOr(err, '未知原因')}（可在站点会话窗查看详情）`,
-      null, dget(meta, 'user_id'), options);
+    await dm(openId, txt('本轮执行失败：{err}（可在站点会话窗查看详情）', lang,
+      { err: pyOr(err, txt('未知原因', lang)) }),
+    null, dget(meta, 'user_id'), options);
     return;
   }
   const row = d.waitq.msgGet(msgId, options);
   const sid = pyOr(row !== null && row !== undefined ? row.sid : '', '');
-  const reply = clipReply(replyOf(sid, pyIntStrict(pyOr(dget(meta, 'baseline'), 0)), options));
+  // 截断后缀与分析文案同语言：入口已解析出提交者 `lang`，必须显式塞回 options——
+  // `clipReply` 只看 `convLang(options)`（缺省 zh），漏传会让 en 用户拿到中文后缀。
+  const reply = clipReply(
+    replyOf(sid, pyIntStrict(pyOr(dget(meta, 'baseline'), 0)), options),
+    { ...options, lang });
   if (pyTruthy(reply)) await dm(openId, reply, null, dget(meta, 'user_id'), options);
 }
 
@@ -1509,11 +1654,11 @@ function replyOf(sid, baseline, options = {}) {
 }
 
 /** 答复截断（`feishu_conv.py:905-910`）：超 `REPLY_MAX_CHARS` 保留首段并附站点指引（码点口径） */
-function clipReply(text) {
+function clipReply(text, options = {}) {
   const value = pyStrStrip(pyOr(text, ''));
   if (pyLen(value) <= REPLY_MAX_CHARS) return value;
   return pySlice(value, REPLY_MAX_CHARS - 200)
-    + '\n……（内容过长已截断，完整内容见站点会话窗 / 看板）';
+    + txt('\n……（内容过长已截断，完整内容见站点会话窗 / 看板）', convLang(options));
 }
 
 // ==========================================================================

@@ -147,7 +147,7 @@ async function apiSlashSet(ctx) {
 
 /** `_api_me_feishu_provision_get`(1767)：能力/总闸/状态/确认链接/步骤（只读） */
 async function apiProvisionGet(ctx) {
-  ctx.json(200, provisionStatus(ctx.user.id, { db: ctx.db }));
+  ctx.json(200, provisionStatus(ctx.user.id, { db: ctx.db, lang: ctx.lang }));
 }
 
 /** `_api_me_feishu_provision_set`(1774)：四动作；缺 action ⇒ 400（与 slash 族**相反**） */
@@ -155,12 +155,12 @@ async function apiProvisionSet(ctx) {
   const body = await ctx.readBody();
   const action = pyStr(pyTruthy(body.action) ? body.action : '');
   const uid = ctx.user.id;
-  const options = { db: ctx.db };
+  const options = { db: ctx.db, lang: ctx.lang };
   let out;
   if (action === 'start') {
     out = await provisionStart(uid, pyTruthy(body.force), options);
   } else if (action === 'cancel') {
-    out = provisionCancel(uid);
+    out = provisionCancel(uid, options);
   } else if (action === 'apply') {
     out = await provisionApply(uid, options);
   } else if (action === 'publish') {
@@ -170,6 +170,7 @@ async function apiProvisionSet(ctx) {
       remark: pyStr(pyTruthy(body.remark) ? body.remark : ''),
       changelog: pyStr(pyTruthy(body.changelog) ? body.changelog : ''),
       db: ctx.db,
+      lang: ctx.lang,
     });
   } else {
     ctx.errorSpaced(400, 'action 仅支持 start / cancel / apply / publish');
@@ -181,7 +182,8 @@ async function apiProvisionSet(ctx) {
 /** `_api_me_feishu_doctor`(1801)：八项自检；`send_probe` 走 Python `bool()` */
 async function apiDoctor(ctx) {
   const body = await ctx.readBody();
-  ctx.json(200, await doctor(ctx.user.id, pyTruthy(body.send_probe), { db: ctx.db }));
+  ctx.json(200, await doctor(ctx.user.id, pyTruthy(body.send_probe),
+    { db: ctx.db, dataLang: ctx.lang }));
 }
 
 /**
