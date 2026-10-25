@@ -38,6 +38,7 @@
     "agent 等待你的回答": "The agent is waiting for your answer",
     "agent 等待用户回答，回复后自动恢复": "The agent is waiting for a reply; it resumes automatically after you answer",
     "agent 请求审批：{name}": "The agent requests approval: {name}",
+    "本次等待不支持在此作答，请在 dsh 会话窗口处理": "This wait cannot be answered here. Please handle it in the DSH session window.",
     "compact 压缩会话上下文": "Compact the session context",
     "compact 已触发": "Compact triggered",
     "dsh（插件·进程内） {path}": "dsh (plugin · in-process) {path}",

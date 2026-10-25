@@ -1207,6 +1207,11 @@ body.tabbar-dragging, body.tabbar-dragging * { cursor: grabbing !important; user
   border-radius: 6px; background: var(--inset-bg); color: inherit; width: 100%; }
 .sess-interaction-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .sess-interaction-hint { flex: 1; font-size: calc(11px * var(--fs)); color: var(--muted-foreground); }
+/* 不可作答时的只读展示（2026-10-25，修 #906）：选项内容照常展示，但不给控件/指针反馈；
+   hint 独占一行并用 ro 变体补上间距（不覆盖可作答路径内部的提示样式） */
+.sess-interaction-list.ro .sess-iopt.ro { cursor: default; }
+.sess-iopt.ro:hover { border-color: var(--border); }
+.sess-interaction-hint.ro { flex: none; margin-top: 8px; }
 .sess-interaction-pre { max-height: 140px; overflow: auto; font-family: var(--mono); font-size: calc(11px * var(--fs));
   background: var(--inset-bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
   margin: 0 0 8px; white-space: pre-wrap; word-break: break-all; }

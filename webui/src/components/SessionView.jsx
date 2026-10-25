@@ -573,9 +573,13 @@ const QuestionBar = memo(function QuestionBar({ withQBar, qbarOpen, questions, f
      随时折起），点条展开；折叠态在轮询刷新（meta 更新）间保持
    - 审批（approval=ask 档挂起的工具调用）：批准 / 本会话内批准 / 拒绝 三按钮
      （审批面板文案出处 kimi web；decision=approved/rejected，scope=session 本会话内批准）
+   - 不可作答（`answerable=false`：外部会话未被平台看管 / 首问竞态等）：**内容照常展示**——
+     选项逐题只读渲染（序号 + label + description +「其他…」行文案，无 input/按钮）+ 一行引导
+     「请在 dsh 会话窗口处理」；审批同理只补引导、不出按钮。作答能力与内容展示解耦，
+     可作答路径逐字不变（2026-10-25 修 #906「只有题头 + 题号点、没有内容」）
    data = 会话端点下发的 interaction（见 board._iw_interaction）；answer 由 SessionView
    注入（board / task 各自端点），失败提示在调用方 toast；qid/approval_id 变化重置选择 */
-const InteractionCard = memo(function InteractionCard({ data, answer }) {
+export const InteractionCard = memo(function InteractionCard({ data, answer }) {
   const { t } = useI18n()
   // 逐题作答态：{ [题 id]: {sel: [], other: '', useOther: false} }（单选也存数组，统一处理）
   const [ans, setAns] = useState({})
@@ -683,6 +687,12 @@ const InteractionCard = memo(function InteractionCard({ data, answer }) {
               onClick={() => run({ approval_id: aid, decision: 'rejected' })}>{t('拒绝')}</Button>
           </div>
         )}
+        {/* 不可作答只补引导（审批内容已在上方 pre 展示；2026-10-25 与提问分支同口径） */}
+        {!data.answerable && (
+          <div className="sess-interaction-hint ro">
+            {t('本次等待不支持在此作答，请在 dsh 会话窗口处理')}
+          </div>
+        )}
       </div>
     )
   }
@@ -745,6 +755,38 @@ const InteractionCard = memo(function InteractionCard({ data, answer }) {
               </span>
             </label>
           )}
+        </div>
+      )}
+      {/* 不可作答时逐题只读展示选项（2026-10-25，修 #906「只有题头+题号点、没有内容」）：
+          内容展示与作答能力解耦——label/description 照常渲染，只是不带任何控件；
+          「其他…」行同理只出文案（不渲染文本输入）。可作答分支（上）逐字不变。 */}
+      {!data.answerable && (opts.length > 0 || cur.allow_other) && (
+        <div className="sess-interaction-list ro">
+          {opts.map((o, i) => (
+            <div key={o.id} className="sess-iopt ro">
+              <span className="sess-iopt-key">{i + 1}</span>
+              <span className="sess-iopt-text">
+                <span className="sess-iopt-label">{o.label}</span>
+                {o.description && <span className="sess-iopt-desc">{o.description}</span>}
+              </span>
+            </div>
+          ))}
+          {cur.allow_other && (
+            <div className="sess-iopt ro">
+              <span className="sess-iopt-key">{opts.length + 1}</span>
+              <span className="sess-iopt-text">
+                <span className="sess-iopt-label">{cur.other_label || t('其他…')}</span>
+                {cur.other_description && (
+                  <span className="sess-iopt-desc">{cur.other_description}</span>)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+      {/* 不可作答的引导（替代原「空白卡片」；比飞书只读卡多一句「去哪答」） */}
+      {!data.answerable && (
+        <div className="sess-interaction-hint ro">
+          {t('本次等待不支持在此作答，请在 dsh 会话窗口处理')}
         </div>
       )}
       {/* 底部：多题=翻页导航（上一题/题号进度点/下一题）+ 常驻「提交」；
