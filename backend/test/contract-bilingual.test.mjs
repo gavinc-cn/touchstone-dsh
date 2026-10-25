@@ -54,6 +54,17 @@ test('zh 多选项模板值：parseFields 保留原文、normStatus 取第一项
   assert.equal(lib.normStatus('未执行 / 通过 / 失败'), '未执行');
 });
 
+for (const item of EXPECTED.severityLevels) {
+  test(`severityLevel：${JSON.stringify(item.input)} → ${JSON.stringify(item.expected)}`, () => {
+    assert.equal(lib.severityLevel(item.input), item.expected);
+  });
+}
+
+test('parseFields 不归一严重程度值（英文档原样 High），归一发生在展示层 severityLevel', () => {
+  assert.equal(lib.parseFields(readFixture('en/bug_report.md'))['严重程度'], 'High');
+  assert.equal(lib.severityLevel('High'), '高');
+});
+
 // --------------------------------------------------------------------------
 // 写回：按文件已有语言
 // --------------------------------------------------------------------------

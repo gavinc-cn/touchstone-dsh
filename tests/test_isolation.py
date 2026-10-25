@@ -76,6 +76,8 @@ _CROSS_WRITE = [
       "stop_value": "1"}),
     ("停任务", "POST", "/api/tasks/{tid}/stop", {}),
     ("任务会话发消息", "POST", "/api/tasks/{tid}/session/chat", {"message": "越权消息"}),
+    ("改 bug 严重程度", "POST", "/api/projects/{pid}/bugs/20260101_0000_FS_x/severity",
+     {"severity": "高"}),
     ("建卡片", "POST", "/api/projects/{pid}/board/cards", {"title": "越权卡"}),
     ("改卡片", "PATCH", "/api/projects/{pid}/board/cards/{cid}", {"title": "被改的卡"}),
     ("移卡片", "POST", "/api/projects/{pid}/board/cards/{cid}/move",

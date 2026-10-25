@@ -3,7 +3,8 @@
     "T14 双端（Python tests/test_contract_bilingual.py / Node backend/test/contract-bilingual.test.mjs）共享的机器契约双语用例表；两端读取同一份 fixture 与同一份期望，任何一端语义分叉都会失败。",
     "parseStatus/parseFields 的键是内部中文 canonical；英文状态值必须归一到中文 canonical。",
     "setMdField：按文件已有语言写回（英文表头 ⇒ 英文键+英文值；混写跟目标字段/文件主语言），expectedText 是写入后的**整文件字节**（LF）。",
-    "zh 档期望是改前基线（生成时用改前 lib.py 真跑核对过）。"
+    "zh 档期望是改前基线（生成时用改前 lib.py 真跑核对过）。",
+    "severityLevels / setMdField 的严重程度档（2026-10-25）：bug_report.md「严重程度」等级（模板 zh 高/中/低、en High/Medium/Low）解析时归一到中文 canonical，写回时按目标文件语言取 zh/en 写法；未知自定义值不猜译（severityLevel → \"\"）。"
   ],
   "parseStatus": {
     "zh/status.md": {
@@ -312,6 +313,77 @@
       "value": "通过",
       "expectedText": null,
       "expectedHit": false
+    },
+    {
+      "fixture": "zh/bug_report.md",
+      "field": "严重程度",
+      "value": "低",
+      "expectedText": "# 登录接口异常\n\n- **状态**: 已分析，待修复\n- **严重程度**: 低\n- **报告时间**: 2026-10-01 10:00\n- **执行环境**: 测试环境 A\n- **错误签名**: login timeout\n\n## 关联用例\n\n| 用例 ID | 用例名称 | 状态 |\n|---------|----------|------|\n| FS0001 | 登录超时 | 失败 |\n\n## 现象与影响\n\n（一句话现象描述）\n",
+      "expectedHit": true
+    },
+    {
+      "fixture": "en/bug_report.md",
+      "field": "严重程度",
+      "value": "中",
+      "expectedText": "# Login API failure\n\n- **Status**: Analyzed, to fix\n- **Severity**: Medium\n- **Reported at**: 2026-10-01 10:00\n- **Execution environment**: Test environment A\n- **Error signature**: login timeout\n\n## Related cases\n\n| Case ID | Case name | Status |\n|---------|-----------|--------|\n| FS0001 | Login timeout | Failed |\n\n## Symptom and impact\n\n(one-line symptom)\n",
+      "expectedHit": true
+    },
+    {
+      "fixture": "mixed/bug_report.md",
+      "field": "严重程度",
+      "value": "中",
+      "expectedText": "# 登录接口异常\n\n- **Status**: Analyzed, to fix\n- **状态**: 已拒绝\n- **Severity**: Medium\n- **错误签名**: login timeout\n",
+      "expectedHit": true
+    }
+  ],
+  "severityLevels": [
+    {
+      "input": "高",
+      "expected": "高"
+    },
+    {
+      "input": "中",
+      "expected": "中"
+    },
+    {
+      "input": "低",
+      "expected": "低"
+    },
+    {
+      "input": "High",
+      "expected": "高"
+    },
+    {
+      "input": "Medium",
+      "expected": "中"
+    },
+    {
+      "input": "Low",
+      "expected": "低"
+    },
+    {
+      "input": "high",
+      "expected": "高"
+    },
+    {
+      "input": "  High  ",
+      "expected": "高"
+    },
+    {
+      "input": "",
+      "expected": ""
+    },
+    {
+      "input": "紧急",
+      "expected": ""
+    },
+    {
+      "input": "higher",
+      "expected": ""
+    },
+    {
+      "input": "非常严重",
+      "expected": ""
     }
   ]
 }

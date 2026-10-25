@@ -655,7 +655,7 @@ test('/api/projects/<id>/bugs：扫描聚合 + 关联任务；详情含全文/�
 
     const detail = await get(fx.db, me, `/api/projects/${p.id}/bugs/20260901_1010_FS_fix_me`);
     assert.equal(detail.status, 200);
-    assert.deepEqual(Object.keys(detail.json), ['dir', 'title', 'status', 'cases', 'content', 'last_task']);
+    assert.deepEqual(Object.keys(detail.json), ['dir', 'title', 'status', 'severity', 'cases', 'content', 'last_task']);
     assert.equal(detail.json.dir, '20260901_1010_FS_fix_me');
     assert.equal(detail.json.title, 'FS_fix_me');
     assert.equal(detail.json.status, '待修复');

@@ -91,6 +91,22 @@ def test_zh_parse_results_are_pre_change_baseline():
     assert lib.norm_status("未执行 / 通过 / 失败") == "未执行"
 
 
+@pytest.mark.parametrize("case", EXPECTED["severityLevels"], ids=[
+    "empty" if not c["input"] else c["input"] for c in EXPECTED["severityLevels"]
+])
+def test_severity_level_aliases(case):
+    """严重程度等级归一：中文 canonical 原样、英文（含大小写/空白）→ 中文 canonical、
+    无法识别的自定义值 → 空串（不猜译，界面按「未分级」处理）。"""
+    assert lib.severity_level(case["input"]) == case["expected"]
+
+
+def test_severity_field_value_not_canonicalized_by_parse_fields():
+    """`parse_fields` 只归一**状态**值：严重程度值原样透传（英文文件是 `High`）——等级
+    归一发生在 scan/detail 展示层（`severity_level`），不改双语解析契约的存量行为。"""
+    assert lib.parse_fields(_read("en/bug_report.md"))["严重程度"] == "High"
+    assert lib.severity_level("High") == "高"
+
+
 # ---------- 写回：按文件已有语言 ----------
 
 def _copy_fixture(tmp_path, rel):

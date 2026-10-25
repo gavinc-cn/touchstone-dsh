@@ -751,7 +751,11 @@ def collect_stats(node, stats):
 
 
 def scan_bugs(bug_dir):
-    """扫描 bug_report 目录下测试任务生成的报告（目录名含 _FS_），按时间倒序，最多 50 条。"""
+    """扫描 bug_report 目录下测试任务生成的报告（目录名含 _FS_），按时间倒序，最多 50 条。
+
+    `severity` = 报告「严重程度」等级归一到中文 canonical（高/中/低）；缺失或无法识别的
+    自定义值给空串（前端按「未分级」展示）。原文字段值不被改写（`severity_level` 只读）。
+    """
     bugs = []
     try:
         entries = sorted(os.listdir(bug_dir), reverse=True)
@@ -770,6 +774,7 @@ def scan_bugs(bug_dir):
             "dir": entry,
             "title": m.group(1) if m else entry,
             "status": fields.get("状态", ""),
+            "severity": lib.severity_level(fields.get("严重程度", "")),
             "cases": sorted(set(re.findall(r"FS\d{4}", report)))[:20],
         })
         if len(bugs) >= 50:
@@ -791,17 +796,29 @@ def bug_last_task(tasks, bug_dir):
     return None
 
 
+# bug 等级排序权重：高 → 中 → 低 → 未分级（缺失/无法识别）。canonical 中文键；
+# 与 backend/lib/casescan.js 的 SEVERITY_RANK 逐字镜像。
+SEVERITY_RANK = {"高": 0, "中": 1, "低": 2}
+
+
+def severity_rank(severity):
+    """等级 → 排序权重（高 0 / 中 1 / 低 2 / 未分级 3）。"""
+    return SEVERITY_RANK.get(severity or "", len(SEVERITY_RANK))
+
+
 def list_project_bugs(project):
     """bug 列表：扫描结果 + 每个 bug 最近的修复/复测/修例任务信息。
 
-    复测通过（已闭环）与已拒绝（被用户否决）的报告沉到列表末尾作为历史报告，
-    其余保持扫描出的时间倒序（sorted 稳定，组内相对顺序不变）。
+    排序（2026-10-25 等级划分批次）：复测通过（已闭环）与已拒绝（被用户否决）的报告
+    照旧沉到列表末尾作为历史报告；其余按严重程度 高 → 中 → 低 → 未分级，同等级内保持
+    扫描出的时间倒序（sorted 稳定，组内相对顺序不变；历史报告组内同样按等级）。
     """
     bugs = scan_bugs(project["bug_dir"])
     tasks = db.list_tasks(project["id"])
     for b in bugs:
         b["last_task"] = bug_last_task(tasks, b["dir"])
-    bugs.sort(key=lambda b: 1 if re.search(r"复测通过|已拒绝", b["status"] or "") else 0)
+    bugs.sort(key=lambda b: (1 if re.search(r"复测通过|已拒绝", b["status"] or "") else 0,
+                             severity_rank(b["severity"])))
     return bugs
 
 
@@ -1241,6 +1258,10 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/projects/(\d+)/bugs/([^/]+)/reject$", path)
         if m:
             self._api_reject_bug(int(m.group(1)), m.group(2), body)
+            return
+        m = re.match(r"^/api/projects/(\d+)/bugs/([^/]+)/severity$", path)
+        if m:
+            self._api_set_bug_severity(int(m.group(1)), m.group(2), body)
             return
         m = re.match(r"^/api/projects/(\d+)/board/cards$", path)
         if m:
@@ -4159,10 +4180,43 @@ class Handler(BaseHTTPRequestHandler):
             "dir": bug_dir,
             "title": m.group(1) if m else bug_dir,
             "status": fields.get("状态", ""),
+            "severity": lib.severity_level(fields.get("严重程度", "")),
             "cases": cases,
             "content": content,
             "last_task": bug_last_task(tasks, bug_dir),
         }, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+    def _api_set_bug_severity(self, project_id, bug_dir, body):
+        """改 bug 报告严重程度等级（高/中/低）：写回报告「严重程度」行。
+
+        等级是平台分级展示/筛选/排序的分类值（用户在报告页可手动调整）：
+        - 只接受 高/中/低（`lib.severity_level` 同时认 High/Medium/Low 与大小写变体，
+          归一到中文 canonical；**非字符串/无法识别一律 400**，不静默丢弃）；
+        - 写回语言跟随报告文件（中文报告写「高」，英文报告写「High」，与 `set_md_field`
+          的双语写回同口径）；
+        - 报告不存在 404、越权 404（`_owned_project`）、报告文件不可写 500。
+        """
+        row = self._owned_project(project_id)
+        if row is None:
+            self._error(404, 'project not found')
+            return
+        bug_dir = unquote(bug_dir).strip().strip("/")
+        dir_path = os.path.join(row["bug_dir"], bug_dir)
+        if not os.path.isdir(dir_path):
+            self._error(404, 'bug not found')
+            return
+        raw = body.get("severity")
+        level = lib.severity_level(raw if isinstance(raw, str) else "")
+        if not level:
+            self._error(400, '严重程度不合法（仅支持 高/中/低）')
+            return
+        report_path = os.path.join(dir_path, "bug_report.md")
+        if not lib.set_md_field(report_path, "严重程度", level):
+            self._error(500, '严重程度写入失败')
+            return
+        self._respond(200, json.dumps({"ok": True, "severity": level},
+                                      ensure_ascii=False).encode("utf-8"),
+                      "application/json; charset=utf-8")
 
     def _api_reject_bug(self, project_id, bug_dir, body):
         """拒绝 bug 报告：标记「已拒绝」+ 追加拒绝记录 + 创建修例任务（reject）。

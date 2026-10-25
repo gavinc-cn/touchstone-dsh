@@ -85,6 +85,7 @@ import {
   FILE_RAW_MAX, PY_WS, bugCases, findCaseDirs, fsBrowse, fsMkdir, isDir, normalizeProjectName,
   parseFields, parseStatusMd, pathLastSegment, pyBasename, pyIntOr, pyIsDigits, pyJoin, pyMtimeInt,
   pyNormpath, pyRelpath, pyStrip, readText, readTextPreview, resolveProjectFile, setMdField,
+  severityLevel,
 } from '../lib/lib.js';
 import { bugLastTask, listProjectBugs, pyJsonDumpsSorted } from '../lib/casescan.js';
 import { pyJsonDumps } from '../lib/pyjson.js';
@@ -195,6 +196,47 @@ async function apiRejectBug(ctx, projectId, bugDirRaw) {
     runner.INSTANCE.submit(tid);
   }
   ctx.json(200, { ok: true, task_id: tid });
+}
+
+/**
+ * `_api_set_bug_severity`：改 bug 报告严重程度等级（高/中/低）：写回报告「严重程度」行。
+ *
+ * 等级是平台分级展示/筛选/排序的分类值（用户在报告页可手动调整）：
+ * - 只接受 高/中/低（`lib.severityLevel` 同时认 High/Medium/Low 与大小写变体，归一到中文
+ *   canonical；**非字符串/无法识别一律 400**，不静默丢弃）；
+ * - 写回语言跟随报告文件（中文报告写「高」，英文报告写「High」，与 `setMdField` 的双语写回同口径）；
+ * - 报告不存在 404、越权 404（`ctx.ownedProject`）、报告文件不可写 500。
+ * @param {object} ctx 路由上下文
+ * @param {number} projectId
+ * @param {string} bugDirRaw 路径段（`([^/]+)`，可能 percent-encoded）
+ */
+async function apiSetBugSeverity(ctx, projectId, bugDirRaw) {
+  const body = await ctx.readBody();           // Python 在 do_POST 统一读体
+  const row = ctx.ownedProject(projectId);
+  if (row === null) return;
+  const bugDir = pyStripSlashes(pyStrip(unquote(bugDirRaw)));
+  const dirPath = pyJoin(row.bug_dir, bugDir);
+  if (!isDir(dirPath)) {
+    ctx.error(404, 'bug not found');           // 紧凑（Python 是字节串字面量）
+    return;
+  }
+  // 非字符串一律按空值处理（与 Python `raw if isinstance(raw, str) else ""` 逐点同口径）
+  const raw = typeof body.severity === 'string' ? body.severity : '';
+  const level = severityLevel(raw);
+  if (!level) {
+    // 错误体走 ctx.error（紧凑形态与 Python `_error` 逐字节相同）才会按请求语言本地化
+    ctx.error(400, '严重程度不合法（仅支持 高/中/低）');
+    return;
+  }
+  const reportPath = pyJoin(dirPath, 'bug_report.md');
+  if (!setMdField(reportPath, '严重程度', level)) {
+    ctx.error(500, '严重程度写入失败');
+    return;
+  }
+  // 成功体 = Python `json.dumps({"ok": True, "severity": level}, ensure_ascii=False)`
+  // 的逐字节形态（`pyJsonDumps`：`{"ok": true, "severity": "高"}`），用 ctx.text 直发。
+  ctx.text(200, pyJsonDumps({ ok: true, severity: level }),
+    'application/json; charset=utf-8');
 }
 
 /** Python `str(x or "")`（标量面；容器按 JSON 文本兜底——与既有私有助手同口径） */
@@ -1160,6 +1202,7 @@ export const routes = [
         dir: bugDir,
         title: bm ? bm[1] : bugDir,
         status: fields['状态'] || '',
+        severity: severityLevel(fields['严重程度']),
         cases,
         content,
         last_task: bugLastTask(listTasks(row.id, { db: ctx.db }), bugDir),
@@ -1200,6 +1243,11 @@ export const routes = [
     method: 'POST',
     re: /^\/api\/projects\/(\d+)\/bugs\/([^/]+)\/reject$/,
     handler: (ctx, m) => apiRejectBug(ctx, Number(m[1]), m[2]),
+  },
+  {
+    method: 'POST',
+    re: /^\/api\/projects\/(\d+)\/bugs\/([^/]+)\/severity$/,
+    handler: (ctx, m) => apiSetBugSeverity(ctx, Number(m[1]), m[2]),
   },
   {
     method: 'PATCH',

@@ -35,6 +35,7 @@ import { pyJsonDumps } from './pyjson.js';
 import {
   CASE_DIR_RE, FS_ID_RE, PY_WS, isDir, isFile, parseFields, parseStatusMd, pyBasename, pyJoin,
   pyMtimeFloat, pySorted, pySortedReverse, pyStrip, pyStrCompare, readText, runtimeDir,
+  severityLevel,
 } from './lib.js';
 
 // --------------------------------------------------------------------------
@@ -219,8 +220,12 @@ export function collectStats(node, stats) {
 /**
  * `scan_bugs`：扫描 bug_report 目录下测试任务生成的报告（目录名含 `_FS_`），
  * 按目录名倒序，最多 50 条。
+ *
+ * `severity` = 报告「严重程度」等级归一到中文 canonical（高/中/低）；缺失或无法识别的
+ * 自定义值给空串（前端按「未分级」展示）。原文字段值不被改写（`severityLevel` 只读）。
  * @param {string} bugDir
- * @returns {Array<{dir: string, title: string, status: string, cases: string[]}>}
+ * @returns {Array<{dir: string, title: string, status: string, severity: string,
+ *                  cases: string[]}>}
  */
 export function scanBugs(bugDir) {
   const bugs = [];
@@ -241,6 +246,7 @@ export function scanBugs(bugDir) {
       dir: entry,
       title: m ? m[1] : entry,
       status: fields['状态'] || '',
+      severity: severityLevel(fields['严重程度']),
       cases: pySorted(new Set(report.match(FS_ID_RE) || [])).slice(0, 20),
     });
     if (bugs.length >= 50) break;
@@ -279,8 +285,9 @@ export function bugLastTask(tasks, bugDir) {
 /**
  * `list_project_bugs`：bug 列表 = 扫描结果 + 每个 bug 最近的修复/复测/修例任务信息。
  *
- * 复测通过（已闭环）与已拒绝（被用户否决）的报告沉到列表末尾作为历史报告，其余保持扫描出的
- * 目录名倒序（排序稳定，组内相对顺序不变）。
+ * 排序（2026-10-25 等级划分批次）：复测通过（已闭环）与已拒绝（被用户否决）的报告照旧沉到
+ * 列表末尾作为历史报告；其余按严重程度 高 → 中 → 低 → 未分级，同等级内保持扫描出的目录名
+ * 倒序（JS `Array#sort` 稳定，与 Python `list.sort` 同序；历史报告组内同样按等级）。
  * @param {object} project 项目行（需 `bug_dir`/`id`）
  * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options] 数据层读口选项
  * @returns {object[]}
@@ -289,13 +296,27 @@ export function listProjectBugs(project, options = {}) {
   const bugs = scanBugs(project.bug_dir);
   const tasks = listTasks(project.id, options);
   for (const b of bugs) b.last_task = bugLastTask(tasks, b.dir);
-  bugs.sort((a, b) => closedRank(a) - closedRank(b));
+  bugs.sort((a, b) => (closedRank(a) - closedRank(b))
+    || (severityRank(a.severity) - severityRank(b.severity)));
   return bugs;
 }
 
 /** 历史报告判据：状态里出现「复测通过」或「已拒绝」（`re.search` ⇒ 任意位置命中） */
 function closedRank(bug) {
   return /复测通过|已拒绝/.test(bug.status || '') ? 1 : 0;
+}
+
+/**
+ * bug 等级排序权重：高 → 中 → 低 → 未分级（缺失/无法识别）。与 `server.py` 的
+ * `SEVERITY_RANK` / `severity_rank` 逐字镜像。
+ */
+const SEVERITY_RANK = { 高: 0, 中: 1, 低: 2 };
+
+/** 等级 → 排序权重（高 0 / 中 1 / 低 2 / 未分级 3） */
+function severityRank(severity) {
+  return Object.hasOwn(SEVERITY_RANK, severity || '')
+    ? SEVERITY_RANK[severity]
+    : Object.keys(SEVERITY_RANK).length;
 }
 
 // --------------------------------------------------------------------------

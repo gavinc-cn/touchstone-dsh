@@ -207,6 +207,9 @@ export const bugApi = {
   // 拒绝报告：平台标记「已拒绝」并创建修例任务（按理由修正用例+沉淀 PITFALLS.md）
   reject: (pid, dir, reason) =>
     api.post(`/api/projects/${pid}/bugs/${encodeURIComponent(dir)}/reject`, { reason }),
+  // 改严重程度等级（canonical 高/中/低）：写回 bug_report.md 的「严重程度」行
+  setSeverity: (pid, dir, severity) =>
+    api.post(`/api/projects/${pid}/bugs/${encodeURIComponent(dir)}/severity`, { severity }),
 }
 
 // ---- 后台管理 ----

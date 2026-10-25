@@ -18,6 +18,7 @@ import {
   BUG_FIXED, BUG_RETEST_PASS, CASE_FAIL, CASE_PASS, CASE_PENDING, CASE_RETEST,
   CASE_SKIP,
 } from './taskEnums'
+import { SEV_HIGH, SEV_LOW, SEV_MEDIUM } from './bugStatus'
 
 // bug_report.md 状态（canonical 中文数据值，勿翻译）
 export const BUG_ANALYZE = '\u5f85\u5206\u6790' // 待分析
@@ -93,6 +94,26 @@ export function bugStatusLabel(t, raw) {
     // 历史/手工写入的裸终态；现平台不写它（复测全通过的终态是「已修复（复测通过）」，
     // 修复任务默认路径写「修复完成，待复测」）。保留映射只为历史报告不裸中文。
     [BUG_FIXED]: t('已修复'),
+  }
+  return Object.prototype.hasOwnProperty.call(map, raw) ? map[raw] : raw
+}
+
+/**
+ * bug 报告严重程度等级展示名（2026-10-25「测试报告等级划分」批次）：
+ * canonical 高/中/低 → 当前语言文案；空值（字段缺失/无法识别）→「未分级」；
+ * 未知自定义值原样返回（与状态映射同口径：精确匹配、不猜译、不崩）。
+ * 数据侧 canonical 常量来自 `utils/bugStatus.js`（`\uXXXX` 转义书写，运行时逐字一致）。
+ * @param {(key: string) => string} t 翻译函数（调用方按当前语言注入）
+ * @param {string} raw 后端下发的 `severity`（canonical 中文或空串）
+ * @returns {string} 展示文案
+ */
+export function severityLabel(t, raw) {
+  if (typeof t !== 'function') return raw
+  if (!raw) return t('未分级')
+  const map = {
+    [SEV_HIGH]: t('高'),
+    [SEV_MEDIUM]: t('中'),
+    [SEV_LOW]: t('低'),
   }
   return Object.prototype.hasOwnProperty.call(map, raw) ? map[raw] : raw
 }

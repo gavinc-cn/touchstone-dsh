@@ -173,7 +173,7 @@ test('scanBugs：`_FS_` 过滤、目录名倒序、标题取 `_FS_` 后段、关
   const { bugs } = makeScanFixture();
   fs.mkdirSync(path.join(bugs, '20260829_0635_FS_cli_config_load'), { recursive: true });
   write(path.join(bugs, '20260829_0635_FS_cli_config_load', 'bug_report.md'),
-    '- **状态**: 已修复\n\n关联 FS0002、FS0001、FS0002、FS0003\n');
+    '- **状态**: 已修复\n- **严重程度**: High\n\n关联 FS0002、FS0001、FS0002、FS0003\n');
   fs.mkdirSync(path.join(bugs, '20260901_1010_FS_other'), { recursive: true });
   write(path.join(bugs, '20260901_1010_FS_other', 'bug_report.md'), '- **状态**: 待修复\n');
   fs.mkdirSync(path.join(bugs, '20260901_1011_no_fs_marker'), { recursive: true });   // 无 _FS_ ⇒ 跳过
@@ -184,11 +184,35 @@ test('scanBugs：`_FS_` 过滤、目录名倒序、标题取 `_FS_` 后段、关
     ['20260901_1012_FS_missing_report', '20260901_1010_FS_other', '20260829_0635_FS_cli_config_load']);
   assert.equal(list[2].title, 'FS_cli_config_load');      // 只剥掉 `YYYYmmdd_HHMM_` 前缀
   assert.equal(list[2].status, '已修复');
+  assert.equal(list[2].severity, '高');                   // 英文 High 归一到中文 canonical
   assert.deepEqual(list[2].cases, ['FS0001', 'FS0002', 'FS0003']);
   assert.equal(list[0].status, '');                       // 缺报告 ⇒ 空状态
+  assert.equal(list[0].severity, '');                     // 缺等级 ⇒ 空串（界面「未分级」）
   assert.deepEqual(list[0].cases, []);
   // 目录不存在 ⇒ 空列表（不抛）
   assert.deepEqual(cs.scanBugs(path.join(bugs, 'nope')), []);
+});
+
+test('scanBugs：严重程度归一（zh 高/中/低、en 大小写、未知自定义值 → 空串）', () => {
+  const { bugs } = makeScanFixture();
+  const seeds = {
+    '20260901_0001_FS_zh_high': '- **严重程度**: 高\n',
+    '20260901_0002_FS_zh_medium': '- **严重程度**: 中\n',
+    '20260901_0003_FS_en_low': '- **Severity**: low\n',
+    '20260901_0004_FS_custom': '- **严重程度**: 紧急\n',
+    '20260901_0005_FS_none': '无等级字段\n',
+  };
+  for (const [name, text] of Object.entries(seeds)) {
+    write(path.join(bugs, name, 'bug_report.md'), text);
+  }
+  const byDir = Object.fromEntries(cs.scanBugs(bugs).map((b) => [b.dir, b.severity]));
+  assert.deepEqual(byDir, {
+    '20260901_0001_FS_zh_high': '高',
+    '20260901_0002_FS_zh_medium': '中',
+    '20260901_0003_FS_en_low': '低',
+    '20260901_0004_FS_custom': '',
+    '20260901_0005_FS_none': '',
+  });
 });
 
 test('scanBugs：最多 50 条（倒序截断）', () => {
@@ -243,8 +267,45 @@ test('listProjectBugs：已闭环（复测通过/已拒绝）沉底且保持组�
     assert.deepEqual(list[1].last_task,
       { id: 2, task_type: 'retest_bug', name: '复测任务', status: 'done', created_at: '2026-09-05 00:00:00' });
     assert.equal(list[0].last_task, null);
-    // 键序与 Python 一致：dir/title/status/cases 之后才追加 last_task
-    assert.deepEqual(Object.keys(list[0]), ['dir', 'title', 'status', 'cases', 'last_task']);
+    // 键序与 Python 一致：dir/title/status/severity/cases 之后才追加 last_task
+    assert.deepEqual(Object.keys(list[0]), ['dir', 'title', 'status', 'severity', 'cases', 'last_task']);
+  } finally {
+    fx.close();
+  }
+});
+
+test('listProjectBugs：历史沉底 → 高→中→低→未分级，同级保持目录名倒序（与 Python 同序）', () => {
+  const fx = freshDb('casescan-sev');
+  try {
+    const work = path.join(fx.dir, 'work');
+    const pid = insertProject(fx.db, {
+      userId: 1, name: 'p', projectDir: path.join(fx.dir, 'p'), workDir: work,
+    });
+    const bugs = path.join(work, 'bug_report');
+    const seeds = {
+      '20260101_0000_FS_low_old': '- **严重程度**: 低\n',
+      '20260101_0100_FS_high_new': '- **严重程度**: High\n',
+      '20260101_0200_FS_low_new': '- **严重程度**: 低\n',
+      '20260101_0300_FS_none_new': '无等级\n',
+      '20260101_0400_FS_medium_new': '- **状态**: 待分析\n- **严重程度**: 中\n',
+      '20260101_0500_FS_hist_pass': '- **状态**: 复测通过\n- **严重程度**: 高\n',
+      '20260101_0600_FS_hist_reject': '- **状态**: 已拒绝\n- **严重程度**: 中\n',
+    };
+    for (const [name, text] of Object.entries(seeds)) {
+      write(path.join(bugs, name, 'bug_report.md'), text);
+    }
+    const project = db.getProject(pid, { db: fx.db });
+    const list = cs.listProjectBugs(project, { db: fx.db });
+    assert.deepEqual(list.map((b) => b.dir), [
+      '20260101_0100_FS_high_new',
+      '20260101_0400_FS_medium_new',
+      '20260101_0200_FS_low_new',      // 同级（低）内目录名倒序：02:00 在 00:00 前
+      '20260101_0000_FS_low_old',
+      '20260101_0300_FS_none_new',     // 未分级在最后
+      '20260101_0500_FS_hist_pass',    // 历史组：高在前
+      '20260101_0600_FS_hist_reject',
+    ]);
+    assert.deepEqual(list.map((b) => b.severity), ['高', '中', '低', '低', '', '高', '中']);
   } finally {
     fx.close();
   }

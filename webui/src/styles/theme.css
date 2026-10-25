@@ -317,6 +317,45 @@ a:hover { text-decoration: underline; }
 /* 已拒绝: 虚线框+暗色, 与 pending(实线)区分, 视觉上表示"被否决" */
 .bug-status.reject { color: var(--dim); border-color: var(--dim); border-style: dashed; }
 
+/* ---------- bug 报告严重程度（2026-10-25「测试报告等级划分」） ----------
+   等级徽标与状态徽标是**两个独立族**（.bug-sev 不是 .bug-status）：既有 e2e 断言
+   `.bugitem .bug-status` 的第一个是状态徽标，等级必须不掺进那个选择器。
+   配色梯度：高=--fail(红) / 中=--retest(橙) / 低=--run(蓝) / 未分级=灰虚框。 */
+.bug-sev { display: inline-flex; align-items: center; padding: 0 8px; border-radius: 8px; font-size: calc(11px * var(--fs)); border: 1px solid; }
+.bug-sev.high { color: var(--fail); border-color: var(--fail); }
+.bug-sev.medium { color: var(--retest); border-color: var(--retest); }
+.bug-sev.low { color: var(--run); border-color: var(--run); }
+.bug-sev.none { color: var(--muted-foreground); border-color: var(--dim); border-style: dashed; }
+
+/* 等级筛选 chips 行（同时充当计数：全部 12 / 高 3 / 中 5 / 低 2 / 未分级 2） */
+.bug-sev-filter { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 8px 6px; }
+.bug-sev-chip {
+  display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+  padding: 0 8px; height: 20px; border-radius: 8px; line-height: 1;
+  font-size: calc(11px * var(--fs)); color: var(--muted-foreground);
+  border: 1px solid var(--border); background: transparent;
+}
+.bug-sev-chip b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.bug-sev-chip:hover { border-color: var(--run); }
+.bug-sev-chip.on { background: var(--panel2); color: var(--text); border-color: var(--text); }
+.bug-sev-chip.high.on { color: var(--fail); border-color: var(--fail); }
+.bug-sev-chip.medium.on { color: var(--retest); border-color: var(--retest); }
+.bug-sev-chip.low.on { color: var(--run); border-color: var(--run); }
+.bug-sev-chip.none.on { color: var(--muted-foreground); border-color: var(--dim); }
+
+/* 详情头部「严重程度」就地编辑（原生 select，配色跟等级走） */
+.bug-sev-edit { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); font-size: calc(11px * var(--fs)); }
+.bug-sev-select {
+  appearance: none; cursor: pointer; height: 20px; padding: 0 6px;
+  border: 1px solid; border-radius: 8px; background: transparent;
+  font-size: calc(11px * var(--fs)); color: var(--muted-foreground);
+}
+.bug-sev-select.high { color: var(--fail); border-color: var(--fail); }
+.bug-sev-select.medium { color: var(--retest); border-color: var(--retest); }
+.bug-sev-select.low { color: var(--run); border-color: var(--run); }
+.bug-sev-select.none { color: var(--muted-foreground); border-color: var(--dim); border-style: dashed; }
+.bug-sev-select:focus-visible { outline: none; box-shadow: 0 0 0 2px color-mix(in srgb, var(--run) 35%, transparent); }
+
 .op-link { color: var(--run); cursor: pointer; user-select: none; }
 .op-link:hover { text-decoration: underline; }
 .op-link.danger { color: var(--fail); }

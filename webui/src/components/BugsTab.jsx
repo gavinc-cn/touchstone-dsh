@@ -4,7 +4,7 @@ import { bugApi, taskApi } from '../api'
 import { toast } from '../utils/toast'
 import { fmtTime, renderMd, stLabel } from '../utils/renderMd'
 import { absToMedia, projectRoots } from '../utils/mediaText'
-import { bugStatusLabel, caseStatusLabel } from '../utils/dataLabels'
+import { bugStatusLabel, caseStatusLabel, severityLabel } from '../utils/dataLabels'
 import {
   BUG_FIXED, BUG_RETEST_PASS, CASE_FAIL, CASE_PASS, CASE_RETEST,
 } from '../utils/taskEnums'
@@ -22,7 +22,10 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import { RefreshCw, Play, Square, RotateCcw, Wrench, Ban } from 'lucide-react'
-import { bugStatusCls } from '../utils/bugStatus'
+import {
+  SEV_FILTER_ALL, SEV_HIGH, SEV_LOW, SEV_MEDIUM, SEV_NONE,
+  bugStatusCls, filterBugsBySeverity, severityCls, severityCounts,
+} from '../utils/bugStatus'
 
 // 复测通过（已闭环）与已拒绝（被用户否决）的报告调暗沉底，作为历史报告
 const isBugHistory = (s) => /复测通过|已拒绝/.test(s || '')
@@ -62,6 +65,10 @@ export default function BugsTab({ project }) {
   const projectId = project?.id
   const store = useAppStore()
   const bugs = store.bugs
+  // 严重程度筛选（2026-10-25）：'all' = 全部；其余为高/中/低/未分级。
+  // 排序由后端给出（历史沉底 → 高→中→低→未分级 → 时间倒序），前端只做筛选与计数。
+  const [sevFilter, setSevFilter] = useState(SEV_FILTER_ALL)
+  const [sevSaving, setSevSaving] = useState(false)
 
   const bugwrapEl = useRef(null)
   const [curBugDir, setCurBugDir] = useState(null)
@@ -104,6 +111,17 @@ export default function BugsTab({ project }) {
   const mdHtml = useMemo(() => (detail
     ? { __html: renderMd(absToMedia(detail.content, projectId, { roots: mdRoots })) }
     : null), [detail, projectId, mdRoots])
+  // 等级筛选 chips 的计数与当前可见列表（纯前端；后端列表已按 高→中→低→未分级 排好）
+  const sevCounts = useMemo(() => severityCounts(bugs), [bugs])
+  const shownBugs = useMemo(() => filterBugsBySeverity(bugs, sevFilter), [bugs, sevFilter])
+  // 筛选 chips：全部 / 高 / 中 / 低 / 未分级（label 按当前语言求值，count 来自 sevCounts）
+  const sevFilterChips = [
+    { key: SEV_FILTER_ALL, cls: 'all', label: t('全部'), count: sevCounts.all },
+    { key: SEV_HIGH, cls: 'high', label: severityLabel(t, SEV_HIGH), count: sevCounts.high },
+    { key: SEV_MEDIUM, cls: 'medium', label: severityLabel(t, SEV_MEDIUM), count: sevCounts.medium },
+    { key: SEV_LOW, cls: 'low', label: severityLabel(t, SEV_LOW), count: sevCounts.low },
+    { key: SEV_NONE, cls: 'none', label: severityLabel(t, SEV_NONE), count: sevCounts.none },
+  ]
   const fixRunning = fixTask?.status === 'running'
   const fixQueued = fixTask?.status === 'queued'
   const chatRunning = chatTask?.status === 'running'
@@ -151,6 +169,22 @@ export default function BugsTab({ project }) {
       saveBugState()
     } catch (e) {
       toast(e.message)
+    }
+  }
+  // 改严重程度等级：写回 bug_report.md（后端按文件语言写「高」/`High`）→ 重读详情 +
+  // 重取列表（排序会随之变化）。空值/未变化直接忽略（下拉里的「未分级」是只读占位）。
+  async function changeSeverity(level) {
+    if (!curBugDir || !projectId || sevSaving) return
+    if (!level || level === (detail?.severity || '')) return
+    setSevSaving(true)
+    try {
+      await bugApi.setSeverity(projectId, curBugDir, level)
+      toast(t('严重程度已更新：{level}', { level: severityLabel(t, level) }))
+      await Promise.all([reloadDetail(curBugDir), store.loadBugs()])
+    } catch (e) {
+      toast(e.message)
+    } finally {
+      setSevSaving(false)
     }
   }
   function openStab(name) {
@@ -371,9 +405,25 @@ export default function BugsTab({ project }) {
         <div className="bugwrap" ref={bugwrapEl}>
           <div className="bug-left">
             <div className="bug-head">{t('Bug 报告')} <span className="dim">{bugs.length ? t('共 {n}', { n: bugs.length }) : ''}</span></div>
+            {/* 等级筛选 chips：同时承担计数展示（全部 / 高 / 中 / 低 / 未分级） */}
+            {!!bugs.length && (
+              <div className="bug-sev-filter" title={t('按严重程度筛选')}>
+                {sevFilterChips.map((chip) => (
+                  <button key={chip.cls} type="button"
+                    className={'bug-sev-chip ' + chip.cls + (sevFilter === chip.key ? ' on' : '')}
+                    onClick={() => setSevFilter(chip.key)}>
+                    {chip.label}
+                    <b>{chip.count}</b>
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="bug-list scroll">
               {!bugs.length && <div className="hint" style={{ padding: 12 }}>{t('暂无 bug 报告')}</div>}
-              {bugs.map((b) => (
+              {!!bugs.length && !shownBugs.length && (
+                <div className="hint" style={{ padding: 12 }}>{t('该等级暂无报告')}</div>
+              )}
+              {shownBugs.map((b) => (
                 <div key={b.dir}
                   className={'bugitem' + (curBugDir === b.dir ? ' sel' : '')
                     + (isBugHistory(b.status) ? ' history' : '')}
@@ -383,6 +433,8 @@ export default function BugsTab({ project }) {
                   <div className="bt">{b.title}</div>
                   <div className="bmeta">
                     <span className={'bug-status ' + bugStatusCls(b.status)}>{bugStatusLabel(t, b.status) || '—'}</span>
+                    <span className={'bug-sev ' + severityCls(b.severity)}
+                      title={t('严重程度')}>{severityLabel(t, b.severity)}</span>
                     {b.last_task && (
                       <span className={'bug-status ' + lastTaskCls(b.last_task.status)}>
                         {b.last_task.name} · {stLabel(b.last_task.status)}
@@ -401,6 +453,20 @@ export default function BugsTab({ project }) {
                 <div className="head">
                   <h3>{detail.title}</h3>
                   <span className={'bug-status ' + bugStatusCls(detail.status)}>{bugStatusLabel(t, detail.status) || '—'}</span>
+                  {/* 严重程度（2026-10-25）：显示即编辑——改动写回 bug_report.md，回执后刷新列表排序 */}
+                  <label className="bug-sev-edit" title={t('修改严重程度')}>
+                    <span>{t('严重程度')}</span>
+                    <select className={'bug-sev-select ' + severityCls(detail.severity)}
+                      value={detail.severity || SEV_NONE}
+                      disabled={sevSaving}
+                      onChange={(e) => changeSeverity(e.target.value)}>
+                      {/* 未分级是只读占位：报告缺等级/无法识别时展示，后端不接受空值写回 */}
+                      <option value={SEV_NONE} disabled>{severityLabel(t, SEV_NONE)}</option>
+                      <option value={SEV_HIGH}>{severityLabel(t, SEV_HIGH)}</option>
+                      <option value={SEV_MEDIUM}>{severityLabel(t, SEV_MEDIUM)}</option>
+                      <option value={SEV_LOW}>{severityLabel(t, SEV_LOW)}</option>
+                    </select>
+                  </label>
                 </div>
                 <div className="mut">
                   bug_report/{detail.dir}

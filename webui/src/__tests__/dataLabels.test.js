@@ -6,7 +6,7 @@ import { setLang, t } from '../utils/i18n'
 import {
   BUG_ANALYZE, BUG_ANALYZED, BUG_ANALYZED_TO_FIX, BUG_FIX_COMPLETE_PENDING_RETEST,
   BUG_FIXED_RETEST_PASSED, BUG_FIXED_UNVERIFIED, BUG_REJECTED, BUG_RETEST_FAILED,
-  bugStatusLabel, caseStatusLabel, phaseLabel,
+  bugStatusLabel, caseStatusLabel, phaseLabel, severityLabel,
 } from '../utils/dataLabels'
 
 beforeEach(() => {
@@ -122,5 +122,30 @@ describe('phaseLabel：live.json 的阶段标签', () => {
     expect(phaseLabel(t, null)).toBe(null)
     expect(phaseLabel(t, undefined)).toBe(undefined)
     expect(phaseLabel(null, '脚本复测')).toBe('脚本复测')
+  })
+})
+
+describe('severityLabel：bug_report.md 严重程度等级（2026-10-25 批次）', () => {
+  it('英文界面映射三档 + 未分级', () => {
+    expect(severityLabel(t, '高')).toBe('High')
+    expect(severityLabel(t, '中')).toBe('Medium')
+    expect(severityLabel(t, '低')).toBe('Low')
+    expect(severityLabel(t, '')).toBe('Unrated')
+  })
+
+  it('中文界面原样返回（含未分级占位文案）', () => {
+    setLang('zh')
+    expect(severityLabel(t, '高')).toBe('高')
+    expect(severityLabel(t, '中')).toBe('中')
+    expect(severityLabel(t, '低')).toBe('低')
+    expect(severityLabel(t, '')).toBe('未分级')
+  })
+
+  it('未知自定义值回落原文（不猜译）；空/缺值按未分级；无 t 时退回原文', () => {
+    // 后端已把 High/Medium/Low 归一到中文 canonical；这里只保底「未知值不猜译」
+    expect(severityLabel(t, '紧急')).toBe('紧急')
+    expect(severityLabel(t, null)).toBe('Unrated')
+    expect(severityLabel(t, undefined)).toBe('Unrated')
+    expect(severityLabel(null, '高')).toBe('高')
   })
 })

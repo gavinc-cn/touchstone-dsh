@@ -181,6 +181,53 @@ _STATUS_ALIASES = {
     "Fixed": "已修复",
 }
 
+# ---------------------------------------------------------------------------
+# bug 报告「严重程度」等级（2026-10-25 测试报告等级划分批次）
+#
+# 等级是报告模板里的固定枚举（bug_report_template.md: 高 / 中 / 低；英文模板
+# bug_report_template.en.md: High / Medium / Low），也是产品侧「分级展示/筛选/排序」
+# 的唯一分类口径。**中文 canonical 仍是内部值**（与状态字段同口径）：解析时英文写法
+# 归一到中文；写回时按目标文件语言取 zh/en 写法。无法识别的自定义值不猜译 ——
+# `severity_level()` 返回空串（界面显示「未分级」），报告正文原样不动。
+# 与 backend/lib/lib.js 的表逐字镜像；任何一端改表都要同步另一端。
+# ---------------------------------------------------------------------------
+SEVERITY_LEVELS = ("高", "中", "低")
+
+_SEVERITY_ALIASES = {
+    # 中文 canonical → 自身（存量中文文件零变化）
+    "高": "高",
+    "中": "中",
+    "低": "低",
+    # 英文 → 中文 canonical（bug_report_template.en.md 的固定枚举；与 i18n/en.json 一致）
+    "High": "高",
+    "Medium": "中",
+    "Low": "低",
+}
+
+# ASCII 大小写不敏感索引（"High"/"high" 都认；中文键不参与）
+_SEVERITY_ALIASES_LOWER = {k.lower(): v for k, v in _SEVERITY_ALIASES.items() if k.isascii()}
+
+# 中文 canonical 等级 → 写回英文文件时的英文写法（set_md_field 用）
+_SEVERITY_EN = {"高": "High", "中": "Medium", "低": "Low"}
+
+
+def severity_level(value):
+    """严重程度值 → 中文 canonical 等级（高/中/低）；无法识别返回空串。
+
+    精确匹配优先，其次 ASCII 大小写不敏感（`High`/`high`）；不做前缀/模糊匹配 ——
+    未知自定义值不猜译（返回 ""，由调用方按「未分级」处理，文件内容原样不动）。
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    mapped = _SEVERITY_ALIASES.get(text)
+    if mapped is not None:
+        return mapped
+    return _SEVERITY_ALIASES_LOWER.get(text.lower(), "")
+
+
 # ASCII 大小写不敏感索引（"Pass"/"pass" 都认；中文键不参与，避免改变中文匹配语义）
 _STATUS_ALIASES_LOWER = {k.lower(): v for k, v in _STATUS_ALIASES.items() if k.isascii()}
 
@@ -313,14 +360,23 @@ def _status_value_in_lang(value, lang):
     return value
 
 
+def _severity_value_in_lang(value, lang):
+    """严重程度值按目标语言写回：先归一到中文 canonical，再取 zh/en 写法；未知值原样。"""
+    canonical = severity_level(value)
+    if canonical in _SEVERITY_EN:
+        return _SEVERITY_EN[canonical] if lang == "en" else canonical
+    return value
+
+
 def set_md_field(path, field, value):
     """改写 md 中 `**field**: 值`（含 '- **field**' 前缀形式）一行。
 
     字段名先经 `_FIELD_ALIASES` 归一到内部中文 canonical；写回语言跟随**目标字段已有
-    写法**（英文行 → 英文键 + 英文状态值；中文行 → 中文键 + 中文值）。目标字段缺失或
-    中英两种写法并存时跟随文件主语言（`_field_lang`，平局按 zh）。只有 `状态` 字段的值
-    做语言换算（其他字段值原样写入：时间/环境标签/摘要等）。行不存在时按目标语言在
-    文末追加。保留原行前缀/格式/编码/换行。返回是否写入成功（文件不存在/读空返回 False）。
+    写法**（英文行 → 英文键 + 英文值；中文行 → 中文键 + 中文值）。目标字段缺失或
+    中英两种写法并存时跟随文件主语言（`_field_lang`，平局按 zh）。只有 `状态` 与
+    `严重程度` 两个字段的值做语言换算（其他字段值原样写入：时间/环境标签/摘要等）。
+    行不存在时按目标语言在文末追加。保留原行前缀/格式/编码/换行。返回是否写入成功
+    （文件不存在/读空返回 False）。
     """
     text = read_text(path)
     if not text:
@@ -330,6 +386,8 @@ def set_md_field(path, field, value):
     write_value = value
     if canonical == "状态" and isinstance(value, str):
         write_value = _status_value_in_lang(value, lang)
+    elif canonical == "严重程度" and isinstance(value, str):
+        write_value = _severity_value_in_lang(value, lang)
     # 只匹配目标字段的行；保留原行前缀（'- ' 或 ''）
     pattern = re.compile(r"^(\s*(?:-\s*)?\*\*" + re.escape(write_field) + r"\*\*\s*[:：]\s*).*$",
                          re.M)

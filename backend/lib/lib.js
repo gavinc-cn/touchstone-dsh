@@ -486,6 +486,64 @@ const STATUS_EN = {
   已修复: 'Fixed',
 };
 
+// ---------------------------------------------------------------------------
+// bug 报告「严重程度」等级（2026-10-25 测试报告等级划分批次）
+//
+// 等级是报告模板里的固定枚举（bug_report_template.md: 高 / 中 / 低；英文模板
+// bug_report_template.en.md: High / Medium / Low），也是产品侧「分级展示/筛选/排序」
+// 的唯一分类口径。**中文 canonical 仍是内部值**（与状态字段同口径）：解析时英文写法
+// 归一到中文；写回时按目标文件语言取 zh/en 写法。无法识别的自定义值不猜译 ——
+// `severityLevel()` 返回空串（界面显示「未分级」），报告正文原样不动。
+// 与 backend_py/lib.py 的表逐字镜像；任何一端改表都要同步另一端。
+// ---------------------------------------------------------------------------
+export const SEVERITY_LEVELS = ['高', '中', '低'];
+
+const SEVERITY_ALIASES = {
+  // 中文 canonical → 自身（存量中文文件零变化）
+  高: '高',
+  中: '中',
+  低: '低',
+  // 英文 → 中文 canonical（bug_report_template.en.md 的固定枚举；与 i18n/en.json 一致）
+  High: '高',
+  Medium: '中',
+  Low: '低',
+};
+
+/** ASCII 大小写不敏感索引（`High`/`high` 都认；中文键不参与） */
+const SEVERITY_ALIASES_LOWER = Object.create(null);
+for (const [key, value] of Object.entries(SEVERITY_ALIASES)) {
+  if (/^[\x00-\x7f]*$/.test(key)) SEVERITY_ALIASES_LOWER[key.toLowerCase()] = value;
+}
+
+/** 中文 canonical 等级 → 写回英文文件时的英文写法（set_md_field 用） */
+const SEVERITY_EN = { 高: 'High', 中: 'Medium', 低: 'Low' };
+
+/**
+ * `lib.severity_level`：严重程度值 → 中文 canonical 等级（高/中/低）；无法识别返回空串。
+ *
+ * 精确匹配优先，其次 ASCII 大小写不敏感（`High`/`high`）；不做前缀/模糊匹配 ——
+ * 未知自定义值不猜译（返回 ''，由调用方按「未分级」处理，文件内容原样不动）。
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function severityLevel(value) {
+  if (typeof value !== 'string') return '';
+  const text = pyStrip(value);
+  if (!text) return '';
+  if (Object.hasOwn(SEVERITY_ALIASES, text)) return SEVERITY_ALIASES[text];
+  const lowered = text.toLowerCase();
+  return Object.hasOwn(SEVERITY_ALIASES_LOWER, lowered) ? SEVERITY_ALIASES_LOWER[lowered] : '';
+}
+
+/** 严重程度值按目标语言写回：先归一到中文 canonical，再取 zh/en 写法；未知值原样。 */
+function severityValueInLang(value, lang) {
+  const canonical = severityLevel(value);
+  if (Object.hasOwn(SEVERITY_EN, canonical)) {
+    return lang === 'en' ? SEVERITY_EN[canonical] : canonical;
+  }
+  return value;
+}
+
 /** 字段名 → 内部中文 canonical 键；未登记字段名原样返回（不丢字段） */
 function canonicalField(name) {
   return Object.hasOwn(FIELD_ALIASES, name) ? FIELD_ALIASES[name] : name;
@@ -1053,24 +1111,27 @@ function statusValueInLang(value, lang) {
  * `lib.set_md_field`：改写 md 里所有 `- **字段**: 值` 同名字段行；行不存在时在文末追加。
  *
  * 字段名先经 `FIELD_ALIASES` 归一到内部中文 canonical；写回语言跟随**目标字段已有写法**
- * （英文行 → 英文键 + 英文状态值；中文行 → 中文键 + 中文值）。目标字段缺失或中英两种
- * 写法并存时跟随文件主语言（`fieldLang`，平局按 zh）。只有 `状态` 字段的值做语言换算
- * （其他字段值原样写入：时间/环境标签/摘要等）。行不存在时按目标语言在文末追加。
- * 保留原行前缀/格式/编码/换行。返回是否写入成功（文件不存在/读空返回 false）。
+ * （英文行 → 英文键 + 英文值；中文行 → 中文键 + 中文值）。目标字段缺失或中英两种
+ * 写法并存时跟随文件主语言（`fieldLang`，平局按 zh）。只有 `状态` 与 `严重程度` 两个
+ * 字段的值做语言换算（其他字段值原样写入：时间/环境标签/摘要等）。行不存在时按目标语言
+ * 在文末追加。保留原行前缀/格式/编码/换行。返回是否写入成功（文件不存在/读空返回 false）。
  *
  * 多行同名字段全替换（`g` + 回调）与 Python `pattern.sub` 一致（KB-20）。
  * 与 Python 的唯一形态差异（**实际不可达**，备案）：Python 的 `pattern.sub(new_line, text)`
  * 会把替换串里的 `\1` 当组引用解释；这里用回调（`prefix + value`），值里的反斜杠是字面量。
- * 本口的值只有状态/时间/环境标签/摘要，且状态值不含反斜杠，故无分叉。
+ * 本口的值只有状态/严重程度/时间/环境标签/摘要，且状态值与等级值均不含反斜杠，故无分叉。
  */
 export function setMdField(filePath, field, value) {
   const text = readText(filePath);
   if (!text) return false;
   const canonical = Object.hasOwn(FIELD_ALIASES, field) ? FIELD_ALIASES[field] : field;
   const [lang, writeField] = targetFieldLang(text, canonical);
-  const writeValue = canonical === '状态' && typeof value === 'string'
-    ? statusValueInLang(value, lang)
-    : value;
+  let writeValue = value;
+  if (canonical === '状态' && typeof value === 'string') {
+    writeValue = statusValueInLang(value, lang);
+  } else if (canonical === '严重程度' && typeof value === 'string') {
+    writeValue = severityValueInLang(value, lang);
+  }
   const pattern = new RegExp(
     `^(\\s*(?:-\\s*)?\\*\\*${escapeRegExp(writeField)}\\*\\*\\s*[:：]\\s*).*$`, 'gm',
   );

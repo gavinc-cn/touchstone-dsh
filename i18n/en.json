@@ -1257,7 +1257,16 @@
     "监控面板": "Monitor",
     "压测面板": "Load test",
     " 上， 主分支 ": "; the main branch ",
-    "最近任务「{name}」:{status}": "Latest task \"{name}\": {status}"
+    "最近任务「{name}」:{status}": "Latest task \"{name}\": {status}",
+    "高": "High",
+    "中": "Medium",
+    "低": "Low",
+    "未分级": "Unrated",
+    "严重程度": "Severity",
+    "按严重程度筛选": "Filter by severity",
+    "修改严重程度": "Change severity",
+    "严重程度已更新：{level}": "Severity updated: {level}",
+    "该等级暂无报告": "No reports at this level"
   },
   "api": {
     "{driver_detail}": "Driver returned HTTP {status}: {driver_detail}",
@@ -1837,7 +1846,9 @@
     "工作树有未提交改动，请先提交或清理后再移除": "The worktree has uncommitted changes; commit or clean them up before removing it",
     "git worktree remove 失败：{detail}": "git worktree remove failed: {detail}",
     "该卡片已在独立 worktree 中运行": "This card is already running in a standalone worktree",
-    "该卡片已有主会话，不能切换到独立 worktree（请新建卡片）": "This card already has a main session and cannot switch to a standalone worktree (create a new card)"
+    "该卡片已有主会话，不能切换到独立 worktree（请新建卡片）": "This card already has a main session and cannot switch to a standalone worktree (create a new card)",
+    "严重程度不合法（仅支持 高/中/低）": "Invalid severity (only High / Medium / Low allowed)",
+    "严重程度写入失败": "Failed to write severity"
   },
   "prompt": {
     "用中文撰写所有产出（用例、报告、日志）。": "Write all deliverables (cases, reports, logs) in English."
