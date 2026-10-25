@@ -25,7 +25,7 @@ import { zstdCompressSync } from 'node:zlib';
 import * as board from '../lib/board.js';
 import * as db from '../lib/db.js';
 import * as sp from '../lib/sessparse.js';
-import { freshDb, insertCard, insertProject } from './m3fixture.mjs';
+import { freshDb, insertCard, insertProject, insertTask } from './m3fixture.mjs';
 
 const SID = 'session-aaaa1111-2222-3333-4444-555555555555';
 const SID2 = 'session-bbbb1111-2222-3333-4444-555555555555';
@@ -307,5 +307,58 @@ test('平台启动的卡：非主会话（fork 子会话）不驱动卡面', asy
   });
   await s.tick();
   assert.equal(s.card().session_id, SID);
+  s.close();
+});
+
+// ------------------------------------------------ 存量误建卡收口（sweep 级回归钉子）
+// 与 Python `tests/test_board_sync_title.py` 的同名用例同判据。背景（2026-10-09 真机
+// 实障）：首版「存量误建卡收口」把「会话枚举解析结果 / tasks·飞书登记」当成稳定输入，
+// 真机头两次运行误删 24 张有真实标题的卡（含 **918**）；二版补前置硬闸
+// `isPlaceholderCard`（只收口卡面标题为空 / == sid 短码的卡），真实标题永不自动收口。
+// 本组用例从 `syncSessions` 入口跑整条链路（真 DB 行 + 真会话存储），钉住这道硬闸。
+
+test('存量误建卡收口：A 类输入被污染（会话读成空壳）时，真实标题卡不得被软删', async () => {
+  // 事故当天形态：会话枚举把会话读成「没跑过一轮」（`has_content=false`）⇒ A 类判据
+  // 「成立」；但卡面标题是用户写下的真实内容 ⇒ 前置硬闸必须拦住（宁漏不误删）。
+  const s = setup('sweep-poison-a', {
+    title: '现在TS作为DSH的插件, UI风格应与DSH一致.',
+    columnKey: 'review', sessionId: SID, sessions: JSON.stringify([SID]), origin: 'sync',
+  }, { hasContent: false });
+  const placeholder = insertCard(s.fx.db, s.pid, {
+    title: SID2.slice(0, 12), columnKey: 'review', sessionId: SID2,
+    sessions: JSON.stringify([SID2]), origin: 'sync',
+  });
+  writeSession(s.sessionsRoot, s.projectDir, SID2, { hasContent: false });
+  board.resetSyncSweptSets();                 // 用例隔离：失败的前序用例可能没走到 close()
+  await s.tick();
+  assert.equal(s.card().trashed, 0, '真实标题 ⇒ 永不自动收口');
+  assert.equal(s.fx.db.prepare('SELECT trashed FROM board_cards WHERE id=?')
+    .get(placeholder).trashed, 1, '占位卡（标题=sid 短码）照常收口');
+  s.close();
+});
+
+test('存量误建卡收口：B 类（sid 命中 tasks 登记）真实标题卡同样不得被软删', async () => {
+  const s = setup('sweep-poison-b', {
+    title: '压测任务（第 1 步/共 2 步）：', description: '',
+    columnKey: 'review', sessionId: SID, sessions: JSON.stringify([SID]), origin: 'sync',
+  }, { titles: ['任务首问'], firstPrompt: '压测任务（第 1 步/共 2 步）：\n细节', hasContent: true });
+  insertTask(s.fx.db, s.pid, { sessionId: SID });   // sid 进平台自持集（B 类判据成立）
+  board.resetSyncSweptSets();
+  await s.tick();
+  assert.equal(s.card().trashed, 0, 'tasks 登记 + 真实标题 ⇒ 不得自动收口');
+  s.close();
+});
+
+test('存量误建卡收口：每项目一轮——用户还原后同一进程内不再被软删', async () => {
+  const s = setup('sweep-once', {
+    title: SID.slice(0, 12), columnKey: 'review', sessionId: SID,
+    sessions: JSON.stringify([SID]), origin: 'sync',
+  }, { hasContent: false });
+  board.resetSyncSweptSets();
+  await s.tick();
+  assert.equal(s.card().trashed, 1, '占位卡首轮被收口');
+  db.restoreBoardCard(s.cid, s.opts);               // 用户从回收站还原
+  await s.tick();
+  assert.equal(s.card().trashed, 0, '同一进程内不再软删（尊重用户显式还原）');
   s.close();
 });
