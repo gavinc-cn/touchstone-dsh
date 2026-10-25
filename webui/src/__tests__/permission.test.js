@@ -12,9 +12,11 @@ import {
   canonicalPermission,
   permissionDefaultLabel,
   permissionDesc,
+  permissionDetailLabel,
   permissionItems,
   permissionLabel,
   permissionOption,
+  sessionControls,
 } from '../utils/permission'
 
 import { setLang } from '../utils/i18n'
@@ -225,5 +227,59 @@ describe('permissionItems', () => {
       label: '自动审查（实验）',
       description: '',
     })
+  })
+})
+
+describe('permissionDetailLabel（任务详情「权限」行）', () => {
+  it('空值＝跟随项目默认（任务级未显式指定）', () => {
+    expect(permissionDetailLabel([], '')).toBe('跟随项目默认')
+    expect(permissionDetailLabel([], null)).toBe('跟随项目默认')
+    expect(permissionDetailLabel(CATALOG_OPTIONS, '   ')).toBe('跟随项目默认')
+  })
+
+  it('非空值走展示层映射：目录 label → 内置中文名 → 原值', () => {
+    expect(permissionDetailLabel(CATALOG_OPTIONS, 'path-rules')).toBe('路径规则')
+    expect(permissionDetailLabel([], 'danger-full-access')).toBe('完全权限')
+    // 旧值 manual 按 canonical 显示为工作区内修改（任务行残留旧档时也不露机器值）
+    expect(permissionDetailLabel([], 'manual')).toBe('工作区内修改')
+    // 宿主自定义档且目录不可用时原样回退
+    expect(permissionDetailLabel([], 'my-preset')).toBe('my-preset')
+  })
+})
+
+describe('sessionControls（会话底栏权限/模型控件门控）', () => {
+  const CAPS = { profile: true, permission: true }
+  const OPTS = [{ value: 'read-only', label: '仅可查看', description: '' }]
+
+  it('看板卡片会话：能力位为真且目录非空才可交互', () => {
+    expect(sessionControls({ board: true, caps: CAPS, permOpts: OPTS }))
+      .toEqual({ modelInteractive: true, permInteractive: true })
+    expect(sessionControls({ board: true, caps: { profile: false, permission: false }, permOpts: OPTS }))
+      .toEqual({ modelInteractive: false, permInteractive: false })
+    // 目录不可用（空数组）⇒ 权限档降级为只读 chip，模型不受影响
+    expect(sessionControls({ board: true, caps: CAPS, permOpts: [] }))
+      .toEqual({ modelInteractive: true, permInteractive: false })
+    expect(sessionControls({ board: true, caps: CAPS }))
+      .toEqual({ modelInteractive: true, permInteractive: false })
+  })
+
+  it('任务会话窗口（2026-10-24 对齐）：与看板卡同口径可交互', () => {
+    expect(sessionControls({ taskActive: true, caps: CAPS, permOpts: OPTS }))
+      .toEqual({ modelInteractive: true, permInteractive: true })
+  })
+
+  it('未打开会话（既非 board 也非任务窗口）⇒ 一律不可交互', () => {
+    expect(sessionControls({ caps: CAPS, permOpts: OPTS }))
+      .toEqual({ modelInteractive: false, permInteractive: false })
+    expect(sessionControls({ board: false, taskActive: false, caps: CAPS, permOpts: OPTS }))
+      .toEqual({ modelInteractive: false, permInteractive: false })
+  })
+
+  it('caps 缺失（meta 未到）不抛错且不可交互', () => {
+    expect(sessionControls({ board: true, permOpts: OPTS }))
+      .toEqual({ modelInteractive: false, permInteractive: false })
+    expect(sessionControls({ taskActive: true }))
+      .toEqual({ modelInteractive: false, permInteractive: false })
+    expect(sessionControls()).toEqual({ modelInteractive: false, permInteractive: false })
   })
 })

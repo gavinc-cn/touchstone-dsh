@@ -78,6 +78,7 @@ import { taskSessionChat } from './sessions.js';
 // 正确修法是给 withWriteDb 加一个**独立**选项（如 `{db, tx: true}` = 在本句柄上开事务）、
 // 逐个调用点判定语义，属 M5/M6 的重构项，已登记在 M4.5 实施记录 §六。
 // --------------------------------------------------------------------------
+import * as board from '../lib/board.js';
 import { effectiveModel } from '../lib/servercaps.js';
 import { readDialogue, readLogTail, taskJson } from '../lib/taskjson.js';
 
@@ -1370,7 +1371,10 @@ export const routes = [
       const projectId = Number(m[1]);
       if (ctx.ownedProject(projectId) === null) return;      // 已回 404 project not found
       const rows = listTasks(projectId, { db: ctx.db });
-      ctx.json(200, rows.map((row) => taskJson(row, { db: ctx.db, stateCache: ctx.stateCache })));
+      // `interaction_pending` 走注入的 board.interactionProbe（见 lib/taskjson.js 的说明：
+      // 静态 import board 会踩 chat/runner 的 ESM 依赖环 TDZ）
+      ctx.json(200, rows.map((row) => taskJson(row,
+        { db: ctx.db, stateCache: ctx.stateCache, interactionProbe: board.interactionProbe })));
     },
   },
   {
@@ -1379,7 +1383,8 @@ export const routes = [
     handler: (ctx, m) => {
       const row = ctx.ownedTask(Number(m[1]));
       if (row === null) return;                              // 已回 404 task not found
-      ctx.json(200, taskJson(row, { db: ctx.db, stateCache: ctx.stateCache }));
+      ctx.json(200, taskJson(row,
+        { db: ctx.db, stateCache: ctx.stateCache, interactionProbe: board.interactionProbe }));
     },
   },
   {

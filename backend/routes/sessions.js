@@ -46,7 +46,7 @@ import { unquote } from '../lib/query.js';
 import * as sessparse from '../lib/sessparse.js';
 import {
   DSH_EFFORT_LEVELS, dshLiveSid, effectiveModel, familyCapabilities, normalizeEffort,
-  sessFamily, sessionOwned, sessionPermissionMode,
+  permissionCatalogValues, sessFamily, sessionOwned, sessionPermissionMode,
 } from '../lib/servercaps.js';
 import {
   boardOwnsSid, boardSessionRunning, projectBusy, sessionQueueState,
@@ -170,17 +170,49 @@ export async function sessionPayload(ctx, task, project, family, agent, after) {
     // HTTP）——`await` 一处不能漏，否则 Promise 会被静默序列化成 `{}`（M3 文件头边界①的记账）。
     chat: await chat.state(sid, { db: ctx.db }),
   };
-  // 会话级思考等级（会话窗「思考等级」控件）：事件流里学到的宿主 reasoningEffort；
-  // 没有就不下发——前端按「该模型的默认档」渲染，不猜。
+  // 会话级实时态（2026-10-24 任务会话对齐卡片会话；仅在 dsh_plugin 且有 sid 时下发，
+  // 值/口径与看板会话 meta 同源）：
+  //   sessionEffort（2026-10-04）→ interaction（审批/提问，按需探测 TTL 5s）→
+  //   permission（宿主 preset key，缺省不下发）→ sessionModel（缺省不下发）
+  //   → queue（宿主 inbox 行，只展示）→ owned（外部会话三态）。
+  let interaction = null;
   if (sid && family === 'dsh_plugin') {
+    const st = dshevents.get(sid) || {};
     const effort = dshevents.sessionEffort(sid);
     if (effort) base.sessionEffort = effort;
+    // 交互（提问/审批）实况：任务会话没有看板 watcher，按需探测并写 watcher 缓存
+    // （与作答端点 `taskAnswerInteraction` 共用同一份缓存/白名单；形态同看板
+    // `meta.interaction`：pending/kind/qid/approval_id/answerable/questions/options/text…）
+    if (project !== null && project !== undefined) {
+      interaction = board.interactionProbe(family, project, sid);
+    }
+    base.interaction = interaction;
+    // 权限档：宿主 preset 实况（2026-10-21 起 preset 优先；可能 path-rules 等）
+    const pmode = sessionPermissionMode(st);
+    if (pmode) base.permission = pmode;
+    // 会话级模型（会话窗「模型」展示）：事件流里学到的 provider/model
+    const sel = st.model || {};
+    if (sel.model) {
+      base.sessionModel = sel.provider ? `${sel.provider}/${sel.model}` : sel.model;
+    }
+    // 宿主 inbox 排队行（P6 #21）：[{id,text}] 同形，只展示、不给「立即注入」
+    base.queue = (st.inbox || []).map((msg) => ({
+      id: String(msg.id || ''),
+      text: String(msg.text || ''),
+    }));
+    // 会话归属三态（外部会话提示条/停止门控）：true 平台自持 / false 外部 / null 未知
+    base.owned = sessionOwned(sid);
   }
   // 统一队列态（会话窗标题「队列」徽标）：本任务单元此刻排队/运行/空闲。
   // 探到正在写的会话（sid 未入库）时 task_id 仍是准确的队列键，照常下发。
   base.unit_state = unitState(project ? project.id : 0, `t:${task.id}`, { db: ctx.db });
-  // 任务会话无卡：answer_pending/server_queued 不在场，退化为四态
-  base.queue_state = sessionQueueState(project ? project.id : 0, base.unit_state, {}, { db: ctx.db });
+  // 展示派生（P6/R2/R10）：任务会话无卡——answer_pending 不在场；server_queued 由宿主
+  // inbox 行在场判定；interaction_pending = 交互挂起（2026-10-24 任务侧首次出现该枚举）；
+  // 其余按 unit_state/外部条目行退化。
+  base.queue_state = sessionQueueState(project ? project.id : 0, base.unit_state, {
+    serverQueued: Boolean(base.queue && base.queue.length),
+    interactionPending: Boolean((interaction || {}).pending),
+  }, { db: ctx.db });
   if (!sessparse.FAMILIES.includes(sfamily)) {
     return { ...base, found: false, reason: 'family' };
   }
@@ -776,18 +808,23 @@ export function cancelQueueAction(ctx, body, scope = {}) {
 }
 
 // ==========================================================================
-// 任务会话三条（M6-6）：server.py 1209/1213/1217 分派 → 3646 / 3849 / 3919
-//   POST /api/tasks/<id>/session/profile              → `_api_task_session_profile`(3646)
+// 任务会话四条（M6-6；2026-10-24 任务会话对齐卡片会话扩 profile + 新增 compact）
+//   POST /api/tasks/<id>/session/profile              → `_api_task_session_profile`
+//   POST /api/tasks/<id>/session/compact              → `_api_task_session_compact`（新）
 //   POST /api/tasks/<id>/session/rewind               → `_api_session_rewind`(3849)
 //   POST /api/tasks/<id>/session/interaction/answer   → `_api_task_answer_interaction`(3919)
 //
-// 三条与看板同族端点的**关键差异**（逐条照 oracle，别顺手复用看板实现）：
-//   ① `profile` 只开思考等级：`model`/`permission_mode` 非空 ⇒ 400（文案见下）；成功体
-//      是 `json.dumps` ⇒ `ctx.json`（看板那条多回 model/permission_mode 两个键）。
-//   ② `rewind` 走同一条 `_rewind_session_dsh`，但**任务侧多两步**：`db.update_task(session_id=new_sid)`
+// 与看板同族端点的**关键差异**（逐条照 oracle，别顺手复用看板实现）：
+//   ① `profile` 2026-10-24 起与看板同能力：`{model?, permission_mode?, reasoning_effort?}`
+//      即时下发（权限先于模型，与 applySessionDefaults 同序）+ 回写 tasks 行（permission/
+//      model；effort 属会话级不落库）；回执**恒含三键**（与看板 profile 字节同形）。
+//      校验顺序：404 → 参数 400 → 族 400 → 无会话 409 → 驱动 502。
+//   ② `compact`：busy 判据＝任务轮正在跑（`task.status=='running'`，含等作答挂起期间）；
+//      成功体 `{ok:true, started:true}`；族不支持复用看板 compact 的退场族文案。
+//   ③ `rewind` 走同一条 `_rewind_session_dsh`，但**任务侧多两步**：`db.update_task(session_id=new_sid)`
 //      （任务只有一个会话位，否则后续轮次仍打在旧会话上）与响应里的 `rebound: true`
 //      （看板路径恒 false，见 `routes/board.js` 的同名实现）。
-//   ③ `answer` 任务侧**直送**：成功体是硬编码 `b'{"ok":true,"queued":false}'`（紧凑，
+//   ④ `answer` 任务侧**直送**：成功体是硬编码 `b'{"ok":true,"queued":false}'`（紧凑，
 //      且 queued 恒 false），**不是**看板那条按 `board.is_answer_pending` 现读派生的形态。
 // ==========================================================================
 
@@ -795,6 +832,12 @@ export function cancelQueueAction(ctx, body, scope = {}) {
 function pyGet(obj, key, dflt = null) {
   if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return dflt;
   return Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : dflt;
+}
+
+/** Python `key in dict`（body 非 dict 时按 False；与 Python `in` 对 dict 的判据同） */
+function pyHas(obj, key) {
+  return obj !== null && typeof obj === 'object' && !Array.isArray(obj)
+    && Object.prototype.hasOwnProperty.call(obj, key);
 }
 
 /** Python `str(x)` 的**标量面**（容器 repr 是已登记偏差，见 board.js 同名私有助手） */
@@ -805,46 +848,67 @@ function pyStrScalar(value) {
 }
 
 /**
- * `_api_task_session_profile`(3646)：任务会话级配置（只开**思考等级**）。
+ * `_api_task_session_profile`（`server.py`）：任务会话级配置（2026-10-24 起与看板对齐）。
  *
- * `model`/`permission_mode` 显式拒绝的理由照 oracle：任务会话没有交互面，permission_mode
- * 会让任务永久挂起；model 每轮起会话时按任务/项目口径下发，会话级切换下一轮即被覆盖。
- * 校验顺序：404 → model/permission_mode 400 → 族 400 → 档位非法 400 → 无会话 409 → 502。
+ * body `{model?, permission_mode?, reasoning_effort?}`：
+ *   - `permission_mode`：manual/yolo 旧别名先归一 → 必须在宿主权限目录（目录不可用时内置
+ *     兜底集合）里 → `setPermission(sid, preset)` 即时生效 → `updateTask(permission=preset)`
+ *     回写任务默认（下一轮权限链取 tasks.permission）→ 回执 canonical preset；
+ *   - `model`：`setModel` 即时 → `updateTask(model=…)` 回写（下一轮 resume 沿用）→ 回执原值；
+ *   - `reasoning_effort`：与 model 一次下传，空串=不改，**不落库**（会话级）。
+ * 校验顺序（计划 §3.4）：404 → 参数非法 400（effort 非法/三者皆空/权限档非法）→ 族 400 →
+ * 无会话 409 → 驱动 502。回执恒含三键（与看板 profile 字节同形）。
  */
 export async function taskSessionProfile(ctx, taskId) {
   const body = await ctx.readBody();
-  const { task, project, family } = ctx.sessionContext(taskId);
+  const { task, family } = ctx.sessionContext(taskId);
   if (task === null) {
     ctx.error(404, 'task not found');                    // 紧凑
     return;
   }
-  for (const unsupported of ['model', 'permission_mode']) {
-    if (String(pyTruthy(pyGet(body, unsupported)) ? pyGet(body, unsupported) : '')) {
-      ctx.errorSpaced(400, '任务会话不支持 {kind}（仅看板卡会话支持）', { kind: unsupported });
-      return;
-    }
-  }
-  if (family !== 'dsh_plugin') {
-    ctx.errorSpaced(400, '该 agent 族不支持会话级配置');
-    return;
-  }
-  const effort = normalizeEffort(pyGet(body, 'reasoning_effort'));
+  // 与 Python `str(body.get(x) or "").strip()` 同口径（假值折空、标量转文本、两端 strip）
+  const orStrip = (key) => (pyTruthy(pyGet(body, key)) ? pyStrScalar(pyGet(body, key)) : '').trim();
+  const model = orStrip('model');
+  // 权限档：旧三档别名先归一（manual→workspace-write、yolo→danger-full-access；auto 不在此列，
+  // 只有宿主目录里确实有 auto 档才接受，与看板 profile 同口径）
+  const pmodeRaw = orStrip('permission_mode');
+  const pmode = Object.prototype.hasOwnProperty.call(dshdriver.LEGACY_PERMISSION_ALIASES, pmodeRaw)
+    ? dshdriver.LEGACY_PERMISSION_ALIASES[pmodeRaw] : pmodeRaw;
+  const effort = pyHas(body, 'reasoning_effort')
+    ? normalizeEffort(pyGet(body, 'reasoning_effort')) : '';
+  // —— 参数非法（400）——
   if (effort === null) {
     ctx.errorSpaced(400, '思考等级非法（{levels} 或留空）',
       { levels: DSH_EFFORT_LEVELS.join('/') });
     return;
   }
+  if (!model && !pmode && !effort) {
+    ctx.error(400, 'model/permission_mode/reasoning_effort required');   // 紧凑，同看板
+    return;
+  }
+  if (pmode && !permissionCatalogValues().has(pmode)) {
+    ctx.errorSpaced(400, '权限档非法（宿主权限目录里没有该档位）');
+    return;
+  }
+  // —— 族（400）——
+  if (family !== 'dsh_plugin') {
+    ctx.errorSpaced(400, '该 agent 族不支持会话级配置');
+    return;
+  }
+  // —— 无会话（409）——
   const sid = task.session_id || '';
   if (!sid) {
     ctx.error(409, '会话尚未生成（首轮执行后才有）');      // 紧凑
     return;
   }
-  // 模型取任务/项目口径（与 runner 起轮一致）：只改思考等级时插件也能自己回读会话当前模型
-  const model = String(task.model || '').trim()
-    || ((project ? String(project.model || '') : '').trim());
-  const [provider, mid] = dshdriver.splitModel(model);
+  // —— 即时下发给宿主（失败 502；成功后才回写任务行）——
   try {
-    await dshdriver.setModel(sid, mid, provider, effort);
+    if (pmode) await dshdriver.setPermission(sid, pmode);
+    if (model || effort) {
+      // model 传原样（可带 provider/ 前缀，插件负责拆）；只改思考等级时 model 传空串让插件
+      // 从会话当前模型回读（与看板 profile 一致）
+      await dshdriver.setModel(sid, model, '', effort);
+    }
   } catch (e) {
     if (e instanceof DshDriverError) {
       ctx.errorSpaced(502, e);                // 驱动错误可能带 i18nKey（如 HTTP 状态）
@@ -852,7 +916,51 @@ export async function taskSessionProfile(ctx, taskId) {
     }
     throw e;
   }
-  ctx.json(200, { ok: true, reasoning_effort: effort });
+  // 写回任务级默认（下一轮起会话/续轮沿用；effort 属会话级、不落任务行）
+  if (pmode) dbmod.updateTask(task.id, { permission: pmode }, { db: ctx.db });
+  if (model) dbmod.updateTask(task.id, { model }, { db: ctx.db });
+  ctx.json(200, { ok: true, model, permission_mode: pmode, reasoning_effort: effort || '' });
+}
+
+/**
+ * `_api_task_session_compact`（`server.py`）：任务会话 compact（压缩上下文，2026-10-24）。
+ *
+ * 口径同看板 compact：走驱动 `/compact`（插件侧触发即返回；压缩在 dsh 进程内异步进行）。
+ * 顺序：404 task not found → 族不支持 400（复用看板 compact 的退场族文案，与
+ * `agents.RETIRED_MSG` 逐字一致；此处写中文原文以满足 i18n 静态词条扫描）→
+ * 无会话 409 → busy 409（判据=任务轮正在跑 `task.status=='running'`，含等作答挂起期间）→
+ * 驱动异常 400（`compact 失败: <detail>`，复用看板 compact 的 i18n key）。
+ * 成功 `{ok:true, started:true}`（`json.dumps` 带空格形态，ctx.json）。body 不消费。
+ */
+export async function taskSessionCompact(ctx, taskId) {
+  const { task, family } = ctx.sessionContext(taskId);
+  if (task === null) {
+    ctx.error(404, 'task not found');                    // 紧凑
+    return;
+  }
+  if (family !== 'dsh_plugin') {
+    ctx.errorSpaced(400, '该智能体族已下线，请在项目设置里改绑 dsh 插件');
+    return;
+  }
+  const sid = task.session_id || '';
+  if (!sid) {
+    ctx.error(409, '会话尚未生成（首轮执行后才有）');      // 紧凑
+    return;
+  }
+  if (task.status === 'running') {
+    ctx.errorSpaced(409, '会话运行中，稍后再试');
+    return;
+  }
+  try {
+    await dshdriver.compact(sid);
+  } catch (e) {
+    if (e instanceof DshDriverError) {
+      ctx.errorSpaced(400, 'compact 失败: {detail}', { detail: pyStrErr(e) });
+      return;
+    }
+    throw e;
+  }
+  ctx.json(200, { ok: true, started: true });
 }
 
 /**
@@ -976,7 +1084,7 @@ export const routes = [
     handler: (ctx, m) => taskSessionMedia(ctx, Number(m[1]), m[2]),
   },
   // --- 写路径（M4.5/M6-6）：顺序 = Python do_POST 的分派顺序 ---
-  // （chat(1201) → inject(1205) → rewind(1209) → interaction/answer(1213) → profile(1217) → stop(1221)）
+  // （chat → inject → rewind → interaction/answer → profile → compact(2026-10-24) → stop）
   {
     method: 'POST',
     re: /^\/api\/tasks\/(\d+)\/session\/chat$/,
@@ -1001,6 +1109,11 @@ export const routes = [
     method: 'POST',
     re: /^\/api\/tasks\/(\d+)\/session\/profile$/,
     handler: (ctx, m) => taskSessionProfile(ctx, Number(m[1])),
+  },
+  {
+    method: 'POST',
+    re: /^\/api\/tasks\/(\d+)\/session\/compact$/,
+    handler: (ctx, m) => taskSessionCompact(ctx, Number(m[1])),
   },
   {
     method: 'POST',

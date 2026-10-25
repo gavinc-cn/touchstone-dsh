@@ -1,6 +1,7 @@
-"""wait_items 七枚举状态机单测（v2a T1，裁决 R3）：
+"""wait_items 状态机单测（v2a T1 七枚举 + 2026-10-24 任务让行 suspended，共八枚举）：
 waiting→starting→running→finishing→done/failed/cancelled；claimed 被 starting
-吸收（存量行经 db.migrate 归一）；recover 按 §4.T1 映射表收口新状态。"""
+吸收（存量行经 db.migrate 归一）；recover 按 §4.T1 映射表收口新状态。
+suspended（仅 task，等用户作答让行）：starting↔suspended，活跃但不在调度前缀。"""
 import sqlite3
 import threading
 import time
@@ -146,7 +147,8 @@ def test_enter_running_superset_of_mark_running():
     with db.connect() as conn:                  # 活跃唯一索引未被撞破：同键活跃行恒唯一
         n = conn.execute(
             "SELECT COUNT(*) n FROM wait_items WHERE kind='card' AND target_id='2108'"
-            " AND state IN ('waiting','starting','running','finishing')").fetchone()["n"]
+            " AND state IN ('waiting','starting','running','finishing','suspended')"\
+            ).fetchone()["n"]
     assert n == 1
 
 
@@ -168,6 +170,7 @@ def test_legacy_claimed_migrates_to_starting():
         sql = conn.execute("SELECT sql FROM sqlite_master"
                            " WHERE name='idx_wait_active'").fetchone()["sql"]
     assert "'starting'" in sql and "'claimed'" not in sql   # 索引口径已重建
+    assert "'suspended'" in sql                             # 2026-10-24 五活跃态口径
     # 重建后索引覆盖新活跃态：starting 行在场拒第二活跃行（waiting 亦撞）
     with db.connect() as conn:
         with pytest.raises(sqlite3.IntegrityError):
@@ -183,9 +186,9 @@ def test_legacy_claimed_migrates_to_starting():
 
 
 def test_active_unique_index_spans_new_states():
-    """活跃唯一索引覆盖四活跃态：同 (kind,target) 在 starting/running/finishing
-    下均拒第二活跃行；enqueue 撞活跃行幂等复用既有 id；终态后可再插。"""
-    for st in ("starting", "running", "finishing"):
+    """活跃唯一索引覆盖五活跃态：同 (kind,target) 在 starting/running/finishing/
+    suspended 下均拒第二活跃行；enqueue 撞活跃行幂等复用既有 id；终态后可再插。"""
+    for st in ("starting", "running", "finishing", "suspended"):
         tgt = f"idx-{st}"
         wid = waitq.enqueue(waitq.KIND_CARD, tgt, 1)
         _set_wait_state(waitq.KIND_CARD, tgt, st)
@@ -202,8 +205,9 @@ def test_active_unique_index_spans_new_states():
 def test_recover_matrix_new_states(monkeypatch):
     """recover 新映射矩阵（v2a §4.T1）：
 
-    waiting 全类存活（对照）；starting/running/finishing 按类收口——
-    t: 任务仍 queued→放回 waiting，否则 cancel（任务行 running 照旧 interrupted）；
+    waiting 全类存活（对照）；starting/running/finishing/suspended 按类收口——
+    t: 任务仍 queued→放回 waiting，否则 cancel（任务行 running 照旧 interrupted；
+    suspended 行同非 waiting 收口——让行中的任务重启后按「运行中被打断」处置，不重投）；
     m: 等待项 failed + 消息行 error=服务重启中断（不重投）；a: 放回 waiting 重投；
     c: 交 board.recover 按实况——占位卡起跑窗口滞留 cancelled 并对账补建重新入队、
     无实况 running/finishing→failed+卡落 review、实况 busy→mark_running+重建占用。
@@ -227,6 +231,11 @@ def test_recover_matrix_new_states(monkeypatch):
     db.update_task(tid_fin, status="running")
     waitq.enqueue(waitq.KIND_TASK, tid_fin, pid)
     _set_wait_state(waitq.KIND_TASK, tid_fin, "finishing")
+    tid_sus = _mk_task(pid)                              # running 任务 + 行 suspended
+    db.update_task(tid_sus, status="running")            # （等作答让行，重启即打断）
+    waitq.enqueue(waitq.KIND_TASK, tid_sus, pid)
+    waitq.claim_by_target(waitq.KIND_TASK, tid_sus, "worker")
+    assert waitq.suspend(waitq.KIND_TASK, tid_sus) is True
     # —— m: starting / running ——
     waitq.msg_enqueue("ms", pid, "s-1", "起跑窗口中断")   # 消息 queued + 行 starting
     waitq.claim_by_target(waitq.KIND_MSG, "ms", "worker")
@@ -296,9 +305,11 @@ def test_recover_matrix_new_states(monkeypatch):
     assert _wait_row(waitq.KIND_TASK, tid_r)["state"] == "cancelled"
     assert _wait_row(waitq.KIND_TASK, tid_run)["state"] == "cancelled"  # running 同型
     assert _wait_row(waitq.KIND_TASK, tid_fin)["state"] == "cancelled"  # finishing 同 running
+    assert _wait_row(waitq.KIND_TASK, tid_sus)["state"] == "cancelled"  # suspended 同非 waiting 收口
     assert db.get_task(tid_r)["status"] == "interrupted"               # 现状口径打断
     assert db.get_task(tid_run)["status"] == "interrupted"
     assert db.get_task(tid_fin)["status"] == "interrupted"
+    assert db.get_task(tid_sus)["status"] == "interrupted"
     assert db.get_task(tid_q)["status"] == "queued"
     # —— m: error 不重投 ——
     assert _wait_row(waitq.KIND_MSG, "ms")["state"] == "failed"
@@ -335,3 +346,95 @@ def test_recover_matrix_new_states(monkeypatch):
     assert _wait_row(waitq.KIND_TASK, tid_w)["state"] == "waiting"
     assert _wait_row(waitq.KIND_MSG, "mw")["state"] == "waiting"
     assert _wait_row(waitq.KIND_ANSWER, cid_w)["state"] == "waiting"
+
+
+# ---------- suspended（2026-10-24：任务等作答让行） ----------
+
+def test_suspend_resume_state_machine():
+    """`suspend` 只接 starting→suspended、`resume` 只接 suspended→starting（rowcount
+    守卫）；只改 state，认领证据/心跳/seq/meta 全不动；非法源态一律 False 且行不动。"""
+    i = waitq.enqueue(waitq.KIND_TASK, 2201, 1)
+    assert waitq.suspend(waitq.KIND_TASK, 2201) is False      # waiting→suspended 非法
+    assert waitq.claim(i, "worker") is True
+    row_before = waitq.get_item(i)
+    assert row_before["state"] == "starting"
+    assert waitq.suspend(waitq.KIND_TASK, 2201) is True       # starting→suspended
+    row = waitq.get_item(i)
+    assert row["state"] == "suspended"
+    assert row["claimed_at"] == row_before["claimed_at"]      # 只改 state
+    assert row["claimed_by"] == row_before["claimed_by"]
+    assert row["last_seen"] == row_before["last_seen"]
+    assert row["seq"] == row_before["seq"]
+    assert waitq.suspend(waitq.KIND_TASK, 2201) is False      # 已是 suspended，不能叠
+    assert waitq.resume(waitq.KIND_TASK, 2201) is True        # suspended→starting
+    row = waitq.get_item(i)
+    assert row["state"] == "starting"
+    assert row["claimed_by"] == row_before["claimed_by"]      # resume 也不动其它列
+    assert waitq.resume(waitq.KIND_TASK, 2201) is False       # 已 starting，幂等
+    assert waitq.mark_running(waitq.KIND_TASK, 2201) is True  # 恢复后照常进入 running
+    assert waitq.suspend(waitq.KIND_TASK, 2201) is False      # 只允许从 starting 让行
+    # 无行/未知 target 安全 False
+    assert waitq.suspend(waitq.KIND_TASK, 999999) is False
+    assert waitq.resume(waitq.KIND_TASK, 999999) is False
+
+
+def test_suspended_is_active_but_not_prefix():
+    """suspended 属活跃态（唯一索引/收口门禁覆盖）但不在调度前缀：
+    finish_by_target/cancel 可收口；活跃行唯一；PREFIX_STATES 不含它。"""
+    assert "suspended" in waitq.ACTIVE_STATES
+    assert "suspended" not in waitq.PREFIX_STATES
+    i = waitq.enqueue(waitq.KIND_TASK, 2202, 1)
+    waitq.claim(i, "worker")
+    waitq.suspend(waitq.KIND_TASK, 2202)
+    # 活跃唯一索引覆盖 suspended：同键第二活跃行被拒
+    with db.connect() as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO wait_items (project_id, kind, target_id, state,"
+                         " seq, created_at) VALUES (1,'task','2202','waiting',9,"
+                         " '2026-10-24 00:00:00')")
+    # 收口门禁：finish_by_target 能从 suspended 落终态（worker finally 的正常路径）
+    assert waitq.finish_by_target(waitq.KIND_TASK, 2202, waitq.STATE_DONE) is True
+    assert _wait_row(waitq.KIND_TASK, 2202)["state"] == "done"
+    # cancel 同样覆盖 suspended
+    i2 = waitq.enqueue(waitq.KIND_TASK, 2203, 1)
+    waitq.claim(i2, "worker")
+    waitq.suspend(waitq.KIND_TASK, 2203)
+    assert waitq.cancel(waitq.KIND_TASK, 2203, "用户停止") is True
+    assert _wait_row(waitq.KIND_TASK, 2203)["state"] == "cancelled"
+
+
+def test_close_dead_unit_suspended_goes_failed():
+    """`_close_dead_unit`：suspended 属起步后（任务轮已起跑、等作答中）——
+    可证死按 failed 收口（不是 cancel）。"""
+    i = waitq.enqueue(waitq.KIND_TASK, 2204, 1)
+    waitq.claim(i, "worker")
+    waitq.suspend(waitq.KIND_TASK, 2204)
+    row = waitq.get_item(i)
+    assert waitq._close_dead_unit(row, "测试收口") is True
+    assert waitq.get_item(i)["state"] == "failed"
+    assert "测试收口" in (waitq.get_item(i)["meta"] or "")
+
+
+def test_selfcheck_reports_stale_suspended_when_task_gone():
+    """selfcheck 超龄扫描覆盖 suspended：任务行已删（可证死）→ 报「suspended 超龄
+    无证据」；任务仍在 running（等作答的常态）→ 不报。"""
+    pid = _mk_project()
+    tid_dead = _mk_task(pid)
+    waitq.enqueue(waitq.KIND_TASK, tid_dead, pid)
+    waitq.claim_by_target(waitq.KIND_TASK, tid_dead, "worker")
+    waitq.suspend(waitq.KIND_TASK, tid_dead)
+    db.delete_task(tid_dead)
+    with db.connect() as conn:                       # claimed_at 打到超龄
+        conn.execute("UPDATE wait_items SET claimed_at='2020-01-01 00:00:00'"
+                     " WHERE kind='task' AND target_id=?", (str(tid_dead),))
+    tid_alive = _mk_task(pid)
+    db.update_task(tid_alive, status="running")
+    waitq.enqueue(waitq.KIND_TASK, tid_alive, pid)
+    waitq.claim_by_target(waitq.KIND_TASK, tid_alive, "worker")
+    waitq.suspend(waitq.KIND_TASK, tid_alive)
+    with db.connect() as conn:
+        conn.execute("UPDATE wait_items SET claimed_at='2020-01-01 00:00:00'"
+                     " WHERE kind='task' AND target_id=?", (str(tid_alive),))
+    problems = waitq.selfcheck()
+    assert any("suspended 超龄" in p and str(tid_dead) in p for p in problems), problems
+    assert not any(str(tid_alive) in p for p in problems), problems

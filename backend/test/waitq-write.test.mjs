@@ -105,6 +105,7 @@ test('导出面：M4 写口一件不少（缺一个都说明这条写路径没�
   const writeNames = [
     'enqueue', 'insertAfterPrefix', 'reposition',
     'claim', 'claimByTarget', 'markRunning', 'enterRunning', 'markFinishing',
+    'suspend', 'resume',
     'markDone', 'markFailed', 'finishByTarget', 'returnToWaiting',
     'cancel', 'cancelAllActive',
     'touchUnit', 'markEvidence', 'evidencePid',
@@ -398,6 +399,49 @@ test('markRunning/markFinishing：严格状态守卫（非起始态 false，不�
   });
 });
 
+test('suspend/resume：仅 starting↔suspended（rowcount 守卫、不动认领/心跳列、suspended 是活跃行）', () => {
+  withFixture('wq-w-susp', (fx) => {
+    const pid = insertProject(fx.db, { name: 'p' });
+    const id = waitq.enqueue('task', 1, pid, null, 0, W(fx));
+
+    // 非 starting 不能挂起（waiting 是排队态，挂起语义只属于已认领的 t: 行）
+    assert.equal(waitq.suspend('task', 1, W(fx)), false);
+    assert.equal(itemRow(fx, id).state, 'waiting');
+    assert.equal(waitq.resume('task', 1, W(fx)), false, '非 suspended 不能恢复');
+
+    assert.equal(waitq.claim(id, 'worker-1', W(fx)), true);
+    const before = itemRow(fx, id);
+    assert.equal(waitq.suspend('task', 1, W(fx)), true);
+    const row = itemRow(fx, id);
+    assert.equal(row.state, 'suspended');
+    // 让行只是「暂时不占串行位」：认领/心跳/首建时刻一律不动（行生命周期未变）
+    assert.equal(row.claimed_by, before.claimed_by);
+    assert.equal(row.claimed_at, before.claimed_at);
+    assert.equal(row.last_seen, before.last_seen);
+    assert.equal(row.created_at, before.created_at);
+    assert.equal(row.ended_at, null);
+
+    // 重复挂起/start 态恢复都 false（幂等守卫，不炸调用方）
+    assert.equal(waitq.suspend('task', 1, W(fx)), false);
+    assert.equal(waitq.suspend('task', 999, W(fx)), false, '无行 ⇒ false');
+    assert.equal(waitq.resume('task', 1, W(fx)), true);
+    assert.equal(itemRow(fx, id).state, 'starting');
+    assert.equal(waitq.resume('task', 1, W(fx)), false);
+
+    // suspended 仍是活跃行：getActive/activeItems 可见（收口/取消/读口统一口径）
+    assert.equal(waitq.suspend('task', 1, W(fx)), true);
+    assert.equal(waitq.getActive('task', 1, R(fx)).state, 'suspended');
+    assert.deepEqual(waitq.activeItems(pid, R(fx)).map((r) => r.state), ['suspended']);
+    // 让行不占位次：另一条 waiting 行的 pos 不把 suspended 计进前缀（total 仍计入活跃行数）
+    const id2 = waitq.enqueue('task', 2, pid, null, 0, W(fx));
+    assert.deepEqual(waitq.position(id2, R(fx)), [1, 2]);
+    // 可被取消（stop/收口路径），终态后再 resume 无效
+    assert.equal(waitq.cancel('task', 1, '用户停止', null, W(fx)), true);
+    assert.equal(itemRow(fx, id).state, 'cancelled');
+    assert.equal(waitq.resume('task', 1, W(fx)), false);
+  });
+});
+
 test('enterRunning：活跃行升格 / running 幂等 / 终态行同 id 重开并清证据 / 无行新插', () => {
   withFixture('wq-w-ent1', (fx) => {
     const pid = insertProject(fx.db, { name: 'p' });
@@ -471,6 +515,13 @@ test('终态机：markDone/markFailed/finishByTarget 只吃活跃行，error 落
     assert.equal(itemRow(fx, d).state, 'failed');
     assert.equal(itemRow(fx, d).meta, '{"error": "收尾异常"}');
     assert.equal(waitq.finishByTarget('task', 999, 'done', '', W(fx)), false);
+
+    // 2026-10-24：suspended 是活跃行 ⇒ worker finally 的按目标收口照常命中（让行不让终态）
+    const s = waitq.enqueue('task', 5, pid, null, 0, W(fx));
+    assert.equal(waitq.claim(s, 'w', W(fx)), true);
+    assert.equal(waitq.suspend('task', 5, W(fx)), true);
+    assert.equal(waitq.finishByTarget('task', 5, 'done', '', W(fx)), true);
+    assert.equal(itemRow(fx, s).state, 'done');
   });
 });
 
@@ -505,6 +556,13 @@ test('returnToWaiting：三活跃态放回、not_before/bump_retry、终态拒�
     assert.equal(waitq.returnToWaiting(id, 0, false, W(fx)), false);
     assert.equal(itemRow(fx, id).state, 'done');
     assert.equal(waitq.returnToWaiting(null, 0, false, W(fx)), false);
+
+    // 2026-10-24：suspended 由 ACTIVE_STATES 派生进可放回面（`_RETURNABLE_IN` 含它）
+    const t = waitq.enqueue('task', 2, pid, null, 0, W(fx));
+    assert.equal(waitq.claim(t, 'w', W(fx)), true);
+    assert.equal(waitq.suspend('task', 2, W(fx)), true);
+    assert.equal(waitq.returnToWaiting(t, 0, false, W(fx)), true);
+    assert.equal(itemRow(fx, t).state, 'waiting');
   });
 });
 
@@ -665,6 +723,24 @@ test('selfcheck：健康库静默；超龄无证据报告但不改行；新鲜�
     // 新鲜心跳 = 活性佐证 ⇒ 不再报告
     assert.equal(waitq.touchUnit('card', cardId, 'busy=1(poll)', W(fx)), true);
     assert.equal(waitq.selfcheck(null, R(fx)).some((p) => p.includes('超龄无证据')), false);
+
+    // 2026-10-24：suspended 纳入超龄报告面；在跑任务由 task.status=running 判活兜底 ⇒ 不报
+    const tRun = insertTask(fx.db, pid, { name: '挂起在跑', status: 'running' });
+    const tBad = insertTask(fx.db, pid, { name: '挂起已终态', status: 'interrupted' });
+    const runId = waitq.enqueue('task', tRun, pid, null, 0, W(fx));
+    waitq.claim(runId, 'w', W(fx));
+    waitq.suspend('task', tRun, W(fx));
+    fx.db.prepare("UPDATE wait_items SET claimed_at='2000-01-01 00:00:00' WHERE id=?").run(runId);
+    assert.equal(waitq.selfcheck(null, R(fx)).some((p) => p.includes(`target=${tRun} `)), false,
+      '挂起等作答的在跑任务不误报超龄');
+    const badId = waitq.enqueue('task', tBad, pid, null, 0, W(fx));
+    waitq.claim(badId, 'w', W(fx));
+    waitq.suspend('task', tBad, W(fx));
+    fx.db.prepare("UPDATE wait_items SET claimed_at='2000-01-01 00:00:00' WHERE id=?").run(badId);
+    const suspProblems = waitq.selfcheck(null, R(fx));
+    assert.equal(suspProblems.some((p) => p.startsWith('suspended 超龄无证据:')
+      && p.includes(`target=${tBad}`)), true, suspProblems.join('|'));
+    assert.equal(itemRow(fx, badId).state, 'suspended', '纯报告：超龄 suspended 行不因报告被改写');
   });
 });
 
@@ -751,6 +827,15 @@ test('reconcileUnits：内建 DB 证据三态 + 可证死分流（waiting/starti
     const dead = waitq.enqueue('task', tEnd, pid, null, 0, W(fx));
     const queued = waitq.enqueue('task', tQueued, pid, null, 0, W(fx));
     const msgGone = waitq.enqueue('msg', 'm-ghost', pid, null, 0, W(fx));
+    // 2026-10-24：suspended 归「起步后」支 ⇒ 可证死时收口为 failed（不是 cancelled）
+    const tSuspAlive = insertTask(fx.db, pid, { name: '挂起在跑', status: 'running' });
+    const tSuspDead = insertTask(fx.db, pid, { name: '挂起已终态', status: 'interrupted' });
+    const suspAlive = waitq.enqueue('task', tSuspAlive, pid, null, 0, W(fx));
+    assert.equal(waitq.claim(suspAlive, 'w', W(fx)), true);
+    assert.equal(waitq.suspend('task', tSuspAlive, W(fx)), true);
+    const suspDead = waitq.enqueue('task', tSuspDead, pid, null, 0, W(fx));
+    assert.equal(waitq.claim(suspDead, 'w', W(fx)), true);
+    assert.equal(waitq.suspend('task', tSuspDead, W(fx)), true);
 
     const out = waitq.reconcileUnits(null, W(fx));
     const v = new Map(out.map((d) => [d.key, d]));
@@ -764,12 +849,19 @@ test('reconcileUnits：内建 DB 证据三态 + 可证死分流（waiting/starti
     assert.deepEqual([v.get(`t:${tEnd}`).verdict, v.get(`t:${tEnd}`).closed], ['dead', true]);
     assert.deepEqual([v.get(`t:${tQueued}`).verdict, v.get(`t:${tQueued}`).closed],
       ['unknown', false], 'queued=拾取→置 running 的新生窗口，不裁（与行龄无关）');
+    assert.deepEqual([v.get(`t:${tSuspAlive}`).verdict, v.get(`t:${tSuspAlive}`).closed],
+      ['alive', false], '挂起等作答的在跑任务 = 活');
+    assert.deepEqual([v.get(`t:${tSuspDead}`).verdict, v.get(`t:${tSuspDead}`).closed],
+      ['dead', true]);
     assert.deepEqual([v.get('m:m-ghost').verdict, v.get('m:m-ghost').closed], ['dead', true]);
 
     // 分流：起步前 → cancelled（cancel_reason）、起步后 → failed（error）
     assert.equal(itemRow(fx, wRow).state, 'cancelled');
     assert.equal(itemRow(fx, sRow).state, 'cancelled');
     assert.equal(itemRow(fx, rRow).state, 'failed');
+    assert.equal(itemRow(fx, suspDead).state, 'failed', 'suspended 起步后 → failed');
+    assert.equal(itemRow(fx, suspDead).meta, '{"error": "启动对账：可证明失效"}');
+    assert.equal(itemRow(fx, suspAlive).state, 'suspended');
     assert.equal(itemRow(fx, wRow).meta, '{"cancel_reason": "启动对账：可证明失效"}');
     assert.equal(itemRow(fx, rRow).meta, '{"error": "启动对账：可证明失效"}');
     assert.equal(itemRow(fx, alive).state, 'waiting');
@@ -912,6 +1004,29 @@ test('selfcheckUnits：managed 豁免只作用于收口面；min_age 与心跳�
     assert.deepEqual(waitq.selfcheckUnits(null, 30, null, W(fx))
       .filter((p) => p.includes(`t:${tEnd}`)), []);
     assert.equal(itemRow(fx, id3).state, 'waiting', '坏时间戳落豁免侧，不被抢先收口');
+  });
+});
+
+test('selfcheckUnits：suspended 行按起步后同型处置（在跑任务静默、任务已终态收口为 failed）', () => {
+  withFixture('wq-w-scu-susp', (fx) => {
+    const pid = insertProject(fx.db, { name: 'p' });
+    const tRun = insertTask(fx.db, pid, { name: '挂起在跑', status: 'running' });
+    const tEnd = insertTask(fx.db, pid, { name: '挂起已终态', status: 'interrupted' });
+    const alive = waitq.enqueue('task', tRun, pid, null, 0, W(fx));
+    waitq.claim(alive, 'w', W(fx));
+    assert.equal(waitq.suspend('task', tRun, W(fx)), true);
+    // 在跑任务挂起等作答：判活、静默、不改行（与 reconcileUnits 同源）
+    assert.deepEqual(waitq.selfcheckUnits(null, 0, null, W(fx)), []);
+    assert.equal(itemRow(fx, alive).state, 'suspended');
+
+    // 任务已终态（重启后的遗留 suspended 行）= 可证死 ⇒ 收口为 failed（起步后支）
+    const dead = waitq.enqueue('task', tEnd, pid, null, 0, W(fx));
+    waitq.claim(dead, 'w', W(fx));
+    assert.equal(waitq.suspend('task', tEnd, W(fx)), true);
+    const problems = waitq.selfcheckUnits(null, 0, null, W(fx));
+    assert.equal(problems.some((p) => p === `自检收口可证死行: t:${tEnd}`), true, problems.join('|'));
+    assert.equal(itemRow(fx, dead).state, 'failed');
+    assert.equal(itemRow(fx, dead).meta, '{"error": "周期自检：可证明失效"}');
   });
 });
 

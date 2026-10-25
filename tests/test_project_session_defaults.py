@@ -23,8 +23,9 @@ B. 隔离实例（真实 server.py + 假 driver；见 tests/serverfixture.py）
  11. 会话窗「思考等级」：卡片 profile 端点只改等级也能下发（model 留空）；会话 meta
      回读 sessionEffort（driver/model 状态帧 → dshevents）；
  12. 会话窗「权限」：接受宿主目录档、manual canonical、未知档 400 文案、meta 回显 preset；
- 13. 任务会话：起轮按项目默认下发思考等级，**不下发权限档**（任务侧无审批作答面）；
-     任务 session profile 端点只收 reasoning_effort（model/permission_mode 400）。
+ 13. 任务会话（2026-10-24 对齐卡片会话）：起轮按项目默认下发思考等级 + 权限档；
+     任务 session profile 端点开 model/permission_mode（即时下发 + 回写任务行），
+     校验/回执与看板 profile 同口径（详见 tests/test_task_session_align.py）。
 """
 import json
 
@@ -506,9 +507,10 @@ def test_board_session_profile_permission_catalog(isolated_server):
     assert d["error"] == "权限档非法（宿主权限目录里没有该档位）"
 
 
-def test_task_round_applies_effort_not_permission(isolated_server):
-    """任务会话：起轮按项目默认下发思考等级；权限档不下发（无审批作答面）；
-    任务 session profile 端点只收 reasoning_effort。"""
+def test_task_round_applies_effort_and_permission(isolated_server):
+    """任务会话（2026-10-24 对齐卡片会话）：起轮按项目默认下发思考等级 + 权限档
+    （manual → /permission preset workspace-write，不带 mode）；任务 session profile
+    端点开 model/permission_mode（即时下发 + 回写任务行）。"""
     srv = isolated_server
     pid = srv.create_project(srv.admin, "defaults-task", reasoning_effort="medium",
                              permission_mode="manual")
@@ -520,7 +522,8 @@ def test_task_round_applies_effort_not_permission(isolated_server):
     sid = _wait_session(srv, f"task-{tid}", timeout=90)
     models = _calls(srv, "/model", sid)
     assert models and models[-1]["reasoning_effort"] == "medium"
-    assert not _calls(srv, "/permission", sid), "任务会话不应下发权限档"
+    perms = _calls(srv, "/permission", sid)
+    assert perms and perms[-1]["preset"] == "workspace-write" and perms[-1]["mode"] == ""
     # 会话窗改思考等级（任务侧端点）
     code, d = srv.admin.json(f"/api/tasks/{tid}/session/profile", "POST",
                              {"reasoning_effort": "xhigh"})
@@ -529,10 +532,16 @@ def test_task_round_applies_effort_not_permission(isolated_server):
     code, d = srv.admin.json(f"/api/tasks/{tid}/session/profile", "POST",
                              {"reasoning_effort": "ultra"})
     assert code == 400 and "思考等级非法" in d["error"]
-    # 任务会话不支持模型/权限档（显式拒绝，不静默）
+    # 任务会话现在支持模型/权限档（2026-10-24）：即时下发 + 回写任务行
     code, d = srv.admin.json(f"/api/tasks/{tid}/session/profile", "POST",
-                             {"permission_mode": "manual"})
-    assert code == 400 and "permission_mode" in d["error"]
+                             {"permission_mode": "read-only",
+                              "model": "deepseek-official/deepseek-flash"})
+    assert code == 200, d
+    assert d["permission_mode"] == "read-only"
+    assert _calls(srv, "/permission", sid)[-1]["preset"] == "read-only"
+    task_row = srv.admin.json(f"/api/tasks/{tid}")[1]
+    assert task_row["permission"] == "read-only"
+    # 未知权限档 400（宿主目录校验）
     code, d = srv.admin.json(f"/api/tasks/{tid}/session/profile", "POST",
-                             {"model": "deepseek-official/deepseek-flash"})
-    assert code == 400 and "model" in d["error"]
+                             {"permission_mode": "bogus"})
+    assert code == 400 and d["error"] == "权限档非法（宿主权限目录里没有该档位）"

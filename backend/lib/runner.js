@@ -338,7 +338,7 @@ import {
   withReadDb,
   withWriteDb,
 } from './db.js';
-import { sessionEffort } from './dshevents.js';
+import { sessionEffort, sessionPermissionMode } from './dshevents.js';
 import {
   DshDriverError,
   TurnWaiter,
@@ -554,9 +554,10 @@ export function unitBusy(projectId, options = {}) {
  *     t:/m: 拾取即置 starting 跨整轮、c: 起跑证实后跨轮 running、a: 送达期瞬态；
  *     行不在场（未入队/已终态/键失效）按 idle；
  *   - `queued`：等待项表里仍有本单元的 waiting 行（表驱动，R2）；**v2a T4 起位次含
- *     运行前缀**：`pos` = 前缀成员数（项目内 starting/running/finishing 行）+
- *     waiting 行中 seq 更小者 + 1（1 基，即"本项目前面还有几个"），`total` = 项目成员
- *     总数（行）。他项目单元不计入位次——同项目串行才是"前面还有几个"的实际约束；
+ *     运行前缀**：`pos` = 前缀成员数（项目内 starting/running/finishing 行；**suspended
+ *     不计**——任务等作答让行不占位）+ waiting 行中 seq 更小者 + 1（1 基，即"本项目
+ *     前面还有几个"），`total` = 项目成员总数（行）。他项目单元不计入位次——同项目串行
+ *     才是"前面还有几个"的实际约束；
  *   - `idle`：表中数不到本单元的活跃行（未入队/已终态/键失效）。
  *
  * 逐点保留的两个细节（照 Python）：
@@ -576,6 +577,7 @@ export function unitState(key, projectId, options = {}) {
   const kind = KIND_OF_KEY[text.charAt(0)];
   if (kind !== undefined && projectId) {
     // running = 本单元有运行中行（v3d 行口径）：活跃非等待即运行上报
+    // （2026-10-24：suspended 也是活跃非等待 ⇒ 报 running；只是不占**位次前缀**）
     const row = getActive(kind, text.slice(2), options);
     if (row !== null && row.project_id === projectId && row.state !== STATE_WAITING) {
       return { state: 'running', pos: 0, total: 0 };
@@ -589,7 +591,10 @@ export function unitState(key, projectId, options = {}) {
     const rk = memberKey(row.kind, row.target_id);
     totalKeys.add(rk);
     if (row.state === STATE_WAITING) waiting.push([rk, row]);
-    else prefixKeys.add(rk);             // starting/running/finishing：位次前缀（R7 全计）
+    else if (row.state === waitq.STATE_STARTING || row.state === waitq.STATE_RUNNING
+        || row.state === waitq.STATE_FINISHING) {
+      prefixKeys.add(rk);                // 显式三态：suspended 不计前缀/位次（2026-10-24）
+    }
   }
   let mine = false;
   let ahead = 0;
@@ -1897,7 +1902,10 @@ export class Runner {
         }
         continue;
       }
-      // starting/running/finishing 行（claimed 已被 starting 吸收——同一收口面）
+      // starting/running/finishing/suspended 行（v2a T1 映射；claimed 已被 starting 吸收
+      // ——同一收口面；2026-10-24 suspended（任务等作答让行）亦为非 waiting 活跃行：
+      // t: 行按下方「task 仍 queued? 放回 : cancel」同款收口（停跑任务 cancel + 第二趟
+      // interrupted，不重投））
       if (kind === waitq.KIND_CARD) {
         continue;                   // c: 交 board.recover 按实况收口
       }
@@ -3686,15 +3694,21 @@ export class Runner {
       const [modelProvider, modelId] = splitModel(
         String(task.model || '').trim() || String(project.model || '').trim());
       sid = await ensureSession(sid, project.project_dir, `task-${task.id}`, modelId, modelProvider);
-      // 项目级思考等级（2026-10-04）：会话实时态里已有显式档位就保持（用户在会话详情页改过、
-      // 以及上轮应用过的项目默认都记在这里），否则回落项目默认。best-effort：档位与模型不匹配
-      // 等问题只记一行日志，本轮照常跑（**权限档不下发**：任务会话没有交互作答面，
-      // manual(approval=ask) 会让轮次永久挂起等一个没人能答的审批）。
+      // 会话默认值（2026-10-04 思考等级；2026-10-24 任务会话对齐卡片会话：权限档也下发）：
+      // 取值优先「会话实时态里已有的显式值」（用户在会话窗改过、或上轮应用过的默认都记在
+      // 这里），否则回落项目默认。权限链 = dshevents.sessionPermissionMode(sid) →
+      // tasks.permission → projects.permission_mode（契约 §3.4；空=不改，沿用宿主默认）。
+      // best-effort：档位与模型不匹配等问题只记日志，本轮照常跑。等作答让行见
+      // `waitTurnEndDsh`（suspended 行让出项目串行位）。
       const effort = sessionEffort(sid)
         || String(rowOpt(project, 'reasoning_effort') || '').trim();
-      if (effort) {
-        appendLog(logPath, `### 会话默认思考等级 effort=${effort}\n`);
-        await applySessionDefaults(sid, modelId, modelProvider, effort, '',
+      const pmode = sessionPermissionMode(sid)
+        || String(rowOpt(task, 'permission') || '').trim()
+        || String(rowOpt(project, 'permission_mode') || '').trim();
+      if (effort || pmode) {
+        appendLog(logPath, `### 会话默认值 effort=${effort || '(默认)'} `
+          + `permission=${pmode || '(默认)'}\n`);
+        await applySessionDefaults(sid, modelId, modelProvider, effort, pmode,
           (t) => appendLog(logPath, t));
       }
       if (sid !== (task.session_id || '')) {
@@ -3714,7 +3728,7 @@ export class Runner {
       appendLog(logPath, `### 轮次 ${roundNo} 开始 ${strftime(new Date(), '%H:%M:%S')} `
         + 'driver=dsh_plugin\n');
       await driverPrompt(sid, prompt);
-      exitCode = await this.waitTurnEndDsh(task, sid, waiter, logPath, opts);
+      exitCode = await this.waitTurnEndDsh(project, task, sid, waiter, logPath, opts);
     } catch (e) {
       if (!(e instanceof DshDriverError)) throw e;      // 照 Python：只吃 DshDriverError
       finishRound(roundId, 'failed', -1, `dsh 驱动调用失败: ${e}`, logPath, opts);
@@ -3755,15 +3769,81 @@ export class Runner {
   }
 
   /**
-   * 等事件流推来的 turn/end（零远端轮询；`_wait_turn_end_dsh`，runner.py:2097）。
+   * 任务等作答让行同步（2026-10-24，契约 §3.2；`_sync_task_wait_row`，runner.py）。
+   *
+   * 按宿主交互实况把 `t:` 行在 `starting ↔ suspended` 之间迁移，返回更新后的 suspended 标志。
+   * 触发面（`waitTurnEndDsh`）：interaction 事件（`force=true` 强制刷新探测缓存）与 5s tick。
+   *   - `st.pending=true` 且未挂起 → `waitq.suspend`（rowcount 守卫）→ notifyAll + 日志
+   *     「让出项目串行位」：本单元不再占运行前缀，同项目后续排队单元可先跑；
+   *   - `st` 非 null 且 `pending=false` 且已挂起 → `waitq.resume`（回 starting）→ notifyAll +
+   *     日志「恢复项目串行位」；
+   *   - `st === null`（中枢断连/未知）→ **保持现状，不猜**（绝不因读不到而 resume）；
+   *   - 探测异常按未知处理（不阻断轮次）。
+   * **不 abort turn**：宿主侧会话继续等作答，作答后同一 turn 继续跑。
+   * 只有 waitq 行态迁移成功（rowcount）才翻转本地标志——并发下已被他人改态时不重复打日志。
+   *
+   * @param {string} family
+   * @param {object|null} project
+   * @param {object} task
+   * @param {string} sid
+   * @param {string} logPath
+   * @param {boolean} suspended 当前本地让行标志
+   * @param {boolean} [force] true=先清探测缓存再探（interaction 事件用）
+   * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
+   * @returns {Promise<boolean>} 更新后的 suspended
+   */
+  async syncTaskWaitRow(family, project, task, sid, logPath, suspended,
+    force = false, options = null) {
+    const opts = this.opt(options);
+    // 函数内动态 import 防循环（board.js 模块级 import runner.js；位置照 Python 的 `import board`）
+    const board = await import('./board.js');
+    let st;
+    try {
+      if (force) {
+        // interaction 事件那一刻：清掉探测缓存再探，否则会撞上 5s TTL 内刚写入的
+        // pending=false（事件比探测缓存新）
+        board.iwClear(sid);
+      }
+      st = board.interactionProbe(family, project, sid);
+    } catch {
+      return suspended;                  // 探测异常=未知（不阻断轮次）
+    }
+    if (st === null || st === undefined) return suspended;    // 未知：不猜、保持现状
+    if (st.pending) {
+      if (!suspended && waitq.suspend(waitq.KIND_TASK, task.id, opts)) {
+        appendLog(logPath, '### 等待用户作答（提问/审批）：让出项目串行位\n');
+        this._cond.notifyAll();
+        return true;
+      }
+      return suspended;
+    }
+    if (suspended && waitq.resume(waitq.KIND_TASK, task.id, opts)) {
+      appendLog(logPath, '### 作答已收：恢复项目串行位\n');
+      this._cond.notifyAll();
+      return false;
+    }
+    return suspended;
+  }
+
+  /**
+   * 等事件流推来的 turn/end（零远端轮询；`_wait_turn_end_dsh`，runner.py:2117）。
    *
    * 结束条件：waiter 收到 turn/end 帧（completed→0 / aborted→130 / 其余→1）。
-   * 本地 5s tick 只做三件事，都不碰远端：响应任务停止标记（再补一次 cancel 兜底）、
-   * 检查 SSE 链路错误、检查 turn 是否压根没起来（宽限期内无 turn/start）。
+   * 本地 5s tick 做的事，都不碰远端轮询：响应任务停止标记（再补一次 cancel 兜底）、检查
+   * SSE 链路错误、检查 turn 是否压根没起来（宽限期内无 turn/start）、以及**任务等作答让行**
+   * （2026-10-24）：interaction 事件即时探测 + 每 5s tick 探测，按 `board.interactionProbe`
+   * 三态在 `waitq.suspend/resume` 间同步 t: 行（见 `syncTaskWaitRow`）——挂起时让出项目
+   * 串行位，作答后恢复；`st === null` 不猜。
+   *
+   * 收尾（turn 结束/停止/链路异常/宽限超时/未预期异常）：`finally` 若仍 suspended 则
+   * resume 回 starting，随后 worker finally 按既有口径 `finishByTarget(done/failed)` 正常
+   * 收口（行收口门禁已含 suspended）。
    *
    * 形参映射：`waiter.wait_turn(5.0)` → `await waiter.wait(5000)`（毫秒，见差异②）；
    * `waiter.turn_reason`/`exit_code` → `waiter.turnReason`/`waiter.exitCode`。
+   * 签名 2026-10-24 加 `project`（探测宿主交互实况用），与 Python 逐字对齐。
    *
+   * @param {object|null} project
    * @param {object} task
    * @param {string} sid
    * @param {TurnWaiter} waiter
@@ -3771,41 +3851,58 @@ export class Runner {
    * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
    * @returns {Promise<number>} 轮次退出码
    */
-  async waitTurnEndDsh(task, sid, waiter, logPath, options = null) {   // eslint-disable-line no-unused-vars
+  async waitTurnEndDsh(project, task, sid, waiter, logPath, options = null) {
     const waitStarted = Date.now() / 1000;
-    for (;;) {
-      const event = await waiter.wait(5000);
-      if (event === 'turn_end') {
-        appendLog(logPath, `### 轮次结束 turn_reason=${pyStr(waiter.turnReason)}\n`);
-        return waiter.exitCode;
-      }
-      if (event === 'interaction') {
-        // 提问/审批已推给用户：本轮不结束（dsh 侧会话挂起等作答），记一行日志后继续等
-        // turn/end（用户作答后同一 turn 继续跑）
-        appendLog(logPath, '### 会话等待人工输入（提问/审批）\n');
-        continue;
-      }
-      if (event === 'error') {
-        appendLog(logPath, `### 事件流异常: ${waiter.error}\n`);
-        return 1;
-      }
-      if (this._stop_requested.has(task.id)) {
-        try {
-          await driverCancel(sid);        // runner.stop 已调过一次，这里兜底
-        } catch (e) {
-          if (!(e instanceof DshDriverError)) throw e;
-          appendLog(logPath, `### cancel 失败: ${e}\n`);
+    let suspended = false;
+    try {
+      for (;;) {
+        const event = await waiter.wait(5000);
+        if (event === 'turn_end') {
+          appendLog(logPath, `### 轮次结束 turn_reason=${pyStr(waiter.turnReason)}\n`);
+          return waiter.exitCode;
         }
-        return 130;
-      }
-      if (!waiter.started && Date.now() / 1000 - waitStarted > this.DSH_TURN_START_GRACE) {
-        appendLog(logPath, `### turn 未启动（${this.DSH_TURN_START_GRACE}s 未见 turn/start）\n`);
-        try {
-          await driverCancel(sid);
-        } catch (e) {
-          if (!(e instanceof DshDriverError)) throw e;
+        if (event === 'interaction') {
+          // 提问/审批已推给用户：本轮不结束（dsh 侧会话挂起等作答），记一行日志后继续等
+          // turn/end（用户作答后同一 turn 继续跑）。事件那一刻强制刷新探测缓存再判让行/恢复。
+          appendLog(logPath, '### 会话等待人工输入（提问/审批）\n');
+          suspended = await this.syncTaskWaitRow('dsh_plugin', project, task, sid, logPath,
+            suspended, true, options);
+          continue;
         }
-        return 1;
+        if (event === 'error') {
+          appendLog(logPath, `### 事件流异常: ${waiter.error}\n`);
+          return 1;
+        }
+        if (this._stop_requested.has(task.id)) {
+          try {
+            await driverCancel(sid);        // runner.stop 已调过一次，这里兜底
+          } catch (e) {
+            if (!(e instanceof DshDriverError)) throw e;
+            appendLog(logPath, `### cancel 失败: ${e}\n`);
+          }
+          return 130;
+        }
+        if (!waiter.started && Date.now() / 1000 - waitStarted > this.DSH_TURN_START_GRACE) {
+          appendLog(logPath, `### turn 未启动（${this.DSH_TURN_START_GRACE}s 未见 turn/start）\n`);
+          try {
+            await driverCancel(sid);
+          } catch (e) {
+            if (!(e instanceof DshDriverError)) throw e;
+          }
+          return 1;
+        }
+        // event === 'timeout'：5s tick 兜底探测（interaction 事件可能漏帧/迟帧；
+        // 作答结束后也靠它把串行位还回去）
+        suspended = await this.syncTaskWaitRow('dsh_plugin', project, task, sid, logPath,
+          suspended, false, options);
+      }
+    } finally {
+      if (suspended) {
+        // 收尾兜底：行回 starting（不残留 suspended），worker finally 再按 done/failed
+        // 收口——与「让行 = 行态表达」不变量一致（不引入内存豁免）
+        if (waitq.resume(waitq.KIND_TASK, task.id, this.opt(options))) {
+          this._cond.notifyAll();
+        }
       }
     }
   }

@@ -99,3 +99,28 @@ export function permissionItems(options, value) {
     description: permissionDesc(list, v),
   }]
 }
+
+/**
+ * 任务详情「权限」行文案（2026-10-24 任务会话对齐卡片）：
+ * 任务级权限档（tasks.permission）为空＝跟随项目默认；非空走展示层映射
+ * （目录 label → 内置中文名 → 原值），与权限下拉同口径。
+ */
+export function permissionDetailLabel(options, value) {
+  if (!canonicalPermission(value)) return t('跟随项目默认')
+  return permissionLabel(options, value)
+}
+
+/**
+ * 会话底栏「权限档 / 模型」两枚下拉的可交互判定（纯函数，2026-10-24 任务会话对齐卡片）：
+ * 条件 = 有打开中的会话（board=看板卡片会话 / taskActive=任务会话窗口）且宿主能力位为真；
+ * 权限档额外要求宿主权限目录非空（目录不可用时降级为只读 chip，展示名由
+ * permissionLabel 的内置中文名兜底）。放在本文件：两枚控件同属会话级权限/模型配置，
+ * 且都在本批由「仅看板卡」放开到任务会话。
+ */
+export function sessionControls({ board = false, taskActive = false, caps, permOpts } = {}) {
+  const opened = !!board || !!taskActive
+  return {
+    modelInteractive: opened && !!(caps && caps.profile),
+    permInteractive: opened && !!(caps && caps.permission) && (permOpts?.length || 0) > 0,
+  }
+}

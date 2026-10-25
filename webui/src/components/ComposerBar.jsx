@@ -13,6 +13,8 @@
 //        (会话级配置四控件, Task 4 + 2026-10-04 思考等级;
 //        权限档位动态跟随 DSH 宿主权限目录（permOpts=宿主目录 options，来自
 //        /api/agents/presets；空=目录不可用，降级为 chip 只读展示）;
+//        taskActive=任务会话窗口（2026-10-24 任务会话对齐卡片：权限档/模型下拉不再仅限
+//        看板卡，板卡与任务窗口同口径可交互，见 utils/permission.sessionControls）;
 //        思考等级选项=该模型支持档位，来自 /api/agents/models 的 efforts，空则用内置档位表),
 //        queueRows/injecting/onInject(排队消息行 + 「立即注入」按钮: 平台队列行
 //         msgId=撤销排队立即投递当前上下文; dsh 宿主 inbox 行只展示、无按钮),
@@ -31,7 +33,7 @@ import SlashMenu from './SlashMenu'
 import { queueStatePlaceholder } from '../utils/queueBadge'
 import { queueRowTag } from '../utils/queueRowTag'
 import { cancellableRow } from '../utils/queueRestore'
-import { canonicalPermission, permissionDesc, permissionItems, permissionLabel }
+import { canonicalPermission, permissionDesc, permissionItems, permissionLabel, sessionControls }
   from '../utils/permission'
 import { useI18n } from '../utils/i18n'
 
@@ -45,7 +47,7 @@ function fmtTok(n) {
 
 export default function ComposerBar({ value, onChange, atts, onRemoveAtt, uploading, inputLocked,
     caps, meta, onSend, onStop, stopDisabled, chatRunning, taskRunning,
-    queuedN, board, sending,
+    queuedN, board, taskActive, sending,
     permMode, permOpts, modelSel, modelOpts, onSetModel, onSetPermission,
     effortSel, effortOpts, onSetEffort,
     queueRows, injecting, onInject,
@@ -60,10 +62,12 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
   //   profile    能力位 = 会话级**模型**切换（唯一族 dsh_plugin 为 True）
   //   permission 能力位 = 权限档切换（dsh_plugin 为 True；档位列表动态跟随 DSH 宿主
   //     权限目录 /api/agents/presets，目录不可用/为空 ⇒ 降级为 chip 只读展示）
-  const modelInteractive = board && !!caps?.profile
-  const permInteractive = board && !!caps?.permission && (permOpts?.length || 0) > 0
+  // 2026-10-24 任务会话对齐卡片：两枚下拉从 `board &&` 放开为「看板卡 **或** 任务窗口」，
+  // 判定收口 utils/permission.sessionControls（纯函数，有单测）
+  const { modelInteractive, permInteractive } =
+    sessionControls({ board, taskActive, caps, permOpts })
   // 思考等级（2026-10-04）：档位属会话请求参数，看板卡与**任务会话**都可交互
-  // （任务侧端点 POST /api/tasks/<id>/session/profile 只开这一项；模型/权限档仍限看板卡）
+  // （任务侧端点 POST /api/tasks/<id>/session/profile 与本批的权限档/模型走同一端点）
   const effortInteractive = !!caps?.profile && !!(effortOpts?.options || []).length
   // 权限档文案/置灰: permMode 未回读(meta.permission 未到)或不可交互；
   // 档位名走展示层映射（目录 label → 内置中文名 → 原值），旧值 manual/yolo 由

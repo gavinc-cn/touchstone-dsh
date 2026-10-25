@@ -26,10 +26,12 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { RETIRED_MSG } from '../lib/agents.js';
+import * as board from '../lib/board.js';
 import * as db from '../lib/db.js';
+import * as dshevents from '../lib/dshevents.js';
 import { TurnWaiter } from '../lib/dshdriver.js';
 import * as runner from '../lib/runner.js';
-import { freshDb, insertProject, insertTask } from './m3fixture.mjs';
+import { freshDb, insertProject, insertTask, insertWait } from './m3fixture.mjs';
 
 /** 每例自带临时库夹具（照 runner-bug.test.mjs 的 withFixture）。 */
 function withFixture(tag, fn) {
@@ -108,7 +110,7 @@ function timeoutWaiter(started = false) {
  * —— 被测代码走的是真的 `fetch`/SSE 解码/`feedInto`/`TurnWaiter` 全链路。
  */
 async function startCannedDriver({ frames = [], statusBody = { last_seq: 7 } } = {}) {
-  const seen = { prompts: [], models: [], cancels: [], paths: [] };
+  const seen = { prompts: [], models: [], cancels: [], permissions: [], paths: [] };
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
@@ -140,6 +142,12 @@ async function startCannedDriver({ frames = [], statusBody = { last_seq: 7 } } =
         seen.models.push(JSON.parse(body || '{}'));
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end('{"selected": {"provider": "p", "model": "m"}}');
+        return;
+      }
+      if (route === 'POST /permission') {
+        seen.permissions.push(JSON.parse(body || '{}'));
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"ok": true}');
         return;
       }
       if (route === 'POST /cancel') {
@@ -404,7 +412,7 @@ test('waitTurnEndDsh: turn_end 三档（completed/aborted/缺失 reason 归一 a
     for (const [frame, expect, reason] of cases) {
       n += 1;
       const { log, task } = mk(n);
-      const code = await r.waitTurnEndDsh(task, 's-1', fedWaiter([frame]), log, { db: fx.db });
+      const code = await r.waitTurnEndDsh(null, task, 's-1', fedWaiter([frame]), log, { db: fx.db });
       assert.equal(code, expect);
       assert.equal(fs.readFileSync(log, 'utf8'), `### 轮次结束 turn_reason=${reason}\n`);
     }
@@ -418,13 +426,98 @@ test('waitTurnEndDsh: interaction 先喂 ⇒ 记一行并继续等，直到 turn
     const log = path.join(fx.dir, 'interaction.log');
     const waiter = new TurnWaiter();
     waiter.feed({ type: 'driver/interaction', data: { state: 'asked' } });
-    const pending = r.waitTurnEndDsh({ id: tid }, 's-1', waiter, log, { db: fx.db });
+    const pending = r.waitTurnEndDsh(null, { id: tid }, 's-1', waiter, log, { db: fx.db });
     // interaction 是 consume-on-read：第一次 wait 必然返回它，之后才轮到 turn/end
     setTimeout(() => waiter.feed({ type: 'turn/end', data: { reason: 'completed' } }), 20);
     const code = await pending;
     assert.equal(code, 0);
     assert.equal(fs.readFileSync(log, 'utf8'),
       '### 会话等待人工输入（提问/审批）\n### 轮次结束 turn_reason=completed\n');
+  });
+});
+
+test('waitTurnEndDsh: 让行 —— 5s tick 探到 pending ⇒ suspend 让出前缀；pending 消失 ⇒ resume + 日志', async () => {
+  await withFixture('runner-round-suspend', async (fx) => {
+    board.resetIwState();
+    try {
+      const r = parkedRunner(fx);
+      const { tid, pid } = insertRoundTask(fx);
+      insertWait(fx.db,
+        { projectId: pid, kind: 'task', targetId: tid, state: 'starting', seq: 1 });
+      const sid = 's-suspend';
+      // watcher 缓存里预置「有一道待答提问」：interactionProbe 新鲜缓存放行（不依赖真中枢）
+      board.setIwCacheForTest(sid, { pending: true, kind: 'question', ts: Date.now() });
+      const rowState = () => fx.db.prepare(
+        "SELECT state FROM wait_items WHERE kind='task' AND target_id=?").get(String(tid)).state;
+      let tick = 0;
+      let suspendedSeen = null;
+      const waiter = {
+        started: true, error: null, turnReason: 'completed', exitCode: 0,
+        async wait() {
+          tick += 1;
+          if (tick === 1) return 'timeout';            // tick①：probe → pending ⇒ suspend
+          if (tick === 2) {
+            suspendedSeen = rowState();                // 挂起态在等待期间可见（不占前缀）
+            board.setIwCacheForTest(sid, { pending: false, kind: 'question', ts: Date.now() });
+            return 'timeout';                          // tick②：probe → not pending ⇒ resume
+          }
+          return 'turn_end';
+        },
+      };
+      const log = path.join(fx.dir, 'suspend.log');
+      const code = await r.waitTurnEndDsh(null, { id: tid }, sid, waiter, log, { db: fx.db });
+      assert.equal(code, 0);
+      assert.equal(suspendedSeen, 'suspended');
+      assert.equal(rowState(), 'starting', 'finally 已回 starting（随后 worker finally 正常收口）');
+      // 两条让行日志逐字（照 Python runner.py；与看板会话同款文案）
+      assert.equal(fs.readFileSync(log, 'utf8'),
+        '### 等待用户作答（提问/审批）：让出项目串行位\n'
+        + '### 作答已收：恢复项目串行位\n'
+        + '### 轮次结束 turn_reason=completed\n');
+    } finally {
+      board.resetIwState();
+    }
+  });
+});
+
+test('waitTurnEndDsh: interaction 事件强制刷新探测缓存 ⇒ 立即 suspend；turn_end 后 finally resume', async () => {
+  await withFixture('runner-round-suspend-force', async (fx) => {
+    board.resetIwState();
+    const hub = dshevents.HUB;
+    const sid = 's-force';
+    try {
+      const r = parkedRunner(fx);
+      const { tid, pid } = insertRoundTask(fx);
+      insertWait(fx.db,
+        { projectId: pid, kind: 'task', targetId: tid, state: 'starting', seq: 1 });
+      // dshevents 实时态：会话在跑且有一道待答提问 ⇒ board.interactionProbe 返回 pending
+      hub._setConnected(true);
+      hub._sessions.set(sid, {
+        status: 'running',
+        interaction: { kind: 'question', call_id: 'call-1',
+          questions: [{ id: 'q_0', question: '继续？', options: [] }] },
+      });
+      const log = path.join(fx.dir, 'suspend-force.log');
+      // interaction 是 consume-on-read：先喂它让第一拍返回 interaction，turn/end 稍后到达，
+      // 否则两帧同批喂入时 `_take` 的优先级（exitCode > interaction）会直返 turn_end。
+      const waiter = fedWaiter([
+        { type: 'driver/interaction', data: { state: 'asked' } },
+      ]);
+      const pending = r.waitTurnEndDsh(null, { id: tid }, sid, waiter, log, { db: fx.db });
+      setTimeout(() => waiter.feed({ type: 'turn/end', data: { reason: 'completed' } }), 20);
+      const code = await pending;
+      assert.equal(code, 0);
+      assert.equal(fx.db.prepare("SELECT state FROM wait_items WHERE kind='task' AND target_id=?")
+        .get(String(tid)).state, 'starting', '收尾 finally resume 回 starting');
+      assert.equal(fs.readFileSync(log, 'utf8'),
+        '### 会话等待人工输入（提问/审批）\n'
+        + '### 等待用户作答（提问/审批）：让出项目串行位\n'
+        + '### 轮次结束 turn_reason=completed\n');
+    } finally {
+      hub._sessions.delete(sid);
+      hub._setConnected(false);
+      board.resetIwState();
+    }
   });
 });
 
@@ -437,7 +530,7 @@ test('waitTurnEndDsh: 链路错误 ⇒ 1；停止标记 ⇒ 130（并补一次 c
     const logErr = path.join(fx.dir, 'err.log');
     const failed = new TurnWaiter();
     failed.fail('事件流被对端关闭');
-    assert.equal(await r.waitTurnEndDsh({ id: tid }, 's-1', failed, logErr, { db: fx.db }), 1);
+    assert.equal(await r.waitTurnEndDsh(null, { id: tid }, 's-1', failed, logErr, { db: fx.db }), 1);
     assert.match(fs.readFileSync(logErr, 'utf8'), /^### 事件流异常: /);
 
     // 停止支：先 `stop(tid)` 置标记，再用「立即超时」替身把 5s tick 压成 0ms
@@ -445,7 +538,7 @@ test('waitTurnEndDsh: 链路错误 ⇒ 1；停止标记 ⇒ 130（并补一次 c
     await r.stop(tid2, { db: fx.db });
     const logStop = path.join(fx.dir, 'stop.log');
     await withDriver({}, async (srv) => {
-      const code = await r.waitTurnEndDsh({ id: tid2 }, 's-1', timeoutWaiter(), logStop, { db: fx.db });
+      const code = await r.waitTurnEndDsh(null, { id: tid2 }, 's-1', timeoutWaiter(), logStop, { db: fx.db });
       assert.equal(code, 130);
       // 兜底 cancel 真发出去了（照 Python：runner.stop 已调过一次，这里再补一次）
       assert.deepEqual(srv.seen.cancels, [{ session_id: 's-1', keep_inbox: false }]);
@@ -454,7 +547,7 @@ test('waitTurnEndDsh: 链路错误 ⇒ 1；停止标记 ⇒ 130（并补一次 c
     assert.equal(fs.existsSync(logStop), false);
     // 停止支（驱动不可用）：cancel 抛 DshDriverError ⇒ 记一行、仍返回 130
     const logStop2 = path.join(fx.dir, 'stop2.log');
-    assert.equal(await r.waitTurnEndDsh({ id: tid2 }, 's-1', timeoutWaiter(), logStop2,
+    assert.equal(await r.waitTurnEndDsh(null, { id: tid2 }, 's-1', timeoutWaiter(), logStop2,
       { db: fx.db }), 130);
     assert.match(fs.readFileSync(logStop2, 'utf8'), /^### cancel 失败: /);
 
@@ -462,13 +555,13 @@ test('waitTurnEndDsh: 链路错误 ⇒ 1；停止标记 ⇒ 130（并补一次 c
     const { tid: tid3 } = insertRoundTask(fx);
     r.DSH_TURN_START_GRACE = -1;
     const logGrace = path.join(fx.dir, 'grace.log');
-    assert.equal(await r.waitTurnEndDsh({ id: tid3 }, 's-1', timeoutWaiter(false), logGrace,
+    assert.equal(await r.waitTurnEndDsh(null, { id: tid3 }, 's-1', timeoutWaiter(false), logGrace,
       { db: fx.db }), 1);
     assert.equal(fs.readFileSync(logGrace, 'utf8'), '### turn 未启动（-1s 未见 turn/start）\n');
     // `started=true` 时宽限不生效（只可能被下一个 tick 收口）⇒ 这里用 error 帧收口
     r.DSH_TURN_START_GRACE = 120.0;
     const logStarted = path.join(fx.dir, 'started.log');
-    assert.equal(await r.waitTurnEndDsh({ id: tid3 }, 's-1', fedWaiter([
+    assert.equal(await r.waitTurnEndDsh(null, { id: tid3 }, 's-1', fedWaiter([
       { type: 'turn/start' }, { type: 'turn/end', data: { reason: 'aborted' } },
     ]), logStarted, { db: fx.db }), 130);
   });
@@ -582,7 +675,7 @@ test('runRoundDshplugin: turn/end=aborted ⇒ 轮次 failed/130、任务不改 n
   });
 });
 
-test('runRoundDshplugin: 项目思考等级非空 ⇒ 下发 /model 并把告警行落日志', async () => {
+test('runRoundDshplugin: 项目思考等级非空 ⇒ 下发 /model 并把默认值日志行落盘', async () => {
   await withDriver({ frames: [{ seq: 1, type: 'turn/end', data: { reason: 'completed' } }] },
     async (srv) => {
       await withFixture('runner-round-effort', async (fx) => {
@@ -593,9 +686,51 @@ test('runRoundDshplugin: 项目思考等级非空 ⇒ 下发 /model 并把告警
         await r.runRoundDshplugin(proj, taskView(tid, pid), 1, { db: fx.db });
         assert.deepEqual(srv.seen.models, [{ session_id: 's-canned', model: '',
           reasoning_effort: 'high' }]);
+        assert.deepEqual(srv.seen.permissions, [], '无权限链值 ⇒ 不发 /permission');
+        const round = fx.db.prepare('SELECT * FROM rounds WHERE task_id=?').get(tid);
+        // 2026-10-24：原「### 会话默认思考等级 …」单行改为与 board._start_web 同款默认值行
+        assert.ok(fs.readFileSync(round.log_path, 'utf8')
+          .includes('### 会话默认值 effort=high permission=(默认)\n'));
+      });
+    });
+});
+
+test('runRoundDshplugin: 权限链 sessionPermissionMode → tasks.permission → projects.permission_mode（一次下发）', async () => {
+  await withDriver({ frames: [{ seq: 1, type: 'turn/end', data: { reason: 'completed' } }] },
+    async (srv) => {
+      await withFixture('runner-round-permchain', async (fx) => {
+        const r = parkedRunner(fx);
+        const { tid, pid } = insertRoundTask(fx, { taskType: 'normal' });
+        const proj = projectView(fx, pid);
+        proj.permission_mode = 'read-only';               // 项目默认档（fallback）
+        proj.reasoning_effort = '';
+        const task = taskView(tid, pid, { permission: 'workspace-write' });  // 任务级覆盖项目
+        await r.runRoundDshplugin(proj, task, 1, { db: fx.db });
+        // applySessionDefaults 内部顺序：先权限（preset 直达、不带 mode）后思考等级
+        assert.deepEqual(srv.seen.permissions, [
+          { session_id: 's-canned', preset: 'workspace-write' },
+        ]);
+        assert.equal('mode' in srv.seen.permissions[0], false, '不再下传旧三档 mode');
         const round = fx.db.prepare('SELECT * FROM rounds WHERE task_id=?').get(tid);
         assert.ok(fs.readFileSync(round.log_path, 'utf8')
-          .includes('### 会话默认思考等级 effort=high\n'));
+          .includes('### 会话默认值 effort=(默认) permission=workspace-write\n'));
+      });
+    });
+});
+
+test('runRoundDshplugin: 任务级权限为空 ⇒ 回落 projects.permission_mode', async () => {
+  await withDriver({ frames: [{ seq: 1, type: 'turn/end', data: { reason: 'completed' } }] },
+    async (srv) => {
+      await withFixture('runner-round-permproject', async (fx) => {
+        const r = parkedRunner(fx);
+        const { tid, pid } = insertRoundTask(fx, { taskType: 'normal' });
+        const proj = projectView(fx, pid);
+        proj.permission_mode = 'read-only';
+        const task = taskView(tid, pid, { permission: '' });
+        await r.runRoundDshplugin(proj, task, 1, { db: fx.db });
+        assert.deepEqual(srv.seen.permissions, [
+          { session_id: 's-canned', preset: 'read-only' },
+        ]);
       });
     });
 });

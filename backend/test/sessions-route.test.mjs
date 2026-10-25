@@ -14,8 +14,10 @@
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { test } from 'node:test';
 import { zstdCompressSync } from 'node:zlib';
 
@@ -27,7 +29,8 @@ import { jsonBody } from '../lib/http.js';
 import { makeContext } from '../routes/index.js';
 import {
   boardSessionMedia, boardSessionMessages, runSessionStream, streamStartAfter,
-  taskSessionMedia, taskSessionMessages, taskSessionStream,
+  taskSessionCompact, taskSessionMedia, taskSessionMessages, taskSessionProfile,
+  taskSessionStream,
 } from '../routes/sessions.js';
 import { freshDb, insertCard, insertMsg, insertProject, insertTask, insertWait } from './m3fixture.mjs';
 
@@ -112,6 +115,100 @@ function mkCtx(fx, { search = '', headers = {}, userId } = {}) {
 
 /** JSON 响应体 */
 function bodyJson(res) { return JSON.parse(res.body); }
+
+/** 真 ctx + 可读请求体（POST 端点用；`lib/http.js:readJsonBody` 只认流+content-length） */
+function mkPostCtx(fx, body, { search = '' } = {}) {
+  const res = new FakeRes();
+  const uid = fx.db.prepare("SELECT id FROM users WHERE username='admin'").get().id;
+  const text = body === undefined ? '' : Buffer.from(JSON.stringify(body), 'utf8');
+  const stream = Readable.from(text.length ? [text] : [], { objectMode: false });
+  stream.headers = text.length ? { 'content-length': String(text.length) } : {};
+  stream.method = 'POST';
+  const ctx = makeContext({
+    req: stream,
+    res,
+    db: fx.db,
+    user: { id: uid },
+    path: '/x',
+    search,
+  });
+  return { ctx, res };
+}
+
+// --------------------------------------------------------------------------
+// 假 dsh 驱动（任务会话 profile/compact 的 200 路径；形状抄 runner-round 的罐头驱动）
+// --------------------------------------------------------------------------
+
+class TaskFakeDriver {
+  constructor() {
+    this.calls = [];
+    this.failCompact = null;              // 置 {code, error} 让 /compact 返回错误
+    this.server = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        const p = req.url.split('?')[0];
+        let body = {};
+        try { body = raw ? JSON.parse(raw) : {}; } catch { body = { raw }; }
+        this.calls.push({ path: `${req.method} ${p}`, body });
+        const json = (code, obj) => {
+          res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify(obj));
+        };
+        if (`${req.method} ${p}` === 'GET /health') return json(200, { ok: true });
+        if (p === '/permission') return json(200, { ok: true });
+        if (p === '/model') return json(200, { selected: { provider: '', model: body.model } });
+        if (p === '/compact') {
+          if (this.failCompact !== null) {
+            return json(this.failCompact.code, { error: this.failCompact.error });
+          }
+          return json(200, { started: true });
+        }
+        return json(404, { error: `fake driver: no route ${p}` });
+      });
+    });
+  }
+
+  byPath(p) { return this.calls.filter((c) => c.path === p); }
+
+  async start() {
+    await new Promise((resolve) => this.server.listen(0, '127.0.0.1', resolve));
+    this.base = `http://127.0.0.1:${this.server.address().port}`;
+    return this;
+  }
+
+  async close() {
+    await new Promise((resolve) => this.server.close(resolve));
+  }
+}
+
+/** 起假驱动并注入 env（dshdriver 每次调用现读 env） */
+async function withDriver(fn) {
+  const drv = await new TaskFakeDriver().start();
+  const savedUrl = process.env.TS_AGENT_DRIVER_URL;
+  const savedToken = process.env.TS_AGENT_DRIVER_TOKEN;
+  process.env.TS_AGENT_DRIVER_URL = drv.base;
+  delete process.env.TS_AGENT_DRIVER_TOKEN;
+  try {
+    return await fn(drv);
+  } finally {
+    if (savedUrl === undefined) delete process.env.TS_AGENT_DRIVER_URL;
+    else process.env.TS_AGENT_DRIVER_URL = savedUrl;
+    if (savedToken !== undefined) process.env.TS_AGENT_DRIVER_TOKEN = savedToken;
+    await drv.close();
+  }
+}
+
+/** 清空驱动 env（未配置档） */
+async function withoutDriver(fn) {
+  const savedUrl = process.env.TS_AGENT_DRIVER_URL;
+  delete process.env.TS_AGENT_DRIVER_URL;
+  try {
+    return await fn();
+  } finally {
+    if (savedUrl !== undefined) process.env.TS_AGENT_DRIVER_URL = savedUrl;
+  }
+}
 
 /** 跑一个用例并保证句柄关闭（**必须 await 用例体**：早关句柄会让异步用例撞 "database is not open"） */
 async function withFixture(tag, fn) {
@@ -535,6 +632,275 @@ test('tasks/session/messages：404 task not found / family 不支持 / 无 sid /
       await taskSessionMessages(inc.ctx, task);
       assert.equal(bodyJson(inc.res).entries.length, 1);
     }
+  });
+});
+
+test('tasks/session/messages：meta 补会话级实时态 interaction/permission/sessionModel/queue/owned + queue_state', async () => {
+  await withFixture('sess-route-taskmeta', async (fx) => {
+    const pid = insertProject(fx.db, { projectDir: PROJECT_DIR });
+    const sid = makeSession('session-eee11111-2222-4333-8444-555555555555');
+    const task = insertTask(fx.db, pid, { sessionId: sid });
+    const hub = dshevents.HUB;
+    hub._setConnected(true);
+    board.resetIwState();
+    try {
+      // ① 无实时态内容：interaction=null / queue=[] / owned=null（注册表未对齐=未知）；
+      //    permission/sessionModel 缺省**不下发**（键不存在）
+      {
+        const { ctx, res } = mkCtx(fx, {});
+        await taskSessionMessages(ctx, task);
+        const p = bodyJson(res);
+        assert.equal(p.found, true);
+        assert.equal(p.interaction, null, 'interaction 恒下发（可为 null）');
+        assert.deepEqual(p.queue, [], 'queue 恒下发 list（可为空）');
+        assert.equal(p.owned, null, 'owned 恒下发三态：未对齐=未知');
+        assert.equal('permission' in p, false);
+        assert.equal('sessionModel' in p, false);
+        assert.equal('sessionEffort' in p, false);
+        assert.equal(p.queue_state, board.QS_IDLE);
+        // 键序契约（照 Python dict 插入序）：interaction → queue → owned
+        const keys = Object.keys(p);
+        assert.ok(keys.indexOf('interaction') > keys.indexOf('chat'));
+        assert.ok(keys.indexOf('interaction') < keys.indexOf('queue'));
+        assert.ok(keys.indexOf('queue') < keys.indexOf('owned'));
+      }
+      // ② 宿主 inbox 行 + 权限/模型实况：queue_state=server_queued（判定序优先于 interaction）
+      hub._sessions.set(sid, {
+        owned: true,
+        permission: { mode: '', preset: 'path-rules' },
+        model: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'high' },
+        inbox: [{ id: 'i1', text: '排队消息' }, {}],
+      });
+      hub._setAligned(true);
+      board.setIwCacheForTest(sid, { pending: true, kind: 'question', qid: 'call-1',
+        ts: Date.now() });
+      {
+        const { ctx, res } = mkCtx(fx, {});
+        await taskSessionMessages(ctx, task);
+        const p = bodyJson(res);
+        assert.equal(p.permission, 'path-rules', 'preset 原样回读');
+        assert.equal(p.sessionModel, 'deepseek-official/deepseek-flash');
+        assert.equal(p.sessionEffort, 'high');
+        assert.deepEqual(p.queue, [{ id: 'i1', text: '排队消息' }, { id: '', text: '' }]);
+        assert.equal(p.owned, true, '对齐且 owned=true ⇒ 平台自持');
+        assert.equal(p.interaction.pending, true);
+        assert.equal(p.queue_state, board.QS_SERVER, 'server_queued 判定序高于 interaction_pending');
+      }
+      // ③ 无宿主排队行但有交互挂起 ⇒ interaction_pending（任务侧首次出现该枚举）
+      hub._sessions.get(sid).inbox = [];
+      {
+        const { ctx, res } = mkCtx(fx, {});
+        await taskSessionMessages(ctx, task);
+        const p = bodyJson(res);
+        assert.deepEqual(p.queue, []);
+        assert.equal(p.queue_state, board.QS_INTERACTION);
+      }
+      // ④ owned=false（外部会话）+ 注册表对齐 ⇒ 外部态；断连/未对齐回落 null（不猜）
+      hub._sessions.get(sid).owned = false;
+      {
+        const { ctx, res } = mkCtx(fx, {});
+        await taskSessionMessages(ctx, task);
+        assert.equal(bodyJson(res).owned, false);
+      }
+      hub._setAligned(false);
+      {
+        const { ctx, res } = mkCtx(fx, {});
+        await taskSessionMessages(ctx, task);
+        assert.equal(bodyJson(res).owned, null, '未对齐 ⇒ 归属未知（不是外部）');
+      }
+    } finally {
+      hub._sessions.delete(sid);
+      hub._setConnected(false);
+      board.resetIwState();
+    }
+  });
+});
+
+test('tasks/session/profile：404 → 参数 400（空体/非法 effort/非法权限档）→ 族 400 → 无会话 409', async () => {
+  await withFixture('sess-route-taskprofile-bad', async (fx) => {
+    const pid = insertProject(fx.db, { projectDir: PROJECT_DIR });
+    const task = insertTask(fx.db, pid, { sessionId: 'sess-task-profile' });
+
+    // ① 404
+    {
+      const { ctx, res } = mkPostCtx(fx, { model: 'm' });
+      await taskSessionProfile(ctx, 999999);
+      assert.equal(res.status, 404);
+      assert.deepEqual(bodyJson(res), { error: 'task not found' });
+    }
+    // ② 三者皆空 ⇒ 400 紧凑（与看板同文案）
+    {
+      const { ctx, res } = mkPostCtx(fx, {});
+      await taskSessionProfile(ctx, task);
+      assert.equal(res.status, 400);
+      assert.equal(res.body, '{"error":"model/permission_mode/reasoning_effort required"}');
+    }
+    // ②b 纯空白/假值同「不指定」
+    {
+      const { ctx, res } = mkPostCtx(fx, { model: '   ', permission_mode: '  ',
+        reasoning_effort: null });
+      await taskSessionProfile(ctx, task);
+      assert.equal(res.status, 400);
+      assert.equal(res.body, '{"error":"model/permission_mode/reasoning_effort required"}');
+    }
+    // ③ 思考等级非法 ⇒ 400 带空格
+    {
+      const { ctx, res } = mkPostCtx(fx, { reasoning_effort: 'turbo' });
+      await taskSessionProfile(ctx, task);
+      assert.equal(res.status, 400);
+      assert.deepEqual(bodyJson(res), {
+        error: '思考等级非法（off/minimal/low/medium/high/xhigh/max 或留空）' });
+    }
+    // ④ 权限档非法 ⇒ 400 带空格（目录不可用时回退内置三档；bogus 不在其中）
+    {
+      const { ctx, res } = mkPostCtx(fx, { permission_mode: 'bogus' });
+      await taskSessionProfile(ctx, task);
+      assert.equal(res.status, 400);
+      assert.deepEqual(bodyJson(res), { error: '权限档非法（宿主权限目录里没有该档位）' });
+    }
+    // ⑤ 参数合法后才查族：退场族 ⇒ 400 带空格
+    const retiredPid = insertProject(fx.db, {
+      name: 'retired-proj', projectDir: PROJECT_DIR, agentPath: '/usr/local/bin/kimi',
+    });
+    const retiredTask = insertTask(fx.db, retiredPid, { sessionId: 'sess-retired' });
+    {
+      const { ctx, res } = mkPostCtx(fx, { model: 'm' });
+      await taskSessionProfile(ctx, retiredTask);
+      assert.equal(res.status, 400);
+      assert.deepEqual(bodyJson(res), { error: '该 agent 族不支持会话级配置' });
+    }
+    // ⑥ 无会话 ⇒ 409 紧凑
+    const noSidTask = insertTask(fx.db, pid, { sessionId: '' });
+    {
+      const { ctx, res } = mkPostCtx(fx, { model: 'm' });
+      await taskSessionProfile(ctx, noSidTask);
+      assert.equal(res.status, 409);
+      assert.equal(res.body, '{"error":"会话尚未生成（首轮执行后才有）"}');
+    }
+  });
+});
+
+test('tasks/session/profile：200 即时下发（权限先于模型）+ 回写 tasks 行 + 回执恒三键', async () => {
+  await withFixture('sess-route-taskprofile-ok', async (fx) => {
+    const pid = insertProject(fx.db, { projectDir: PROJECT_DIR });
+    const task = insertTask(fx.db, pid, { sessionId: 'sess-task-profile-ok' });
+    const taskRow = () => fx.db.prepare('SELECT * FROM tasks WHERE id=?').get(task);
+    await withDriver(async (drv) => {
+      // ① 三键齐给：权限档 manual 归一为 canonical preset；模型原样下发；effort 一次带上
+      {
+        const { ctx, res } = mkPostCtx(fx, {
+          model: 'deepseek-official/deepseek-flash',
+          permission_mode: 'manual',
+          reasoning_effort: 'high',
+        });
+        await taskSessionProfile(ctx, task);
+        assert.equal(res.status, 200);
+        assert.equal(res.body, '{"ok": true, "model": "deepseek-official/deepseek-flash", '
+          + '"permission_mode": "workspace-write", "reasoning_effort": "high"}');
+        // 下发顺序：权限（preset 直达、不带 mode）先于模型（与 applySessionDefaults 同序）
+        assert.deepEqual(drv.byPath('POST /permission').map((c) => c.body),
+          [{ session_id: 'sess-task-profile-ok', preset: 'workspace-write' }]);
+        assert.deepEqual(drv.byPath('POST /model').map((c) => c.body),
+          [{ session_id: 'sess-task-profile-ok',
+            model: 'deepseek-official/deepseek-flash', reasoning_effort: 'high' }]);
+        // 写回任务级默认（下一轮起会话沿用；effort 不落库）
+        assert.equal(taskRow().permission, 'workspace-write');
+        assert.equal(taskRow().model, 'deepseek-official/deepseek-flash');
+      }
+      // ② 两端空白 strip；只给权限档 ⇒ 不发 /model、不改任务 model
+      {
+        const { ctx, res } = mkPostCtx(fx, { permission_mode: '  read-only  ' });
+        await taskSessionProfile(ctx, task);
+        assert.equal(res.status, 200);
+        assert.equal(res.body, '{"ok": true, "model": "", "permission_mode": "read-only", '
+          + '"reasoning_effort": ""}');
+        assert.equal(drv.byPath('POST /permission').length, 2);
+        assert.equal(drv.byPath('POST /model').length, 1, '无 model/effort ⇒ 不发 /model');
+        assert.equal(taskRow().permission, 'read-only');
+        assert.equal(taskRow().model, 'deepseek-official/deepseek-flash', 'model 未被清空');
+      }
+      // ③ 只给思考等级 ⇒ model 传空串让插件回读当前模型；回执 model/permission_mode 空、
+      //    reasoning_effort 回显（恒三键）
+      {
+        const { ctx, res } = mkPostCtx(fx, { reasoning_effort: 'low' });
+        await taskSessionProfile(ctx, task);
+        assert.equal(res.status, 200);
+        assert.equal(res.body, '{"ok": true, "model": "", "permission_mode": "", '
+          + '"reasoning_effort": "low"}');
+        assert.deepEqual(drv.byPath('POST /model').at(-1).body,
+          { session_id: 'sess-task-profile-ok', model: '', reasoning_effort: 'low' });
+        assert.equal(taskRow().permission, 'read-only', '权限档不被空值覆盖');
+      }
+    });
+    // ④ 驱动不可用 ⇒ 502 带空格（参数合法且会话在场才走驱动）
+    await withoutDriver(async () => {
+      const { ctx, res } = mkPostCtx(fx, { model: 'm' });
+      await taskSessionProfile(ctx, task);
+      assert.equal(res.status, 502);
+      assert.deepEqual(bodyJson(res),
+        { error: '未配置 dsh agent 驱动（非插件形态或插件未下发驱动地址）' });
+    });
+  });
+});
+
+test('tasks/session/compact：404 / 族 400 / 无会话 409 / busy 409 / 驱动 400 / 成功 started:true', async () => {
+  await withFixture('sess-route-taskcompact', async (fx) => {
+    const pid = insertProject(fx.db, { projectDir: PROJECT_DIR });
+    const task = insertTask(fx.db, pid, { sessionId: 'sess-compact', status: 'done' });
+    const url = (id) => `/api/tasks/${id}/session/compact`;
+
+    // ① 404
+    {
+      const { ctx, res } = mkPostCtx(fx, {});
+      await taskSessionCompact(ctx, 999999);
+      assert.equal(res.status, 404);
+      assert.deepEqual(bodyJson(res), { error: 'task not found' });
+    }
+    // ② 退场族 ⇒ 400 带空格（复用看板 compact 的退场族文案）
+    const retiredPid = insertProject(fx.db, {
+      name: 'compact-retired', projectDir: PROJECT_DIR, agentPath: '/usr/local/bin/kimi',
+    });
+    const retiredTask = insertTask(fx.db, retiredPid, { sessionId: 'sess-r' });
+    {
+      const { ctx, res } = mkPostCtx(fx, {});
+      await taskSessionCompact(ctx, retiredTask);
+      assert.equal(res.status, 400);
+      assert.equal(bodyJson(res).error, '该智能体族已下线，请在项目设置里改绑 dsh 插件');
+    }
+    // ③ 无会话 ⇒ 409 紧凑
+    const noSidTask = insertTask(fx.db, pid, { sessionId: '' });
+    {
+      const { ctx, res } = mkPostCtx(fx, {});
+      await taskSessionCompact(ctx, noSidTask);
+      assert.equal(res.status, 409);
+      assert.equal(res.body, '{"error":"会话尚未生成（首轮执行后才有）"}');
+    }
+    // ④ busy：任务轮正在跑（含等作答挂起期间）⇒ 409 带空格
+    const busyTask = insertTask(fx.db, pid, { sessionId: 'sess-busy', status: 'running' });
+    {
+      const { ctx, res } = mkPostCtx(fx, {});
+      await taskSessionCompact(ctx, busyTask);
+      assert.equal(res.status, 409);
+      assert.deepEqual(bodyJson(res), { error: '会话运行中，稍后再试' });
+    }
+    // ⑤ 成功 ⇒ `{ok:true, started:true}`（json.dumps 带空格形态）+ 真打驱动 /compact
+    await withDriver(async (drv) => {
+      const { ctx, res } = mkPostCtx(fx, {});
+      await taskSessionCompact(ctx, task);
+      assert.equal(res.status, 200);
+      assert.equal(res.body, '{"ok": true, "started": true}');
+      assert.deepEqual(drv.byPath('POST /compact').map((c) => c.body),
+        [{ session_id: 'sess-compact' }]);
+    });
+    // ⑥ 驱动异常 ⇒ 400 带空格，文案复用看板 compact 的 i18n key
+    await withDriver(async (drv) => {
+      drv.failCompact = { code: 500, error: '压缩服务不可用' };
+      const { ctx, res } = mkPostCtx(fx, {});
+      await taskSessionCompact(ctx, task);
+      assert.equal(res.status, 400);
+      assert.deepEqual(bodyJson(res), { error: 'compact 失败: 压缩服务不可用' });
+    });
+    assert.ok(url(task).includes('/compact'));
   });
 });
 

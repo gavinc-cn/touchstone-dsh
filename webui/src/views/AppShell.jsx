@@ -990,13 +990,14 @@ export default function AppShell() {
               </Select>
             </div>
             <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>{t('思考等级：列表来自当前模型的可用档位；留空用智能体默认；设置后新起的会话（含任务与看板卡）按此档运行')}</div>
-            {/* 权限档（2026-10-21 起动态跟随 DSH 宿主权限目录 /api/agents/presets）：
-                项目内**看板卡片会话**的默认权限档；档位列表/顺序/标签与宿主一致，提交值
-                为宿主 preset key（read-only/workspace-write/danger-full-access/path-rules/...）。
+            {/* 权限档（2026-10-21 起动态跟随 DSH 宿主权限目录 /api/agents/presets；
+                2026-10-24 起任务会话同样支持）：项目内**看板卡片会话与任务会话**的默认
+                权限档；档位列表/顺序/标签与宿主一致，提交值为宿主 preset key
+                （read-only/workspace-write/danger-full-access/path-rules/...）。
                 目录不可用（驱动未配置/宿主插件缺失）时下拉置灰，只展示现值 label，仍可保存
-                其它字段。任务会话暂不适用（无审批作答面，需要审批的档会挂起）。 */}
+                其它字段。任务轮的权限链：会话实况 → tasks.permission → 本项目默认。 */}
             <div className="form-row">
-              <label title={t('项目内看板卡片会话的默认权限档；留空用宿主默认')}>{t('权限')}</label>
+              <label title={t('项目内看板卡片会话与任务会话的默认权限档；留空用宿主默认')}>{t('权限')}</label>
               <Select value={permValue} disabled={permUnavailable}
                 onValueChange={(v) => setPf({ ...pf, permission_mode: v === '__default__' ? '' : v })}>
                 <SelectTrigger className={'min-w-[200px] flex-1' + (pf.permission_mode ? '' : ' text-muted-foreground')}
@@ -1019,7 +1020,7 @@ export default function AppShell() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>{t('权限：项目内新起的看板卡片会话按此档运行；审批请求由平台接管并在会话窗作答；任务会话暂不支持权限档')}</div>
+            <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>{t('权限：项目内新起的看板卡片会话与任务会话按此档运行；审批请求由平台接管并在会话窗作答')}</div>
             <div className="form-row"><label title={t('理解/分析项目时优先使用的 skill，注入每类任务首轮提示词')}>{t('理解项目')}</label>
               <Select value={pf.skill_understand || '__none__'}
                 onValueChange={(v) => setPf({ ...pf, skill_understand: v === '__none__' ? '' : v })}>

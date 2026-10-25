@@ -135,6 +135,14 @@ test('unitState：running（活跃非等待行）→ queued（waiting 行带位�
     // c:2 已是终态（不在活跃行集）⇒ 前缀仍是 {c:1}，t:7 的 ahead 仍是 1（c:2 不再计）
     // 等等：c:2 从等待区消失 ⇒ ahead 归 0 ⇒ pos = 1 + 0 + 1 = 2，total = 2（c:1,t:7）
     assert.deepEqual(runner.unitState('t:7', pid, o), { state: 'queued', pos: 2, total: 2 });
+
+    // 2026-10-24：suspended 行仍报 running（活跃非等待），但**不计位次前缀**
+    fx.db.prepare("UPDATE wait_items SET state='suspended' "
+      + "WHERE kind='task' AND target_id='7'").run();
+    assert.deepEqual(runner.unitState('t:7', pid, o), { state: 'running', pos: 0, total: 0 });
+    insertWait(fx.db, { projectId: pid, kind: 'task', targetId: 8, state: 'waiting', seq: 10 });
+    // 前缀只有 c:1 finishing；t:7 suspended 既非 waiting 也非前缀 ⇒ 不计位次也不挡位
+    assert.deepEqual(runner.unitState('t:8', pid, o), { state: 'queued', pos: 2, total: 3 });
   });
 });
 

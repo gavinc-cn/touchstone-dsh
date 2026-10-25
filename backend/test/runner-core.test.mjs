@@ -585,6 +585,12 @@ test('⑩ recover：waiting 存活 / a: 放回 / m: 记败 / t: 分流 / running
     insertWait(fx.db, { projectId: p1, kind: 'task', targetId: tQ, state: 'starting', seq: 7 });
     const tD = insertTask(fx.db, p1, { name: 'done-collapse', status: 'done' });
     insertWait(fx.db, { projectId: p1, kind: 'task', targetId: tD, state: 'running', seq: 8 });
+    // 2026-10-24：suspended 属非 waiting 活跃行，按 t: 同款「queued?放回:cancel」收口
+    const tSuspQ = insertTask(fx.db, p1, { name: 'suspended-queued', status: 'queued' });
+    insertWait(fx.db, { projectId: p1, kind: 'task', targetId: tSuspQ, state: 'suspended', seq: 10 });
+    const tSuspRun = insertTask(fx.db, p1, { name: 'suspended-running', status: 'running',
+      sessionId: 'sess-susp' });
+    insertWait(fx.db, { projectId: p1, kind: 'task', targetId: tSuspRun, state: 'suspended', seq: 11 });
     const cR = queuedCard(fx, p1, { state: 'running', seq: 9 });
 
     // —— running 任务：杀残留 + 轮次收口 + interrupted + 通知 + 跳后段 ——
@@ -622,27 +628,36 @@ test('⑩ recover：waiting 存活 / a: 放回 / m: 记败 / t: 分流 / running
     assert.equal(rowState(fx, 'task', tQ), 'waiting', 't: 仍 queued ⇒ 放回续跑');
     assert.equal(rowState(fx, 'task', tD), 'cancelled', 't: 非 queued ⇒ 维持 cancel');
     assert.equal(metaOf(fx, 'task', tD).cancel_reason, '服务重启中断');
+    assert.equal(rowState(fx, 'task', tSuspQ), 'waiting',
+      'suspended + 任务仍 queued ⇒ 同 starting 放回续跑');
+    assert.equal(rowState(fx, 'task', tSuspRun), 'cancelled',
+      'suspended + 任务已起跑 ⇒ 同 starting 收口 cancel（不重投）');
+    assert.equal(metaOf(fx, 'task', tSuspRun).cancel_reason, '服务重启中断');
     assert.equal(rowState(fx, 'card', cR), 'running', 'c: 交 board.recover，本处不动');
-    // running 任务
+    // running 任务（含 recover 前处于等作答让行的 suspended 任务）
     const tr = taskRow(fx, tRun);
     assert.equal(tr.status, 'interrupted');
     assert.equal(tr.error, '服务重启中断');
     assert.ok(tr.ended_at);
+    assert.equal(taskRow(fx, tSuspRun).status, 'interrupted',
+      'suspended 任务的第二趟收口同 running：interrupted');
     assert.equal(taskRow(fx, child).status, 'done', '后段跳过');
     assert.equal(taskRow(fx, child).error, '前段任务被服务重启中断，后段跳过');
     const rounds = db.listRounds(tRun, o);
     assert.equal(rounds.find((x) => x.kind === 'load').status, 'interrupted', '发压运行行收口');
     assert.equal(rounds.find((x) => x.kind === 'agent').status, 'running',
       'agent 轮次收口沿用轮末口径（recover 不动）');
-    assert.deepEqual(notify, [[p1, tRun, 'running-task', 'normal', '服务重启中断', 0]],
-      '失败通知口（M7 缝）收到四元组 + skipped_n');
+    assert.deepEqual(notify, [
+      [p1, tSuspRun, 'suspended-running', 'normal', '服务重启中断', 0],
+      [p1, tRun, 'running-task', 'normal', '服务重启中断', 0],
+    ], '失败通知口（M7 缝）收到四元组 + skipped_n（按任务 id 序）');
     // 缺行补建
     assert.equal(rowState(fx, 'task', tMiss), 'waiting');
     // 汇总横幅
-    // 注意 n_requeue 的口径：waiting 的 m:/a: 两条 + a: 放回一条 + **t: queued 放回一条**
-    // （Python 在 t: 分支同样 `n_requeue += 1`，日志标签一并照抄）
+    // 注意 n_requeue 的口径：waiting 的 m:/a: 两条 + a: 放回一条 + **t: queued 放回两条**
+    // （含 suspended+queued 那条；Python 在 t: 分支同样 `n_requeue += 1`，日志标签一并照抄）
     assert.ok(lines.some((l) => l.includes('[runner] 服务重启：waiting 等待项存活 4 条')
-      && l.includes('m:/a: 存活 4 条')), lines.join('|'));
+      && l.includes('m:/a: 存活 5 条')), lines.join('|'));
     // 顺序硬约束：非 waiting 收口（放回 waiting）先于 queued 缺行补建（INSERT）
     const ops = auditOps(fx.db);
     const firstReturn = ops.indexOf('update:wait:waiting');

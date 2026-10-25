@@ -217,6 +217,6 @@ CREATE INDEX IF NOT EXISTS idx_rounds_task ON rounds(task_id);
 CREATE INDEX IF NOT EXISTS idx_board_cards_project ON board_cards(project_id);
 CREATE INDEX IF NOT EXISTS idx_board_comments_card ON board_comments(card_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_wait_active ON wait_items(kind, target_id)
-    WHERE state IN ('waiting','starting','running','finishing');
+    WHERE state IN ('waiting','starting','running','finishing','suspended');
 CREATE INDEX IF NOT EXISTS idx_wait_pick ON wait_items(state, project_id, seq);
 CREATE INDEX IF NOT EXISTS idx_chat_msgs_sid ON chat_msgs(sid, created_at);

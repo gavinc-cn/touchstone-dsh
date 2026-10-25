@@ -188,9 +188,13 @@ export const taskApi = {
   // 前端据此把原文放回输入框（排队行展示文本被截 120 字，不能用来回填）。
   sessionChatCancelQueue: (id, msgId) => api.post(`/api/tasks/${id}/session/chat/stop`,
     msgId ? { mode: 'cancel_queue', msg_id: msgId } : { mode: 'cancel_queue' }),
-  // 任务会话级配置（2026-10-04）：body={reasoning_effort}——只开**思考等级**一项
-  // （任务会话无权限档交互面、模型按任务/项目每轮下发，后端显式拒绝这两项）
+  // 任务会话级配置（2026-10-24 起对齐看板卡片会话）：body={model?, permission_mode?,
+  // reasoning_effort?}——权限档即时 set_permission 并回写 tasks.permission（任务级默认，
+  // 空=跟随项目）；模型即时 /model 并回写 tasks.model；思考等级同前。
+  // （2026-10-04 版只开思考等级、显式拒绝另两项，本批起不再拒绝）
   sessionProfile: (id, body) => api.post(`/api/tasks/${id}/session/profile`, body),
+  // 任务会话 compact 压缩上下文（对齐看板卡；busy 409、族不支持 400，错误口径同看板）
+  compact: (id) => api.post(`/api/tasks/${id}/session/compact`),
   // session 图片 URL(同源 cookie 直接供 <img src>)
   sessionMediaUrl: (id, agent, mediaId) =>
     `${BASE}/api/tasks/${id}/session/media/${encodeURIComponent(mediaId)}?agent=${encodeURIComponent(agent)}`,

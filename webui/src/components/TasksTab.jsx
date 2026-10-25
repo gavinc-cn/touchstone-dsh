@@ -1,10 +1,11 @@
-import { useState, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useAppStore } from '../stores/app'
-import { taskApi } from '../api'
+import { projectApi, taskApi } from '../api'
 import { toast } from '../utils/toast'
 import { fmtTime, stLabel } from '../utils/renderMd'
 import { RETEST_ALL_FAILED, RETEST_NONE, RETEST_RANGE, retestLabel } from '../utils/taskEnums'
 import { t, useI18n } from '../utils/i18n'
+import { permissionLabel } from '../utils/permission'
 import { useResizable } from '../hooks/useResizable'
 import { RzHandles } from './RzHandles'
 import SessionModal from './SessionModal'
@@ -75,6 +76,12 @@ function stopToForm(task) {
     else { f.dur_value = Math.max(1, Math.round(s / 60)); f.dur_unit = 'min' }
   }
   return f
+}
+
+/** 任务详情「权限」行文案（2026-10-24 任务会话对齐卡片）：
+ *  任务级 permission 为空＝跟随项目默认；非空走宿主目录 label → 内置中文名 → 原值映射。 */
+function permissionLabelFor(options, value) {
+  return value ? permissionLabel(options, value) : t('跟随项目默认')
 }
 
 // 任务类型 → 展示名（机器值不翻译，只映射展示）
@@ -168,6 +175,17 @@ export default function TasksTab({ onCreated } = {}) {
   const { rzOn, rzStyle, rzStart, rzDragStart, rzReset } = useResizable()
   // 搜索关键字: 匹配任务名称 / session id（大小写不敏感）
   const [kw, setKw] = useState('')
+  // 宿主权限目录（2026-10-24 任务会话对齐卡片）：任务详情「权限」行存的是宿主 preset key，
+  // 用目录 label 显示中文名；目录不可用（驱动未配置/拉取失败）时 permissionLabel 回退
+  // 内置中文名，不阻塞列表/详情（任务级空值＝跟随项目默认）。
+  const [permOpts, setPermOpts] = useState([])
+  useEffect(() => {
+    let stopped = false
+    projectApi.agentPresets()
+      .then((r) => { if (!stopped) setPermOpts((r && Array.isArray(r.options)) ? r.options : []) })
+      .catch(() => { if (!stopped) setPermOpts([]) })
+    return () => { stopped = true }
+  }, [])
 
   // 终点选项由生命周期阶段派生（排除 gen_case 的类型 = 回归）
   const stages = lifecycleStages()
@@ -432,6 +450,15 @@ export default function TasksTab({ onCreated } = {}) {
                           {task.auto_commit ? t('自动提交') : ''}{task.auto_commit && task.auto_deploy ? '/' : ''}{task.auto_deploy ? t('自动部署') : ''}{task.auto_deploy && task.auto_retest ? '/' : ''}{task.auto_retest ? t('自动复测') : ''}
                         </span>
                       )}
+                      {/* 等待作答徽标（2026-10-24 任务会话对齐卡片）：列表行
+                          interaction_pending=任务会话正挂起等用户作答（agent 提问/审批）。
+                          后端只对 status=running 的任务探测，前端只按字段渲染。 */}
+                      {task.interaction_pending && (
+                        <span className="badge st-retest" style={{ verticalAlign: -2 }}
+                          title={t('agent 向用户提问挂起，等待作答')}>
+                          {t('等待作答')}
+                        </span>
+                      )}
                       {task.error && <div className="tl-err">{task.error}</div>}
                     </div>
                     <div><span className={'badge st-' + task.status}><span className="dot"></span>{stLabel(task.status)}</span></div>
@@ -504,7 +531,10 @@ export default function TasksTab({ onCreated } = {}) {
                         <div className="kv"><span className="k">{t('自动修复')}</span><span className="v">{detail.auto_fix ? t('开') : t('关')}</span></div>
                         <div className="kv"><span className="k">{t('复测')}</span><span className="v">{detail.retest ? retestLabel(detail.retest) : t('不复测')}</span></div>
                         <div className="kv"><span className="k">{t('模型')}</span><span className="v">{detail.model || t('（默认）')}</span></div>
-                        <div className="kv"><span className="k">{t('权限')}</span><span className="v">{detail.permission || t('（CLI 默认）')}</span></div>
+                        {/* 权限档（2026-10-24 任务会话对齐卡片）：任务级 preset key 用宿主目录
+                            label 显示中文名；空＝跟随项目默认（权限链：会话实况 → tasks.permission
+                            → projects.permission_mode，会话窗切换会回写任务级默认） */}
+                        <div className="kv"><span className="k">{t('权限')}</span><span className="v">{permissionLabelFor(permOpts, detail.permission)}</span></div>
                         <div className="kv"><span className="k">{t('自动提交')}</span><span className="v">{detail.auto_commit ? t('开') : t('关')}</span></div>
                         <div className="kv"><span className="k">{t('自动部署')}</span><span className="v">{detail.auto_deploy ? t('开') : t('关')}</span></div>
                         <div className="kv"><span className="k">{t('自动复测')}</span><span className="v">{detail.auto_retest ? t('开') : t('关')}</span></div>

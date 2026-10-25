@@ -100,23 +100,29 @@ function detectPython() {
 
 const PYTHON_SKIP = detectPython() ? false : `未找到可用的 Python 解释器: ${PYTHON}（TS_PYTHON 可指定）`;
 
-// Python 真跑实测的 executed 列表（2026-10-11，db.init_db() + 夹具 SQL 副本）
+// Python 真跑实测的 executed 列表（2026-10-11；2026-10-24 追加两条迁移后按 Node 实跑复核）
+// 注：两条 2026-10-24 迁移里，`tasks_permission_presets` 是**数据迁移**（rows 守卫查
+// `tasks.permission IN ('manual','yolo','auto')`）——夹具任务行 permission 收敛后为 ''，
+// 故两套夹具都不命中（与 py `test_schema_export.py::test_guards_fire_only_when_condition_holds`
+// 的期望一致）；`wait_items_rebuild_active_index_suspended` 是**结构迁移**，旧夹具的
+// `idx_wait_active` 是四活跃态 ⇒ 命中。
 /** 空库首启：清单里两种无条件步 + 版本落章（补列由收敛完成、不产生清单步） */
 const FRESH_EXECUTED = [
   '2026-09-04_projects_user_name_unique_index',
   '2026-09-24_drop_leases',
   '2026-10-11_schema_version_stamp',
 ];
-/** pre_alter 第一轮：无历史包袱 → 只跑无条件步 + 旧口径活跃索引重建 */
+/** pre_alter 第一轮：无历史包袱 → 无条件步 + 旧口径活跃索引重建 + 五活跃态索引重建 */
 const PRE_ALTER_ROUND1_EXECUTED = [
   '2026-09-04_projects_user_name_unique_index',
   '2026-09-24_drop_leases',
   '2026-09-21_wait_items_rebuild_active_index',
+  '2026-10-24_wait_items_rebuild_active_index_suspended',
   '2026-10-11_schema_version_stamp',
 ];
 /** pre_alter 第二轮：索引已新口径 → 不再重建 */
 const PRE_ALTER_ROUND2_EXECUTED = FRESH_EXECUTED;
-/** ancient 第一轮：13 步全跑（含表重建） */
+/** ancient 第一轮：14 步全跑（含表重建 + 五活跃态索引重建） */
 const ANCIENT_ROUND1_EXECUTED = [
   '2026-09-04_projects_guide_text_merge',
   '2026-09-04_projects_user_id_backfill',
@@ -130,6 +136,7 @@ const ANCIENT_ROUND1_EXECUTED = [
   '2026-09-24_drop_leases',
   '2026-09-21_wait_items_claimed_to_starting',
   '2026-09-21_wait_items_rebuild_active_index',
+  '2026-10-24_wait_items_rebuild_active_index_suspended',
   '2026-10-11_schema_version_stamp',
 ];
 /** ancient 第二轮：重建已发生 → 只剩无条件步 + 长期可重入的飞书桥接 */
@@ -365,6 +372,9 @@ test('pre_alter 夹具：一轮收敛到目标结构（补 9 列）+ executed + 
     assert.equal(hasTable(handle, 'projects_old'), false, '重建中间表必须已 DROP');
     assert.match(one(handle, "SELECT sql FROM sqlite_master WHERE name='idx_wait_active'").sql,
       /'starting'/);
+    // 2026-10-24 结构迁移效果：旧四活跃态索引 → 五活跃态（含 suspended）
+    assert.match(one(handle, "SELECT sql FROM sqlite_master WHERE name='idx_wait_active'").sql,
+      /'suspended'/);
     assert.equal(db.schemaVersion(handle), 1);
   } finally {
     handle.close();
@@ -383,7 +393,7 @@ test('ancient 夹具：第一轮表重建丢 9 列（既有行为），第二轮
 
   // ---- 第一轮 ----
   const first = db.initDb({ dbPath, env: ENV_PASSWORDLESS });
-  assert.deepEqual(first.executed, ANCIENT_ROUND1_EXECUTED, '13 步全跑（含表重建）');
+  assert.deepEqual(first.executed, ANCIENT_ROUND1_EXECUTED, '14 步全跑（含表重建）');
   const afterFirst = db.openDb(dbPath);
   try {
     // 显式钉住已知行为：projects 只剩 12 个老列，后加的 9 列被重建丢掉
@@ -447,6 +457,9 @@ test('ancient 夹具：第一轮表重建丢 9 列（既有行为），第二轮
 
     assert.match(one(handle, "SELECT sql FROM sqlite_master WHERE name='idx_wait_active'").sql,
       /'starting'/);
+    // 2026-10-24 结构迁移效果：旧四活跃态索引 → 五活跃态（含 suspended）
+    assert.match(one(handle, "SELECT sql FROM sqlite_master WHERE name='idx_wait_active'").sql,
+      /'suspended'/);
     assert.equal(one(handle,
       "SELECT json FROM app_settings WHERE key='schema_version'").json, '1');
     assert.equal(db.schemaVersion(handle), 1);

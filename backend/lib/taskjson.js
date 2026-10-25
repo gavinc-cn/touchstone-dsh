@@ -254,19 +254,50 @@ export function sessionTitle(row, { db } = {}) {
 }
 
 /**
- * `_task_json(row)`：任务 JSON（**字段与顺序逐字对齐 server.py:2533**，因为响应体走
+ * `_task_interaction_pending`：任务行「等待作答」徽标判据（2026-10-24，契约 §3.6）。
+ *
+ * 仅 `status=running` 的任务探（其余状态不会挂起等作答）；需要 dsh_plugin 且有会话 sid；
+ * 探针由调用方注入（`board.interactionProbe`，TTL 5s 复用，与任务会话窗同一份缓存）——
+ * **不用静态 import**：`board.js` 的模块求值期会调 `chat.setBoardBridge`，若从
+ * `runner → taskjson` 这条链静态引入 board，会把 board 的求值插进 chat 的依赖环里
+ * （chat 尚未初始化完 ⇒ `BOARD_BRIDGE` TDZ 崩溃，chat-lifecycle 用例实测）。故按依赖注入。
+ * 任何异常/未知/未注入探针一律 false——徽标是展示增强，不阻断任务列表渲染。
+ * @param {object} row 任务行
+ * @param {{db?: object, interactionProbe?: Function}} [deps]
+ * @returns {boolean}
+ */
+function taskInteractionPending(row, { db, interactionProbe } = {}) {
+  try {
+    if (row.status !== 'running') return false;
+    const sid = row.session_id || '';
+    if (!sid) return false;
+    if (typeof interactionProbe !== 'function') return false;
+    const project = getProject(pyGet(row, 'project_id', null), { db });
+    if (project === null || project === undefined) return false;
+    const family = agentFamily(project.agent_path);
+    if (family !== 'dsh_plugin') return false;
+    const st = interactionProbe(family, project, sid);
+    return Boolean(st && st.pending);
+  } catch {
+    return false;                                      // 展示派生失败按 false
+  }
+}
+
+/**
+ * `_task_json(row)`：任务 JSON（**字段与顺序逐字对齐 server.py**，因为响应体走
  * `pyJsonDumps`，顺序不同就是字节差异；对拍里 `kind:'text'` 用例会直接抓出来）。
  *
  * 三个派生字段：`new_cases`（案例库扫描）、`model`（effectiveModel：显式 > 首轮日志 -m > dsh 默认）、
- * `session_title`（dsh 会话标题）。
+ * `session_title`（dsh 会话标题）；2026-10-24 末尾新增 `interaction_pending`（等待作答徽标）。
  *
  * 缺列老行：Python 对「行里没这一列」会 IndexError（请求 500），但 `migrate()` 保证迁移后列必在
  * —— 这里对 `or "" / or 0` 那几列按空值降级、其余按 null 输出，属**有意的更稳行为**（单测覆盖）。
  * @param {object} row 任务行（`db.get_task` / `db.list_tasks`）
- * @param {{db?: object, stateCache?: object}} [deps]
+ * @param {{db?: object, stateCache?: object, interactionProbe?: Function}} [deps]
+ *   `interactionProbe` = `board.interactionProbe`（调用方注入，见 `taskInteractionPending`）
  * @returns {object}
  */
-export function taskJson(row, { db, stateCache } = {}) {
+export function taskJson(row, { db, stateCache, interactionProbe } = {}) {
   const raw = (key) => (row[key] === undefined ? null : row[key]);
   const str0 = (key) => pyOr(row[key] === undefined ? null : row[key], '');
   return {
@@ -302,5 +333,7 @@ export function taskJson(row, { db, stateCache } = {}) {
     started_at: raw('started_at'),
     ended_at: raw('ended_at'),
     error: raw('error'),
+    // 2026-10-24：等待作答徽标（仅 running 任务探；见 `taskInteractionPending`）
+    interaction_pending: taskInteractionPending(row, { db, interactionProbe }),
   };
 }

@@ -474,7 +474,7 @@ def test_leaked_runner_workers_cannot_steal_rows(monkeypatch, _leaked_runner):
     assert _claim_and_start(r, f"c:{CARD_A}") == 9
     with db.connect() as conn:             # 遗留 worker 未留下任何残留行
         assert conn.execute("SELECT COUNT(*) n FROM wait_items WHERE state IN"
-                            " ('starting','running','finishing')").fetchone()["n"] == 1
+                            " ('starting','running','finishing','suspended')").fetchone()["n"] == 1
 
 
 def test_undo_does_not_disarm_leaked_runner_mute(monkeypatch, _leaked_runner):

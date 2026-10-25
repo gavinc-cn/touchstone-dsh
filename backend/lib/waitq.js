@@ -92,13 +92,19 @@ export const KIND_EXT = 'ext';
 export const KINDS = Object.freeze([KIND_TASK, KIND_CARD, KIND_MSG, KIND_ANSWER, KIND_EXT]);
 
 /**
- * 状态机七枚举（v2a T1，裁决 R3）：claimed 被 starting 吸收。
+ * 状态机八枚举（v2a T1 裁决 R3：claimed 被 starting 吸收；2026-10-24 加 suspended）。
  * 注意 `STATE_*` 是**别名**（存量引用面），不是第二套取值——与 Python 同（waitq.py:55-57）。
  */
 export const WAITING = 'waiting';
 export const STARTING = 'starting';
 export const RUNNING = 'running';
 export const FINISHING = 'finishing';
+/**
+ * 挂起（2026-10-24 任务会话「等待作答让行」）：仅 `t:` 行使用，`starting ↔ suspended`。
+ * 语义＝「行仍活着、仍归本单元，但**暂时让出项目串行位**」——不占前缀窗口/位次/unit_busy，
+ * 但仍是活跃行（活跃唯一索引 / active_items 扫描 / 收口面都包含它）。
+ */
+export const SUSPENDED = 'suspended';
 export const DONE = 'done';
 export const FAILED = 'failed';
 export const CANCELLED = 'cancelled';
@@ -108,13 +114,14 @@ export const STATE_WAITING = WAITING;
 export const STATE_STARTING = STARTING;
 export const STATE_RUNNING = RUNNING;
 export const STATE_FINISHING = FINISHING;
+export const STATE_SUSPENDED = SUSPENDED;
 export const STATE_DONE = DONE;
 export const STATE_FAILED = FAILED;
 export const STATE_CANCELLED = CANCELLED;
 
-/** 活跃态（活跃唯一索引 / active_items 扫描口径） */
-export const ACTIVE_STATES = Object.freeze([WAITING, STARTING, RUNNING, FINISHING]);
-/** 调度口径运行前缀（位次口径另含 FINISHING，见裁决 R7） */
+/** 活跃态（活跃唯一索引 / active_items 扫描口径；2026-10-24 起含 suspended） */
+export const ACTIVE_STATES = Object.freeze([WAITING, STARTING, RUNNING, FINISHING, SUSPENDED]);
+/** 调度口径运行前缀（位次口径另含 FINISHING，见裁决 R7；**suspended 不计前缀**） */
 export const PREFIX_STATES = Object.freeze([STARTING, RUNNING]);
 
 /**
@@ -155,7 +162,7 @@ const SEQ_REBALANCE_EPS = 1e-9;
 
 /**
  * 活跃态超龄阈值（秒）：超过且无可证明证据 = 可疑泄漏（waitq.py:704）。
- * v2d T3 起判据覆盖 starting/running/finishing 三态。
+ * v2d T3 起判据覆盖 starting/running/finishing 三态；2026-10-24 加 suspended。
  */
 export const CLAIM_STALE_S = 1800;
 
@@ -563,7 +570,9 @@ function positionOn(handle, itemId) {
     const rk = memberKey(r.kind, r.target_id);
     totalKeys.add(rk);
     if (r.state === STATE_WAITING) waiting.push([r.id, rk]);
-    else prefixKeys.add(rk);             // starting/running/finishing：位次前缀
+    else if (r.state === STARTING || r.state === RUNNING || r.state === FINISHING) {
+      prefixKeys.add(rk);                // 显式三态：suspended 是活跃行但**不计位次/前缀**
+    }
   }
   let ahead = 0;
   for (const [rid, rk] of waiting) {
@@ -942,6 +951,48 @@ export function markFinishing(kind, targetId, options = {}) {
 }
 
 /**
+ * `starting → suspended`（2026-10-24 任务会话让行；waitq.py 同名）。
+ *
+ * 只在任务挂起等人工输入（提问/审批）时由 runner `_wait_turn_end_dsh` 调用：行仍归本单元、
+ * 仍是活跃行（活跃唯一索引/对账/收口面都看得见），但**不占**项目串行位（PREFIX_STATES 不含
+ * suspended ⇒ 不挡补位/位次）。**不动**认领/心跳/seq/meta 等列——让行不是放回，也不是新生命
+ * 周期（由 turn 结束的统一收口落终态）。rowcount 守卫：非 starting 行返回 `false`（不炸调用方）。
+ *
+ * @param {string} kind
+ * @param {string|number} targetId
+ * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
+ * @returns {boolean}
+ */
+export function suspend(kind, targetId, options = {}) {
+  return withWriteDb(options, (handle) => {
+    const info = handle.prepare(
+      "UPDATE wait_items SET state='suspended' WHERE kind=? AND target_id=?"
+      + " AND state='starting'",
+    ).run(kind, String(targetId));
+    return Number(info.changes) === 1;
+  });
+}
+
+/**
+ * `suspended → starting`（waitq.py 同名）：作答已收/轮次收尾时恢复行态。
+ * 同样只改 state、rowcount 守卫；非 suspended 行返回 `false`。
+ *
+ * @param {string} kind
+ * @param {string|number} targetId
+ * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
+ * @returns {boolean}
+ */
+export function resume(kind, targetId, options = {}) {
+  return withWriteDb(options, (handle) => {
+    const info = handle.prepare(
+      "UPDATE wait_items SET state='starting' WHERE kind=? AND target_id=?"
+      + " AND state='suspended'",
+    ).run(kind, String(targetId));
+    return Number(info.changes) === 1;
+  });
+}
+
+/**
  * 活跃项落终态（done/failed）；非活跃返回 `false`（waitq.py:508）。
  *
  * 状态守卫落在 UPDATE 上（rowcount 判定），避免读-写之间被并发抢先落终态；error 的 meta
@@ -1256,9 +1307,11 @@ export function selfcheck(probe = null, options = {}) {
     ).all()) {
       problems.push(`等待项重复: kind=${r.kind} target=${r.target_id} n=${r.n}`);
     }
+    // 2026-10-24：suspended 也纳入「超龄且无证据」报告面（正常等待作答的任务由
+    // `unitVerdict` 的 task.status=running 判 alive 兜底；只有 task 已删/已终态才报）
     const stale = handle.prepare(
       'SELECT * FROM wait_items'
-      + " WHERE state IN ('starting','running','finishing')"
+      + " WHERE state IN ('starting','running','finishing','suspended')"
       + ' AND claimed_at IS NOT NULL AND claimed_at < ?',
     ).all(cutoff);
     const crow = handle.prepare(
@@ -1325,7 +1378,10 @@ function unitAge(row) {
 
 /**
  * 可证死活跃行收口（启动对账 / 周期自检共用，v3c；waitq.py:798）：起步前（waiting/
- * starting）→ cancelled；起步后（running/finishing）→ failed（error=reason）。
+ * starting）→ cancelled；起步后（running/finishing/**suspended**）→ failed（error=reason）。
+ *
+ * 2026-10-24：suspended 归「起步后」支（与 Python 逐字同）——任务轮已起跑，只是行暂时让位；
+ * 可证死说明任务行已删/已终态，按 failed 收口（审计语义与 running 同）。
  *
  * 分流口径承 `runner.recover` 的按行收口映射（「服务重启中断」同款：未起跑的行本就是取消
  * 语义、已起跑的行按失败收口）；两者都是一次 rowcount 守卫的终态写入（终态行不再被改写，

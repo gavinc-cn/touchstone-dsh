@@ -1328,7 +1328,7 @@
           "unique": 1,
           "origin": "c",
           "partial": 1,
-          "sql": "CREATE UNIQUE INDEX idx_wait_active ON wait_items(kind, target_id)\n    WHERE state IN ('waiting','starting','running','finishing')",
+          "sql": "CREATE UNIQUE INDEX idx_wait_active ON wait_items(kind, target_id)\n    WHERE state IN ('waiting','starting','running','finishing','suspended')",
           "columns": [
             "kind",
             "target_id"

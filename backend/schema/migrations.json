@@ -72,6 +72,18 @@
       ]
     },
     {
+      "id": "2026-10-24_tasks_permission_presets",
+      "desc": "任务会话权限档改存 DSH 宿主 preset：旧三档 manual/yolo/auto 归一（manual→workspace-write，yolo/auto→danger-full-access）",
+      "when": {
+        "kind": "rows",
+        "sql": "SELECT 1 FROM tasks WHERE permission IN ('manual','yolo','auto') LIMIT 1"
+      },
+      "sql": [
+        "UPDATE tasks SET permission='workspace-write' WHERE permission='manual'",
+        "UPDATE tasks SET permission='danger-full-access' WHERE permission IN ('yolo','auto')"
+      ]
+    },
+    {
       "id": "2026-09-04_projects_drop_global_unique_name",
       "desc": "旧库 projects.name 全局 UNIQUE → (user_id,name) 用户内唯一：重建表",
       "when": {
@@ -152,6 +164,18 @@
       "sql": [
         "DROP INDEX idx_wait_active",
         "CREATE UNIQUE INDEX idx_wait_active ON wait_items(kind, target_id) WHERE state IN ('waiting','starting','running','finishing')"
+      ]
+    },
+    {
+      "id": "2026-10-24_wait_items_rebuild_active_index_suspended",
+      "desc": "活跃唯一索引口径扩到五活跃态（含 suspended：任务等作答让出串行位时行仍活跃）",
+      "when": {
+        "kind": "rows",
+        "sql": "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_wait_active' AND coalesce(sql,'') NOT LIKE '%suspended%' LIMIT 1"
+      },
+      "sql": [
+        "DROP INDEX idx_wait_active",
+        "CREATE UNIQUE INDEX idx_wait_active ON wait_items(kind, target_id) WHERE state IN ('waiting','starting','running','finishing','suspended')"
       ]
     },
     {

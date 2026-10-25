@@ -518,9 +518,10 @@ class Runner:
         - queued：等待项表里仍有本单元的 waiting 行（P4 起表驱动，R2）；
           **v2a T4 起位次含运行前缀（裁决 R7，「claimed 不计」口径废止）；
           v3a 起前缀成员口径 = 行（唯一来源，R1/R2）**：
-          pos = 前缀成员数（项目内 starting/running/finishing 行）+ waiting 行中
-          seq 更小者 + 1（1 基，即"本项目前面还有几个"），total = 项目成员总数
-          （行）。行即运行成员的完整表征（c: 行在起跑证实后跨轮 running 存活）。
+          pos = 前缀成员数（项目内 starting/running/finishing 行；**suspended 不计**
+          ——任务等作答让行不占位）+ waiting 行中 seq 更小者 + 1（1 基，即"本项目
+          前面还有几个"），total = 项目成员总数（行）。行即运行成员的完整表征
+          （c: 行在起跑证实后跨轮 running 存活）。
           他项目单元不计入位次——同项目串行才是"前面还有几个"的实际约束；
         - idle：表中数不到本单元的活跃行（未入队/已终态/键失效；下轮挑选自会
           清理残留脏行）。
@@ -544,8 +545,9 @@ class Runner:
                 total_keys.add(rk)
                 if row["state"] == waitq.STATE_WAITING:
                     waiting.append((rk, row))
-                else:
+                elif row["state"] in (waitq.STARTING, waitq.RUNNING, waitq.FINISHING):
                     prefix_keys.add(rk)       # starting/running/finishing：位次前缀（R7 全计）
+                # suspended（任务等作答让行）不计前缀/位次——让行即不占位（2026-10-24）
             mine = False
             ahead = 0
             for rk, row in waiting:
@@ -693,8 +695,10 @@ class Runner:
                     if kind in (waitq.KIND_MSG, waitq.KIND_ANSWER):
                         n_requeue += 1      # m:/a: waiting 行存活（无镜像可建，移交⑧）
                     continue
-                # starting/running/finishing 行（v2a T1 映射；claimed 已被
-                # starting 吸收——同一收口面，三态同型处理）
+                # starting/running/finishing/suspended 行（v2a T1 映射；claimed 已被
+                # starting 吸收——同一收口面；2026-10-24 suspended（任务等作答让行）
+                # 亦为非 waiting 活跃行：t: 行按下方「task 仍 queued?放回:cancel」
+                # 同款收口（停跑任务 cancel + 第二趟 interrupted，不重投））
                 if kind == waitq.KIND_CARD:
                     continue            # c: 交 board.recover 按实况收口（见其重建段）
                 if kind == waitq.KIND_ANSWER:
@@ -2044,18 +2048,25 @@ class Runner:
             sid = dshdriver.ensure_session(
                 sid, cwd=project["project_dir"], task=f"task-{task['id']}",
                 model=model_id, provider=model_provider)
-            # 项目级思考等级（2026-10-04）：会话实时态里已有显式档位就保持（用户在
-            # 会话详情页改过、以及上轮应用过的项目默认都记在这里），否则回落项目默认。
-            # best-effort：档位与模型不匹配等问题只记一行日志，本轮照常跑
-            # （**权限档不下发**：任务会话没有交互作答面，manual(approval=ask) 会让
-            #  轮次永久挂起等一个没人能答的审批——项目权限档只对看板卡会话生效）。
+            # 会话默认值（2026-10-04 思考等级；2026-10-24 任务会话对齐卡片会话：权限档
+            # 也下发）。取值优先「会话实时态里已有的显式值」（用户在会话窗改过、或上轮
+            # 应用过的默认都记在这里），否则回落项目默认：
+            #   权限链 = dshevents.session_permission_mode(sid) → tasks.permission →
+            #            projects.permission_mode（契约 §3.4；空=不改，沿用宿主默认）
+            # best-effort：档位与模型不匹配等问题只记日志，本轮照常跑。
+            # 等作答让行见 _wait_turn_end_dsh（suspended 行让出项目串行位）。
             effort = dshevents.session_effort(sid) or \
                 str(db.row_opt(project, "reasoning_effort") or "").strip()
-            if effort:
-                append_log(log_path, f"### 会话默认思考等级 effort={effort}\n")
+            pmode = dshevents.session_permission_mode(sid) or \
+                str(db.row_opt(task, "permission") or "").strip() or \
+                str(db.row_opt(project, "permission_mode") or "").strip()
+            if effort or pmode:
+                append_log(log_path, f"### 会话默认值 effort={effort or '(默认)'} "
+                                     f"permission={pmode or '(默认)'}\n")
                 dshdriver.apply_session_defaults(
                     sid, model=model_id, provider=model_provider,
-                    reasoning_effort=effort, log=lambda t: append_log(log_path, t))
+                    reasoning_effort=effort, permission_mode=pmode,
+                    log=lambda t: append_log(log_path, t))
             if sid != (task["session_id"] or ""):
                 # sid 在本轮开始即精确入库（不再等轮后从 stdout/mtime 猜）：会话窗口
                 # 运行期间即可按 exact sid 读事件；续轮直接用同一 sid resume
@@ -2076,7 +2087,7 @@ class Runner:
             append_log(log_path, f"### 轮次 {round_no} 开始 {time.strftime('%H:%M:%S')} "
                                  f"driver=dsh_plugin\n")
             dshdriver.prompt(sid, prompt)
-            exit_code = self._wait_turn_end_dsh(task, sid, waiter, log_path)
+            exit_code = self._wait_turn_end_dsh(project, task, sid, waiter, log_path)
         except dshdriver.DshDriverError as e:
             db.finish_round(round_id, "failed", -1, f"dsh 驱动调用失败: {e}", log_path)
             db.update_task(task["id"], error=f"dsh 驱动调用失败: {e}")
@@ -2103,40 +2114,109 @@ class Runner:
             pass
         return exit_code, sid
 
-    def _wait_turn_end_dsh(self, task, sid, waiter, log_path):
+    def _sync_task_wait_row(self, family, project, task, sid, log_path,
+                            suspended, force=False):
+        """任务等作答让行同步（2026-10-24，契约 §3.2）：按宿主交互实况把 t: 行在
+        `starting ↔ suspended` 之间迁移，返回更新后的 suspended 标志。
+
+        触发面（`_wait_turn_end_dsh`）：interaction 事件（force=True 强制刷新探测
+        缓存）与 5s tick。语义：
+          - `st.pending=True` 且行态 starting → `waitq.suspend`（rowcount 守卫）+
+            notify_all + 日志「让出项目串行位」——本单元不再占运行前缀，
+            同项目后续排队单元可先跑；
+          - `st is not None and not st.pending` 且行态 suspended → `waitq.resume`
+            （回 starting）+ notify_all + 日志「恢复项目串行位」；
+          - `st is None`（中枢断连/未知）→ **保持现状，不猜**（绝不因读不到而 resume）；
+          - 探测异常按未知处理（不阻断轮次）。
+        **不 abort turn**：宿主侧会话继续等作答，作答后同一 turn 继续跑。
+        只有 waitq 行态迁移成功（rowcount）才翻转本地标志——并发下已被他人改态
+        时不重复打日志。
+        """
+        import board  # 函数内 import 防循环（board 模块级 import runner）
+        try:
+            if force:
+                # interaction 事件那一刻：清掉 board 探测缓存再探，否则会撞上
+                # 5s TTL 内刚写入的 pending=false（事件比探测缓存新）
+                board._iw_clear(sid)
+            st = board.interaction_probe(family, project, sid)
+        except Exception:                          # noqa: BLE001 —— 探测异常=未知
+            return suspended
+        if st is None:
+            return suspended                       # 未知：不猜、保持现状
+        if st.get("pending"):
+            if not suspended and waitq.suspend(waitq.KIND_TASK, task["id"]):
+                append_log(log_path,
+                           "### 等待用户作答（提问/审批）：让出项目串行位\n")
+                with self._cond:
+                    self._cond.notify_all()
+                return True
+            return suspended
+        if suspended and waitq.resume(waitq.KIND_TASK, task["id"]):
+            append_log(log_path, "### 作答已收：恢复项目串行位\n")
+            with self._cond:
+                self._cond.notify_all()
+            return False
+        return suspended
+
+    def _wait_turn_end_dsh(self, project, task, sid, waiter, log_path):
         """等事件流推来的 turn/end（零远端轮询）。
 
         结束条件：waiter 收到 turn/end 帧（completed→0 / aborted→130 / 其余→1）。
-        本地 5s tick 只做三件事，都不碰远端：响应任务停止标记（再补一次 cancel
-        兜底）、检查 SSE 链路错误、检查 turn 是否压根没起来（宽限期内无 turn/start）。
+        本地 5s tick 做的事，都不碰远端轮询：响应任务停止标记（再补一次 cancel
+        兜底）、检查 SSE 链路错误、检查 turn 是否压根没起来（宽限期内无
+        turn/start）、以及**任务等作答让行**（2026-10-24）：interaction 事件即时
+        探测 + 每 5s tick 探测，按 `board.interaction_probe` 三态在
+        `waitq.suspend/resume` 间同步 t: 行（见 `_sync_task_wait_row`）——挂起时
+        让出项目串行位，作答后恢复；`st is None` 不猜。
+
+        收尾（turn 结束/停止/链路异常/宽限超时/未预期异常）：`finally` 若仍
+        suspended 则 resume 回 starting，随后 worker finally 按既有口径
+        `finish_by_target(done/failed)` 正常收口（行收口门禁已含 suspended）。
         """
         wait_started = time.time()
-        while True:
-            event = waiter.wait_turn(5.0)
-            if event == "turn_end":
-                append_log(log_path, f"### 轮次结束 turn_reason={waiter.turn_reason}\n")
-                return waiter.exit_code
-            if event == "interaction":
-                # 提问/审批已推给用户：本轮不结束（dsh 侧会话挂起等作答），
-                # 记一行日志后继续等 turn/end（用户作答后同一 turn 继续跑）
-                append_log(log_path, "### 会话等待人工输入（提问/审批）\n")
-                continue
-            if event == "error":
-                append_log(log_path, f"### 事件流异常: {waiter.error}\n")
-                return 1
-            if task["id"] in self._stop_requested:
-                try:
-                    dshdriver.cancel(sid)      # runner.stop 已调过一次，这里兜底
-                except dshdriver.DshDriverError as e:
-                    append_log(log_path, f"### cancel 失败: {e}\n")
-                return 130
-            if not waiter.started and time.time() - wait_started > DSH_TURN_START_GRACE:
-                append_log(log_path, f"### turn 未启动（{DSH_TURN_START_GRACE}s 未见 turn/start）\n")
-                try:
-                    dshdriver.cancel(sid)
-                except dshdriver.DshDriverError:
-                    pass
-                return 1
+        suspended = False
+        try:
+            while True:
+                event = waiter.wait_turn(5.0)
+                if event == "turn_end":
+                    append_log(log_path, f"### 轮次结束 turn_reason={waiter.turn_reason}\n")
+                    return waiter.exit_code
+                if event == "interaction":
+                    # 提问/审批已推给用户：本轮不结束（dsh 侧会话挂起等作答），
+                    # 记一行日志后继续等 turn/end（用户作答后同一 turn 继续跑）。
+                    # 事件的那一刻强制刷新探测缓存再判让行/恢复。
+                    append_log(log_path, "### 会话等待人工输入（提问/审批）\n")
+                    suspended = self._sync_task_wait_row(
+                        "dsh_plugin", project, task, sid, log_path, suspended,
+                        force=True)
+                    continue
+                if event == "error":
+                    append_log(log_path, f"### 事件流异常: {waiter.error}\n")
+                    return 1
+                if task["id"] in self._stop_requested:
+                    try:
+                        dshdriver.cancel(sid)      # runner.stop 已调过一次，这里兜底
+                    except dshdriver.DshDriverError as e:
+                        append_log(log_path, f"### cancel 失败: {e}\n")
+                    return 130
+                if not waiter.started and time.time() - wait_started > DSH_TURN_START_GRACE:
+                    append_log(log_path, f"### turn 未启动（{DSH_TURN_START_GRACE}s 未见 turn/start）\n")
+                    try:
+                        dshdriver.cancel(sid)
+                    except dshdriver.DshDriverError:
+                        pass
+                    return 1
+                # event == "timeout"：5s tick 兜底探测（interaction 事件可能漏帧/
+                # 迟帧；作答结束后也靠它把串行位还回去）
+                suspended = self._sync_task_wait_row(
+                    "dsh_plugin", project, task, sid, log_path, suspended)
+        finally:
+            if suspended:
+                # 收尾兜底：行回 starting（不残留 suspended），worker finally 再按
+                # done/failed 收口——与「让行 = 行态表达」不变量一致（不引入内存豁免）
+                if waitq.resume(waitq.KIND_TASK, task["id"]):
+                    with self._cond:
+                        self._cond.notify_all()
 
     def _should_stop(self, task, round_no):
         """任务级停止条件：轮数达到 / 累计新 bug 达到 / 截止时间到 / 运行时长达到，任一命中即停。"""

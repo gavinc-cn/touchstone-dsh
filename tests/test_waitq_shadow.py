@@ -175,7 +175,7 @@ def test_card_started_reopens_terminal_row_and_creates_missing():
     with db.connect() as conn:                             # 同键活跃行恒唯一
         n = conn.execute(
             "SELECT COUNT(*) n FROM wait_items WHERE kind='card' AND target_id=?"
-            " AND state IN ('waiting','starting','running','finishing')",
+            " AND state IN ('waiting','starting','running','finishing','suspended')",
             (str(cid2),)).fetchone()["n"]
     assert n == 1
 

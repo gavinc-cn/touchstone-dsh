@@ -3,10 +3,13 @@
 
 设计：doc_ai/plan/202609/20260917_0718_排队与占用统一模型.md
 - 等待项五类 kind：task / card / msg / answer / ext（外部条目，v2d T4，裁决 R13），
-  状态机七枚举（v2a T1，裁决 R3）
+  状态机（v2a T1 七枚举 + 2026-10-24 任务等作答让行新增 suspended，共八枚举）
   waiting → starting → running → finishing → done | failed | cancelled
   （claimed 被 starting 吸收，存量行由 db.migrate 归一；starting/running/finishing
   可经 return_to_waiting 放回）；
+  **suspended（仅 task）**：等用户作答（提问/审批）期间让出项目串行位——
+  `starting ↔ suspended`（suspend/resume，rowcount 守卫），不占前缀窗口/位次，
+  但仍是活跃行（finished 收口门禁含 suspended；turn 结束由 worker finally 落终态）；
 - seq 为 REAL 分数序：落尾 MAX(seq)+1 不变，中点插入/拖拽改序经
   insert_after_prefix / reposition（v2a T2，裁决 R4；间隙挤压等距重排、行 id 稳定）；
 - 一切等待项变更必须经本模块函数（唯一写路径）；其他模块禁止直接 SQL 写
@@ -43,21 +46,30 @@ KIND_ANSWER = "answer"
 KIND_EXT = "ext"
 KINDS = (KIND_TASK, KIND_CARD, KIND_MSG, KIND_ANSWER, KIND_EXT)
 
-# 状态机七枚举（v2a T1，v2 §2.5.2-5，裁决 R3）：claimed 被 starting 吸收
+# 状态机（v2a T1 七枚举 + 2026-10-24 suspended）：claimed 被 starting 吸收
 # （原子认领迁移同为 rowcount 守卫，仅目标态改名），starting/running/finishing
 # 行留队构成运行前缀（行即成员——v2a T3 补位器已接线调度窗口，T4 接线位次）。
+# suspended（仅 KIND_TASK）：任务轮等用户作答（提问/审批）时占用让行——行仍活跃
+# （唯一索引/active 扫描/收口门禁都算它），但**不在 PREFIX_STATES**：让出项目串行位，
+# 不占窗口/位次；作答后 resume 回 starting。**不 abort turn**（abort 会清掉待答提问）。
 WAITING, STARTING, RUNNING, FINISHING = "waiting", "starting", "running", "finishing"
+SUSPENDED = "suspended"
 DONE, FAILED, CANCELLED = "done", "failed", "cancelled"
-ACTIVE_STATES = (WAITING, STARTING, RUNNING, FINISHING)   # 活跃唯一索引 / active_items 扫描口径
-PREFIX_STATES = (STARTING, RUNNING)   # 调度口径运行前缀（位次口径另含 FINISHING，见 R7）
+# 活跃唯一索引 / active_items 扫描口径（五活跃态；suspended 亦活跃——否则收口门禁
+# finish_by_target 看不到它、唯一索引也挡不住同键再入队）
+ACTIVE_STATES = (WAITING, STARTING, RUNNING, FINISHING, SUSPENDED)
+PREFIX_STATES = (STARTING, RUNNING)   # 调度口径运行前缀（位次口径另含 FINISHING，见 R7；
+                                      # suspended 不占前缀/位次——等作答让行语义）
 # STATE_* 旧名保留为别名（存量引用面不动；claimed 无别名——唯一引用点
 # chat._reap_orphan_claim 已随改名切到 STATE_STARTING）
 STATE_WAITING, STATE_STARTING = WAITING, STARTING
 STATE_RUNNING, STATE_FINISHING = RUNNING, FINISHING
+STATE_SUSPENDED = SUSPENDED
 STATE_DONE, STATE_FAILED, STATE_CANCELLED = DONE, FAILED, CANCELLED
 
 _ACTIVE_IN = ",".join(f"'{s}'" for s in ACTIVE_STATES)      # SQL IN 片段（唯一出处）
-# return_to_waiting 可放回态 = 活跃非 waiting（starting/running/finishing）
+# return_to_waiting 可放回态 = 活跃非 waiting（starting/running/finishing/suspended）
+# ——suspended 按派生纳入（recover 的 a: 放回等路径不特殊处理）
 _RETURNABLE_IN = ",".join(f"'{s}'" for s in ACTIVE_STATES if s != WAITING)
 
 # 成员键前缀（行即成员；v3a 起前缀/位次/窗口的键空间）。拾取侧 runner._KEY_PREFIX
@@ -149,7 +161,7 @@ def active_items(project_id=None):
 def answer_pending_card_ids():
     """有活跃 answer 等待项（已作答·待送达）的卡片 id 集合（看板 queue_state
     批量派生用，P6——替代 board.is_answer_pending 逐卡点查的 N+1 形态；
-    口径同为四活跃态行）。"""
+    口径同为活跃态行（answer 行不会被 suspend——suspended 仅出现在 t: 行））。"""
     with db.connect() as conn:
         return {int(r[0]) for r in conn.execute(
             "SELECT DISTINCT target_id FROM wait_items"
@@ -203,6 +215,8 @@ def position(item_id):
     **v3a 读口切行（R1/R2）**：前缀成员 = starting/running/finishing 行，唯一
     来源——c: 行在起跑证实后跨轮 running 存活（`enter_running`，v3d 起亦无第二
     来源），与 runner.unit_state 手算同口径。
+    **2026-10-24**：suspended（任务等作答让行）属活跃但**不计入前缀/位次**——
+    让行单元在同行项目的位次里视同不在场（投影显式枚举三态，非 else 兜底）。
     无生产调用方（生产位次走 unit_state），留自测。"""
     row = get_item(item_id)
     if row is None or row["state"] != STATE_WAITING:
@@ -219,8 +233,9 @@ def position(item_id):
         total_keys.add(rk)
         if r["state"] == STATE_WAITING:
             waiting.append((r["id"], rk))
-        else:
+        elif r["state"] in (STARTING, RUNNING, FINISHING):
             prefix_keys.add(rk)               # starting/running/finishing：位次前缀
+        # suspended/其它活跃态不入前缀：等作答让行不占位次
     ahead = 0
     for rid_, rk in waiting:
         if rid_ == item_id:
@@ -407,6 +422,37 @@ def claim_by_target(kind, target_id, claimer=""):
     return claim(row["id"], claimer) if row is not None else False
 
 
+def suspend(kind, target_id):
+    """让行（2026-10-24，仅任务等作答）：**starting → suspended**（rowcount 守卫）。
+
+    语义（契约 §3.2/§4）：任务轮挂起等用户作答（提问/审批）时把行从运行前缀摘出
+    ——suspended 仍属 ACTIVE_STATES（活跃唯一索引/收口门禁照常覆盖），但不在
+    PREFIX_STATES（调度窗口/位次/unit_busy 均不占）⇒ 同项目后续排队单元可先跑；
+    **不 abort turn**（宿主侧会话继续等作答，作答后同一 turn 恢复）。
+    只改 state：claimed_at/claimed_by/last_seen/evidence/seq/meta 全不动（行仍是
+    同一次认领的生命周期，resume 即回 starting）。仅接 starting（运行中轮的行态；
+    非 starting/无行/已 suspended 返回 False，调用方按「不猜」保持现状）。
+    """
+    with db.connect() as conn:
+        cur = conn.execute(
+            "UPDATE wait_items SET state='suspended' WHERE kind=? AND target_id=?"
+            " AND state='starting'", (kind, str(target_id)))
+        return cur.rowcount == 1
+
+
+def resume(kind, target_id):
+    """恢复串行位（2026-10-24，仅任务）：**suspended → starting**（rowcount 守卫）。
+
+    作答已收（interaction pending 消失）/turn 收尾时调用：行回到调度前缀（重新占
+    项目串行位）。只改 state，其余列原样（同 `suspend`）。非 suspended 返回 False。
+    """
+    with db.connect() as conn:
+        cur = conn.execute(
+            "UPDATE wait_items SET state='starting' WHERE kind=? AND target_id=?"
+            " AND state='suspended'", (kind, str(target_id)))
+        return cur.rowcount == 1
+
+
 def mark_running(kind, target_id):
     """starting → running：证实运行（proc 存活 / web busy / turn 基线确认）后由起跑路径调用；
     非 starting 行返回 False（幂等守卫，不炸调用方）。
@@ -567,10 +613,10 @@ def return_to_waiting(item_id, not_before=0.0, bump_retry=False):
 def cancel(kind, target_id, reason="", states=None):
     """取消活跃等待项（幂等：无活跃行返回 False；reason 落 meta）。
 
-    状态守卫落在 UPDATE 上（四活跃态 + rowcount 判定，
+    状态守卫落在 UPDATE 上（活跃态 + rowcount 判定，
     与 _set_terminal 同型）：避免读-写之间被并发抢先落终态——终态行不再被改写成
     cancelled；reason 的 meta 合并在同一事务内、仅取消成功（rowcount==1）时执行。
-    states 收窄可取消行态（默认 None=四活跃态，既有调用面逐字不变；v2d T1：
+    states 收窄可取消行态（默认 None=活跃态，既有调用面逐字不变；v2d T1：
     作答排队防御只取 waiting——running/finishing 行终态化归 board.finish 唯一
     收尾点、starting 归 worker finally，行态口径统一，v2b 终审记录①）。
     空元组防御（v2d T1 minor 收口）：states=() 语义为「无可取消态」，直接返回
@@ -710,7 +756,9 @@ def selfcheck(probe=None):
 
     检查项（v3c 行口径，裁决 R12）：
     ① 同 (kind,target) 多条活跃等待项（独索引失效/绕过）；
-    ② 活跃态（starting/running/finishing，v2d T3 扩面——原仅 starting）**超龄
+    ② 活跃态（starting/running/finishing，v2d T3 扩面——原仅 starting；
+        2026-10-24 加 suspended：等作答行有 task status=running 判活兜底，正常不
+        误报，任务已删/终态时才报告）**超龄
        且无可证明证据**（claimed_at 越过 `CLAIM_STALE_S` 且判活三态非 alive、
        last_seen 心跳也不再新鲜）——可疑泄漏，纯报告面：
        行不因超龄被改写（可证死才自动收口的判据在 `_unit_verdict`/
@@ -746,7 +794,7 @@ def selfcheck(probe=None):
                             f" n={r['n']}")
         stale = conn.execute(
             "SELECT * FROM wait_items"
-            " WHERE state IN ('starting','running','finishing')"
+            " WHERE state IN ('starting','running','finishing','suspended')"
             " AND claimed_at IS NOT NULL AND claimed_at < ?",
             (cutoff,)).fetchall()
         crow = conn.execute(
@@ -797,7 +845,8 @@ def _unit_age(row):
 
 def _close_dead_unit(row, reason):
     """可证死活跃行收口（启动对账 / 周期自检共用，v3c）：起步前（waiting/
-    starting）→ cancelled；起步后（running/finishing）→ failed（error=reason）。
+    starting）→ cancelled；起步后（running/finishing/**suspended**）→ failed
+    （error=reason；suspended=任务轮已起跑、等作答期间可证死，按运行期口径收口）。
 
     分流口径承 `runner.recover` 的按行收口映射（「服务重启中断」同款：未起跑
     的行本就是取消语义、已起跑的行按失败收口）；两者都是一次 rowcount 守卫的

@@ -251,10 +251,12 @@ CREATE TABLE IF NOT EXISTS wait_items (
     last_seen   REAL NOT NULL DEFAULT 0,
     evidence    TEXT NOT NULL DEFAULT ''
 );
--- v2a T1（2026-09-21，裁决 R3）：活跃唯一索引覆盖四活跃态（claimed 已被
+-- v2a T1（2026-09-21，裁决 R3）：活跃唯一索引覆盖活跃态（claimed 已被
 -- starting 吸收；starting/running/finishing 行留队构成运行前缀）
+-- 2026-10-24：活跃态扩五枚举（+suspended：任务等作答让出串行位，行仍活跃）。
+-- 老库经 MIGRATIONS 步骤「2026-10-24_wait_items_rebuild_active_index_suspended」重建。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_wait_active ON wait_items(kind, target_id)
-    WHERE state IN ('waiting','starting','running','finishing');
+    WHERE state IN ('waiting','starting','running','finishing','suspended');
 CREATE INDEX IF NOT EXISTS idx_wait_pick ON wait_items(state, project_id, seq);
 
 CREATE TABLE IF NOT EXISTS chat_msgs (
@@ -369,6 +371,23 @@ MIGRATIONS = [
         ],
     },
     {
+        # 任务会话权限档（2026-10-24，任务会话对齐卡片会话批次）：tasks.permission
+        # 从旧三档口径改为宿主 preset key（与 projects.permission_mode 同口径）；
+        # 现库全空，本步属防御性迁移。**排在 tasks 表重建类迁移之前**：将来若加
+        # tasks 重建步骤，其 INSERT…SELECT 只搬固定列，本步须先跑（同 projects 先例）。
+        "id": "2026-10-24_tasks_permission_presets",
+        "desc": "任务会话权限档改存 DSH 宿主 preset：旧三档 manual/yolo/auto 归一"
+                "（manual→workspace-write，yolo/auto→danger-full-access）",
+        "when": {"kind": "rows",
+                 "sql": "SELECT 1 FROM tasks"
+                        " WHERE permission IN ('manual','yolo','auto') LIMIT 1"},
+        "sql": [
+            "UPDATE tasks SET permission='workspace-write' WHERE permission='manual'",
+            "UPDATE tasks SET permission='danger-full-access'"
+            " WHERE permission IN ('yolo','auto')",
+        ],
+    },
+    {
         "id": "2026-09-04_projects_drop_global_unique_name",
         "desc": "旧库 projects.name 全局 UNIQUE → (user_id,name) 用户内唯一：重建表",
         "when": {"kind": "index_origin_unique", "table": "projects"},
@@ -451,6 +470,23 @@ FROM projects_old""",
             "DROP INDEX idx_wait_active",
             "CREATE UNIQUE INDEX idx_wait_active ON wait_items(kind, target_id)"
             " WHERE state IN ('waiting','starting','running','finishing')",
+        ],
+    },
+    {
+        # 2026-10-24：活跃唯一索引口径扩到五活跃态（旧库 WHERE 尚无 suspended 时重建）。
+        # 必须排在「2026-09-21_wait_items_rebuild_active_index」之后（后者把极老库的
+        # claimed 口径先收敛到四活跃态，本步再补 suspended），且老库也要升——不能只靠
+        # 改 SCHEMA 里的建索引 DDL（CREATE IF NOT EXISTS 不会改已存在的索引）。
+        "id": "2026-10-24_wait_items_rebuild_active_index_suspended",
+        "desc": "活跃唯一索引口径扩到五活跃态（含 suspended：任务等作答让出串行位时行仍活跃）",
+        "when": {"kind": "rows",
+                 "sql": "SELECT 1 FROM sqlite_master WHERE type='index'"
+                        " AND name='idx_wait_active'"
+                        " AND coalesce(sql,'') NOT LIKE '%suspended%' LIMIT 1"},
+        "sql": [
+            "DROP INDEX idx_wait_active",
+            "CREATE UNIQUE INDEX idx_wait_active ON wait_items(kind, target_id)"
+            " WHERE state IN ('waiting','starting','running','finishing','suspended')",
         ],
     },
     {

@@ -507,9 +507,10 @@ def _session_queue_state(project_id, unit_state, running=False,
 
     判定序（高→低）：answer_pending > server_queued > interaction_pending
     > running > starting > queued_serial/foreign_busy > idle。
-    - answer_pending/server_queued/interaction_pending 仅看板卡片会话在场
-      （任务会话恒 False，按 unit_state/外部条目行退化为 running/queued_serial/
-      foreign_busy/idle 四态）；
+    - answer_pending 仅看板卡片会话在场（任务会话无卡，恒 False）；
+      2026-10-24 起任务会话也传 server_queued（宿主 inbox 行在场）与
+      interaction_pending（任务会话交互挂起）——任务侧首次出现这两枚枚举，
+      其余按 unit_state/外部条目行退化为 running/queued_serial/foreign_busy/idle；
     - running 为调用方口径（_board_session_running，含外部实况 busy）；
       unit_state=running（本单元有运行中行）同样判 running；
     - starting（板卡已交 runner、会话未证实运行的启动宽限窗口）：c: 行
@@ -1350,6 +1351,10 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/tasks/(\d+)/session/profile$", path)
         if m:
             self._api_task_session_profile(int(m.group(1)), body)
+            return
+        m = re.match(r"^/api/tasks/(\d+)/session/compact$", path)
+        if m:
+            self._api_task_session_compact(int(m.group(1)), body)
             return
         m = re.match(r"^/api/tasks/(\d+)/session/chat/stop$", path)
         if m:
@@ -2693,9 +2698,35 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- tasks API ----------
 
+    def _task_interaction_pending(self, row, proj):
+        """任务行「等待作答」徽标判据（2026-10-24，契约 §3.6）。
+
+        仅 `status=running` 的任务探（其余状态不会挂起等作答）；需要 dsh_plugin 且
+        有会话 sid；走 `board.interaction_probe`（TTL 5s 复用，与任务会话窗同一份
+        缓存）。任何异常/未知一律 False——徽标是展示增强，不阻断任务列表渲染。
+        """
+        try:
+            if row["status"] != "running" or proj is None:
+                return False
+            sid = row["session_id"] or ""
+            if not sid:
+                return False
+            family = runner.agent_family(proj["agent_path"])
+            if family != "dsh_plugin":
+                return False
+            st = board.interaction_probe(family, proj, sid)
+            return bool((st or {}).get("pending"))
+        except Exception:                      # noqa: BLE001 —— 展示派生失败按 False
+            return False
+
     def _task_json(self, row):
-        """任务 JSON；new_cases 为相对创建时案例基数的增量（当前库总数 - cases_base）。"""
+        """任务 JSON；new_cases 为相对创建时案例基数的增量（当前库总数 - cases_base）。
+
+        2026-10-24 新增 `interaction_pending`（任务列表/详情「等待作答」徽标；
+        `_api_list_tasks` 与单任务 GET 共用本函数，故字段加在这里而非列表路由）。
+        """
         new_cases = 0
+        proj = None
         try:
             proj = db.get_project(row["project_id"])
             if proj:
@@ -2725,7 +2756,9 @@ class Handler(BaseHTTPRequestHandler):
                 # T13：任务语言（创建时冻结；读侧统一归一，未知/空值 → zh）
                 "lang": i18n.task_lang(row),
                 "created_at": row["created_at"], "started_at": row["started_at"],
-                "ended_at": row["ended_at"], "error": row["error"]}
+                "ended_at": row["ended_at"], "error": row["error"],
+                # 2026-10-24：等待作答徽标（仅 running 任务探；见 _task_interaction_pending）
+                "interaction_pending": self._task_interaction_pending(row, proj)}
 
     @staticmethod
     def _session_title(row):
@@ -3753,48 +3786,104 @@ class Handler(BaseHTTPRequestHandler):
                       "application/json; charset=utf-8")
 
     def _api_task_session_profile(self, task_id, body):
-        """任务会话级配置（2026-10-04，只开**思考等级**）。
+        """任务会话级配置（2026-10-24 任务会话对齐卡片会话；语义对齐看板
+        `_api_board_session_profile`）：body={model?, permission_mode?,
+        reasoning_effort?}。
 
-        会话详情页对任务会话也给「思考等级」控件（与看板卡同款）——档位属会话请求
-        参数，不影响任务参数与轮次语义。**只接受 reasoning_effort**：
-          - `model`：任务模型在每轮起会话时按任务/项目模型下发，会话级切换下一轮即被
-            覆盖，开了会骗人，显式拒绝；
-          - `permission_mode`：任务会话没有交互面（任务端点不下发 meta.interaction，
-            审批卡无人可答），manual(approval=ask) 会让任务永久挂起，同样不开
-            （项目权限档只对看板卡会话生效，见 board._start_web 注释）。
-        body={reasoning_effort}（空串=恢复宿主/项目默认）；非法值 400；族不符 400；
-        会话尚未生成 409；驱动异常 502。
+        - `permission_mode`：normalize 校验（manual/yolo 旧别名→preset；其余必须在
+          宿主权限目录/内置兜底集合里；空=不改）→ `dshdriver.set_permission(sid,
+          preset)` **即时生效** → `db.update_task(permission=preset)` 回写任务默认
+          （runner 下一轮权限链取 tasks.permission）→ 回执 canonical preset；
+        - `model`：`dshdriver.set_model(sid, model)` 即时 → `db.update_task(model=…)`
+          回写（下一轮 resume 沿用；任务/项目模型口径不变）→ 回执原值；
+        - `reasoning_effort`：与 model 一次下传，空串=不改；不落库（会话级）。
+        校验顺序（计划 §3.4）：404 → 参数非法 400（空体/非法 effort/非法权限档）→
+        族 400 → 无会话 409 → 驱动 502。回执**恒含三键**（与看板 profile 字节同形，
+        前端乐观回显对齐）。
         """
         task, project, family = self._session_context(task_id)
         if task is None:
             self._error(404, 'task not found')
             return
-        for unsupported in ("model", "permission_mode"):
-            if str(body.get(unsupported) or ""):
-                self._error_spaced(400, '任务会话不支持 {kind}（仅看板卡会话支持）', {"kind": unsupported})
-                return
+        model = str(body.get("model") or "").strip()
+        # 权限档：旧三档别名先归一（manual→workspace-write、yolo→danger-full-access；
+        # auto 不在此列，只有宿主目录里确实有 auto 档才接受，与看板 profile 同口径）
+        pmode_raw = str(body.get("permission_mode") or "").strip()
+        pmode = dshdriver.LEGACY_PERMISSION_ALIASES.get(pmode_raw, pmode_raw)
+        effort = normalize_effort(body.get("reasoning_effort")) if "reasoning_effort" in body else ""
+        # —— 参数非法（400）——
+        if effort is None:
+            self._error_spaced(400, '思考等级非法（{levels} 或留空）',
+                               {"levels": "/".join(DSH_EFFORT_LEVELS)})
+            return
+        if not model and not pmode and not effort:
+            self._error(400, 'model/permission_mode/reasoning_effort required')
+            return
+        if pmode and pmode not in _permission_catalog_values():
+            self._error_spaced(400, '权限档非法（宿主权限目录里没有该档位）')
+            return
+        # —— 族（400）——
         if family != "dsh_plugin":
             self._error_spaced(400, '该 agent 族不支持会话级配置')
             return
-        effort = normalize_effort(body.get("reasoning_effort"))
-        if effort is None:
-            self._error_spaced(400, '思考等级非法（{levels} 或留空）', {"levels": "/".join(DSH_EFFORT_LEVELS)})
+        # —— 无会话（409）——
+        sid = task["session_id"] or ""
+        if not sid:
+            self._error(409, '会话尚未生成（首轮执行后才有）')
+            return
+        # —— 即时下发给宿主（失败 502；成功后才回写任务行）——
+        try:
+            if pmode:
+                dshdriver.set_permission(sid, pmode)
+            if model or effort:
+                # model 传原样（可带 provider/ 前缀，插件负责拆）；只改思考等级时
+                # model 传空串让插件从会话当前模型回读（与看板 profile 一致）
+                dshdriver.set_model(sid, model, reasoning_effort=effort)
+        except dshdriver.DshDriverError as e:
+            self._error_spaced(502, e)
+            return
+        # 写回任务级默认（下一轮起会话/续轮沿用；effort 属会话级、不落任务行）
+        if pmode:
+            db.update_task(task_id, permission=pmode)
+        if model:
+            db.update_task(task_id, model=model)
+        self._respond(200, json.dumps({"ok": True, "model": model,
+                                       "permission_mode": pmode,
+                                       "reasoning_effort": effort or ""},
+                                      ensure_ascii=False).encode("utf-8"),
+                      "application/json; charset=utf-8")
+
+    def _api_task_session_compact(self, task_id, body):
+        """任务会话 compact（压缩上下文，2026-10-24；口径同看板 compact）。
+
+        单族世界：走驱动 `/compact`（插件侧执行宿主 `/compact` 命令，触发即返回；
+        压缩在 dsh 进程内异步进行）。busy 拒绝（409，判据=任务轮正在跑
+        `task.status=='running'`，含等作答挂起期间）；族不支持 400（复用看板
+        compact 的退场族文案）；会话尚未生成 409；驱动异常 400（文案同看板
+        compact：`compact 失败: <detail>`）。成功 `{ok:true, started:true}`。
+        """
+        task, project, family = self._session_context(task_id)
+        if task is None:
+            self._error(404, 'task not found')
+            return
+        if family != "dsh_plugin":
+            self._error_spaced(400, runner.RETIRED_MSG)
             return
         sid = task["session_id"] or ""
         if not sid:
             self._error(409, '会话尚未生成（首轮执行后才有）')
             return
-        # 模型取任务/项目口径（与 runner 起轮一致）：只改思考等级时插件也能自己回读
-        # 会话当前模型，这里传上是为了「档位与模型不匹配」时宿主能给出准确报错
-        model = (task["model"] or "").strip() or \
-            ((project["model"] or "").strip() if project else "")
-        provider, mid = dshdriver.split_model(model)
-        try:
-            dshdriver.set_model(sid, mid, provider=provider, reasoning_effort=effort)
-        except dshdriver.DshDriverError as e:
-            self._error_spaced(502, e)
+        if task["status"] == "running":
+            self._error_spaced(409, '会话运行中，稍后再试')
             return
-        self._respond(200, json.dumps({"ok": True, "reasoning_effort": effort},
+        try:
+            dshdriver.compact(sid)
+        except dshdriver.DshDriverError as e:
+            self._error_spaced(400, i18n.localizable(
+                RuntimeError(f"compact 失败: {e}"), "compact 失败: {detail}",
+                {"detail": str(e)}))
+            return
+        self._respond(200, json.dumps({"ok": True, "started": True},
                                       ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
 
@@ -4806,21 +4895,51 @@ class Handler(BaseHTTPRequestHandler):
                 "capabilities": family_capabilities(family),
                 "project_busy": _project_busy(project["id"]) if project else False,
                 "chat": chat.state(sid)}
-        # 会话级思考等级（会话窗「思考等级」控件，2026-10-04）：事件流里学到的宿主
-        # reasoningEffort（driver/model 帧）；没有就不下发，前端按「默认」渲染。
-        # 任务会话的档位下发见 _api_task_session_profile（只此一项可改）。
+        # 会话级实时态（2026-10-24 任务会话对齐卡片会话；仅在 dsh_plugin 且有
+        # sid 时下发，值/口径与看板会话 meta 同源）：
+        #   sessionEffort（2026-10-04）→ interaction（审批/提问，按需探测 TTL 5s）→
+        #   permission（宿主 preset key，缺省不下发）→ sessionModel（缺省不下发）
+        #   → queue（宿主 inbox 行，只展示）→ owned（外部会话三态）。
+        interaction = None
         if sid and family == "dsh_plugin":
+            st = dshevents.get(sid) or {}
             effort = dshevents.session_effort(sid)
             if effort:
                 base["sessionEffort"] = effort
+            # 交互（提问/审批）实况：任务会话没有看板 watcher，按需探测并写 watcher
+            # 缓存（与作答端点 `_api_task_answer_interaction` 共用同一份缓存/白名单；
+            # 形态同看板 `meta.interaction`：pending/kind/qid/approval_id/answerable/
+            # questions/options/text…）。
+            if project is not None:
+                interaction = board.interaction_probe(family, project, sid)
+            base["interaction"] = interaction
+            # 权限档：宿主 preset 实况（2026-10-21 起 preset 优先；可能 path-rules 等）
+            pmode = _session_permission_mode(st)
+            if pmode:
+                base["permission"] = pmode
+            # 会话级模型（会话窗「模型」展示）：事件流里学到的 provider/model
+            sel = st.get("model") or {}
+            if sel.get("model"):
+                base["sessionModel"] = (f"{sel['provider']}/{sel['model']}"
+                                        if sel.get("provider") else sel["model"])
+            # 宿主 inbox 排队行（P6 #21）：[{id,text}] 同形，只展示、不给「立即注入」
+            base["queue"] = [{"id": str(m.get("id") or ""),
+                              "text": str(m.get("text") or "")}
+                             for m in (st.get("inbox") or [])]
+            # 会话归属三态（外部会话提示条/停止门控）：True 平台自持 / False 外部 /
+            # None 注册表未知（前端按池内渲染）
+            base["owned"] = _session_owned(sid)
         # 统一队列态（会话窗标题「队列」徽标）：本任务单元此刻排队/运行/空闲；
         # 探到正在写的会话（sid 未入库）时 task_id 仍是准确的队列键，照常下发
         base["unit_state"] = _unit_state(project["id"] if project else 0,
                                          f"t:{task['id']}")
-        # 展示派生（P6）：任务会话无卡——answer_pending/server_queued 不在场，
-        # 按 unit_state/外部条目行退化为 running/queued_serial/foreign_busy/idle
+        # 展示派生（P6/R2/R10）：任务会话无卡——answer_pending 不在场；
+        # server_queued 由宿主 inbox 行在场判定；interaction_pending=交互挂起
+        # （2026-10-24 任务侧首次出现该枚举）；其余按 unit_state/外部条目行退化。
         base["queue_state"] = _session_queue_state(
-            project["id"] if project else 0, base["unit_state"])
+            project["id"] if project else 0, base["unit_state"],
+            server_queued=bool(base.get("queue")),
+            interaction_pending=bool((interaction or {}).get("pending")))
         if sfamily not in sessparse.FAMILIES:
             return {**base, "found": False, "reason": "family"}
         if not sid:

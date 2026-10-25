@@ -206,8 +206,68 @@ def test_ancient_fixture_converges_and_runs_every_declared_migration(isolated_db
         idx_sql = conn.execute("SELECT sql FROM sqlite_master"
                                " WHERE name='idx_wait_active'").fetchone()["sql"]
         assert "'starting'" in idx_sql
+        assert "'suspended'" in idx_sql      # 2026-10-24 五活跃态（任务等作答让行）
     finally:
         conn.close()
+
+
+def test_tasks_permission_migration_normalizes_legacy_values(isolated_db):
+    """2026-10-24 任务会话权限档数据迁移：tasks.permission 旧三档 → 宿主 preset key
+    （manual→workspace-write、yolo/auto→danger-full-access），新档值不误伤、幂等。"""
+    db.DB_OVERRIDE = os.path.join(isolated_db, "task-perm-mig.db")
+    db.init_db()
+    with db.connect() as conn:
+        for name, mode in (("t-manual", "manual"), ("t-yolo", "yolo"),
+                           ("t-auto", "auto"), ("t-preset", "path-rules")):
+            conn.execute(
+                "INSERT INTO tasks(project_id, name, permission, created_at)"
+                " VALUES(1,?,?,'2026-10-24 00:00:00')", (name, mode))
+    executed = db.run_declared_migrations()
+    assert "2026-10-24_tasks_permission_presets" in executed
+    with db.connect() as conn:
+        got = {r["name"]: r["permission"] for r in conn.execute(
+            "SELECT name, permission FROM tasks")}
+    assert got == {"t-manual": "workspace-write", "t-yolo": "danger-full-access",
+                   "t-auto": "danger-full-access", "t-preset": "path-rules"}
+    # 幂等：守卫不再命中，值不变
+    again = db.run_declared_migrations()
+    assert "2026-10-24_tasks_permission_presets" not in again
+    with db.connect() as conn:
+        got2 = {r["name"]: r["permission"] for r in conn.execute(
+            "SELECT name, permission FROM tasks")}
+    assert got2 == got
+
+
+def test_wait_items_index_migration_adds_suspended(isolated_db):
+    """2026-10-24 结构迁移：旧 idx_wait_active（四活跃态）重建为五活跃态（含
+    suspended）；重复跑幂等（守卫不再命中，DDL 不变），且 suspended 行参与唯一约束。"""
+    db.DB_OVERRIDE = os.path.join(isolated_db, "wait-idx-mig.db")
+    db.init_db()
+    with db.connect() as conn:                       # 造旧索引形态（回退四活跃态）
+        conn.execute("DROP INDEX idx_wait_active")
+        conn.execute("CREATE UNIQUE INDEX idx_wait_active ON wait_items(kind, target_id)"
+                     " WHERE state IN ('waiting','starting','running','finishing')")
+    executed = db.run_declared_migrations()
+    assert "2026-10-24_wait_items_rebuild_active_index_suspended" in executed
+    with db.connect() as conn:
+        sql = conn.execute("SELECT sql FROM sqlite_master"
+                          " WHERE name='idx_wait_active'").fetchone()["sql"]
+    assert "'suspended'" in sql
+    # suspended 行同样受唯一约束（同键第二活跃行被拒）
+    with db.connect() as conn:
+        conn.execute("INSERT INTO wait_items (project_id, kind, target_id, state,"
+                     " seq, created_at) VALUES (1,'task','1','suspended',1,"
+                     " '2026-10-24 00:00:00')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO wait_items (project_id, kind, target_id, state,"
+                         " seq, created_at) VALUES (1,'task','1','waiting',2,"
+                         " '2026-10-24 00:00:00')")
+    again = db.run_declared_migrations()
+    assert "2026-10-24_wait_items_rebuild_active_index_suspended" not in again
+    with db.connect() as conn:
+        sql2 = conn.execute("SELECT sql FROM sqlite_master"
+                           " WHERE name='idx_wait_active'").fetchone()["sql"]
+    assert sql2 == sql
 
 
 # --------------------------------------------------------------------------
@@ -253,21 +313,26 @@ def test_unknown_handler_raises(isolated_db, monkeypatch):
 
 
 def test_guards_fire_only_when_condition_holds(isolated_db):
-    """rows 守卫：条件不成立时跳过、成立时执行（老库夹具上除权限档迁移外都应触发）。
+    """rows 守卫：条件不成立时跳过、成立时执行（老库夹具上除三条数据迁移外都应触发）。
 
-    2026-10-21 权限档迁移（`2026-10-21_projects_permission_mode_presets`）是**数据
-    迁移**，守卫 SQL 引用 `projects.permission_mode` 列——而 raw ancient 夹具是
-    2026-10-04 之前的库，本就没有该列（真实启动时先由 migrate() 的 ALTER 补列，且这类
-    极老库不可能带旧三档值）。故这里先给夹具补列（让守卫 SQL 可执行），并断言该步
-    **不命中**；它的命中路径由 `test_project_session_defaults.py::
-    test_permission_mode_migration_normalizes_legacy_values` 覆盖。
+    2026-10-21 projects 权限档迁移与 2026-10-24 tasks 权限档迁移是**数据迁移**，
+    守卫 SQL 分别引用 `projects.permission_mode` / `tasks.permission` 列——而 raw
+    ancient 夹具是这些列出现之前的库（真实启动时先由 migrate() 的 ALTER 补列，且这类
+    极老库不可能带旧三档值）。故这里先给夹具补两列（让守卫 SQL 可执行），并断言两步
+    **不命中**；它们的命中路径由 `test_project_session_defaults.py::
+    test_permission_mode_migration_normalizes_legacy_values` 与
+    `test_tasks_permission_migration_normalizes_legacy_values` 覆盖。
+    **2026-10-24 的 idx_wait_active 重建迁移是结构迁移**（老库索引口径不含
+    suspended），在本夹具上应命中（见下）。
     """
     path = _exec_sql_file(os.path.join(SCHEMA_DIR, "fixtures/ancient.sql"))
-    # raw 夹具不跑 migrate()：手工补列，只为让 2026-10-21 迁移的 when SQL 可执行
+    # raw 夹具不跑 migrate()：手工补列，只为让两条权限档迁移的 when SQL 可执行
     # （夹具里没有旧三档行 ⇒ 本来就不该命中；不补列会 no such column 而非「跳过」）。
     conn = sqlite3.connect(path)
     try:
         conn.execute("ALTER TABLE projects ADD COLUMN permission_mode"
+                     " TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE tasks ADD COLUMN permission"
                      " TEXT NOT NULL DEFAULT ''")
         conn.commit()
     finally:
@@ -275,8 +340,17 @@ def test_guards_fire_only_when_condition_holds(isolated_db):
     db.DB_OVERRIDE = path
     executed = db.run_declared_migrations()          # 夹具上直接跑清单（不先 migrate）
     ids = {step["id"] for step in db.MIGRATIONS}
-    assert set(executed) == ids - {"2026-10-21_projects_permission_mode_presets"}, \
-        "老库夹具应触发除权限档数据迁移外的全部声明式迁移"
+    assert set(executed) == ids - {"2026-10-21_projects_permission_mode_presets",
+                                   "2026-10-24_tasks_permission_presets"}, \
+        "老库夹具应触发除两条权限档数据迁移外的全部声明式迁移"
+    assert "2026-10-24_wait_items_rebuild_active_index_suspended" in executed
+    conn = db.connect()
+    try:
+        idx_sql = conn.execute("SELECT sql FROM sqlite_master"
+                               " WHERE name='idx_wait_active'").fetchone()["sql"]
+    finally:
+        conn.close()
+    assert "'suspended'" in idx_sql
     conn = db.connect()
     try:
         assert conn.execute("SELECT state FROM wait_items WHERE kind='card'"

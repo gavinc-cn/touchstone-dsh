@@ -27,23 +27,27 @@ function withFixture(tag, fn) {
   }
 }
 
-test('常量：五 kind、七状态、STATE_* 别名与活跃/前缀口径（改状态机时两侧一起改）', () => {
+test('常量：五 kind、八状态、STATE_* 别名与活跃/前缀口径（改状态机时两侧一起改）', () => {
   assert.deepEqual([...waitq.KINDS], ['task', 'card', 'msg', 'answer', 'ext']);
   assert.deepEqual(
-    [waitq.WAITING, waitq.STARTING, waitq.RUNNING, waitq.FINISHING,
+    [waitq.WAITING, waitq.STARTING, waitq.RUNNING, waitq.FINISHING, waitq.SUSPENDED,
       waitq.DONE, waitq.FAILED, waitq.CANCELLED],
-    ['waiting', 'starting', 'running', 'finishing', 'done', 'failed', 'cancelled'],
+    ['waiting', 'starting', 'running', 'finishing', 'suspended',
+      'done', 'failed', 'cancelled'],
   );
   // 别名是**同一个值**（不是第二套取值）：waitq.py:55-57
   assert.equal(waitq.STATE_WAITING, waitq.WAITING);
   assert.equal(waitq.STATE_STARTING, waitq.STARTING);
   assert.equal(waitq.STATE_RUNNING, waitq.RUNNING);
   assert.equal(waitq.STATE_FINISHING, waitq.FINISHING);
+  assert.equal(waitq.STATE_SUSPENDED, waitq.SUSPENDED);
   assert.equal(waitq.STATE_DONE, waitq.DONE);
   assert.equal(waitq.STATE_FAILED, waitq.FAILED);
   assert.equal(waitq.STATE_CANCELLED, waitq.CANCELLED);
-  // active = 四活跃态；prefix = starting/running（finishing 不计前缀，位次口径另算）
-  assert.deepEqual([...waitq.ACTIVE_STATES], ['waiting', 'starting', 'running', 'finishing']);
+  // active = 五活跃态（2026-10-24 加 suspended：等待作答让行）；prefix = starting/running
+  // （suspended 不占窗口/位次，finishing 也不计前缀，位次口径另算）
+  assert.deepEqual([...waitq.ACTIVE_STATES],
+    ['waiting', 'starting', 'running', 'finishing', 'suspended']);
   assert.deepEqual([...waitq.PREFIX_STATES], ['starting', 'running']);
 });
 

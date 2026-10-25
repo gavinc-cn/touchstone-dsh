@@ -149,3 +149,21 @@ def test_bad_key_uid_is_idle():
     """非法键（id 非数字）不抛异常，按空闲返回。"""
     r = _bare()
     assert r.unit_state("c:x", 9) == {"state": "idle", "pos": 0, "total": 0}
+
+
+def test_suspended_row_reports_running_but_not_counted_in_prefix():
+    """2026-10-24（任务等作答让行）：本单元 suspended 行仍报 running（会话在跑，
+    只是等作答）；它**不计入他单元的位次前缀**——suspended 让出串行位
+    （PREFIX_STATES 不变，位次投影显式三态）。"""
+    i = waitq.enqueue(waitq.KIND_TASK, 1, 9)
+    waitq.claim(i, "worker")
+    waitq.suspend(waitq.KIND_TASK, 1)              # 等作答让行
+    waitq.enqueue(waitq.KIND_CARD, 5, 9)
+    r = _bare()
+    # 自身：活跃非 waiting → running（前端 queue_state 由 interaction_pending 覆盖展示）
+    assert r.unit_state("t:1", 9) == {"state": "running", "pos": 0, "total": 0}
+    # 他单元位次：suspended 不占前缀 → 等待区第一位 pos=1/total=2
+    assert r.unit_state("c:5", 9) == {"state": "queued", "pos": 1, "total": 2}
+    # 恢复后又占前缀（回 starting）
+    assert waitq.resume(waitq.KIND_TASK, 1) is True
+    assert r.unit_state("c:5", 9) == {"state": "queued", "pos": 2, "total": 2}

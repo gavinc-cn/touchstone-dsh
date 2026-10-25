@@ -20,18 +20,19 @@ import { test } from 'node:test';
 import { zstdCompressSync } from 'node:zlib';
 
 import { StateCache } from '../lib/casescan.js';
+import * as board from '../lib/board.js';
 import * as db from '../lib/db.js';
 import * as sessparse from '../lib/sessparse.js';
 import { DIALOGUE_TEXT_LIMIT, readDialogue, readLogTail, taskJson } from '../lib/taskjson.js';
 import { dispatch, makeContext } from '../routes/index.js';
 
-/** `_task_json` 的 29 个键，**顺序照抄 server.py:2533**（响应体走 pyJsonDumps，顺序即字节） */
+/** `_task_json` 的 30 个键，**顺序照抄 server.py**（响应体走 pyJsonDumps，顺序即字节） */
 const TASK_JSON_KEYS = [
   'id', 'project_id', 'name', 'auto_fix', 'retest', 'stop_type', 'stop_value', 'task_type',
   'payload', 'start_stage', 'end_stage', 'date_from', 'date_to', 'extra', 'model', 'permission',
   'auto_commit', 'auto_deploy', 'auto_retest', 'new_cases', 'status', 'session_id',
   'session_title', 'current_round', 'new_bugs', 'lang', 'created_at', 'started_at',
-  'ended_at', 'error',
+  'ended_at', 'error', 'interaction_pending',
 ];
 
 // --------------------------------------------------------------------------
@@ -213,10 +214,43 @@ test('/api/projects/<id>/tasks：字段与顺序逐点对齐 _task_json，new_ca
     assert.equal(t.ended_at, '2026-01-01 02:00:00');
     assert.equal(t.error, 'oops');
     assert.equal(t.session_title, '', '空 session_id ⇒ 标题空串');
+    assert.equal(t.interaction_pending, false, '2026-10-24：非 running 状态不探 ⇒ false');
     const other = list.find((x) => x.id === sid);
     assert.equal(other.new_cases, 0, 'cases_base > 总数 ⇒ 归零（max(0, …)）');
     assert.equal(other.started_at, null, 'NULL 原样透出（不折成空串）');
   } finally {
+    env.close();
+  }
+});
+
+test('/api/projects/<id>/tasks：interaction_pending 仅 running+有 sid+dsh_plugin 才探（TTL 缓存复用）', async () => {
+  const env = setup();
+  board.resetIwState();
+  try {
+    const sid = 'session-77777777-2222-4333-8444-555555555555';
+    const running = addTask(env, env.p1, { name: '在跑', status: 'running', session_id: sid });
+    const queued = addTask(env, env.p1, { name: '排队', status: 'queued', session_id: sid });
+    const noSid = addTask(env, env.p1, { name: '无会话', status: 'running', session_id: '' });
+    board.setIwCacheForTest(sid, { pending: true, kind: 'question', qid: 'call-1',
+      ts: Date.now() });
+    const list = (await call(env, `/api/projects/${env.p1}/tasks`)).json();
+    const byId = new Map(list.map((t) => [t.id, t]));
+    assert.equal(byId.get(running).interaction_pending, true);
+    assert.equal(byId.get(queued).interaction_pending, false, '非 running 不探');
+    assert.equal(byId.get(noSid).interaction_pending, false, '无 sid 不探');
+    // 单任务 GET 共用 taskJson ⇒ 同字段（Python 加在 _task_json 而非列表路由）
+    const one = await call(env, `/api/tasks/${running}`);
+    assert.equal(one.json().interaction_pending, true);
+    // 非 dsh 族 ⇒ false
+    env.handle.prepare('UPDATE projects SET agent_path=? WHERE id=?').run('kimi', env.p1);
+    assert.equal((await call(env, `/api/tasks/${running}`)).json().interaction_pending, false);
+    // 探针缓存变 pending=false（TTL 内复用）⇒ false
+    env.handle.prepare('UPDATE projects SET agent_path=? WHERE id=?')
+      .run('dsh-plugin:/usr/bin/dsh', env.p1);
+    board.setIwCacheForTest(sid, { pending: false, ts: Date.now() });
+    assert.equal((await call(env, `/api/tasks/${running}`)).json().interaction_pending, false);
+  } finally {
+    board.resetIwState();
     env.close();
   }
 });

@@ -670,15 +670,19 @@ const InteractionCard = memo(function InteractionCard({ data, answer }) {
           </button>
         </div>
         {data.input && <pre className="sess-interaction-pre">{data.input}</pre>}
-        <div className="sess-interaction-opts">
-          <Button size="sm" disabled={busy}
-            onClick={() => run({ approval_id: aid, decision: 'approved' })}>{t('批准')}</Button>
-          <Button size="sm" variant="outline" disabled={busy}
-            onClick={() => run({ approval_id: aid, decision: 'approved', scope: 'session' })}>
-            {t('本会话内批准')}</Button>
-          <Button size="sm" variant="outline" disabled={busy}
-            onClick={() => run({ approval_id: aid, decision: 'rejected' })}>{t('拒绝')}</Button>
-        </div>
+        {/* 审批按钮按 answerable 门控（2026-10-24 顺带小修，对齐提问分支）：
+            外部会话/未认领时只展示审批内容、不给按钮（点了也必被服务端拒绝） */}
+        {data.answerable && (
+          <div className="sess-interaction-opts">
+            <Button size="sm" disabled={busy}
+              onClick={() => run({ approval_id: aid, decision: 'approved' })}>{t('批准')}</Button>
+            <Button size="sm" variant="outline" disabled={busy}
+              onClick={() => run({ approval_id: aid, decision: 'approved', scope: 'session' })}>
+              {t('本会话内批准')}</Button>
+            <Button size="sm" variant="outline" disabled={busy}
+              onClick={() => run({ approval_id: aid, decision: 'rejected' })}>{t('拒绝')}</Button>
+          </div>
+        )}
       </div>
     )
   }
@@ -786,7 +790,10 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   const boardSid = board?.sid                 // board 模式: {projectId, sid, cid}
   const boardPid = board?.projectId
   const boardCid = board?.cid
-  const [meta, setMeta] = useState(null)          // found/agents/model/session_id/totals/total 等
+  // meta 字段（board/task 两态同形）：found/agents/session_id/totals/total/capabilities/
+  // interaction/owned/queue_state…；model=任务生效模型（仅 board 会话语义消费，
+  // 见头部信息行——任务窗模型信息已由底栏下拉/降级 chip 承担，两值语义不同，不再同屏展示）
+  const [meta, setMeta] = useState(null)
   const [entries, setEntries] = useState([])
   const [chatState, setChatState] = useState({ running: false })
   const [agent, setAgent] = useState('main')
@@ -846,6 +853,10 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   const lastSeqRef = useRef(-1)                    // 已收到的最大 seq(增量去重)
   const sidRef = useRef('')                        // 当前推送的 session_id(探测被真实 sid 纠正时重置增量)
   const boardSidRef = useRef('')                   // board 当前会话 sid 最新值(跨会话 stale 写校验, 见下)
+  // 任务窗口当前任务 id 快照(2026-10-24 任务会话对齐卡片)：任务会话也开权限档/模型切换，
+  // await 后与当前任务比对，不一致(已切任务)则静默丢弃 state 写与 toast；boardSidRef
+  // 在任务模式下恒为空串，不能复用
+  const taskIdRef = useRef('')
   const esRef = useRef(null)
   const sessionUpgradeRef = useRef(null)           // board 模式「轮询→SSE」升级回调(P4 事件化)
   const sessionDebounceRef = useRef(null)          // SSE refresh 去抖定时器
@@ -954,8 +965,14 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   // kimi code web 命令面板同款的历史遗留占位全量置灰常显(dis:true, 描述照 kimi code web 截图, 见设计文档第四节)
   const SLASH_CMDS = [
     { key: '/stop', desc: t('停止当前对话'), type: 'cmd', on: () => !!caps.chat, run: stopChat },
-    { key: '/compact', desc: t('压缩会话历史'), type: 'cmd', on: () => !!board && !!caps.compact,
-      run: async () => { await boardApi.compact(boardPid, boardCid, boardSid) } },
+    // 2026-10-24 任务会话对齐卡片：compact 不再限看板卡——任务会话也走同一宿主能力位，
+    // 分派到 taskApi.compact（后端 POST /api/tasks/<tid>/session/compact，错误口径同看板）
+    { key: '/compact', desc: t('压缩会话历史'), type: 'cmd',
+      on: () => !!caps.compact && (!!board || !!taskId),
+      run: async () => {
+        if (board) await boardApi.compact(boardPid, boardCid, boardSid)
+        else await taskApi.compact(taskId)
+      } },
     { key: '/new', desc: t('创建新会话'), type: 'cmd', dis: true },
     { key: '/clear', desc: t('清空并新建会话'), type: 'cmd', dis: true },
     { key: '/plan', desc: t('切换计划模式 开/关'), type: 'cmd', dis: true },
@@ -998,7 +1015,12 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
         if (m.session_id) sidRef.current = m.session_id
         // total 回退(会话被重写) → 重置并全量重连
         if (m.found && m.total < lastSeqRef.current + 1) { reconnect(); return }
-        setMeta(m)
+        // 任务会话 meta（2026-10-24 对齐看板卡后后端补 interaction/permission/
+        // sessionModel/queue/owned）整包替换；宿主 inbox 排队行 queue=null/缺键时
+        // 保持上次列表（读不到 ≠ 没有排队，与看板管道同口径，防排队行闪烁）。
+        // 注：payload 的 model=任务生效模型，任务窗已不消费（头部 chip 仅 board 语义，
+        // 模型展示走 meta.sessionModel + 底栏下拉）。
+        setMeta((prev) => ({ ...m, queue: m.queue == null ? prev?.queue : m.queue }))
       })
       es.addEventListener('entries', (ev) => {
         if (stopped) return
@@ -1144,6 +1166,8 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
   // board 会话切换时同步 sid 快照 ref: 回调里 await(可能秒级, 服务端冷启动更久)返回后
   // 与当前会话比对, 不一致(已切会话)则静默丢弃 state 写与 toast, 防旧请求污染新会话
   useEffect(() => { boardSidRef.current = boardSid }, [boardSid])
+  // 任务窗口切换时同步任务 id 快照 ref（任务会话权限档/模型切换的 stale 守卫，见上）
+  useEffect(() => { taskIdRef.current = taskId || '' }, [taskId])
 
   // 排队消息执行失败提示（如会话忙、会话已被删除）：一条一次 toast，
   // 并清掉对应乐观 chip(按后端 msg_id 对齐)；错误记录由后端保留一段时间后回收
@@ -1159,19 +1183,22 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     }
   }, [chatState])
 
-  // 会话级配置(Task 4): board 会话打开/切换时重置选择态(meta 未回读前置灰渲染),
+  // 会话级配置(Task 4): 会话打开/切换时重置选择态(meta 未回读前置灰渲染),
   // 并拉取项目 agent 模型列表(模型下拉选项与思考等级档位来源; 与 AppShell 项目弹窗同端点,
-  // dsh-plugin: 前缀由后端识别) + DSH 宿主权限目录(权限档选项来源; 宿主级目录, 不依赖 agent)
+  // dsh-plugin: 前缀由后端识别) + DSH 宿主权限目录(权限档选项来源; 宿主级目录, 不依赖 agent)。
+  // 2026-10-24 任务会话对齐卡片：**不再只在 board 模式拉取**——任务会话窗口同样渲染
+  // 权限档/模型下拉（后端 meta 补 permission/sessionModel），依赖加 taskId（切任务即重置+重拉）。
   useEffect(() => {
     setPermMode(null)
     setModelSel(null)
     setEffortSel(null)
-    let stopped = false
-    if (!boardSid) {
-      // 任务会话没有权限档控件；清空防串会话残留（模型目录保留现有行为不动）
+    if (!boardSid && !taskId) {
+      // 无打开中的会话（任务尚未生成/未选中）：清空目录防串会话残留
       setPermOpts([])
+      setModelOpts({ models: [], default: '' })
       return undefined
     }
+    let stopped = false
     // 宿主权限目录 200/失败都降级为空数组：ComposerBar 据此退化为只读 chip
     // （展示名走 permissionLabel 的内置中文名兜底）
     projectApi.agentPresets()
@@ -1185,7 +1212,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
       setModelOpts({ models: [], default: '' })
     }
     return () => { stopped = true }
-  }, [boardSid, proj?.agent_path])
+  }, [boardSid, taskId, proj?.agent_path])
 
   // meta 轮询回读后同步权限档/模型/思考等级显示: 权限档=DSH 宿主 preset key（后端已归一，
   // 旧库/旧帧的 manual/yolo 由 permissionLabel/canonicalPermission 在显示层兜底）、
@@ -1434,50 +1461,65 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
     } catch (e) { toast(e.message); return false }
   }
 
-  /* ---------- 会话级配置(Task 4): 权限档/模型切换(仅 board + caps.permission/profile 可交互) ---------- */
+  /* ---------- 会话级配置(Task 4): 权限档/模型切换（看板卡与任务会话都可交互） ---------- */
+  // 2026-10-24 任务会话对齐卡片：两枚下拉从「仅 board」放开到任务会话窗口（可交互判定在
+  // ComposerBar/utils.permission.sessionControls）。提交分派：
+  //   看板卡 → boardApi.setSessionProfile（卡片 session profile 端点）
+  //   任务   → taskApi.sessionProfile（任务 session profile 端点：服务端即时
+  //            set_permission/set_model，并回写 tasks.permission / tasks.model 作任务级默认）
+  // stale 守卫：发起时快照会话标识（board=看板 sid / 任务=任务 id），await 后与当前值比对，
+  // 已切会话则静默丢弃 state 写与 toast（任务模式 boardSidRef 恒空，改用 taskIdRef）。
+  function currentSessionGuard() {
+    if (board) {
+      const sid = boardSid
+      return () => sid === boardSidRef.current
+    }
+    const tid = taskId
+    return () => !!tid && tid === taskIdRef.current
+  }
   // 权限档切换（2026-10-21 起动态跟随 DSH 宿主权限目录）：直接把宿主 preset key 作为
   // permission_mode 提交（read-only/workspace-write/danger-full-access/path-rules/...，
-  // 不再做旧三档映射）；切换即调 profile 端点即时生效，乐观回显 + 轮询回读兜底
-  // （sid 快照防 stale 写）
+  // 不再做旧三档映射）；切换即调 profile 端点即时生效，乐观回显 + 轮询/事件回读兜底
   async function onSetPermission(mode) {
     if (!mode || mode === permMode) return
-    const sid = boardSid               // 发起时会话标识: await 后仍是当前会话才写 state/toast
+    const stillCurrent = currentSessionGuard()
     try {
-      await boardApi.setSessionProfile(boardPid, sid, { permission_mode: mode })
-      if (sid !== boardSidRef.current) return   // 已切会话: 旧请求结果静默丢弃(防 stale 写)
+      if (board) await boardApi.setSessionProfile(boardPid, boardSid, { permission_mode: mode })
+      else await taskApi.sessionProfile(taskId, { permission_mode: mode })
+      if (!stillCurrent()) return   // 已切会话: 旧请求结果静默丢弃(防 stale 写)
       setPermMode(mode)
       // toast 用展示层档位名（目录 label → 内置中文名 → 原值）
       toast(t('权限已切换：{label}', { label: permissionLabel(permOpts, mode) }))
     } catch (e) {
-      if (sid === boardSidRef.current) toast(e.message)
+      if (stillCurrent()) toast(e.message)
     }
   }
-  // 模型切换: 直改会话 profile(即时生效); 乐观回显, 下轮轮询回读兜底(sid 快照防 stale 写)
+  // 模型切换: 直改会话 profile(即时生效); 乐观回显, 下轮回读兜底(stale 守卫同上)
   async function onSetModel(m) {
-    const sid = boardSid
+    const stillCurrent = currentSessionGuard()
     try {
-      await boardApi.setSessionProfile(boardPid, sid, { model: m })
-      if (sid !== boardSidRef.current) return
+      if (board) await boardApi.setSessionProfile(boardPid, boardSid, { model: m })
+      else await taskApi.sessionProfile(taskId, { model: m })
+      if (!stillCurrent()) return
       setModelSel(m)
       toast(t('模型已切换：{model}', { model: m }))
     } catch (e) {
-      if (sid === boardSidRef.current) toast(e.message)
+      if (stillCurrent()) toast(e.message)
     }
   }
-  // 思考等级切换（2026-10-04）：看板卡走卡片 profile 端点、任务走任务 session profile 端点
-  // （任务侧只开这一项，模型/权限档仍任务级/看板级）。乐观回显 + 轮询回读兜底。
-  // 空值（默认档哨兵）不提交——哨兵项本就置灰不可选，这里再兜一层。
+  // 思考等级切换（2026-10-04）：看板卡走卡片 profile 端点、任务走任务 session profile 端点。
+  // 乐观回显 + 回读兜底；空值（默认档哨兵）不提交——哨兵项本就置灰不可选，这里再兜一层。
   async function onSetEffort(v) {
     if (!v || v === '__default__' || v === effortSel) return
-    const sid = boardSid
+    const stillCurrent = currentSessionGuard()
     try {
-      if (board) await boardApi.setSessionProfile(boardPid, sid, { reasoning_effort: v })
+      if (board) await boardApi.setSessionProfile(boardPid, boardSid, { reasoning_effort: v })
       else await taskApi.sessionProfile(taskId, { reasoning_effort: v })
-      if (sid && sid !== boardSidRef.current) return   // 已切会话: 旧请求结果静默丢弃
+      if (!stillCurrent()) return   // 已切会话: 旧请求结果静默丢弃
       setEffortSel(v)
       toast(t('思考等级已切换：{level}', { level: effortText(v, '', t) }))
     } catch (e) {
-      if (!sid || sid === boardSidRef.current) toast(e.message)
+      if (stillCurrent()) toast(e.message)
     }
   }
 
@@ -1702,7 +1744,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
         <QuestionBar withQBar={withQBar} qbarOpen={qbarOpen}
           questions={questions} flashSeq={flashSeq} onJump={jumpTo} />
         <div className="sess-main">
-      {/* 头部信息行: 连接状态/session/模型/agent 切换/totals */}
+      {/* 头部信息行: 连接状态/session/模型(仅 board 语义)/agent 切换/totals */}
       <div className="sess-sub">
         {withQBar && (
           <button type="button" className="sess-qbar-toggle" title={qbarOpen ? t('收起提问索引') : t('展开提问索引')}
@@ -1717,7 +1759,12 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
             {meta.session_id.replace(/^session_/, '').slice(0, 8)}
           </span>
         )}
-        {meta?.model && <span className="sess-chip">{meta.model}</span>}
+        {/* 模型 chip（2026-10-24 任务会话对齐卡片后收紧为**仅 board 会话语义**）：
+            看板 payload 本就不下发 model；任务 payload 的 meta.model=任务生效模型
+            （tasks.model→projects.model），与底栏模型下拉现值（meta.sessionModel=
+            宿主回读的会话实况）语义不同，任务窗同屏会露出两个模型值——任务窗不再渲染，
+            模型信息统一由底栏下拉/降级 chip 承担（决策见 2026-10-24 plan A 项）。 */}
+        {board && meta?.model && <span className="sess-chip">{meta.model}</span>}
         {agents.length > 1 && (
           <span className="sess-agents">
             {agents.map((a) => (
@@ -1801,6 +1848,7 @@ export default function SessionView({ task, board, withQBar = true, onUnitState,
           taskRunning={taskRunning}
           queuedN={queuedN}
           board={board}
+          taskActive={!board && !!taskId}
           sending={sending}
           permMode={permMode}
           permOpts={permOpts}

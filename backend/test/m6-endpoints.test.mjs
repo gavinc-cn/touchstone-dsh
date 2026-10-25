@@ -770,23 +770,30 @@ test('POST /tasks/<tid>/session/rewind：fork 失败 ⇒ 502 且**不改绑**（
   }
 });
 
-test('POST /tasks/<tid>/session/profile：只改思考等级 ⇒ /model 带任务口径的模型', async () => {
+test('POST /tasks/<tid>/session/profile：只改思考等级 ⇒ /model 传空 model（插件回读当前模型）', async () => {
   const s = setup('task-profile');
+  const sid = 'session-cccccccc-cccc-4ccc-8ccc-cccccccccccc';
   const tid = insertTask(s.db, s.pid, {
-    name: '任务', taskType: 'normal', status: 'done', sessionId: 'session-cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    name: '任务', taskType: 'normal', status: 'done', sessionId: sid,
   });
   s.db.prepare('UPDATE tasks SET model=? WHERE id=?').run('deepseek-official/deepseek-chat', tid);
   await withDriver(async (drv) => {
     const r = await call(s, 'POST', `/api/tasks/${tid}/session/profile`,
       { body: { reasoning_effort: 'high' } });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json(), { ok: true, reasoning_effort: 'high' });
+    // 2026-10-24 对齐看板 profile：回执**恒三键**；只改等级时 model 传空串让插件回读当前模型
+    // （不再用任务的 model 口径回填——旧行为已被本批语义替换）。
+    assert.deepEqual(r.json(),
+      { ok: true, model: '', permission_mode: '', reasoning_effort: 'high' });
     const mcall = drv.byPath('/model');
     assert.equal(mcall.length, 1);
-    // `split_model('deepseek-official/deepseek-chat')` ⇒ provider/model 拆开下传
-    assert.equal(mcall[0].body.model, 'deepseek-chat');
-    assert.equal(mcall[0].body.provider, 'deepseek-official');
+    assert.equal(mcall[0].body.model, '');
+    assert.equal('provider' in mcall[0].body, false);
     assert.equal(mcall[0].body.reasoning_effort, 'high');
+    // effort 属会话级 ⇒ 不落库；空 model 也不写回任务行
+    const row = s.db.prepare('SELECT * FROM tasks WHERE id=?').get(tid);
+    assert.equal(row.model, 'deepseek-official/deepseek-chat');
+    assert.equal(row.permission, '');
   });
   s.close();
 });
