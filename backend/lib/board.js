@@ -5033,8 +5033,15 @@ export async function iwOnce(options = {}) {
               && !subagentSession(sid)) {
             extHold.add(card.id);
           } else if (eventAligned() && !platformHolds(card.id, options)) {
-            // ③ 中枢可信却查不到 ⇒ 会话确已结束：补上卡列这一格（写前复核在 iwApply）
-            await iwApply(fam, card, 'to_review', null, options);
+            // ③ 中枢可信却查不到 ⇒ 会话确已结束：补上卡列这一格（写前复核在 iwApply）。
+            //    **例外（2026-10-25 修「排队中卡滞留待审核」）**：本卡有排队/执行中的消息
+            //    单元（`liveMsg`）时会话虽缺席，但已被平台排队驱动（送达时按 resume 接回），
+            //    队列语义要求「排队中」的卡在「正在开发」列 ⇒ 发 `to_doing` 归位。此前这里
+            //    恒发 `to_review`，而 `iwApply` 写前复核按同一入参（r=null + liveMsg=true）
+            //    把动作重算成 `to_doing` ⇒ **重算不一致即放弃写入** ⇒ 待审核卡顶着「排队中」
+            //    徽标永久滞留（生产实证：卡 927/933/893，dsh web 重启后旧卡会话不在宿主）。
+            const liveMsg = chatMod.liveOfSid(sid, options);
+            await iwApply(fam, card, liveMsg ? 'to_doing' : 'to_review', null, options);
           }
           continue;                    // 实况读不到：该卡本轮跳过，不搬列
         }

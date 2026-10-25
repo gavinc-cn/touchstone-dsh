@@ -1182,3 +1182,85 @@ test('startInteractionWatcher：订阅中枢；帧到达即调和（待审核卡
     s.close();
   }
 });
+
+// ==========================================================================
+// ⑫ 「排队中」卡滞留待审核（2026-10-25 生产实障：宿主已失去会话时的列归位）
+// ==========================================================================
+
+/**
+ * 2026-10-25 生产实障（项目 126 卡 927/933/893）：用户在**待审核**卡的会话窗里追问，
+ * 消息登记进统一队列（卡片挂「排队中」徽标）；但 dsh web 重启后这些旧卡的会话已不在
+ * 宿主（`/live` 里没有该 sid），`iwOnce` 的「实况读不到」分支**只发 `to_review`**——
+ * 而 `iwApply` 的写前复核按同一入参把动作重算成 `to_doing`（`review + live_msg ⇒
+ * to_doing`）⇒ **重算不一致 ⇒ 放弃写入** ⇒ 卡片顶着「排队中」徽标永久滞留在
+ * 待审核列（用户口径：「status 是排队中 ⇒ 应该在正在开发队列」）。
+ *
+ * 判据（双后端同形）：中枢可信（在线 ∧ 已对齐）却查不到 sid ⇒ 会话确已结束，本卡
+ * 有排队/执行中的消息单元（`live_msg`）时按 `to_doing` 归位；无消息仍落 `to_review`
+ * （2026-10-08 批次 D 旧口径不变）；中枢未对齐＝未知，一律不搬列。
+ */
+function withHubAligned(connected, aligned) {
+  const hub = dshevents.HUB;
+  const prev = { connected: hub._connected, aligned: hub._aligned };
+  hub._setConnected(connected);
+  hub._setAligned(aligned);
+  return () => {
+    hub._setConnected(prev.connected);
+    hub._setAligned(prev.aligned);
+  };
+}
+
+test('iwOnce：会话不在池 + 本卡消息在排队 ⇒ 待审核卡归「正在开发」', async () => {
+  const s = setup('iw-lost-queued');
+  const sid = 'session-lost-queued-1';
+  const cid = insertCard(s.fx.db, s.pid, {
+    title: '排队中卡', columnKey: 'review', sessionId: sid,
+  });
+  // 追问已入队（`m:` 行为 `liveMsg` 判据：本卡消息在排队/在跑）
+  insertMsg(s.fx.db, { id: 'm-lost-1', projectId: s.pid, sid, cardId: cid, state: 'queued' });
+  const restore = withHubAligned(true, true);
+  try {
+    assert.equal(dshevents.get(sid), null, '前置：注册表里没有该会话（宿主已失去）');
+    await board.iwOnce(s.opts);
+    assert.equal(cardRow(s.fx, cid).column_key, 'doing',
+      '会话缺席但本卡消息在排队 ⇒ 必须归开发列（否则「排队中」徽标挂在待审核列）');
+  } finally {
+    restore();
+    s.close();
+  }
+});
+
+test('iwOnce：会话不在池 + 本卡无排队消息 ⇒ 仍按旧口径落「待审核」', async () => {
+  const s = setup('iw-lost-idle');
+  const sid = 'session-lost-idle-1';
+  const cid = insertCard(s.fx.db, s.pid, {
+    title: '跑完的卡', columnKey: 'doing', sessionId: sid,
+  });
+  const restore = withHubAligned(true, true);
+  try {
+    await board.iwOnce(s.opts);
+    assert.equal(cardRow(s.fx, cid).column_key, 'review',
+      '无消息的卡会话消失 ⇒ 旧口径 to_review（2026-10-08 批次 D 不变）');
+  } finally {
+    restore();
+    s.close();
+  }
+});
+
+test('iwOnce：中枢在线但未对齐（未知）⇒ 排队中也不搬列', async () => {
+  const s = setup('iw-lost-unaligned');
+  const sid = 'session-lost-unaligned-1';
+  const cid = insertCard(s.fx.db, s.pid, {
+    title: '未知态卡', columnKey: 'review', sessionId: sid,
+  });
+  insertMsg(s.fx.db, { id: 'm-lost-2', projectId: s.pid, sid, cardId: cid, state: 'queued' });
+  const restore = withHubAligned(true, false);
+  try {
+    await board.iwOnce(s.opts);
+    assert.equal(cardRow(s.fx, cid).column_key, 'review',
+      '未对齐＝实况未知，不据未知搬列（不变量「断连/未对齐=未知」）');
+  } finally {
+    restore();
+    s.close();
+  }
+});

@@ -4788,7 +4788,16 @@ def _iw_once():
                         #    杜绝「热重载后注册表为空 ⇒ 把运行中的卡批量搬走」的误判。
                         #    写前复核全在 `_iw_apply`：queue 占位 / 起跑窗口 / 平台持有 /
                         #    已答待送达 / 归档（to_done）自动跳出（状态机重评）。
-                        _iw_apply(fam, card, "to_review", None)
+                        #    **例外（2026-10-25 修「排队中卡滞留待审核」）**：本卡有排队/执行
+                        #    中的消息单元（live_msg）时会话虽缺席，但已被平台排队驱动（送达时
+                        #    按 resume 接回），队列语义要求「排队中」的卡在「正在开发」列 ⇒ 发
+                        #    to_doing 归位。此前这里恒发 to_review，而 `_iw_apply` 写前复核按同一
+                        #    入参（r=None + live_msg=True）把动作重算成 to_doing ⇒ 重算不一致即
+                        #    放弃写入 ⇒ 待审核卡顶着「排队中」徽标永久滞留（生产实证：卡
+                        #    927/933/893，dsh web 重启后旧卡会话不在宿主）。
+                        _iw_apply(fam, card,
+                                  "to_doing" if chat.live_of_sid(sid) else "to_review",
+                                  None)
                     continue               # 实况读不到：该卡本轮跳过，不搬列
                 # —— 外部条目占用候选（v2d T4）：busy 且非挂起、且平台不持有 ——
                 # 挂起（pending）不算占用（豁免面②：挂起即出队，不建行）；平台

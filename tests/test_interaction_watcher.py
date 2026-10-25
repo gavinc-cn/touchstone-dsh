@@ -423,14 +423,20 @@ def _fake_proj(pid=9):
             "agent_path": "dsh-plugin:/usr/bin/dsh"}
 
 
-def _once(monkeypatch, cards, r, live=False, runner=None):
+def _once(monkeypatch, cards, r, live=False, runner=None,
+          connected=True, aligned=False):
     """跑一轮调和扫描（不触网络），返回 [(card_id, action)]；live=本卡消息实况。
-    runner=注入的假 runner（默认 None：board 退化直起路径）。"""
+    runner=注入的假 runner（默认 None：board 退化直起路径）。
+    connected/aligned=模拟中枢在线/已对齐（「实况读不到」分支的三种语义靠它区分：
+    断连＝未知保行、在线未对齐＝未知不搬列、在线且已对齐＝会话确已结束）。"""
     applies = []
     monkeypatch.setattr(board.db, "list_projects_all", lambda: [_fake_proj()])
     monkeypatch.setattr(board.db, "list_board_cards", lambda pid: cards)
     monkeypatch.setattr(board, "_iw_interaction", lambda *a, **k: r)
     monkeypatch.setattr(board.chat, "live_of_sid", lambda sid: live)
+    monkeypatch.setattr(board.dshevents, "connected", lambda: connected)
+    monkeypatch.setattr(board.dshevents, "aligned", lambda: aligned)
+    monkeypatch.setattr(board, "_platform_holds", lambda cid: False)
     monkeypatch.setattr(board, "_iw_apply",
                         lambda fam, c, action, rr: applies.append((c["id"], action)))
     monkeypatch.setattr(board.runner, "INSTANCE", runner)
@@ -911,3 +917,37 @@ def test_iw_once_running_row_without_run_still_falls_to_review(monkeypatch):
     board._iw_once()
 
     assert db.get_board_card(cid)["column_key"] == "review"
+
+
+# ---------- 「排队中」卡滞留待审核（2026-10-25 生产实障，宿主已失去会话） ----------
+#
+# 生产实障（项目 126 卡 927/933/893）：用户在**待审核**卡的会话窗里追问，消息登记进
+# 统一队列（卡片挂「排队中」徽标）；但 dsh web 重启后这些旧卡会话已不在宿主（`/live`
+# 里没有该 sid），`_iw_once` 的「实况读不到」分支只发 `to_review`——而 `_iw_apply` 的
+# 写前复核按同一入参（r=None + live_msg=True）把动作重算成 `to_doing` ⇒ **重算不一致
+# ⇒ 放弃写入** ⇒ 卡片顶着「排队中」徽标永久滞留在待审核列。
+# 用户口径：「status 是排队中 ⇒ 应该在正在开发队列」。
+
+
+def test_iw_once_lost_session_live_msg_returns_to_doing(monkeypatch):
+    """会话不在池 + 本卡消息在排队（中枢可信）⇒ 待审核卡归开发列。"""
+    cards = [_card(id=21, column_key="review")]
+    applies = _once(monkeypatch, cards, None, live=True,
+                    connected=True, aligned=True)
+    assert applies == [(21, "to_doing")]
+
+
+def test_iw_once_lost_session_no_msg_still_to_review(monkeypatch):
+    """会话不在池 + 本卡无排队消息 ⇒ 旧口径 to_review 不变（2026-10-08 批次 D）。"""
+    cards = [_card(id=22, column_key="doing")]
+    applies = _once(monkeypatch, cards, None, live=False,
+                    connected=True, aligned=True)
+    assert applies == [(22, "to_review")]
+
+
+def test_iw_once_lost_session_unaligned_does_not_move(monkeypatch):
+    """中枢在线但未对齐＝实况未知 ⇒ 有排队消息也不搬列（不变量「未对齐=未知」）。"""
+    cards = [_card(id=23, column_key="review")]
+    applies = _once(monkeypatch, cards, None, live=True,
+                    connected=True, aligned=False)
+    assert applies == []
