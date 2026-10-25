@@ -77,7 +77,7 @@ function apiBuiltinAssetsList(ctx) {
   if (!resolved.ok) return;
   let list;
   try {
-    list = assets.listAssets(target, resolved.projectDir);
+    list = assets.listAssets(target, resolved.projectDir, ctx.lang);
   } catch (e) {
     if (e instanceof assets.AssetError) {
       ctx.errorSpaced(e.code, e);          // AssetError 可能带 i18nKey（插值文案）
@@ -115,8 +115,8 @@ async function apiBuiltinAssetAction(ctx, assetId, action) {
   let result;
   try {
     result = action === 'install'
-      ? assets.install(asset, target, resolved.projectDir)
-      : assets.uninstall(asset, target, resolved.projectDir);
+      ? assets.install(asset, target, resolved.projectDir, ctx.lang)
+      : assets.uninstall(asset, target, resolved.projectDir, ctx.lang);
   } catch (e) {
     if (e instanceof assets.AssetError) {
       ctx.errorSpaced(e.code, e);          // 同上：key+vars 由 lib 的 localizable 附加

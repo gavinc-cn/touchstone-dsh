@@ -47,7 +47,7 @@ def test_worktree_start_no_queue_row(tmp_path, monkeypatch):
     card = _mk_card(proj["id"])
     wt = str(tmp_path / "wts" / ("card_%d" % card["id"]))
     calls = {}
-    monkeypatch.setattr(board.worktree, "create", lambda p, cid: (wt, "ts/card-%d" % cid, ""))
+    monkeypatch.setattr(board.worktree, "create", lambda p, cid, lang="zh": (wt, "ts/card-%d" % cid, ""))
     _stub_start(monkeypatch, tmp_path, calls)
 
     card_dict, err = board.start_into_doing(proj, card, "", False, True)
@@ -67,7 +67,7 @@ def test_worktree_card_resume_reuses_worktree(tmp_path, monkeypatch):
     card = _mk_card(proj["id"], column_key="review", worktree=wt)
     seen = {}
     monkeypatch.setattr(board.worktree, "create",
-                        lambda p, cid: (seen.setdefault("cid", cid) and None) or (wt, "ts/card-%d" % cid, ""))
+                        lambda p, cid, lang="zh": (seen.setdefault("cid", cid) and None) or (wt, "ts/card-%d" % cid, ""))
     calls = {}
     _stub_start(monkeypatch, tmp_path, calls)
 
@@ -84,7 +84,7 @@ def test_worktree_start_rejects_card_with_session(tmp_path, monkeypatch):
     proj = _mk_project(tmp_path)
     card = _mk_card(proj["id"], session_id="session-abc")
     monkeypatch.setattr(board.worktree, "create",
-                        lambda p, cid: (_ for _ in ()).throw(AssertionError("不应创建")))
+                        lambda p, cid, lang="zh": (_ for _ in ()).throw(AssertionError("不应创建")))
 
     card_dict, err = board.start_into_doing(proj, card, "", False, True)
     assert card_dict is None and "已有主会话" in err["error"]
@@ -97,7 +97,7 @@ def test_worktree_start_parent_dependency_blocked(tmp_path, monkeypatch):
     parent = _mk_card(proj["id"])                       # 父卡仍在 todo
     child = _mk_card(proj["id"], parent_card_id=parent["id"])
     monkeypatch.setattr(board.worktree, "create",
-                        lambda p, cid: (_ for _ in ()).throw(AssertionError("不应创建")))
+                        lambda p, cid, lang="zh": (_ for _ in ()).throw(AssertionError("不应创建")))
     card_dict, err = board.start_into_doing(proj, child, "", False, True)
     assert card_dict is None and err == {"blocked": "parent-not-done"}
     assert db.get_board_card(child["id"])["column_key"] == "todo"
@@ -108,7 +108,7 @@ def test_worktree_start_failure_keeps_marker_and_rolls_column(tmp_path, monkeypa
     proj = _mk_project(tmp_path)
     card = _mk_card(proj["id"])
     wt = str(tmp_path / "wts" / "card_fail")
-    monkeypatch.setattr(board.worktree, "create", lambda p, cid: (wt, "ts/card-1", ""))
+    monkeypatch.setattr(board.worktree, "create", lambda p, cid, lang="zh": (wt, "ts/card-1", ""))
 
     def _boom(project, c, extra=""):
         raise RuntimeError("会话启动失败: 驱动不可用")
@@ -126,7 +126,7 @@ def test_worktree_create_error_returns_400_payload(tmp_path, monkeypatch):
     proj = _mk_project(tmp_path)
     card = _mk_card(proj["id"])
     monkeypatch.setattr(board.worktree, "create",
-                        lambda p, cid: ("", "", "无法创建 worktree：项目目录不是 git 仓库"))
+                        lambda p, cid, lang="zh": ("", "", "无法创建 worktree：项目目录不是 git 仓库"))
     monkeypatch.setattr(board, "start_card",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应起会话")))
     card_dict, err = board.start_into_doing(proj, card, "", False, True)
@@ -179,7 +179,7 @@ def test_cleanup_card_worktree_clears_marker(tmp_path, monkeypatch):
     """清理成功即清卡片 worktree 标记（该卡回到普通模式）；运行中由 server 409 拦。"""
     proj = _mk_project(tmp_path)
     card = _mk_card(proj["id"], worktree="/tmp/wt-clean")
-    monkeypatch.setattr(board.worktree, "remove", lambda p, c: (True, ""))
+    monkeypatch.setattr(board.worktree, "remove", lambda p, c, lang="zh": (True, ""))
     ok, err = board.cleanup_card_worktree(proj, db.get_board_card(card["id"]))
     assert ok and err == ""
     assert db.get_board_card(card["id"])["worktree"] == ""
@@ -191,7 +191,7 @@ def test_worktree_preview_gates(tmp_path, monkeypatch):
     proj = _mk_project(tmp_path)
     plain = _mk_card(proj["id"])
     monkeypatch.setattr(board.worktree, "preview",
-                        lambda p, cid: {"ok": True, "error": "",
+                        lambda p, cid, lang="zh": {"ok": True, "error": "",
                                         "path": "/tmp/wt-pv", "branch": "ts/card-%d" % cid,
                                         "exists": False, "root": "/tmp"})
     pv = board.worktree_preview(proj, plain)

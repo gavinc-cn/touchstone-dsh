@@ -30,6 +30,16 @@ const NORMALIZE_CASES = CASES.cases.filter((c) => c.kind === 'normalize');
 const RESOLVE_CASES = CASES.cases.filter((c) => c.kind === 'resolve');
 const DICT_CASES = CASES.cases.filter((c) => c.kind === 'dict');
 
+// KB-18 边界 fixture（Python/Node 读同一份；各端期望字段分别钉住现状）
+const FIXTURE_I18N_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)),
+  '..', '..', 'tests', 'fixtures', 'i18n');
+const NUMBER_BOUNDARIES = JSON.parse(
+  fs.readFileSync(path.join(FIXTURE_I18N_DIR, 'number_boundaries.json'), 'utf8'));
+const FLOAT_SHORTEST = JSON.parse(
+  fs.readFileSync(path.join(FIXTURE_I18N_DIR, 'float_shortest.json'), 'utf8'));
+const PLURAL_TRIM = JSON.parse(
+  fs.readFileSync(path.join(FIXTURE_I18N_DIR, 'plural_trim.json'), 'utf8'));
+
 let tmpDir = '';
 let fixturePath = '';
 
@@ -79,9 +89,14 @@ function _buildVars(c) {
   return out;
 }
 
-/** 调 t()：lang 缺省时走函数默认参数（省略第三个实参）。 */
+/** 调 t()：lang 缺省时省略第三个实参，走函数默认参数（默认 zh）。 */
 function _callT(c) {
-  return t(c.ns, c.key, c.lang, _buildVars(c));
+  const vars = _buildVars(c);
+  if (!Object.hasOwn(c, 'lang')) {
+    // 无变量时真正省略第三实参；有变量时只能传 undefined 占位以落到第四参
+    return vars === undefined ? t(c.ns, c.key) : t(c.ns, c.key, undefined, vars);
+  }
+  return t(c.ns, c.key, c.lang, vars);
 }
 
 before(() => {
@@ -136,6 +151,48 @@ test('共享用例表：t() 同输入同输出（与 Python 测试同源）', ()
   useFixtureDict();
   for (const c of T_CASES) {
     assert.equal(_callT(c), c.expected, JSON.stringify(c));
+  }
+});
+
+test('共享用例表：省略 lang 走默认参数，输出与显式 zh 逐字节相同', () => {
+  useFixtureDict();
+  const omitted = T_CASES.filter((c) => !Object.hasOwn(c, 'lang'));
+  assert.ok(omitted.length > 0, '共享用例表缺少「省略 lang」用例');
+  for (const c of omitted) {
+    const defaultOut = _callT(c);
+    const explicitZh = t(c.ns, c.key, 'zh', _buildVars(c));
+    assert.equal(defaultOut, c.expected, JSON.stringify(c));
+    assert.deepEqual(Buffer.from(defaultOut, 'utf8'), Buffer.from(explicitZh, 'utf8'),
+      JSON.stringify(c));
+  }
+});
+
+test('数字边界：>2^53 整数排版双端各自现状（共享 fixture，KB-18）', () => {
+  useFixtureDict();
+  const cases = NUMBER_BOUNDARIES.cases;
+  assert.ok(cases.some((c) => c.python !== c.node),
+    'fixture 应记录已知的 >2^53 双端分歧');
+  for (const c of cases) {
+    // Python int 任意精度；JS Number 为 float64 ⇒ 字面量解析时已舍入
+    assert.equal(t('web', '值 {v}', 'en', { v: Number(c.value) }), c.node, c.name);
+  }
+});
+
+test('复数 trim：U+FEFF / U+0085 双端差异现状（共享 fixture，KB-18）', () => {
+  useFixtureDict();
+  const cases = PLURAL_TRIM.cases;
+  assert.ok(cases.some((c) => c.node !== c.python),
+    'fixture 应记录 U+FEFF / U+0085 的双端分歧');
+  for (const c of cases) {
+    assert.equal(t('web', '复数 {n}', 'en', { n: c.n }), `${c.node}:${c.n}`, c.name);
+  }
+});
+
+test('浮点最短表示：确定性边界（共享 fixture，替代 44,997 doubles fuzz，KB-18）', () => {
+  useFixtureDict();
+  for (const c of FLOAT_SHORTEST.cases) {
+    // 两端同一 expected：1e-7/1e-6/1e20/1e21 阈值、次正规最小值、最大有限值、-0
+    assert.equal(t('web', '值 {v}', 'en', { v: Number(c.literal) }), c.expected, c.literal);
   }
 });
 

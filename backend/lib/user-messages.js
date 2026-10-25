@@ -33,6 +33,7 @@ export const LIB_USER_MESSAGE_SOURCES = Object.freeze({
       'reorderCard',
       'cleanupCardWorktree',
       'handoffWorktreeMerge',
+      'worktreePreview',
       'moveCard',
       'doingGesture',
       'enterDoing',
@@ -51,6 +52,20 @@ export const LIB_USER_MESSAGE_SOURCES = Object.freeze({
   'dshdriver.js': {
     classes: ['DshDriverError'],
     constants: ['UNCONFIGURED_MESSAGE'],
+  },
+  'worktree.js': {
+    // KB-03：模块自己写的固定中文（git stderr/路径/异常原文不翻，也不在扫描面：
+    // 它们不是字面量）。函数体内的 throw/return 一律是 t('api', ...) 的精确 key。
+    functions: [
+      'repoRoot',
+      'git',
+      'headBranch',
+      'preview',
+      'create',
+      'status',
+      'remove',
+      'mergeStatus',
+    ],
   },
   'rag.js': {
     functions: ['_cfg_int', 'save_config'],

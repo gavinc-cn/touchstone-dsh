@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ArrowLeft, Boxes, Brain, Check, KeyRound, Languages, Link2, LogOut, Palette } from 'lucide-react'
 import { AUTO, AUTO_PREVIEW, SKINS, applySkin, getSkin, resolveSkin, skinLabel } from '../utils/skin'
-import { getLang, setLang, useI18n } from '../utils/i18n'
+import { clearServerLang, getLang, setLang, useI18n } from '../utils/i18n'
 import { FONT_SCALES, applyFontScale, fontScaleLabel, getFontScale } from '../utils/fontScale'
 import { BRIGHTNESSES, applyBrightness, brightnessHint, brightnessLabel, getBrightness } from '../utils/brightness'
 import RagPanel from '../components/settings/RagPanel.jsx'
@@ -53,7 +53,12 @@ export default function Settings() {
   }, [params.section, cur.key]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function logout() {
-    await auth.logout()
+    try {
+      await auth.logout()
+    } finally {
+      // 登出失败也要清（与 AppShell.logout 同口径）：别让同页换账号继承上一账号的语言偏好
+      clearServerLang()
+    }
     navigate('/login')
   }
 

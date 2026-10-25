@@ -56,6 +56,7 @@ import * as dbmod from '../lib/db.js';
 import { DshDriverError } from '../lib/dshdriver.js';
 import * as dshdriver from '../lib/dshdriver.js';
 import * as dshevents from '../lib/dshevents.js';
+import { detailText } from '../lib/i18n.js';
 import * as localbus from '../lib/localbus.js';
 import { pyStrip } from '../lib/lib.js';
 import { pyJsonDumps } from '../lib/pyjson.js';
@@ -303,7 +304,7 @@ async function cardWorktreePreview(ctx, m) {
   const cardId = Number(m[2]);
   const [row, card] = boardOwned(ctx, projectId, cardId);
   if (row === null) return;
-  ctx.json(200, board.worktreePreview(row, card));
+  ctx.json(200, board.worktreePreview(row, card, ctx.lang));
 }
 
 /**
@@ -681,14 +682,15 @@ async function apiBoardSendComment(ctx, projectId, cardId, commentId) {
   try {
     // inject=true 时立即注入运行中的当前轮；项目忙时登记统一队列消息单元（回 queued=true）
     rec = await board.deliverComment(row, card, target, pyTruthy(pyGet(body, 'inject')),
-      { db: ctx.db });
+      ctx.lang, { db: ctx.db });
   } catch (e) {
     if (e instanceof DshDriverError) {
       // 409 = 会话运行中（deliver_comment 的忙拒绝）；其余 code 按 500
       if (Array.isArray(e.args) && e.args[0] === 409) {
         ctx.errorSpaced(409, e.args.length > 1 ? e.args[1] : BUSY_FALLBACK);
       } else {
-        ctx.errorSpaced(500, 'agent 调用失败: {detail}', { detail: pyStrErr(e) });
+        ctx.errorSpaced(500, 'agent 调用失败: {detail}',
+          { detail: detailText(e, ctx.lang) });
       }
       return;
     }
@@ -712,16 +714,17 @@ async function apiBoardSessionOp(ctx, projectId, cardId, op) {
   }
   try {
     if (op === 'compact') {
-      await board.compactSession(row, card, sid, { db: ctx.db });
+      await board.compactSession(row, card, sid, ctx.lang, { db: ctx.db });
       ctx.text(200, '{"ok":true}', 'application/json; charset=utf-8');
       return;
     }
     if (op === 'fork-compact') {
-      const [newSid, compactOk] = await board.forkCompactSession(row, card, sid, { db: ctx.db });
+      const [newSid, compactOk] = await board.forkCompactSession(row, card, sid, ctx.lang,
+        { db: ctx.db });
       ctx.json(200, { ok: true, new_sid: newSid, compact_ok: compactOk });
       return;
     }
-    const newSid = await board.forkSession(row, card, sid, { db: ctx.db });
+    const newSid = await board.forkSession(row, card, sid, ctx.lang, { db: ctx.db });
     ctx.json(200, { ok: true, new_sid: newSid });
   } catch (e) {
     ctx.errorSpaced(400, e);                  // Python `except RuntimeError` ⇒ 400
@@ -736,7 +739,7 @@ async function apiBoardWorktreeCleanup(ctx, projectId, cardId) {
     ctx.errorSpaced(409, '会话运行中，请先停止卡片再清理 worktree');
     return;
   }
-  const [ok, err] = board.cleanupCardWorktree(row, card, { db: ctx.db });
+  const [ok, err] = board.cleanupCardWorktree(row, card, ctx.lang, { db: ctx.db });
   if (!ok) { ctx.errorSpaced(400, err); return; }
   ctx.text(200, '{"ok": true}', 'application/json; charset=utf-8');
 }
@@ -1060,7 +1063,7 @@ async function apiBoardSessionRewind(ctx, projectId, sid) {
     await dshdriver.ensureSession(newSid, row.project_dir, `rewind-${sid.slice(0, 8)}`);
   } catch (e) {
     if (e instanceof DshDriverError) {
-      ctx.errorSpaced(502, '回退失败：{detail}', { detail: pyStrErr(e) });
+      ctx.errorSpaced(502, '回退失败：{detail}', { detail: detailText(e, ctx.lang) });
       return;
     }
     throw e;
@@ -1081,9 +1084,9 @@ async function apiBoardJira(ctx, projectId, action) {
       user: pyStrScalar(pyGet(body, 'user') || ''),
       token: pyStrScalar(pyGet(body, 'token') || ''),
     };
-    result = await board.jiraMyself(cfg);
+    result = await board.jiraMyself(cfg, ctx.lang);
   } else {
-    result = await board.jiraImport(row.id, { db: ctx.db });
+    result = await board.jiraImport(row.id, ctx.lang, { db: ctx.db });
   }
   ctx.json(pyTruthy(pyGet(result, 'ok')) ? 200 : 400, result);
 }

@@ -1048,6 +1048,17 @@ def start_ext_recover_after_connect(timeout=EXT_RECOVER_WAIT_SECONDS):
     return th
 
 
+def _start_card_with_lang(project, card, extra, lang):
+    """带请求语言调 `start_card`（KB-01：起会话失败的内层 detail 用请求语言渲染）。
+
+    无请求上下文（`lang` 空串）时保持既有的三参调用形态——大量测试桩按三参签名
+    打桩 start_card，且队列拾起/定时开工本来就无语言来源。
+    """
+    if lang:
+        return start_card(project, card, extra, lang=lang)
+    return start_card(project, card, extra)
+
+
 def _enter_doing(project, card, extra="", force=False, worktree=False,
                  queue_worktree=False, lang=""):
     """进 doing 统一入口（start 端点 / 拖入 doing / 定时开工共用）。
@@ -1210,7 +1221,7 @@ def _enter_doing(project, card, extra="", force=False, worktree=False,
             after_prefix=card["column_key"] in ("review", "blocked"))
         return card_json(db.get_board_card(card["id"])), None
     try:
-        start_card(project, db.get_board_card(card["id"]), extra)
+        _start_card_with_lang(project, db.get_board_card(card["id"]), extra, lang)
     except RuntimeError as e:
         # 与 runner 队列拾起（dequeue_start）对撞落败：对方已起跑成功（_RUNS 有活
         # 条目），放弃回滚、按当前态返回——否则会把对方落好的 doing 踩回原列
@@ -1355,7 +1366,7 @@ def _enter_doing_worktree(project, card, extra="", force=False, want=False,
                     if parent is not None and parent["column_key"] != "done":
                         return None, {"blocked": "parent-not-done"}
         # worktree 创建/复用是慢操作（git 子进程，可能数秒），必须在锁外做
-        path, branch, err = worktree.create(project, card_id)
+        path, branch, err = worktree.create(project, card_id, lang=lang)
         if err:
             return None, {"error": err}
         with _gate_lock:
@@ -1380,7 +1391,8 @@ def _enter_doing_worktree(project, card, extra="", force=False, want=False,
             # 用户本人下拉点「在新 worktree 中开始」引起的落列：不置「有更新」标记
             db.update_board_card(card_id, mark_unread=False, **fields)
         try:
-            log_path = start_card(project, db.get_board_card(card_id), extra)
+            log_path = _start_card_with_lang(project, db.get_board_card(card_id),
+                                             extra, lang)
         except RuntimeError as e:
             # 与并发起跑对撞落败：对方已起跑成功，不动列、直接按当前态返回
             if _session_in_flight(card_id):
@@ -1403,28 +1415,32 @@ def _enter_doing_worktree(project, card, extra="", force=False, want=False,
         _wt_start_end(card_id)
 
 
-def worktree_preview(project, card):
+def worktree_preview(project, card, lang=""):
     """卡片「在新 worktree 中开始」入口的预览（server 端点用，**不落盘**）：
 
     返回 {supported, reason, path, branch, exists, merge}——supported=False 时 reason
-    是给用户看的中文原因（项目不是 git 仓库 / 卡片已有主会话，D10）；前端据此把
-    菜单项置灰并显示原因，避免用户点了必然失败的入口。
+    是给用户看的原因（按 `lang` 渲染：项目不是 git 仓库 / 卡片已有主会话，D10）；
+    前端据此把菜单项置灰并显示原因，避免用户点了必然失败的入口。
     `merge`（2026-10-07 批次）= 待合并提交判定（`merge_pending`，None=无待合并）：
     已经是 worktree 卡的卡片走本端点时前端据它决定「通过」要不要弹合并框。
+    lang（KB-03）＝本条请求语言，缺省空串＝无请求上下文（按 zh 渲染）。
     """
     branch = worktree.branch_for(card["id"])
     pend = merge_pending(project, card)
     if (_card_opt(card, "worktree") or "").strip():
         # 已是 worktree 卡：续跑自动复用，无需再选（前端一般不再显示该入口）
-        return {"supported": False, "reason": "该卡片已在独立 worktree 中运行",
+        return {"supported": False,
+                "reason": i18n.t("api", "该卡片已在独立 worktree 中运行", lang),
                 "path": _card_opt(card, "worktree"), "branch": branch,
                 "exists": os.path.isdir(_card_opt(card, "worktree")),
                 "merge": pend}
     if (card["session_id"] or "").strip():
         return {"supported": False,
-                "reason": "该卡片已有主会话，不能切换到独立 worktree（请新建卡片）",
+                "reason": i18n.t(
+                    "api", "该卡片已有主会话，不能切换到独立 worktree（请新建卡片）",
+                    lang),
                 "path": "", "branch": branch, "exists": False, "merge": pend}
-    pv = worktree.preview(project, card["id"])
+    pv = worktree.preview(project, card["id"], lang=lang)
     if not pv["ok"]:
         return {"supported": False, "reason": pv["error"], "path": "",
                 "branch": branch, "exists": False, "merge": pend}
@@ -1432,17 +1448,18 @@ def worktree_preview(project, card):
             "branch": pv["branch"], "exists": pv["exists"], "merge": pend}
 
 
-def cleanup_card_worktree(project, card):
+def cleanup_card_worktree(project, card, lang=""):
     """清理卡片 worktree（server 端点用）。返回 (ok, err)。
 
     运行中的卡拒绝（409 语义由 server 落）：会话还在跑时删工作树=把 agent 的
     cwd 抽走，必须由用户先停卡。删除成功后**清空卡片 worktree 标记**（该卡回到
     普通模式；主会话若已是 worktree cwd，仍可续跑，但下次「开始」不再建树——
     这属用户显式选择，且 D10 只拦「已有会话切 worktree」，不拦反向）。
+    lang（KB-03）＝本条请求语言，透传给 `worktree.remove`（缺省空串＝zh）。
     """
     if _card_unit_active(card["id"]) or _session_in_flight(card["id"]):
         return False, "会话运行中，请先停止卡片再清理 worktree"
-    ok, err = worktree.remove(project, card)
+    ok, err = worktree.remove(project, card, lang=lang)
     if not ok:
         return False, err
     db.update_board_card(card["id"], worktree="")
@@ -1541,7 +1558,7 @@ def handoff_worktree_merge(project, card, lang=""):
     """
     if not (card["session_id"] or "").strip():
         return None, {"error": "该卡片尚无主会话，无法交给 agent 合并"}
-    st = worktree.merge_status(project, card)
+    st = worktree.merge_status(project, card, lang=lang)
     if not st["ok"]:
         # key+vars 载体（不预渲染）：中文插值结果与旧 f-string 逐字节相同，
         # 英文侧查共享词条（Node board.js messageVars 同 key）
@@ -1975,7 +1992,7 @@ def _save_card_sid(card_id, sid):
     return True
 
 
-def _start_web(project, card, family, extra=""):
+def _start_web(project, card, family, extra="", lang="zh"):
     """web 驱动起会话（单族：dsh_plugin——会话在 dsh 宿主进程内）：建会话（sid
     立即可知，**建完立即入库**，防后续步骤失败丢会话成孤儿）→ 设模型 → 记 turn
     归属基线 → 发 prompt → 登记 _RUNS（proc=None，靠事件中枢/巡视收尾，见
@@ -2041,9 +2058,11 @@ def _start_web(project, card, family, extra=""):
     except (dshdriver.DshDriverError, OSError) as e:
         db.update_board_card(card["id"], last_error=f"会话启动失败: {e}",
                              last_error_at=int(time.time() * 1000))
-        # 抛出物同时带 .message（渲染后中文，日志/既有断言口径不变）与 i18n_key/vars
+        # 抛出物同时带 .message（渲染后中文，日志/既有断言口径不变）与 i18n_key/vars；
+        # detail 按请求语言渲染（KB-01：内层 DshDriverError 的 key/vars 一起翻）
         raise i18n.localizable(RuntimeError(f"会话启动失败: {e}"),
-                               "会话启动失败: {detail}", {"detail": str(e)})
+                               "会话启动失败: {detail}",
+                               {"detail": i18n.detail_text(e, lang)})
     # 续接路径 sid 本就在库（归并写法幂等）；此处兜建会话后卡片被删等边角（m4）
     if not _save_card_sid(card["id"], sid):
         runner.append_log(log_path, "### 卡片已被删除，会话启动放弃\n")
@@ -2107,10 +2126,10 @@ def start_card(project, card, extra="", lang=""):
         db.update_board_card(card["id"], last_error=agents.RETIRED_MSG,
                              last_error_at=int(time.time() * 1000))
         raise RuntimeError(agents.RETIRED_MSG)
-    return _start_web(project, card, family, extra)
+    return _start_web(project, card, family, extra, lang=lang)
 
 
-def deliver_comment(project, card, comment_row, inject=False):
+def deliver_comment(project, card, comment_row, inject=False, lang=""):
     """评论投递主会话（恒发评论原文，不包任何前缀——2026-10-10 去前缀）。
 
     2026-09-06 起会话详情页路径 `raw=True` 直发原文、卡片评论区「投递」仍包
@@ -2135,8 +2154,8 @@ def deliver_comment(project, card, comment_row, inject=False):
         raise RuntimeError("尚无会话，请先开始开发")
     inst = runner.INSTANCE
     if inst is None:
-        # 无统一队列（单测/独立脚本）：保持既有立即投递行为
-        _deliver_now(project, card, comment_row, text, inject)
+        # 无统一队列（单测/独立脚本）：保持既有立即投递行为（请求语言随之下传）
+        _deliver_now(project, card, comment_row, text, inject, lang=lang)
         return None
     # 排队中的消息可「立即注入」（见 chat.inject_now）：family/model/
     # comment_id 提交时定格进等待项 meta（chat_msgs 零加列，P3 裁决 R1），执行时
@@ -2205,7 +2224,7 @@ def _ensure_card_session(project, card, sid):
                                     task=f"card-{cid}")
 
 
-def _deliver_now(project, card, comment_row, text, inject=False):
+def _deliver_now(project, card, comment_row, text, inject=False, lang="zh"):
     """评论真正送达（立即路径与统一队列消息单元执行体共用；text 即评论原文）。
 
     单族化后只有 dsh_plugin：followup 忙时排进 agent inbox（等同服务端排队
@@ -2239,8 +2258,11 @@ def _deliver_now(project, card, comment_row, text, inject=False):
             # 统一走 _web_send（单族投递唯一出口，测试打桩面也在此）
             _web_send(family, project, sid, text, inject=bool(inject))
         except dshdriver.DshDriverError as e:
+            # detail 按请求语言渲染（KB-01：内层驱动错误的 key/vars 一起翻）；
+            # .message 保持旧中文（日志/投递单元语料口径不变）
             raise i18n.localizable(RuntimeError(f"评论投递失败: {e}"),
-                                   "评论投递失败: {detail}", {"detail": str(e)})
+                                   "评论投递失败: {detail}",
+                                   {"detail": i18n.detail_text(e, lang)})
         db.update_board_comment(comment_row["id"], sent=1, session_id=sid,
                                 sent_text=text)
         return
@@ -2361,7 +2383,7 @@ def running_map():
     return out
 
 
-def compact_session(project, card, sid):
+def compact_session(project, card, sid, lang="zh"):
     """对卡片关联会话执行 compact（压缩上下文）。
 
     单族化后只有 dsh_plugin：走驱动 `/compact`（插件侧执行宿主 `/compact`
@@ -2404,12 +2426,14 @@ def compact_session(project, card, sid):
     # 命令；`ctx.compaction` 服务在插件 ctx 不可注入，命令路径是 P0 探针的结论）。
     # 触发即返回——压缩在 dsh 进程内异步进行（要过一次模型），失败落宿主日志。
     last = ""
+    last_err = None
     for attempt in (1, 2):
         try:
             dshdriver.compact(sid)
             return
         except dshdriver.DshDriverError as e:
             last = str(e)
+            last_err = e
             pool_miss = getattr(e, "code", None) == 404
             # 只在首跳 404（池外）补一次看管声明；**force=True** 跳过平台侧陈旧记账
             # （驱动侧重载会清空 `watched` 表，`_WATCHED` 却仍写着「声明过」）。
@@ -2422,10 +2446,11 @@ def compact_session(project, card, sid):
                 continue
             break
     raise i18n.localizable(RuntimeError(f"compact 失败: {last}"),
-                           "compact 失败: {detail}", {"detail": str(last)})
+                           "compact 失败: {detail}",
+                           {"detail": i18n.detail_text(last_err, lang)})
 
 
-def fork_compact_session(project, card, sid):
+def fork_compact_session(project, card, sid, lang="zh"):
     """对卡片关联会话执行「压缩并新建」（单族：dsh_plugin）：fork 出完整副本 →
     把**新会话**压缩（其上下文随即变轻），与「新会话上下文轻」的目标一致；
     差别是新会话日志里仍保留完整历史（窗口渲染更重），已在 spec 注明。
@@ -2456,11 +2481,12 @@ def fork_compact_session(project, card, sid):
                 pass
     except dshdriver.DshDriverError as e:
         raise i18n.localizable(RuntimeError(f"压缩新建失败: {e}"),
-                               "压缩新建失败: {detail}", {"detail": str(e)})
+                               "压缩新建失败: {detail}",
+                               {"detail": i18n.detail_text(e, lang)})
     return new_sid, True
 
 
-def fork_session(project, card, sid):
+def fork_session(project, card, sid, lang="zh"):
     """fork 卡片关联会话（单族：dsh_plugin）：经驱动完整复制源会话
     （历史/上下文全量保留，同 workspace/cwd），新会话标题「<卡标题>（fork）」。
 
@@ -2493,7 +2519,8 @@ def fork_session(project, card, sid):
                 pass                      # 标题失败不影响 fork 主流程
     except dshdriver.DshDriverError as e:
         raise i18n.localizable(RuntimeError(f"fork 失败: {e}"),
-                               "fork 失败: {detail}", {"detail": str(e)})
+                               "fork 失败: {detail}",
+                               {"detail": i18n.detail_text(e, lang)})
     return new_sid
 
 
@@ -3240,21 +3267,27 @@ def _jira_get(cfg, path):
         return 0, str(e)
 
 
-def jira_myself(cfg):
-    """测试连接：GET /rest/api/3/myself。返回 {"ok", "name"|"error"}。"""
+def jira_myself(cfg, lang="zh"):
+    """测试连接：GET /rest/api/3/myself。返回 {"ok", "name"|"error"}。
+
+    两条固定模板按 `lang` 渲染（Node `jiraMyself` 同 key）；`HTTP {status}: …`
+    是上游原文，按诊断原样返回（登记边界）。
+    """
     if not (cfg.get("url") and cfg.get("user") and cfg.get("token")):
-        return {"ok": False, "error": "请填全 Jira 地址 / 用户名 / token"}
+        return {"ok": False,
+                "error": i18n.t("api", "请填全 Jira 地址 / 用户名 / token", lang)}
     status, data = _jira_get(cfg, "/rest/api/3/myself")
     if status == 200 and isinstance(data, dict):
         return {"ok": True, "name": data.get("displayName") or data.get("name") or ""}
     return {"ok": False, "error": f"HTTP {status}: {data if isinstance(data, str) else json.dumps(data)[:200]}"}
 
 
-def jira_import(project_id):
+def jira_import(project_id, lang="zh"):
     """导入当前用户未解决的 Jira 工单为看板卡片（jira_key 去重，最多 50 条）。"""
     cfg = settings_of(project_id)["jira"]
     if not (cfg.get("url") and cfg.get("user") and cfg.get("token")):
-        return {"ok": False, "error": "请先在设置中配置 Jira"}
+        return {"ok": False,
+                "error": i18n.t("api", "请先在设置中配置 Jira", lang)}
     jql = urllib.parse.quote(
         "assignee=currentUser() AND resolution=Unresolved ORDER BY updated DESC")
     status, data = _jira_get(cfg, f"/rest/api/3/search?jql={jql}&maxResults=50")

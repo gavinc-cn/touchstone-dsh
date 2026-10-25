@@ -35,6 +35,7 @@
   },
   "cases": [
     {"kind": "t", "ns": "web", "key": "保存", "lang": "zh", "vars": {}, "expected": "保存"},
+    {"kind": "t", "ns": "web", "key": "保存", "vars": {}, "expected": "保存", "doc": "KB-17：省略 lang 走函数默认参数，输出必须与显式 zh 逐字节相同"},
     {"kind": "t", "ns": "web", "key": "共 {n} 张卡片", "lang": "zh", "vars": {"n": 3}, "expected": "共 3 张卡片"},
     {"kind": "t", "ns": "web", "key": "保存", "lang": "en", "vars": {}, "expected": "Save"},
     {"kind": "t", "ns": "web", "key": "保存", "lang": "EN", "vars": {}, "expected": "Save"},

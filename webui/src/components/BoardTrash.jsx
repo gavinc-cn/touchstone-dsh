@@ -9,7 +9,7 @@ import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { Undo2, Trash2 } from 'lucide-react'
-import { useI18n } from '../utils/i18n'
+import { useI18n, displayTitle } from '../utils/i18n'
 
 // 列标题映射（回收站卡片显示原列）：工厂形式，切换语言即重渲染
 const colLabelOf = (t) => ({
@@ -35,13 +35,13 @@ export default function BoardTrash({ project, onClose, onChanged }) {
   async function restore(c) {
     try {
       await boardApi.restoreCard(projectId, c.id)
-      toast(t('已还原「{title}」', { title: c.title || t('未命名') }))
+      toast(t('已还原「{title}」', { title: displayTitle(c.title) }))
       await load(); onChanged?.()
     } catch (e) { toast(e.message) }
   }
   async function purge(c) {
     if (!window.confirm(t('彻底删除「{title}」？评论一并删除，不可恢复。',
-      { title: c.title || t('未命名') }))) return
+      { title: displayTitle(c.title) }))) return
     try {
       await boardApi.purgeCard(projectId, c.id)
       await load(); onChanged?.()
@@ -77,7 +77,7 @@ export default function BoardTrash({ project, onClose, onChanged }) {
             {cards.map((c) => (
               <div key={c.id} className="flex items-start gap-2 rounded border border-border px-3 py-2">
                 <div className="min-w-0 flex-1">
-                  <div className="text-sm break-words">{c.title || t('未命名')}</div>
+                  <div className="text-sm break-words">{displayTitle(c.title)}</div>
                   <div className="mt-0.5 flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
                     <span className="bug-status pending">{colLabel[c.column] || c.column}</span>
                     {c.jira_key && <span className="bug-status pending">{c.jira_key}</span>}

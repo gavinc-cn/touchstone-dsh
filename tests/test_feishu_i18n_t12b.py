@@ -165,7 +165,9 @@ def _push_text(monkeypatch, ctx, name, lang):
 
 
 def _doctor_text(monkeypatch, lang):
-    monkeypatch.setattr(feishu, "doctor", lambda uid, send_probe=False: (
+    # `data_lang` 是 T12d 数据面语言：本用例的 doctor 桩按 `lang` 直接给两套数据，
+    # 只吸收新增关键字以免慢动作调用契约变更把它打崩（断言仍看渲染后的 DM）。
+    monkeypatch.setattr(feishu, "doctor", lambda uid, send_probe=False, data_lang=None: (
         DOCTOR_ZH if lang == "zh" else DOCTOR_EN))
     captured = []
     monkeypatch.setattr(feishu, "_dm_text",
@@ -764,8 +766,10 @@ def test_setup_slow_apply_publish_dm_english_entry(clean_prefs, monkeypatch):
     monkeypatch.setattr(feishu, "_dm_text",
                         lambda oid, text, cfg: sent.append(text))
     out = {"apply": {"ok": True}, "publish": {"ok": True, "version": "1.2.3"}}
-    monkeypatch.setattr(feishu, "provision_apply", lambda uid: out["apply"])
-    monkeypatch.setattr(feishu, "provision_publish", lambda uid: out["publish"])
+    monkeypatch.setattr(feishu, "provision_apply",
+                        lambda uid, lang=None: out["apply"])
+    monkeypatch.setattr(feishu, "provision_publish",
+                        lambda uid, lang=None: out["publish"])
 
     class _SyncThread:
         def __init__(self, target=None, args=(), kwargs=None, **extra):

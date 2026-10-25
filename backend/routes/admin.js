@@ -457,7 +457,7 @@ async function adminRagTest(ctx) {
     api_key: apiKey,
     timeout_s: body.timeout_s,
     batch_size: body.batch_size,
-  });
+  }, ctx.lang);
   ctx.json(200, result);
 }
 

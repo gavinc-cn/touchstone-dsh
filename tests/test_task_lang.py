@@ -385,6 +385,25 @@ def test_card_start_freezes_request_lang_once(env):
     assert db.get_board_card(cid)["lang"] == "en"
 
 
+def test_doing_queue_idempotent_start_freezes_empty_lang(env):
+    """KB-41①：卡已由无请求上下文路径入队（lang=''）时，用户重按开始补冻。
+
+    `doing+queue` 幂等分支不重新落列，但会把本条请求语言补到仍为空的卡上
+    （先到先得；二次请求不覆盖）。
+    """
+    cid = db.insert_board_card(env["pid"], "幂等补冻")
+    db.update_board_card(cid, column_key="doing", block_kind="queue")
+    project = db.get_project(env["pid"])
+    card_dict, err = board.start_into_doing(project, db.get_board_card(cid), "",
+                                            lang="en")
+    assert card_dict is not None and err is None
+    assert db.get_board_card(cid)["lang"] == "en"
+    assert env["runner"].submitted_cards == [cid]     # 走幂等补队分支
+    # 二次带 zh 不覆盖
+    board.start_into_doing(project, db.get_board_card(cid), "", lang="zh")
+    assert db.get_board_card(cid)["lang"] == "en"
+
+
 def test_card_start_without_lang_leaves_unfrozen(env):
     """无请求上下文（定时开工 / 队列拾起 / 内部调用）不写卡：保持 ''，payload 仍 zh。
 
@@ -508,12 +527,58 @@ def test_move_blocked_by_parent_gate_keeps_unfrozen(env):
     assert db.get_board_card(child)["lang"] == ""     # 被拒绝的意图不污染语言
 
 
+def test_start_endpoint_blocked_by_parent_gate_keeps_unfrozen(env):
+    """KB-41②：**start 端点**的父门禁拒绝同样不钉语言（与 move 路径对称）。
+
+    start 路径此前只有「成功地冻结」断言；这里固定「被 parent-not-done 拒绝的
+    起跑意图不写 lang」——冻结点在门禁之后（F3 语义对 start 也成立）。
+    """
+    parent = db.insert_board_card(env["pid"], "父卡-start")
+    db.update_board_card(parent, column_key="doing")
+    child = db.insert_board_card(env["pid"], "子卡-start")
+    db.update_board_card(child, parent_card_id=parent)
+    handler = FakeHandler(env["user"], {"X-TS-Lang": "en"},
+                          f"/api/projects/{env['pid']}/board/cards/{child}/start")
+    handler._api_board_card_action(env["pid"], child, "start", {})
+    code, payload = handler.last_json()
+    assert code == 200 and payload == {"blocked": "parent-not-done"}
+    assert db.get_board_card(child)["lang"] == ""
+
+
+def test_worktree_direct_start_freezes_request_lang(env, monkeypatch):
+    """KB-41③：独立 worktree 直起（`_enter_doing_worktree`）冻结请求语言。
+
+    冻结点在 D10/在管/父依赖/worktree 创建等门禁之后、落列与起会话之前；这里桩掉
+    真 git 创建与会话启动，只验语言定格与传参。
+    """
+    cid = db.insert_board_card(env["pid"], "worktree 直起")
+    monkeypatch.setattr(board.worktree, "create",
+                        lambda project, card_id, lang="zh": (
+                            "/tmp/wt/card_%d" % card_id,
+                            "ts/card-%d" % card_id, ""))
+    started = []
+
+    def _fake_start(project, card, extra="", lang=""):
+        started.append(lang)
+        return "/tmp/wt-direct.log"
+
+    monkeypatch.setattr(board, "start_card", _fake_start)
+    monkeypatch.setattr(board.runner, "append_log", lambda *a, **k: None)
+    project = db.get_project(env["pid"])
+    card, err = board.start_into_doing(project, db.get_board_card(cid), "",
+                                       worktree=True, lang="en")
+    assert err is None and card is not None
+    assert card["lang"] == "en"
+    assert db.get_board_card(cid)["lang"] == "en"
+    assert started == ["en"]
+
+
 def test_worktree_merge_endpoint_freezes_request_lang(env, monkeypatch):
     """worktree 合并回交（POST .../worktree/merge）同样是请求：冻结 ctx 语言（F1）。"""
     cid = db.insert_board_card(env["pid"], "合并回交")
     db.update_board_card(cid, column_key="review", worktree="/tmp/wt/card_x",
                          session_id="sid-1")
-    monkeypatch.setattr(board.worktree, "merge_status", lambda p, c: {
+    monkeypatch.setattr(board.worktree, "merge_status", lambda p, c, lang="zh": {
         "ok": True, "error": "", "path": "/tmp/wt/card_x",
         "branch": "ts/card-%d" % cid, "target": "master", "exists": True,
         "branch_exists": True, "dirty": False, "dirty_count": 0,

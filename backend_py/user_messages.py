@@ -51,6 +51,7 @@ LIB_USER_MESSAGE_SOURCES = {
             "reorder_card",
             "cleanup_card_worktree",
             "handoff_worktree_merge",
+            "worktree_preview",
             "move_card",
             "_doing_gesture",
             "_enter_doing",
@@ -64,6 +65,20 @@ LIB_USER_MESSAGE_SOURCES = {
             "fork_session",
         ],
         "constants": ["LOST_SESSION_MSG"],
+    },
+    "worktree.py": {
+        # KB-03：模块自己写的固定中文（git stderr/路径/异常原文不翻，也不在扫描面：
+        # 它们不是字面量）。函数体内的 return/raise 一律是 i18n.t(...) 的精确 key。
+        "functions": [
+            "repo_root",
+            "_git",
+            "head_branch",
+            "preview",
+            "create",
+            "status",
+            "remove",
+            "merge_status",
+        ],
     },
     "dshdriver.py": {
         "classes": ["DshDriverError"],

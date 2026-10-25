@@ -166,7 +166,7 @@ test('compact①：宿主已失去会话 ⇒ 先 /session 接回再 /compact（�
   const unsetHub = setHub({ sessions: {} });          // 可信快照 ∧ 注册表无此 sid = 确已失去
   const s = setup('compact-cold', { sid: 'session-cold-907' });
   try {
-    await board.compactSession(s.project, s.card, 'session-cold-907', s.opts);
+    await board.compactSession(s.project, s.card, 'session-cold-907', 'zh', s.opts);
     assert.deepEqual(drv.calls.map((c) => c.path), ['/session', '/compact']);
     assert.deepEqual(drv.byPath('/session')[0].body, {
       session_id: 'session-cold-907', task: `card-${s.cid}`, cwd: s.fx.dir,
@@ -185,7 +185,7 @@ test('compact②：会话在场 ⇒ 零 /session 请求（既有路径一字未�
   const unsetHub = setHub({ sessions: { [sid]: { owned: true, status: 'idle' } } });
   const s = setup('compact-warm', { sid });
   try {
-    await board.compactSession(s.project, s.card, sid, s.opts);
+    await board.compactSession(s.project, s.card, sid, 'zh', s.opts);
     assert.deepEqual(drv.calls.map((c) => c.path), ['/compact']);
     assert.equal(drv.byPath('/session').length, 0);
   } finally {
@@ -206,7 +206,7 @@ test('compact③：中枢未对齐 ⇒ 未知 ≠ 已失去：不接回，压缩
   const s = setup('compact-unaligned', { sid: 'session-unaligned' });
   try {
     await assert.rejects(
-      () => board.compactSession(s.project, s.card, 'session-unaligned', s.opts),
+      () => board.compactSession(s.project, s.card, 'session-unaligned', 'zh', s.opts),
       (e) => e.message.includes('compact 失败') && e.message.includes('会话已结束'),
     );
     assert.equal(drv.byPath('/session').length, 0, '未知态绝不乱 resume');
@@ -225,7 +225,7 @@ test('compact④：sync 卡冷会话 ⇒ 不收养（零 /session），仍抛中
   const s = setup('compact-sync', { sid: 'session-sync-cold', origin: 'sync' });
   try {
     await assert.rejects(
-      () => board.compactSession(s.project, s.card, 'session-sync-cold', s.opts),
+      () => board.compactSession(s.project, s.card, 'session-sync-cold', 'zh', s.opts),
       (e) => e.message.includes('compact 失败'),
     );
     assert.equal(drv.byPath('/session').length, 0, 'C 批：平台不接管外部会话');
@@ -246,7 +246,7 @@ test('compact⑤：接不回 ⇒ 只试一次 /session，不吞错（驱动文�
   console.log = () => { /* 接回失败诊断行：本用例只关心请求形状 */ };
   try {
     await assert.rejects(
-      () => board.compactSession(s.project, s.card, 'session-dead', s.opts),
+      () => board.compactSession(s.project, s.card, 'session-dead', 'zh', s.opts),
       (e) => e.message.includes('compact 失败'),
     );
     assert.equal(drv.byPath('/session').length, 1, '只接一次，不重试刷请求');
@@ -270,7 +270,7 @@ test('compact⑥：回滚阀 TS_HOST_SESSION_REVIVE=0 ⇒ 不接回，退回修�
   process.env.TS_HOST_SESSION_REVIVE = '0';
   try {
     await assert.rejects(
-      () => board.compactSession(s.project, s.card, 'session-valve', s.opts),
+      () => board.compactSession(s.project, s.card, 'session-valve', 'zh', s.opts),
       (e) => e.message.includes('compact 失败'),
     );
     assert.equal(drv.byPath('/session').length, 0, '阀关：一个 resume 请求都不发');

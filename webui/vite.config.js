@@ -4,22 +4,27 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
+// webui/ 根目录（本配置文件所在目录）与仓库根词表目录（webui/ 之外）
+const webuiDir = path.dirname(fileURLToPath(import.meta.url))
+// 词表在仓库根：单一真源 i18n/en.json，前端构建期内联
+const i18nDir = path.resolve(webuiDir, '../i18n')
+
 export default defineConfig(({ mode }) => ({
   // dsh 插件形态: --mode plugin 以 /touchstone/ 为 base 构建(dist-plugin); 独立形态不变(dist)
   base: mode === 'plugin' ? '/touchstone/' : '/',
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
-      '@': path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'src'),
-      // 词表在仓库根（webui/ 之外）：单一真源 i18n/en.json，前端构建期内联
-      '@i18n': path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../i18n'),
+      '@': path.resolve(webuiDir, 'src'),
+      '@i18n': i18nDir,
     },
   },
   server: {
     host: '0.0.0.0',
     port: 5173,
-    // dev 模式放行仓库根：@i18n/en.json 位于 webui/ 之外，默认只允许 webui 会被 fs 拦截
-    fs: { allow: [path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')] },
+    // dev 模式只放行 webui 自身与仓库根 i18n/：@i18n/en.json 位于 webui/ 之外，默认只允许
+    // webui 会被 fs 拦截；不放行整个仓库根（KB-47，dev-only 收窄；生产构建不受影响）
+    fs: { allow: [webuiDir, i18nDir] },
     proxy: {
       // 开发时 API 与 SSE 转发到 4601 后端
       '/api': {
@@ -45,4 +50,3 @@ export default defineConfig(({ mode }) => ({
     include: ['src/**/*.test.{js,jsx}'],
   },
 }))
-

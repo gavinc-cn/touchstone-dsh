@@ -107,7 +107,7 @@ import {
   snapshot as eventSnapshot, stats as eventStats, subscribe as eventSubscribe,
   waitConnected,
 } from './dshevents.js';
-import { cardLang, localizable, messageVars } from './i18n.js';
+import { cardLang, detailText, localizable, messageVars, t } from './i18n.js';
 import { ensureRuntimeDirs, pyIntOr, pyJoin, runtimeDir } from './lib.js';
 import { pyJsonDumps } from './pyjson.js';
 
@@ -906,7 +906,8 @@ export function mergePending(project, card) {
  * 卡片「在新 worktree 中开始」入口的预览（server 端点用，**不落盘**）。
  *
  * 返回 `{supported, reason, path, branch, exists, merge}`——`supported=false` 时 `reason`
- * 是给用户看的中文原因（项目不是 git 仓库 / 卡片已有主会话，D10）；前端据此把菜单项置灰
+ * 是按 `lang` 渲染的用户可读原因（项目不是 git 仓库 / 卡片已有主会话，D10；本函数直接返回
+ * 渲染后文本，不经 i18nKey 二次本地化；上游 `worktree.preview` 已按 `lang` 产文）；前端据此把菜单项置灰
  * 并显示原因，避免用户点了必然失败的入口。`merge` = 待合并提交判定（`None` = 无待合并）：
  * 已经是 worktree 卡的卡片走本端点时前端据它决定「通过」要不要弹合并框。
  *
@@ -915,10 +916,11 @@ export function mergePending(project, card) {
  *
  * @param {object} project
  * @param {object} card
+ * @param {'zh'|'en'|string=} [lang]
  * @returns {{supported: boolean, reason: string, path: string, branch: string,
  *            exists: boolean, merge: object|null}}
  */
-export function worktreePreview(project, card) {
+export function worktreePreview(project, card, lang = 'zh') {
   const branch = branchFor(card.id);
   const pend = mergePending(project, card);
   const wt = String(cardOpt(card, 'worktree') || '').trim();
@@ -926,7 +928,7 @@ export function worktreePreview(project, card) {
     // 已是 worktree 卡：续跑自动复用，无需再选（前端一般不再显示该入口）
     return {
       supported: false,
-      reason: '该卡片已在独立 worktree 中运行',
+      reason: t('api', '该卡片已在独立 worktree 中运行', lang),
       path: cardOpt(card, 'worktree'),
       branch,
       exists: isDirSafe(cardOpt(card, 'worktree')),
@@ -936,14 +938,14 @@ export function worktreePreview(project, card) {
   if (String(card.session_id || '').trim()) {
     return {
       supported: false,
-      reason: '该卡片已有主会话，不能切换到独立 worktree（请新建卡片）',
+      reason: t('api', '该卡片已有主会话，不能切换到独立 worktree（请新建卡片）', lang),
       path: '',
       branch,
       exists: false,
       merge: pend,
     };
   }
-  const pv = worktreePreviewCore(project, card.id);
+  const pv = worktreePreviewCore(project, card.id, lang);
   if (!pv.ok) {
     return {
       supported: false, reason: pv.error, path: '', branch, exists: false, merge: pend,
@@ -2378,7 +2380,7 @@ export async function enterDoing(project, card, extra = '', force = false, workt
     return [cardJson(dbmod.getBoardCard(card.id, options), {}, options), null];
   }
   try {
-    await startCard(project, dbmod.getBoardCard(card.id, options), extra, '', options);
+    await startCard(project, dbmod.getBoardCard(card.id, options), extra, lang, options);
   } catch (e) {
     // 与 runner 队列拾起（dequeueStart）对撞落败：对方已起跑成功（在管条目在场），
     // 放弃回滚、按当前态返回——否则会把对方落好的 doing 踩回原列
@@ -2495,7 +2497,7 @@ export async function enterDoingWorktree(project, card, extra = '', force = fals
       }
     }
     // worktree 创建/复用是慢操作（git 子进程，可能数秒），必须在锁外做
-    const [p, branch, err] = wtCreate(project, cardId);
+    const [p, branch, err] = wtCreate(project, cardId, lang);
     if (err) return [null, { error: err }];
     // 锁外创建期间可能有并发起跑：复检一次，让位给已经在管的那条路，避免双会话
     if (sessionInFlight(cardId)) {
@@ -2515,7 +2517,8 @@ export async function enterDoingWorktree(project, card, extra = '', force = fals
     dbmod.updateBoardCard(cardId, false, fields, options);   // 用户本人操作：不置未读
     let logPath;
     try {
-      logPath = await startCard(project, dbmod.getBoardCard(cardId, options), extra, '', options);
+      logPath = await startCard(project, dbmod.getBoardCard(cardId, options), extra, lang,
+        options);
     } catch (e) {
       // 与并发起跑对撞落败：对方已起跑成功，不动列、直接按当前态返回
       if (sessionInFlight(cardId)) {
@@ -2545,13 +2548,14 @@ export const _enter_doing_worktree = enterDoingWorktree;
  *
  * 运行中的卡拒绝（409 语义由 server 落）；删除成功后**清空卡片 worktree 标记**（该卡回到
  * 普通模式；D10 只拦「已有会话切 worktree」，不拦反向）。
+ * @param {'zh'|'en'|string=} [lang] 本条请求语言（缺省空串＝无请求上下文，按 zh 渲染）
  * @returns {[boolean, string]}
  */
-export function cleanupCardWorktree(project, card, options = {}) {
+export function cleanupCardWorktree(project, card, lang = '', options = {}) {
   if (cardUnitActive(card.id, options) || sessionInFlight(card.id)) {
     return [false, '会话运行中，请先停止卡片再清理 worktree'];
   }
-  const [ok, err] = wtRemove(project, card);
+  const [ok, err] = wtRemove(project, card, lang);
   if (!ok) return [false, err];
   dbmod.updateBoardCard(card.id, true, { worktree: '' }, options);
   return [true, ''];
@@ -2621,7 +2625,7 @@ export function handoffWorktreeMerge(project, card, lang = '', options = {}) {
   if (!String(card.session_id || '').trim()) {
     return Promise.resolve([null, { error: '该卡片尚无主会话，无法交给 agent 合并' }]);
   }
-  const st = mergeStatus(project, card);
+  const st = mergeStatus(project, card, lang);
   if (!st.ok) {
     return Promise.resolve([null,
       { error: messageVars('无法判定待合并提交：{detail}', { detail: st.error }) }]);
@@ -2858,9 +2862,15 @@ export const _save_card_sid = saveCardSid;
  * Node 把该段内的一切异常一律包装成同一条中文 `Error`——理由：调用方的回滚分支只认异常本身
  * （`except RuntimeError`），漏包装的异常类型会绕过回滚让卡片停在 doing（静默坏态）。
  *
+ * @param {object} project
+ * @param {object} card
+ * @param {string} family
+ * @param {string} [extra]
+ * @param {'zh'|'en'|string=} [lang] 本条请求语言（KB-01：失败 detail 按它渲染）
+ * @param {object} [options]
  * @returns {Promise<string>} 会话日志路径
  */
-export async function startWeb(project, card, family, extra = '', options = {}) {
+export async function startWeb(project, card, family, extra = '', lang = 'zh', options = {}) {
   let sid = String(card.session_id || '').trim();
   const prompt = buildStartPrompt(project, card, extra, sid);
   ensureRuntimeDirs(project.work_dir);
@@ -2906,7 +2916,7 @@ export async function startWeb(project, card, family, extra = '', options = {}) 
     dbmod.updateBoardCard(card.id, true,
       { last_error: `会话启动失败: ${errText(e)}`, last_error_at: nowMs() }, options);
     throw localizable(new Error(`会话启动失败: ${errText(e)}`),
-      '会话启动失败: {detail}', { detail: errText(e) });
+      '会话启动失败: {detail}', { detail: detailText(e, lang) });
   }
   // 续接路径 sid 本就在库（归并写法幂等）；此处兜建会话后卡片被删等边角
   if (!saveCardSid(card.id, sid, options)) {
@@ -2973,7 +2983,7 @@ export async function startCard(project, card, extra = '', lang = '', options = 
       { last_error: RETIRED_MSG, last_error_at: nowMs() }, options);
     throw new Error(RETIRED_MSG);
   }
-  return startWeb(project, card, family, extra, options);
+  return startWeb(project, card, family, extra, lang, options);
 }
 
 // ---------- 投递与会话兜底（board.py:2041-2175） ----------
@@ -2988,7 +2998,8 @@ export async function startCard(project, card, extra = '', lang = '', options = 
  * **async**（`chat.submit` 是 async；无单例分支要 await 投递）。
  * @returns {Promise<{id: string, state: string, queued: boolean}|null>}
  */
-export async function deliverComment(project, card, commentRow, inject = false, options = {}) {
+export async function deliverComment(project, card, commentRow, inject = false, lang = 'zh',
+  options = {}) {
   const family = webFamily(project);
   const sid = card.session_id;
   const text = commentRow.text;
@@ -2996,8 +3007,8 @@ export async function deliverComment(project, card, commentRow, inject = false, 
   if (!sid) throw new Error('尚无会话，请先开始开发');
   const inst = runnerInstance();
   if (inst === null) {
-    // 无统一队列（单测/独立脚本）：保持既有立即投递行为
-    await deliverNow(project, card, commentRow, text, inject, options);
+    // 无统一队列（单测/独立脚本）：保持既有立即投递行为（请求语言随之下传）
+    await deliverNow(project, card, commentRow, text, inject, options, lang);
     return null;
   }
   // 排队中的消息可「立即注入」：family/model/comment_id 提交时定格进等待项 meta
@@ -3075,9 +3086,11 @@ export const _ensure_card_session = ensureCardSession;
  * 固定，都在 `webSend` 之前）：① **会话存活**（`ensureCardSession` 先接回再投递，接不回则报
  * `LOST_SESSION_MSG`）；② **重声明看管**（C 批终审 I2，`watchBeforeDelivery` 钩子；未接线
  * 时按「该条件不成立」跳过）。退场族无投递通道，直接报错。**async**。
+ * @param {'zh'|'en'|string=} [lang] 本条请求语言（只影响失败载荷里的 detail）
  * @returns {Promise<void>}
  */
-export async function deliverNow(project, card, commentRow, text, inject = false, options = {}) {
+export async function deliverNow(project, card, commentRow, text, inject = false, options = {},
+  lang = 'zh') {
   const family = webFamily(project);
   const sid = card.session_id;
   if (family !== null) {
@@ -3090,7 +3103,7 @@ export async function deliverNow(project, card, commentRow, text, inject = false
       await webSend(family, project, sid, text, '', Boolean(inject), options);
     } catch (e) {
       throw localizable(new Error(`评论投递失败: ${errText(e)}`),
-        '评论投递失败: {detail}', { detail: errText(e) });
+        '评论投递失败: {detail}', { detail: detailText(e, lang) });
     }
     dbmod.updateBoardComment(commentRow.id, { sent: 1, session_id: sid, sent_text: text },
       options);
@@ -3214,21 +3227,24 @@ function requireCardSession(card, sid) {
  * **不在此收口**：照旧走两跳，由驱动 404 文案兜底（与修复前完全一致）。
  *
  * `sid` 必须属于该卡片；不支持的族抛 `Error`（server 转 400）。**async**。
+ * @param {'zh'|'en'|string=} [lang] 本条请求语言（只影响失败载荷里的 detail）
  * @returns {Promise<void>}
  */
-export async function compactSession(project, card, sid, options = {}) {
+export async function compactSession(project, card, sid, lang = 'zh', options = {}) {
   requireCardSession(card, sid);
   const family = agentFamily(project.agent_path || '');
   if (family !== 'dsh_plugin') throw new Error(RETIRED_MSG);
   // 会话存活前置：宿主已失去该会话 ⇒ 先按 resume 语义接回，再压缩（与投递同款）
   await ensureCardSession(project, card, sid, options);
   let last = '';
+  let lastErr = null;
   for (const attempt of [1, 2]) {
     try {
       await dshMod.compact(sid);
       return;
     } catch (e) {
       last = errText(e);
+      lastErr = e;
       const poolMiss = (e && e.code === 404);
       const ensure = optionalHook('ensureWatch');
       const declared = attempt === 1 && poolMiss && ensure !== null
@@ -3241,7 +3257,7 @@ export async function compactSession(project, card, sid, options = {}) {
     }
   }
   throw localizable(new Error(`compact 失败: ${last}`),
-    'compact 失败: {detail}', { detail: last });
+    'compact 失败: {detail}', { detail: detailText(lastErr, lang) });
 }
 
 /** `compact_session` 的 Python 名别名。 */
@@ -3250,9 +3266,10 @@ export const _compact_session = compactSession;
 /**
  * 对卡片关联会话执行「压缩并新建」（Python `fork_compact_session`）：fork 出完整副本 →
  * 把**新会话**压缩（其上下文随即变轻）。返回 `[新会话 sid, true]`。
+ * @param {'zh'|'en'|string=} [lang]
  * @returns {Promise<[string, boolean]>}
  */
-export async function forkCompactSession(project, card, sid, options = {}) {
+export async function forkCompactSession(project, card, sid, lang = 'zh', options = {}) {
   requireCardSession(card, sid);
   const family = agentFamily(project.agent_path || '');
   if (family !== 'dsh_plugin') throw new Error(RETIRED_MSG);
@@ -3271,7 +3288,7 @@ export async function forkCompactSession(project, card, sid, options = {}) {
   } catch (e) {
     if (e instanceof Error && String(e.message).startsWith('压缩新建失败')) throw e;
     throw localizable(new Error(`压缩新建失败: ${errText(e)}`),
-      '压缩新建失败: {detail}', { detail: errText(e) });
+      '压缩新建失败: {detail}', { detail: detailText(e, lang) });
   }
   return [newSid, true];
 }
@@ -3283,9 +3300,10 @@ export const _fork_compact_session = forkCompactSession;
  * fork 卡片关联会话（Python `fork_session`）：经驱动完整复制源会话（历史/上下文全量保留，
  * 同 workspace/cwd），新会话标题「<卡标题>（fork）」。返回新会话 sid。调用方（server 端点）
  * 负责把新 sid 绑定进卡片会话列表（仅追加列表，不抢占主会话）。**async**。
+ * @param {'zh'|'en'|string=} [lang]
  * @returns {Promise<string>}
  */
-export async function forkSession(project, card, sid, options = {}) {
+export async function forkSession(project, card, sid, lang = 'zh', options = {}) {
   requireCardSession(card, sid);
   const family = agentFamily(project.agent_path || '');
   if (family !== 'dsh_plugin') throw new Error(RETIRED_MSG);
@@ -3304,7 +3322,7 @@ export async function forkSession(project, card, sid, options = {}) {
   } catch (e) {
     if (e instanceof Error && String(e.message).startsWith('fork 失败')) throw e;
     throw localizable(new Error(`fork 失败: ${errText(e)}`),
-      'fork 失败: {detail}', { detail: errText(e) });
+      'fork 失败: {detail}', { detail: detailText(e, lang) });
   }
   return newSid;
 }
@@ -6210,11 +6228,12 @@ export const _jira_get = jiraGet;
 
 /**
  * 测试连接（Python `jira_myself`）：GET `/rest/api/3/myself`。返回 `{ok, name|error}`。**async**。
+ * 两条固定模板按 `lang` 渲染（与 Python 同 key）；`HTTP {status}: …` 是上游原文，不翻。
  * @returns {Promise<object>}
  */
-export async function jiraMyself(cfg, opts = {}) {
+export async function jiraMyself(cfg, lang = 'zh', opts = {}) {
   if (!(cfg.url && cfg.user && cfg.token)) {
-    return { ok: false, error: '请填全 Jira 地址 / 用户名 / token' };
+    return { ok: false, error: t('api', '请填全 Jira 地址 / 用户名 / token', lang) };
   }
   const [status, data] = await jiraGet(cfg, '/rest/api/3/myself', opts);
   if (status === 200 && data !== null && typeof data === 'object' && !Array.isArray(data)) {
@@ -6229,13 +6248,14 @@ export const _jira_myself = jiraMyself;
 
 /**
  * 导入当前用户未解决的 Jira 工单为看板卡片（Python `jira_import`；`jira_key` 去重，最多 50 条）。
+ * 两条固定模板按 `lang` 渲染（与 Python 同 key）；`HTTP {status}: …` 是上游原文，不翻。
  * **async**（Jira HTTP）。
  * @returns {Promise<object>} `{ok, added, skipped}` 或 `{ok:false, error}`
  */
-export async function jiraImport(projectId, options = {}, opts = {}) {
+export async function jiraImport(projectId, lang = 'zh', options = {}, opts = {}) {
   const cfg = settingsOf(projectId, options).jira || {};
   if (!(cfg.url && cfg.user && cfg.token)) {
-    return { ok: false, error: '请先在设置中配置 Jira' };
+    return { ok: false, error: t('api', '请先在设置中配置 Jira', lang) };
   }
   const jql = encodeURIComponent(
     'assignee=currentUser() AND resolution=Unresolved ORDER BY updated DESC')

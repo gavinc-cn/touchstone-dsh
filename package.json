@@ -62,6 +62,7 @@
   "scripts": {
     "build:client": "node dsh-plugin/scripts/build.mjs",
     "test:backend": "node --test \"backend/test/**/*.test.mjs\"",
+    "test:plugin-client": "node --test \"dsh-plugin/test/**/*.test.mjs\"",
     "prepack": "node dsh-plugin/scripts/prepack-check.mjs"
   },
   "repository": {

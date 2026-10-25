@@ -40,6 +40,7 @@ import * as dbmod from '../lib/db.js';
 import * as dshdriver from '../lib/dshdriver.js';
 import { DshDriverError } from '../lib/dshdriver.js';
 import * as dshevents from '../lib/dshevents.js';
+import { detailText } from '../lib/i18n.js';
 import { jsonBody } from '../lib/http.js';
 import { pyStrip } from '../lib/lib.js';
 import { unquote } from '../lib/query.js';
@@ -555,19 +556,6 @@ function pyLen(text) {
   return [...text].length;
 }
 
-/**
- * Python `str(e)`：异常 → 可进响应正文的文本（与 `chat.js` 私有的 `errText` 同口径，
- * 那份没导出，故此处复刻一份）。
- *
- * `DshDriverError` 覆写了 `toString()`（纯消息）；普通 `Error` 取 `.message`——直接
- * `${err}` 会拼出 `Error: xxx`，而 Python 的 `str(RuntimeError('xxx'))` 是 `xxx`。
- */
-function pyStrErr(err) {
-  if (err === null || err === undefined) return String(err);
-  if (err instanceof DshDriverError) return String(err);
-  if (err instanceof Error) return err.message;
-  return String(err);
-}
 
 /**
  * 是不是 Python `OSError` 那一档（`_api_session_chat` 的第二个 except ⇒ 500）。
@@ -636,13 +624,15 @@ export async function taskSessionChat(ctx, taskId, bodyOverride = null) {
         // dshdriver 的构造点都带非空消息 ⇒ 空串按「无第二参」回兜底文案。
         ctx.errorSpaced(409, err.message ? String(err.message) : BUSY_FALLBACK);
       } else {
-        ctx.errorSpaced(500, 'agent 调用失败: {detail}', { detail: pyStrErr(err) });
+        ctx.errorSpaced(500, 'agent 调用失败: {detail}',
+          { detail: detailText(err, ctx.lang) });
       }
       return;
     }
     // ② OSError（Node 的系统错误）⇒ 500，同一文案
     if (isOsError(err)) {
-      ctx.errorSpaced(500, 'agent 调用失败: {detail}', { detail: pyStrErr(err) });
+      ctx.errorSpaced(500, 'agent 调用失败: {detail}',
+        { detail: detailText(err, ctx.lang) });
       return;
     }
     // ③ 裸 RuntimeError = 投递前置闸 `chat.DeliveryRefused`（外部会话前提不成立）：
@@ -727,7 +717,7 @@ export async function injectMsg(ctx, project, sid, body, taskId = null) {
       return;
     }
     // 投递失败：消息已按原位次退回排队（chat.injectNow 内），此处只报错 ⇒ 502
-    ctx.errorSpaced(502, '注入失败：{detail}', { detail: pyStrErr(err) });
+    ctx.errorSpaced(502, '注入失败：{detail}', { detail: detailText(err, ctx.lang) });
     return;
   }
   ctx.text(200, '{"ok":true}', 'application/json; charset=utf-8');   // 硬编码字节串 ⇒ 紧凑
@@ -955,7 +945,7 @@ export async function taskSessionCompact(ctx, taskId) {
     await dshdriver.compact(sid);
   } catch (e) {
     if (e instanceof DshDriverError) {
-      ctx.errorSpaced(400, 'compact 失败: {detail}', { detail: pyStrErr(e) });
+      ctx.errorSpaced(400, 'compact 失败: {detail}', { detail: detailText(e, ctx.lang) });
       return;
     }
     throw e;
@@ -1003,7 +993,7 @@ export async function taskSessionRewind(ctx, taskId) {
     dbmod.updateTask(task.id, { session_id: newSid }, { db: ctx.db });
   } catch (e) {
     if (e instanceof DshDriverError) {
-      ctx.errorSpaced(502, '回退失败：{detail}', { detail: pyStrErr(e) });
+      ctx.errorSpaced(502, '回退失败：{detail}', { detail: detailText(e, ctx.lang) });
       return;
     }
     throw e;

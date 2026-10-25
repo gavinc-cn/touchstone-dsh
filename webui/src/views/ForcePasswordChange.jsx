@@ -3,6 +3,7 @@
 // 该账号在改密前只能看到本页——路由守卫按 auth.mustChangePassword 拦截，后端同规则
 // 兜底（除 /api/auth/me、/api/auth/change_password、/api/auth/logout 外一律 403）。
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/auth'
 import { authApi } from '../api'
 import { toast } from '../utils/toast'
@@ -19,10 +20,11 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Loader2, KeyRound } from 'lucide-react'
-import { useI18n } from '../utils/i18n'
+import { clearServerLang, useI18n } from '../utils/i18n'
 
 export default function ForcePasswordChange() {
   const auth = useAuthStore()
+  const navigate = useNavigate()
   // 文案取 t()：切换语言即时重渲染
   const { t } = useI18n()
   const [oldPw, setOldPw] = useState('')
@@ -30,6 +32,16 @@ export default function ForcePasswordChange() {
   const [newPw2, setNewPw2] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+
+  // 退出登录：清掉本次页面加载临时采用的账号语言偏好（与 AppShell.logout 同口径，登出失败也清）
+  async function logout() {
+    try {
+      await auth.logout()
+    } finally {
+      clearServerLang()
+    }
+    navigate('/login')
+  }
 
   async function submit() {
     if (busy) return
@@ -104,7 +116,7 @@ export default function ForcePasswordChange() {
         <CardFooter className="flex-col items-center pt-0">
           <button type="button"
             className="text-sm text-[var(--run)] underline-offset-4 hover:underline"
-            onClick={() => auth.logout()}>
+            onClick={logout}>
             {t('退出登录')}
           </button>
         </CardFooter>

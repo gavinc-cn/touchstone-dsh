@@ -72,7 +72,7 @@ _PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
 class AssetError(Exception):
-    """资产操作错误（api 层转 400/500；message 为面向用户的中文原因）。"""
+    """资产操作错误（api 层转 400/500；`message` 按 `lang` 渲染，`i18nKey`/`i18nVars` 供响应层本地化）。"""
 
     def __init__(self, message, code=400):
         super().__init__(message)
@@ -134,8 +134,16 @@ def _atomic_write_bytes(path, data):
 
 
 def _manifest_error(asset_dir, why):
-    """清单非法统一异常（白名单校验失败 = 开发者错误，不放行）。"""
-    return AssetError(f"资产清单非法（{os.path.basename(asset_dir)}）：{why}", 500)
+    """清单非法统一异常（白名单校验失败 = 开发者错误，不放行）。
+
+    外层模板 `资产清单非法（{name}）：{why}` 登记为 api key（响应层按请求语言渲染）；
+    `why` 是开发者诊断（固定中文 + 动态 repr/OSError 原文），**不翻**（Ruling R-A4）。
+    `.message` 仍是渲染后的中文，旧日志/测试口径不变。
+    """
+    name = os.path.basename(asset_dir)
+    return i18n.localizable(
+        AssetError(f"资产清单非法（{name}）：{why}", 500),
+        "资产清单非法（{name}）：{why}", {"name": name, "why": why})
 
 
 def _safe_rel(rel, what):
@@ -454,35 +462,40 @@ def install_root(asset, target, project_dir=""):
     return _skill_root(asset["family"], target, project_dir)
 
 
-def _unsupported_error(asset, target):
+def _unsupported_error(asset, target, lang="zh"):
     """资产在目标下不可安装的错误（返回带 i18n_key/i18n_vars 的 AssetError）。
 
     三个词条都是共享词典里的 key（Node `unsupportedInfo()` 同三 key）；`.message`
-    仍按中文渲染，故 `raise _unsupported_error(...)` 的旧中文输出逐字节不变。
+    按 `lang` 渲染（缺省 zh 与旧中文输出逐字节相同）。`{targets}` 标签也按 lang
+    取词（新增 `用户级`/`项目级` 两 key），分隔符 zh `、` / en `, `。
+    `TS_I18N=0` 回滚时 `t()` 恒中文 ⇒ 分隔符同步回落 `、`，不拼「用户级, 项目级」。
     每个分支都把字面量 key 直接写进 `localizable()`（覆盖门禁据此静态校验）。
     """
     if target not in asset["targets"]:
-        targets = "、".join("用户级" if t == "user" else "项目级"
-                            for t in asset["targets"])
+        sep = (", " if i18n.normalize_lang(lang) == "en"
+               and not i18n.is_i18n_disabled() else "、")
+        targets = sep.join(
+            i18n.t("api", "用户级" if t == "user" else "项目级", lang)
+            for t in asset["targets"])
         return i18n.localizable(
-            AssetError(i18n.t("api", "该资产只支持{targets}安装", "zh",
+            AssetError(i18n.t("api", "该资产只支持{targets}安装", lang,
                               targets=targets)),
             "该资产只支持{targets}安装", {"targets": targets})
     if asset["type"] == "dsh_plugin":
         return i18n.localizable(
             AssetError(i18n.t("api", "dsh 插件资产只支持用户级（装进 dsh profile，与项目无关）",
-                              "zh")),
+                              lang)),
             "dsh 插件资产只支持用户级（装进 dsh profile，与项目无关）")
     family = asset["family"]
     return i18n.localizable(
-        AssetError(i18n.t("api", "该资产（{family}）暂不支持此目标的安装", "zh",
+        AssetError(i18n.t("api", "该资产（{family}）暂不支持此目标的安装", lang,
                           family=family)),
         "该资产（{family}）暂不支持此目标的安装", {"family": family})
 
 
-def _unsupported_reason(asset, target):
-    """资产在目标下不可安装的用户可读原因（渲染后中文；payload 的 reason 字段用）。"""
-    return str(_unsupported_error(asset, target))
+def _unsupported_reason(asset, target, lang="zh"):
+    """资产在目标下不可安装的用户可读原因（按 `lang` 渲染；payload 的 reason 字段用）。"""
+    return str(_unsupported_error(asset, target, lang))
 
 
 def _installed_files(asset, root):
@@ -506,11 +519,12 @@ def _installed_files(asset, root):
 # ---------- 状态 / 安装 / 卸载 ----------
 
 
-def asset_status(asset, target, project_dir=""):
+def asset_status(asset, target, project_dir="", lang="zh"):
     """判定资产在指定目标下的状态，返回含明细的 dict（详情见模块 docstring）。
 
     skill：纯文件四态。dsh_plugin：文件态与注册行态**合成**——文件齐且内容一致、
     注册行在且未被停用，才算 installed；只齐一半（文件缺 / 注册行缺 / 被停用）判 partial。
+    不支持的目标下 `reason` 按 `lang` 渲染（由 `_unsupported_reason` 下沉）。
     """
     root = install_root(asset, target, project_dir)
     supported = root is not None
@@ -541,7 +555,7 @@ def asset_status(asset, target, project_dir=""):
             else:
                 state = "partial"
     return {"supported": supported,
-            "reason": "" if supported else _unsupported_reason(asset, target),
+            "reason": "" if supported else _unsupported_reason(asset, target, lang),
             "root": display_path(root) if supported else "",
             "state": state, "files": files, "patch": patch}
 
@@ -594,9 +608,9 @@ def _plugin_restart_required(asset):
     return str(prof.get("patchReload") or "") != "live"
 
 
-def asset_json(asset, target, project_dir=""):
-    """资产的对外 JSON（清单元信息 + 目标下的状态明细）。"""
-    st = asset_status(asset, target, project_dir)
+def asset_json(asset, target, project_dir="", lang="zh"):
+    """资产的对外 JSON（清单元信息 + 目标下的状态明细；`reason` 按 lang 渲染）。"""
+    st = asset_status(asset, target, project_dir, lang)
     out = {"id": asset["id"], "name": asset["name"], "type": asset["type"],
            "type_label": TYPE_LABELS.get(asset["type"], asset["type"]),
            "family": asset["family"],
@@ -623,13 +637,13 @@ def asset_json(asset, target, project_dir=""):
     return out
 
 
-def list_assets(target, project_dir=""):
+def list_assets(target, project_dir="", lang="zh"):
     """目标下的资产清单（含状态）；target 非法抛 AssetError(400)。"""
     if target not in ASSET_TARGETS:
         targets = "/".join(ASSET_TARGETS)
         raise i18n.localizable(AssetError(f"target 必须是 {targets}"),
                                "target 必须是 {targets}", {"targets": targets})
-    return [asset_json(a, target, project_dir) for a in load_assets()]
+    return [asset_json(a, target, project_dir, lang) for a in load_assets()]
 
 
 def _require_profile(asset):
@@ -774,11 +788,11 @@ def _prune_empty_dirs(path, stop_at):
         cur = os.path.dirname(cur)
 
 
-def install(asset, target, project_dir=""):
+def install(asset, target, project_dir="", lang="zh"):
     """安装/更新/修复资产（收敛到期望状态），返回结果 dict。"""
     root = install_root(asset, target, project_dir)
     if root is None:
-        raise _unsupported_error(asset, target)
+        raise _unsupported_error(asset, target, lang)
     if target == "project":
         if not project_dir or not os.path.isdir(project_dir):
             raise AssetError("项目目录不存在")
@@ -805,15 +819,15 @@ def install(asset, target, project_dir=""):
     patch_action = ""
     if asset["type"] == "dsh_plugin":
         patch_action, _patch = _write_plugin_patch(asset)
-    st = asset_status(asset, target, project_dir)
+    st = asset_status(asset, target, project_dir, lang)
     return {"ok": True, "state": st["state"], "files_written": written,
             "patch_action": patch_action,
             "restart_required": (_plugin_restart_required(asset)
                                  if asset["type"] == "dsh_plugin" else False),
-            "asset": asset_json(asset, target, project_dir)}
+            "asset": asset_json(asset, target, project_dir, lang)}
 
 
-def uninstall(asset, target, project_dir=""):
+def uninstall(asset, target, project_dir="", lang="zh"):
     """卸载资产：只删除清单内文件（别人的文件一律不动），返回结果 dict。
 
     dsh_plugin 另删**平台写的注册块**（或与规范逐字一致的手工块）；包目录清空后连空
@@ -821,7 +835,7 @@ def uninstall(asset, target, project_dir=""):
     """
     root = install_root(asset, target, project_dir)
     if root is None:
-        raise _unsupported_error(asset, target)
+        raise _unsupported_error(asset, target, lang)
     # dsh 插件：先判注册行——foreign（用户自定义写法）时**在删任何文件之前**拒绝，
     # 免得出现「包文件已删、注册行还在」的半残状态
     patch = plugin_patch_state(asset) if asset["type"] == "dsh_plugin" else None
@@ -844,9 +858,9 @@ def uninstall(asset, target, project_dir=""):
     if patch is not None:
         patch_action, _p = _remove_plugin_patch(asset)
         _prune_empty_dirs(root, dsh_profiles_dir())
-    st = asset_status(asset, target, project_dir)
+    st = asset_status(asset, target, project_dir, lang)
     return {"ok": True, "state": st["state"], "files_deleted": deleted,
             "patch_action": patch_action,
             "restart_required": (_plugin_restart_required(asset)
                                  if asset["type"] == "dsh_plugin" else False),
-            "asset": asset_json(asset, target, project_dir)}
+            "asset": asset_json(asset, target, project_dir, lang)}

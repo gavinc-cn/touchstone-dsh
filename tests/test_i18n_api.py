@@ -360,6 +360,81 @@ def test_dshdriver_idle_timeout_float_keeps_old_zh_rendering(monkeypatch):
         "无头中文必须逐字节保持旧的 1.0 形态"
 
 
+def test_dshdriver_sse_errors_are_localized(monkeypatch):
+    """KB-07：T11 新增的 4 条 `dshdriver` SSE 错误必须有行为断言（不只词条存在）。
+
+    四条错误分别由真实 `dshdriver.stream` 路径抛出；用替身连接制造确定的上游形态：
+      - 非 200 响应体 ⇒ `事件流被拒: {detail}`；
+      - `read1` 抛 `socket.timeout` ⇒ `事件流空闲超时（>{seconds}s 无数据）`；
+      - `read1` 抛 `OSError` ⇒ `事件流读取失败: {detail}`；
+      - `read1` 返回 `b""`（对端正常 EOF）⇒ `事件流被对端关闭`。
+    每条都断言异常 message（日志/旧中文口径）与无头、en 两种 `_error_spaced` 正文；
+    这四条词条只由 Python 侧发出（Node 驱动没有对应 SSE 消费循环，T11 报告已登记）。
+    """
+    import socket
+
+    import dshdriver
+
+    class _Resp:
+        def __init__(self, status=200, body=b"", chunk=b"", exc=None):
+            self.status = status
+            self._body = body
+            self._chunk = chunk
+            self._exc = exc
+
+        def read(self):
+            return self._body
+
+        def read1(self, _n):
+            if self._exc is not None:
+                raise self._exc
+            return self._chunk
+
+        def close(self):
+            pass
+
+    class _Conn:
+        sock = None
+
+        def __init__(self, resp):
+            self._resp = resp
+
+        def request(self, *_args, **_kwargs):
+            pass
+
+        def getresponse(self):
+            return self._resp
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv(dshdriver.URL_ENV, "http://127.0.0.1:1")
+    # (名称, 上游替身, idle_timeout, 旧中文 message, en 渲染后的 message)
+    cases = [
+        ("reject", _Resp(status=500, body=b"nope"), 90,
+         "事件流被拒: nope", "Event stream rejected: nope"),
+        ("idle", _Resp(exc=socket.timeout("timed out")), 2.0,
+         "事件流空闲超时（>2.0s 无数据）",
+         "Event stream idle timeout (no data for more than 2.0s)"),
+        ("read", _Resp(exc=OSError("broken")), 90,
+         "事件流读取失败: broken", "Event stream read failed: broken"),
+        ("closed", _Resp(chunk=b""), 90,
+         "事件流被对端关闭", "The event stream was closed by the peer"),
+    ]
+    for name, resp, idle_timeout, zh, en in cases:
+        monkeypatch.setattr(dshdriver.http.client, "HTTPConnection",
+                            lambda *_a, _r=resp, **_k: _Conn(_r))
+        with pytest.raises(dshdriver.DshDriverError) as caught:
+            dshdriver.stream("sid", lambda _frame: None, idle_timeout=idle_timeout)
+        err = caught.value
+        assert str(err) == zh, name
+        assert getattr(err, "i18n_key", None), f"{name}: 异常缺少 i18n_key"
+        assert render_spaced(None, err)[1] == \
+            ('{"error": "%s"}' % zh).encode("utf-8"), f"{name}: 无头中文逐字节"
+        assert render_spaced({"X-TS-Lang": "en"}, err)[1] == \
+            ('{"error": "%s"}' % en).encode("utf-8"), f"{name}: 英文正文"
+
+
 def test_non_string_message_uses_js_string_coercion():
     """非字符串 message 按 Node `String(message)` 强制转换（T10 ⑤ 的 Python 镜像）。
 
@@ -436,6 +511,35 @@ def test_endpoint_board_worktree_cleanup_busy_english(monkeypatch):
     # running_map 为空 ⇒ 走 lib 的忙拒绝（400）；消息与 409 分支同一词条
     assert handler.last()[:2] == (400,
         b'{"error": "The session is running; stop the card before cleaning up the worktree"}')
+
+
+def test_endpoint_board_worktree_cleanup_409_bilingual(monkeypatch):
+    """KB-07：DELETE worktree 的**端点级 409**中文/英文正文（此前只测了 lib 的 400）。
+
+    运行位在场时端点自己直接响应 409（`_error_spaced`），不进入 lib；无头/显式 zh
+    必须逐字节相同，en 走词表译文。
+    """
+    def handler_with(headers=None):
+        handler, _row, _card = _board_endpoint(headers)
+        return handler
+
+    monkeypatch.setattr(server.board, "running_map", lambda: {2: {"proc": None}})
+    zh_body = '{"error": "会话运行中，请先停止卡片再清理 worktree"}'.encode()
+    en_body = ('{"error": "The session is running; stop the card before '
+               'cleaning up the worktree"}').encode()
+
+    no_head = handler_with()
+    no_head._api_board_card_worktree_cleanup(1, 2)
+    assert no_head.last()[:2] == (409, zh_body)
+
+    zh = handler_with({"X-TS-Lang": "zh"})
+    zh._api_board_card_worktree_cleanup(1, 2)
+    assert zh.last()[:2] == (409, zh_body)
+    assert zh.last()[1] == no_head.last()[1], "显式 zh 必须与无语言头逐字节相同"
+
+    en = handler_with({"X-TS-Lang": "en"})
+    en._api_board_card_worktree_cleanup(1, 2)
+    assert en.last()[:2] == (409, en_body)
 
 
 def test_endpoint_chat_delivery_refused_english(monkeypatch):

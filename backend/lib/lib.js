@@ -1050,7 +1050,7 @@ function statusValueInLang(value, lang) {
 }
 
 /**
- * `lib.set_md_field`：改写 md 里 `- **字段**: 值` 一行；行不存在时在文末追加。
+ * `lib.set_md_field`：改写 md 里所有 `- **字段**: 值` 同名字段行；行不存在时在文末追加。
  *
  * 字段名先经 `FIELD_ALIASES` 归一到内部中文 canonical；写回语言跟随**目标字段已有写法**
  * （英文行 → 英文键 + 英文状态值；中文行 → 中文键 + 中文值）。目标字段缺失或中英两种
@@ -1058,6 +1058,7 @@ function statusValueInLang(value, lang) {
  * （其他字段值原样写入：时间/环境标签/摘要等）。行不存在时按目标语言在文末追加。
  * 保留原行前缀/格式/编码/换行。返回是否写入成功（文件不存在/读空返回 false）。
  *
+ * 多行同名字段全替换（`g` + 回调）与 Python `pattern.sub` 一致（KB-20）。
  * 与 Python 的唯一形态差异（**实际不可达**，备案）：Python 的 `pattern.sub(new_line, text)`
  * 会把替换串里的 `\1` 当组引用解释；这里用回调（`prefix + value`），值里的反斜杠是字面量。
  * 本口的值只有状态/时间/环境标签/摘要，且状态值不含反斜杠，故无分叉。
@@ -1071,7 +1072,7 @@ export function setMdField(filePath, field, value) {
     ? statusValueInLang(value, lang)
     : value;
   const pattern = new RegExp(
-    `^(\\s*(?:-\\s*)?\\*\\*${escapeRegExp(writeField)}\\*\\*\\s*[:：]\\s*).*$`, 'm',
+    `^(\\s*(?:-\\s*)?\\*\\*${escapeRegExp(writeField)}\\*\\*\\s*[:：]\\s*).*$`, 'gm',
   );
   const out = pattern.test(text)
     ? text.replace(pattern, (matched, prefix) => prefix + String(writeValue))

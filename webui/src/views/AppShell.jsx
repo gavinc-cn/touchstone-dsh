@@ -4,7 +4,7 @@ import { useAuthStore } from '../stores/auth'
 import { useAppStore } from '../stores/app'
 import { projectApi, prefsApi } from '../api'
 import { toast } from '../utils/toast'
-import { applyServerLang, useI18n } from '../utils/i18n'
+import { applyServerLang, clearServerLang, useI18n } from '../utils/i18n'
 import { useResizable } from '../hooks/useResizable'
 import TasksTab from '../components/TasksTab.jsx'
 import MonitorTab from '../components/MonitorTab.jsx'
@@ -560,7 +560,13 @@ export default function AppShell() {
   // 改密/主题/飞书/RAG 配置均已迁至设置页（/settings），侧栏只保留「设置」与「菜单」两个入口
 
   async function logout() {
-    await auth.logout()
+    try {
+      await auth.logout()
+    } finally {
+      // 登出失败也要清：清掉本次页面加载临时采用的上一个账号的语言偏好，避免同页换账号
+      // 继承上一账号语言。只清内存态/镜像，本浏览器手动选择的 ts_lang 仍保留。
+      clearServerLang()
+    }
     navigate('/login')
   }
 

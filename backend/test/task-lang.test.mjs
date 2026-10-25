@@ -437,6 +437,25 @@ test('卡片起跑：首次 start 冻结 en，二次 start 带 zh 不覆盖', as
   } finally { env.close(); }
 });
 
+test('doing+queue 幂等重按开始：空 lang 补冻 en，二次 zh 不覆盖（KB-41①）', async () => {
+  const env = setup('task-lang-idempotent');
+  try {
+    const cid = db.insertBoardCard(env.pid, '幂等补冻', '', '', { db: env.fx.db });
+    db.updateBoardCard(cid, false,
+      { column_key: 'doing', block_kind: 'queue' }, { db: env.fx.db });
+    const project = db.getProject(env.pid, { db: env.fx.db });
+    const [cardDict, err] = await board.startIntoDoing(project,
+      db.getBoardCard(cid, { db: env.fx.db }), '', false, false, false, 'en',
+      { db: env.fx.db });
+    assert.notEqual(cardDict, null);
+    assert.equal(err, null);
+    assert.equal(db.getBoardCard(cid, { db: env.fx.db }).lang, 'en');
+    await board.startIntoDoing(project, db.getBoardCard(cid, { db: env.fx.db }),
+      '', false, false, false, 'zh', { db: env.fx.db });
+    assert.equal(db.getBoardCard(cid, { db: env.fx.db }).lang, 'en');
+  } finally { env.close(); }
+});
+
 test('卡片起跑：无请求上下文（定时开工/队列拾起/内部调用）保持未冻结', async () => {
   const env = setup('task-lang-card-nolang');
   try {
@@ -559,6 +578,22 @@ test('被父任务门禁拒绝的 move 不冻结语言（冻结在门禁之后�
   } finally { env.close(); }
 });
 
+test('start 端点被父门禁拒绝：不冻结语言（KB-41②）', async () => {
+  const env = setup('task-lang-start-parent');
+  try {
+    const parent = db.insertBoardCard(env.pid, 'P-start', '', '', { db: env.fx.db });
+    db.updateBoardCard(parent, false, { column_key: 'doing' }, { db: env.fx.db });
+    const child = db.insertBoardCard(env.pid, 'C-start', '', '', { db: env.fx.db });
+    db.updateBoardCard(child, false, { parent_card_id: parent }, { db: env.fx.db });
+    const res = await call(env, `/api/projects/${env.pid}/board/cards/${child}/start`, {
+      method: 'POST', headers: { 'x-ts-lang': 'en' }, body: {},
+    });
+    assert.equal(res.status, 200, res.text());
+    assert.deepEqual(res.json(), { blocked: 'parent-not-done' });
+    assert.equal(db.getBoardCard(child, { db: env.fx.db }).lang, '');
+  } finally { env.close(); }
+});
+
 test('worktree 合并回交端点冻结 ctx.lang（真 git 待合并分支）', async () => {
   const env = setup('task-lang-merge');
   const fxGit = gitRepo('task-lang-merge-git');
@@ -584,6 +619,31 @@ test('worktree 合并回交端点冻结 ctx.lang（真 git 待合并分支）', 
     assert.equal(res.json().card.id, cid);
     assert.equal(db.getBoardCard(cid, { db: env.fx.db }).lang, 'en');
     assert.equal(db.getBoardCard(cid, { db: env.fx.db }).column_key, 'doing');
+  } finally {
+    fs.rmSync(fxGit.dir, { recursive: true, force: true });
+    env.close();
+  }
+});
+
+test('worktree 直起冻结 ctx.lang（KB-41③：真 git 建树 + 起会话前失败也定格）', async () => {
+  const env = setup('task-lang-wt-direct');
+  const fxGit = gitRepo('task-lang-wt-direct-git');
+  try {
+    const pid = insertProject(env.fx.db, {
+      userId: 1, name: 'wt-direct', projectDir: fxGit.repo, workDir: fxGit.dir,
+    });
+    // 退场族 ⇒ startCard 在建树/冻结之后、真起会话之前必抛（不连 dsh）
+    env.fx.db.prepare("UPDATE projects SET agent_path='kimi' WHERE id=?").run(pid);
+    const cid = db.insertBoardCard(pid, 'wt-direct', '', '', { db: env.fx.db });
+    const project = db.getProject(pid, { db: env.fx.db });
+    const [out, err] = await board.enterDoingWorktree(project,
+      db.getBoardCard(cid, { db: env.fx.db }), '', false, true, 'en',
+      { db: env.fx.db });
+    assert.equal(out, null);
+    assert.ok(err !== null && err !== undefined && err.error,
+      '退场族应在起会话时返回硬错误');
+    assert.equal(db.getBoardCard(cid, { db: env.fx.db }).lang, 'en',
+      '冻结在 worktree 创建/门禁之后，起会话失败不回退语言');
   } finally {
     fs.rmSync(fxGit.dir, { recursive: true, force: true });
     env.close();

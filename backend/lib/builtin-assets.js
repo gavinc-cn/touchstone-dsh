@@ -63,7 +63,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { SKILL_DIRS_BY_FAMILY } from './agents.js';
-import { localizable, t } from './i18n.js';
+import { isI18nDisabled, localizable, normalizeLang, t } from './i18n.js';
 import {
   PY_WS, isDir, isFile, pathExists, pyIsAbs, pyJoin, pySorted, pyStrip, realpathOrResolve,
 } from './lib.js';
@@ -306,7 +306,7 @@ function stripQuotes(text) {
 // --------------------------------------------------------------------------
 
 /**
- * 资产操作错误（api 层转 400/500；message 为面向用户的中文原因）。
+ * 资产操作错误（api 层转 400/500；`message` 按 `lang` 渲染，`i18nKey`/`i18nVars` 供响应层本地化）。
  *
  * 照 `backend/lib/rag.js` 已建立的「Python 异常类」风格：`name` 与 Python 的
  * `type(exc).__name__` 逐字相同，故对拍里「两侧同抛」的分支能比 `$kind`。
@@ -413,9 +413,18 @@ export function _atomic_write_bytes(filePath, data) {
   }
 }
 
-/** 清单非法统一异常（白名单校验失败 = 开发者错误，不放行）。 */
+/**
+ * 清单非法统一异常（白名单校验失败 = 开发者错误，不放行）。
+ *
+ * 外层模板 `资产清单非法（{name}）：{why}` 登记为 api key（响应层按请求语言渲染）；
+ * `why` 是开发者诊断（固定中文 + 动态 repr/OSError 原文），**不翻**（Ruling R-A4）。
+ * `.message` 仍是渲染后的中文，旧日志/测试口径不变。
+ */
 export function _manifest_error(asset_dir, why) {
-  return new AssetError(`资产清单非法（${path.basename(asset_dir)}）：${why}`, 500);
+  const name = path.basename(asset_dir);
+  return localizable(
+    new AssetError(`资产清单非法（${name}）：${why}`, 500),
+    '资产清单非法（{name}）：{why}', { name, why });
 }
 
 /** 校验清单内相对路径：非空、非绝对、无 `..` 段（防越界写）。 */
@@ -751,12 +760,16 @@ export function install_root(asset, target, project_dir = '') {
 }
 
 /** 资产在目标下不可安装的原因（key+vars）；`reason` 字段与异常共用同一份真相源。 */
-function unsupportedInfo(asset, target) {
+function unsupportedInfo(asset, target, lang = 'zh') {
   if (!asset.targets.includes(target)) {
+    // TS_I18N=0 回滚时 t() 恒中文 ⇒ 分隔符也必须回落 `、`，否则拼出「用户级, 项目级」
+    const sep = normalizeLang(lang) === 'en' && !isI18nDisabled() ? ', ' : '、';
     return {
       key: '该资产只支持{targets}安装',
       vars: {
-        targets: asset.targets.map((x) => (x === 'user' ? '用户级' : '项目级')).join('、'),
+        targets: asset.targets
+          .map((x) => t('api', x === 'user' ? '用户级' : '项目级', lang))
+          .join(sep),
       },
     };
   }
@@ -766,16 +779,17 @@ function unsupportedInfo(asset, target) {
   return { key: '该资产（{family}）暂不支持此目标的安装', vars: { family: asset.family } };
 }
 
-/** 资产在目标下不可安装的用户可读原因（渲染后的中文，供 `reason` 字段/旧调用方）。 */
-export function _unsupported_reason(asset, target) {
-  const info = unsupportedInfo(asset, target);
-  return t('api', info.key, 'zh', info.vars);
+/** 资产在目标下不可安装的用户可读原因（按 `lang` 渲染；payload 的 reason 字段用）。 */
+export function _unsupported_reason(asset, target, lang = 'zh') {
+  const info = unsupportedInfo(asset, target, lang);
+  return t('api', info.key, lang, info.vars);
 }
 
-/** 不可安装原因的**异常**形态：`.message` 是渲染后中文，`i18nKey/.i18nVars` 供响应层本地化。 */
-function unsupportedError(asset, target) {
-  const info = unsupportedInfo(asset, target);
-  return localizable(new AssetError(_unsupported_reason(asset, target)), info.key, info.vars);
+/** 不可安装原因的**异常**形态：`.message` 按 lang 渲染，`i18nKey/.i18nVars` 供响应层本地化。 */
+function unsupportedError(asset, target, lang = 'zh') {
+  const info = unsupportedInfo(asset, target, lang);
+  return localizable(new AssetError(_unsupported_reason(asset, target, lang)),
+    info.key, info.vars);
 }
 
 /** 清单文件在该落点根下的安装信息列表。 */
@@ -804,8 +818,11 @@ export function _installed_files(asset, root) {
 // 状态 / 安装 / 卸载
 // --------------------------------------------------------------------------
 
-/** 判定资产在指定目标下的状态，返回含明细的 dict（详情见模块 docstring）。 */
-export function asset_status(asset, target, project_dir = '') {
+/**
+ * 判定资产在指定目标下的状态，返回含明细的 dict（详情见模块 docstring）。
+ * 不支持的目标下 `reason` 按 `lang` 渲染（由 `_unsupported_reason` 下沉）。
+ */
+export function asset_status(asset, target, project_dir = '', lang = 'zh') {
   const root = install_root(asset, target, project_dir);
   const supported = root !== null;
   const files = supported ? _installed_files(asset, root) : [];
@@ -830,7 +847,7 @@ export function asset_status(asset, target, project_dir = '') {
   }
   return {
     supported,
-    reason: supported ? '' : _unsupported_reason(asset, target),
+    reason: supported ? '' : _unsupported_reason(asset, target, lang),
     root: supported ? display_path(root) : '',
     state,
     files,
@@ -877,9 +894,9 @@ export function _plugin_restart_required(asset) {
   return pyStr(pyOr(pyGet(prof, 'patchReload'), '')) !== 'live';
 }
 
-/** 资产的对外 JSON（清单元信息 + 目标下的状态明细）。 */
-export function asset_json(asset, target, project_dir = '') {
-  const st = asset_status(asset, target, project_dir);
+/** 资产的对外 JSON（清单元信息 + 目标下的状态明细；`reason` 按 lang 渲染）。 */
+export function asset_json(asset, target, project_dir = '', lang = 'zh') {
+  const st = asset_status(asset, target, project_dir, lang);
   const out = {
     id: asset.id,
     name: asset.name,
@@ -917,13 +934,13 @@ export function asset_json(asset, target, project_dir = '') {
 }
 
 /** 目标下的资产清单（含状态）；`target` 非法抛 `AssetError(400)`。 */
-export function list_assets(target, project_dir = '') {
+export function list_assets(target, project_dir = '', lang = 'zh') {
   if (!ASSET_TARGETS.includes(target)) {
     const targets = ASSET_TARGETS.join('/');
     throw localizable(new AssetError(`target 必须是 ${targets}`),
       'target 必须是 {targets}', { targets });
   }
-  return load_assets().map((a) => asset_json(a, target, project_dir));
+  return load_assets().map((a) => asset_json(a, target, project_dir, lang));
 }
 
 /** dsh 插件安装的前置检查：目标 profile 目录必须存在（不存在则装了也不会被加载）。 */
@@ -1074,10 +1091,10 @@ export function _prune_empty_dirs(p, stop_at) {
 }
 
 /** 安装/更新/修复资产（收敛到期望状态），返回结果 dict。 */
-export function install(asset, target, project_dir = '') {
+export function install(asset, target, project_dir = '', lang = 'zh') {
   const root = install_root(asset, target, project_dir);
   if (root === null) {
-    throw unsupportedError(asset, target);
+    throw unsupportedError(asset, target, lang);
   }
   if (target === 'project') {
     if (!pyTruthy(project_dir) || !isDir(project_dir)) {
@@ -1109,22 +1126,22 @@ export function install(asset, target, project_dir = '') {
   if (asset.type === 'dsh_plugin') {
     patch_action = _write_plugin_patch(asset)[0];
   }
-  const st = asset_status(asset, target, project_dir);
+  const st = asset_status(asset, target, project_dir, lang);
   return {
     ok: true,
     state: st.state,
     files_written: written,
     patch_action,
     restart_required: asset.type === 'dsh_plugin' ? _plugin_restart_required(asset) : false,
-    asset: asset_json(asset, target, project_dir),
+    asset: asset_json(asset, target, project_dir, lang),
   };
 }
 
 /** 卸载资产：只删除清单内文件（别人的文件一律不动），返回结果 dict。 */
-export function uninstall(asset, target, project_dir = '') {
+export function uninstall(asset, target, project_dir = '', lang = 'zh') {
   const root = install_root(asset, target, project_dir);
   if (root === null) {
-    throw unsupportedError(asset, target);
+    throw unsupportedError(asset, target, lang);
   }
   // dsh 插件：先判注册行——foreign（用户自定义写法）时**在删任何文件之前**拒绝，
   // 免得出现「包文件已删、注册行还在」的半残状态
@@ -1152,14 +1169,14 @@ export function uninstall(asset, target, project_dir = '') {
     patch_action = _remove_plugin_patch(asset)[0];
     _prune_empty_dirs(root, dsh_profiles_dir());
   }
-  const st = asset_status(asset, target, project_dir);
+  const st = asset_status(asset, target, project_dir, lang);
   return {
     ok: true,
     state: st.state,
     files_deleted: deleted,
     patch_action,
     restart_required: asset.type === 'dsh_plugin' ? _plugin_restart_required(asset) : false,
-    asset: asset_json(asset, target, project_dir),
+    asset: asset_json(asset, target, project_dir, lang),
   };
 }
 

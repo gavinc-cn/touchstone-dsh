@@ -2523,8 +2523,12 @@ function setupBindcodeAction(userId, options = {}, lang = 'zh') {
 /**
  * `feishu._setup_slow_action`（M11）：慢动作（自检/补齐配置/提交发布）后台执行，
  * 结果 DM 回执。卡片回调要尽快 ACK，这几项是多次 REST（2~5s）⇒ 不占回调。
- * doctor/provision 的逐项数据（label/detail/hint、error 原文）属站点设置页文案面
- * （T12d），这里只本地化飞书消息的框与回执句。
+ * 语言（T12b + KB-27）：`lang` = DM 收件人（绑定用户）语言；除消息框与回执句外，
+ * **数据面**（doctor 八项 label/detail/hint、apply/publish 的 error/步骤）也跟随它
+ * ——`doctor(..., {dataLang: lang})`、`provisionApply(..., {lang})`、
+ * `provisionPublish(..., {lang})`。doctor 的 `options.lang` 是**真发探测 DM** 的
+ * 收件人语言；此处 `sendProbe=false` 不真发，故不传。`provisionPublish` 的
+ * remark/changelog 是发给飞书的版本说明，保持中文（KB-38）。
  */
 export async function setupSlowAction(userId, sender, action, cfg, options = {},
   lang = 'zh') {
@@ -2532,7 +2536,8 @@ export async function setupSlowAction(userId, sender, action, cfg, options = {},
   try {
     let text;
     if (action === 'doctor') {
-      const out = await d.provision.doctor(userId, false, options);
+      const out = await d.provision.doctor(userId, false,
+        { ...options, dataLang: lang });
       const summary = pyOr(dget(out, 'summary'), {});
       const bad = pyOr(dget(out, 'items'), []).filter((it) => {
         const state = dget(it, 'state');
@@ -2555,14 +2560,14 @@ export async function setupSlowAction(userId, sender, action, cfg, options = {},
       }
       text = lines.join('\n');
     } else if (action === 'apply') {
-      const out = await d.provision.provisionApply(userId, options);
+      const out = await d.provision.provisionApply(userId, { ...options, lang });
       text = pyTruthy(dget(out, 'ok'))
         ? i18n.t('api', '🧩 配置补齐成功：机器人能力 / 权限 / 长连接订阅 / 事件 / '
           + '回调已写入（需发布新版本生效）。', lang)
         : i18n.t('api', '❌ 配置补齐失败：{err}', lang,
           { err: pyStr(pyOr(dget(out, 'error'), i18n.t('api', '未知错误', lang))) });
     } else {
-      const out = await d.provision.provisionPublish(userId, options);
+      const out = await d.provision.provisionPublish(userId, { ...options, lang });
       text = pyTruthy(dget(out, 'ok'))
         ? i18n.t('api', '🚀 已提交发布版本 {version}；仍需租户管理员审批后线上生效。',
           lang, { version: pyStr(pyOr(dget(out, 'version'), '')) })

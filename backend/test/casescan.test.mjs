@@ -18,11 +18,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import * as db from '../lib/db.js';
 import * as lib from '../lib/lib.js';
 import * as cs from '../lib/casescan.js';
 import { freshDb, insertProject } from './m3fixture.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const BILINGUAL = path.join(HERE, '..', '..', 'tests', 'fixtures', 'bilingual');
 
 /** 建临时目录 */
 function tmpDir(tag = 'ts-casescan-') {
@@ -277,6 +281,21 @@ test('parseRounds：角度表 + 明细小节统计（时间/角度 strip、入�
   assert.deepEqual(Object.keys(rounds[0]),
     ['round', 'time', 'angle', 'cases', 'new_bugs', 'passed', 'failed', 'skipped']);
   assert.deepEqual(cs.parseRounds(path.join(cases, 'nope')), []);
+});
+
+test('parseRounds：英文统计行 + 角度表行端到端（与 Python 共享同一 ROUNDS 夹具）', () => {
+  const { cases } = makeScanFixture();
+  fs.copyFileSync(path.join(BILINGUAL, 'rounds_en.md'), path.join(cases, 'ROUNDS.md'));
+  assert.deepEqual(cs.parseRounds(cases), [{
+    round: 1,
+    time: '2026-10-24 10:00',
+    angle: '边界',
+    cases: 5,
+    new_bugs: 1,
+    passed: 16,
+    failed: 0,
+    skipped: 2,
+  }]);
 });
 
 test('loadLive：live.json 内容 + mtime（Python 浮点口径）；缺失/坏 JSON ⇒ 双 null', () => {

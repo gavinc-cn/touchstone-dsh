@@ -91,7 +91,7 @@ import { pathToFileURL } from 'node:url';
 // 分支 Detected unsettled top-level await + exit 13）。入口改成 main().then(...) 后环消失，
 // 私有副本删掉，改回下面这行 import（重复实现归零）。
 import { scanCases } from './export-cases.js';
-import { localizable } from './i18n.js';
+import { localizable, t } from './i18n.js';
 import { pyJoin, pyMtimeFloat, pyStrCompare, pyStrip, readText } from './lib.js';
 import { pyJsonDumps, pyJsonDumpsIndent } from './pyjson.js';
 
@@ -519,21 +519,27 @@ export function raw_config() {
   return cfg !== null && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : null;
 }
 
-/** 配置整数字段规整：None/空串→默认值；非法或越界抛 ValueError（上限防误填拖垮请求）。 */
-export function _cfg_int(value, def, upper, name) {
+/**
+ * 配置整数字段规整：None/空串→默认值；非法或越界抛 ValueError（上限防误填拖垮请求）。
+ *
+ * `lang` 只决定 `.message` 语种（t 的 key 仍是中文原文）；`i18nKey/i18nVars` 照旧
+ * 附加，供响应层/`test_connection` 按请求语言重渲染——zh 侧与旧模板逐字节相同。
+ */
+export function _cfg_int(value, def, upper, name, lang = 'zh') {
   if (value === null || value === undefined || value === '') return def;
   let n;
   try {
     n = pyInt(value);
   } catch (exc) {
     if (exc instanceof TypeError || exc instanceof ValueError) {
-      throw localizable(new ValueError(`${name} 须为正整数`),
+      throw localizable(new ValueError(t('api', '{name} 须为正整数', lang, { name })),
         '{name} 须为正整数', { name });
     }
     throw exc;
   }
   if (n < 1 || n > upper) {
-    throw localizable(new ValueError(`${name} 须在 1~${upper} 之间`),
+    throw localizable(
+      new ValueError(t('api', '{name} 须在 1~{upper} 之间', lang, { name, upper })),
       '{name} 须在 1~{upper} 之间', { name, upper });
   }
   return n;
@@ -590,9 +596,10 @@ export function disable() {
  * 配置连通性探测：按给定配置发一次单文本嵌入请求（管理页「测试连接」用）。
  *
  * 返回 `{ok: true, dim}` 或 `{ok: false, error}`，绝不抛出；error 文本不含 api_key。
+ * `lang` 只影响我们自己的固定模板；网络/鉴权/解析原文按诊断原样返回（登记边界）。
  * **异步**（见文件头 ①）。
  */
-export async function test_connection(cfg) {
+export async function test_connection(cfg, lang = 'zh') {
   try {
     const probe = {
       api_base: pyStrStrip(pyStr(pyOr(pyGet(cfg, 'api_base'), ''))),
@@ -600,13 +607,21 @@ export async function test_connection(cfg) {
       api_key: pyStrStrip(pyStr(pyOr(pyGet(cfg, 'api_key'), ''))),
     };
     if (!(probe.api_base && probe.model && probe.api_key)) {
-      throw new ValueError('api_base / model / api_key 尚未填写完整');
+      throw new ValueError(
+        t('api', 'api_base / model / api_key 尚未填写完整', lang));
     }
-    probe.timeout_s = _cfg_int(pyGet(cfg, 'timeout_s'), DEF_TIMEOUT_S, 300, 'timeout_s');
-    probe.batch_size = _cfg_int(pyGet(cfg, 'batch_size'), DEF_BATCH_SIZE, 256, 'batch_size');
+    probe.timeout_s = _cfg_int(pyGet(cfg, 'timeout_s'), DEF_TIMEOUT_S, 300,
+      'timeout_s', lang);
+    probe.batch_size = _cfg_int(pyGet(cfg, 'batch_size'), DEF_BATCH_SIZE, 256,
+      'batch_size', lang);
     const vecs = await _post_embeddings(probe, ['ping']);
     return { ok: true, dim: vecs.length && pyTruthy(vecs[0]) ? pyLen(vecs[0]) : 0 };
   } catch (exc) {  // 网络/鉴权/响应形态异常统一转为可展示文本
+    // 我们自己的固定模板带 i18nKey（含 _cfg_int/_post_embeddings）→ 按请求语言重渲染；
+    // 其余动态异常（HTTP/鉴权/JSON 原文）原样返回，不翻译。
+    if (exc !== null && typeof exc === 'object' && typeof exc.i18nKey === 'string') {
+      return { ok: false, error: t('api', exc.i18nKey, lang, exc.i18nVars || undefined) };
+    }
     const text = exc && exc.message !== undefined ? String(exc.message) : String(exc);
     return { ok: false, error: text || (exc && exc.constructor ? exc.constructor.name : 'Error') };
   }
@@ -642,7 +657,9 @@ export async function _post_embeddings(cfg, texts) {
   for (let attempt = 0; attempt <= HTTP_RETRY; attempt += 1) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(new Error('embeddings 请求超时')), timeoutMs);
+      // 固定模板：附加 i18nKey 供 test_connection 按请求语言渲染，zh 不变
+      const timer = setTimeout(() => controller.abort(
+        localizable(new Error('embeddings 请求超时'), 'embeddings 请求超时')), timeoutMs);
       let resp;
       try {
         resp = await fetch(url, {
@@ -662,9 +679,15 @@ export async function _post_embeddings(cfg, texts) {
       const data = JSON.parse(raw);
       let items = data !== null && typeof data === 'object' && !Array.isArray(data)
         ? pyGet(data, 'data') : null;
-      if (!Array.isArray(items)) throw new ValueError('embeddings 响应缺 data');
+      if (!Array.isArray(items)) {
+        throw localizable(new ValueError('embeddings 响应缺 data'),
+          'embeddings 响应缺 data');
+      }
       items = pySortBy(items, (d) => pyGet(d, 'index', 0));
-      if (items.length !== texts.length) throw new ValueError('embeddings 返回条数不符');
+      if (items.length !== texts.length) {
+        throw localizable(new ValueError('embeddings 返回条数不符'),
+          'embeddings 返回条数不符');
+      }
       return items.map((item) => pyGetItem(item, 'embedding'));
     } catch (exc) {  // HTTP/超时/解析失败统一计数重试
       if (attempt >= HTTP_RETRY) throw exc;

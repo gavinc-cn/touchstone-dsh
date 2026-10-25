@@ -547,8 +547,13 @@ ROUND_ROW_RE = re.compile(
     r"^\|\s*第\s*(\d+)\s*轮\s*\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|\s*(\d+)\s*\|", re.M)
 # ROUNDS.md 轮次明细小节标题：### 第 1 轮（2026-08-22）
 ROUND_SEC_RE = re.compile(r"^###\s*第\s*(\d+)\s*轮[^\n]*$", re.M)
-# 明细小节执行统计：'通过 16 / 失败 0 / 跳过 0'
-EXEC_STAT_RE = re.compile(r"通过\s*(\d+)\s*/\s*失败\s*(\d+)(?:\s*/\s*跳过\s*(\d+))?")
+# 明细小节执行统计：'通过 16 / 失败 0 / 跳过 0'（中文原语法零 churn；英文 Passed/Failed/Skipped
+# 同义：pass/fail/skip + 可选 ed，大小写不敏感，英文分支允许一个可选冒号）。捕获组 1/2/3 不变；
+# 接受集合与 Node `casescan.EXEC_STAT_RE` 逐字一致（共享用例表 rounds_stats_cases.json）。
+EXEC_STAT_RE = re.compile(
+    r"(?:通过|pass(?:ed)?\s*[:：]?)\s*(\d+)\s*/\s*"
+    r"(?:失败|fail(?:ed)?\s*[:：]?)\s*(\d+)(?:\s*/\s*(?:跳过|skip(?:ped)?\s*[:：]?)\s*(\d+))?",
+    re.I)
 # 角度表入库用例数：'（15 条）'
 CASES_COUNT_RE = re.compile(r"（\s*(\d+)\s*条\s*）")
 
@@ -1971,9 +1976,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_me_feishu_slash_get(self):
         """当前用户的飞书快捷指令（斜杠指令）现状：TS 期望清单 + 飞书侧已注册
-        （各看各的应用）。凭据缺失/权限不足不报错，走 error 字段供页面展示引导。"""
+        （各看各的应用）。凭据缺失/权限不足不报错，走 error 字段供页面展示引导。
+        KB-36：`error` 等数据按**请求语言**渲染（`desired` 的 17 条注册说明保持中文）。"""
         user = self._current_user()
-        self._respond(200, json.dumps(feishu.slash_status(user["id"]),
+        self._respond(200, json.dumps(feishu.slash_status(user["id"],
+                                                         lang=self._request_lang()),
                                       ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
 
@@ -1981,7 +1988,9 @@ class Handler(BaseHTTPRequestHandler):
         """斜杠指令三动作：sync=注册/同步（只增改 TS 自己的指令）、clear=清除 TS 指令、
         notify=向本人飞书单聊发「权限引导卡片」（用户在飞书卡片上点「我已开通，重试注册」
         即由回调重跑同步）。缺 scope 的失败会自动补发一次权限卡片（card_sent/card_error
-        回报）；三个动作都返回 200 + 摘要（ok/error），设置页据此渲染差异与引导。"""
+        回报）；三个动作都返回 200 + 摘要（ok/error），设置页据此渲染差异与引导。
+        KB-36：sync/clear 的 `error`/`failed` 按**请求语言**渲染；`card_error` 仍由
+        `send_slash_perm_card` 按其既有收件人语言逻辑产出（本次不改）。"""
         user = self._current_user()
         action = str(body.get("action") or "sync")
         if action not in ("sync", "clear", "notify"):
@@ -1991,8 +2000,9 @@ class Handler(BaseHTTPRequestHandler):
             ok, err = feishu.send_slash_perm_card(user["id"])
             out = {"ok": ok, "card_sent": ok, "card_error": err}
         else:
-            out = (feishu.sync_slash_commands(user["id"]) if action == "sync"
-                   else feishu.clear_slash_commands(user["id"]))
+            lang = self._request_lang()
+            out = (feishu.sync_slash_commands(user["id"], lang=lang) if action == "sync"
+                   else feishu.clear_slash_commands(user["id"], lang=lang))
             out["card_sent"], out["card_error"] = False, ""
             if out.get("need_scope"):
                 # 缺权限：顺手把引导卡片推到飞书（发不出去也不影响设置页的报错展示）
@@ -2054,7 +2064,8 @@ class Handler(BaseHTTPRequestHandler):
         result = rag.test_connection({"api_base": body.get("api_base"), "model": body.get("model"),
                                       "api_key": api_key,
                                       "timeout_s": body.get("timeout_s"),
-                                      "batch_size": body.get("batch_size")})
+                                      "batch_size": body.get("batch_size")},
+                                     self._request_lang())
         self._respond(200, json.dumps(result, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
 
@@ -2099,7 +2110,8 @@ class Handler(BaseHTTPRequestHandler):
         if not ok:
             return
         try:
-            assets = builtin_assets.list_assets(target, project_dir)
+            assets = builtin_assets.list_assets(target, project_dir,
+                                                lang=self._request_lang())
         except builtin_assets.AssetError as e:
             self._error_spaced(e.code, e)
             return
@@ -2127,9 +2139,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if action == "install":
-                result = builtin_assets.install(asset, target, project_dir)
+                result = builtin_assets.install(asset, target, project_dir,
+                                                lang=self._request_lang())
             else:
-                result = builtin_assets.uninstall(asset, target, project_dir)
+                result = builtin_assets.uninstall(asset, target, project_dir,
+                                                  lang=self._request_lang())
         except builtin_assets.AssetError as e:
             self._error_spaced(e.code, e)
             return
@@ -3333,14 +3347,14 @@ class Handler(BaseHTTPRequestHandler):
     def _api_board_card_worktree_preview(self, project_id, card_id):
         """独立 worktree 预览（GET .../board/cards/<id>/worktree，2026-10-06 批次）。
 
-        只读、不落盘：算路径/分支并给出 supported 与中文原因（项目非 git 仓库 /
-        卡片已有主会话 ⇒ supported=false）。前端「开始」下拉据此决定菜单项是否置灰
-        （plan §3.4），避免用户点了必然失败的入口。
+        只读、不落盘：算路径/分支并给出 supported 与原因（按请求语言渲染：项目非
+        git 仓库 / 卡片已有主会话 ⇒ supported=false）。前端「开始」下拉据此决定菜单项
+        是否置灰（plan §3.4），避免用户点了必然失败的入口。
         """
         row, card = self._board_owned(project_id, card_id)
         if row is None:
             return
-        info = board.worktree_preview(row, card)
+        info = board.worktree_preview(row, card, lang=self._request_lang())
         self._respond(200, json.dumps(info, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
 
@@ -3356,7 +3370,8 @@ class Handler(BaseHTTPRequestHandler):
         if board.running_map().get(card_id):
             self._error_spaced(409, '会话运行中，请先停止卡片再清理 worktree')
             return
-        ok, err = board.cleanup_card_worktree(row, card)
+        ok, err = board.cleanup_card_worktree(row, card,
+                                              lang=self._request_lang())
         if not ok:
             self._error_spaced(400, err)
             return
@@ -3400,7 +3415,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error_spaced(409, '会话运行中，稍后再试')
             return
         try:
-            board.compact_session(row, card, sid)
+            board.compact_session(row, card, sid, lang=self._request_lang())
         except RuntimeError as e:
             self._error_spaced(400, e)
             return
@@ -3424,7 +3439,8 @@ class Handler(BaseHTTPRequestHandler):
             self._error_spaced(409, '会话运行中，稍后再试')
             return
         try:
-            new_sid, compact_ok = board.fork_compact_session(row, card, sid)
+            new_sid, compact_ok = board.fork_compact_session(
+                row, card, sid, lang=self._request_lang())
         except RuntimeError as e:
             self._error_spaced(400, e)
             return
@@ -3449,7 +3465,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error_spaced(409, '会话运行中，稍后再试')
             return
         try:
-            new_sid = board.fork_session(row, card, sid)
+            new_sid = board.fork_session(row, card, sid, lang=self._request_lang())
         except RuntimeError as e:
             self._error_spaced(400, e)
             return
@@ -3490,7 +3506,8 @@ class Handler(BaseHTTPRequestHandler):
             # 原文、不包【看板评论】前缀（2026-10-10 去前缀；旧客户端多传的 body.raw
             # 字段静默忽略，不再透传）
             rec = board.deliver_comment(row, card, target,
-                                        inject=bool(body.get("inject")))
+                                        inject=bool(body.get("inject")),
+                                        lang=self._request_lang())
         except dshdriver.DshDriverError as e:
             # 409 = 会话运行中（deliver_comment 的忙拒绝）；其余 code 按 500
             if e.args and e.args[0] == 409:
@@ -3499,7 +3516,8 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._error_spaced(409, "会话运行中，稍后重试")
             else:
-                self._error_spaced(500, 'agent 调用失败: {detail}', {"detail": str(e)})
+                self._error_spaced(500, 'agent 调用失败: {detail}',
+                                   {"detail": i18n.detail_text(e, self._request_lang())})
             return
         except RuntimeError as e:
             self._error_spaced(400, e)
@@ -3566,9 +3584,9 @@ class Handler(BaseHTTPRequestHandler):
         if action == "test":
             cfg = {"url": str(body.get("url") or ""), "user": str(body.get("user") or ""),
                    "token": str(body.get("token") or "")}
-            result = board.jira_myself(cfg)
+            result = board.jira_myself(cfg, self._request_lang())
         else:
-            result = board.jira_import(row["id"])
+            result = board.jira_import(row["id"], self._request_lang())
         code = 200 if result.get("ok") else 400
         self._respond(code, json.dumps(result, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
@@ -3879,9 +3897,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             dshdriver.compact(sid)
         except dshdriver.DshDriverError as e:
-            self._error_spaced(400, i18n.localizable(
-                RuntimeError(f"compact 失败: {e}"), "compact 失败: {detail}",
-                {"detail": str(e)}))
+            self._error_spaced(400, 'compact 失败: {detail}',
+                               {"detail": i18n.detail_text(e, self._request_lang())})
             return
         self._respond(200, json.dumps({"ok": True, "started": True},
                                       ensure_ascii=False).encode("utf-8"),
@@ -3996,7 +4013,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         except Exception as e:
             # 投递失败：消息已按原位次退回排队（chat.inject_now 内），此处只报错
-            self._error_spaced(502, '注入失败：{detail}', {"detail": str(e)})
+            self._error_spaced(502, '注入失败：{detail}',
+                               {"detail": i18n.detail_text(e, self._request_lang())})
             return
         self._respond(200, b'{"ok":true}', "application/json; charset=utf-8")
 
@@ -4067,7 +4085,8 @@ class Handler(BaseHTTPRequestHandler):
             if task is not None:
                 db.update_task(task["id"], session_id=new_sid)
         except dshdriver.DshDriverError as e:
-            self._error_spaced(502, '回退失败：{detail}', {"detail": str(e)})
+            self._error_spaced(502, '回退失败：{detail}',
+                               {"detail": i18n.detail_text(e, self._request_lang())})
             return
         self._respond(200, json.dumps({"ok": True, "new_session_id": new_sid,
                                        "boundary": boundary,
@@ -5107,10 +5126,12 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._error_spaced(409, "会话运行中，稍后重试")
             else:
-                self._error_spaced(500, 'agent 调用失败: {detail}', {"detail": str(e)})
+                self._error_spaced(500, 'agent 调用失败: {detail}',
+                                   {"detail": i18n.detail_text(e, self._request_lang())})
             return
         except OSError as e:
-            self._error_spaced(500, 'agent 调用失败: {detail}', {"detail": str(e)})
+            self._error_spaced(500, 'agent 调用失败: {detail}',
+                               {"detail": i18n.detail_text(e, self._request_lang())})
             return
         except RuntimeError as e:
             # 投递前置闸拒投（chat.DeliveryRefused：外部会话前提不成立，C 批 T5/T8）——

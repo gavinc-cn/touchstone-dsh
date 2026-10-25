@@ -365,8 +365,10 @@ test('shouldStop: rounds/bugs/deadline/duration/兜底 六档', () => {
     assert.equal(r.shouldStop(T({ stop_type: 'deadline', stop_value: null }), 1), false);
     assert.equal(r.shouldStop(T({ stop_type: 'duration', stop_value: '0',
       started_at: '2020-01-01 00:00:00' }), 1), true);
+    // duration 未到 ⇒ False。started_at 用远期常量：原 `2026-10-13` + 999999s（≈11.57 天）
+    // 已在 2026-10-24 13:46:39 UTC 到期（R-A11 时间炸弹，2026-10-24 修复）。
     assert.equal(r.shouldStop(T({ stop_type: 'duration', stop_value: '999999',
-      started_at: '2026-10-13 00:00:00' }), 1), false);
+      started_at: '2099-01-01 00:00:00' }), 1), false);
     assert.equal(r.shouldStop(T({ stop_type: 'duration', stop_value: '5', started_at: '坏' }), 1), false);
     assert.equal(r.shouldStop(T({ stop_type: 'bogus' }), 1), true);
     assert.equal(r.shouldStop(T({ stop_type: 'bogus' }), 0), false);

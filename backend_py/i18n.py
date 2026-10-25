@@ -528,6 +528,36 @@ def localizable(error, message, vars=None):
     return error
 
 
+def detail_text(error, lang="zh"):
+    """嵌套错误 detail 的渲染（KB-01 可翻子集）：内层带 `i18n_key` 时按语言渲染。
+
+    外层固定键（`agent 调用失败: {detail}` 等）的 detail 往往来自 `DshDriverError`：
+    它自带 `i18n_key`/`i18n_vars`（如驱动 HTTP 错误的 `{driver_detail}`）。本函数是这类
+    「嵌套 detail」的唯一渲染口：
+      - **zh**（以及任何非法语言）返回 `str(error)`，即旧 `str(e)` 口径——响应字节不变；
+      - **en** 且 `error.i18n_key` 是字符串时，按同一 key+vars 渲染英文；无 key 的动态
+        异常（OSError/sqlite/网络错误/第三方正文）保持原文（KB-37 口径：不猜译诊断）；
+      - 渲染失败/异常对象怪异一律回落 `str(error)`，绝不抛错。
+
+    与 `localizable` / `message_vars` 的分工：那两个负责把「外层固定键 + vars」交给响应层，
+    本函数只负责把 **vars 里的内层 detail** 先按请求语言渲染好（响应层不递归）。
+
+    :param error: 内层异常对象（通常 DshDriverError；也接受任意值）
+    :param lang: 语言（缺省 "zh"；接受大小写/地区变体）
+    :returns: str
+    """
+    try:
+        key = getattr(error, "i18n_key", None)
+        if isinstance(key, str) and normalize_lang(lang) == "en":
+            return t("api", key, lang, **(getattr(error, "i18n_vars", None) or {}))
+    except Exception:  # noqa: BLE001 —— 嵌套 detail 渲染失败必须回落原样
+        pass
+    try:
+        return str(error)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def t(ns, key, lang="zh", **vars):
     """取文案：zh（或任何非法/缺省语言）返回插值后的中文 key；en 查 dict[ns][key]，
     缺失/类型非法回落插值后的中文 key。TS_I18N=0 恒中文。本函数永不抛错。

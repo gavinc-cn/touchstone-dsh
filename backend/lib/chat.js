@@ -2029,6 +2029,7 @@ export async function waitTurn(projectDir, sid, family, since = null, logPath = 
 export async function sendNow(task, project, family, sid, message, inject, options = {}) {
   if (family !== 'dsh_plugin') {
     // 单族世界：其余族已全部退场（B0 防呆口径），走到这儿说明有残留调用路径
+    // 单族世界该分支不可达；中文为冻结诊断（无请求语言通道，chat_msgs 无 lang 列），不接词表
     throw new Error(`该智能体族已下线，请在项目设置里改绑 dsh 插件：${family || '未知'}`);
   }
   return dshSendNow(project, sid, message, inject, options);

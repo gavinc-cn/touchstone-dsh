@@ -12,25 +12,79 @@ const OPEN_KEY = 'ts.plugin.open'; // 面板开合状态(localStorage 记忆)
 // 上次所在页面(路由级, 由内嵌 SPA 写入; 键名与 webui/src/lib/lastRoute.js **逐字一致**)
 const ROUTE_KEY = 'ts.last_route';
 
-// ── 界面语言(2026-10-22) ─────────────────────────────────────────────────────
-// 面板 iframe 与 dsh 宿主页**同源**, 本壳直接读 SPA 写下的 localStorage ts_lang
-// (键名与 webui/src/utils/i18n.js 的 LANG_KEY **逐字一致**, 两侧必须同步改)。
-// 未设置/非法值/读不到(隐私模式) 一律按英文 —— 产品决定 D2: 默认英文。
+// ── 界面语言(2026-10-22; 2026-10-24 镜像键 + 响应式) ─────────────────────────
+// 面板 iframe 与 dsh 宿主页**同源**, 本壳直接读 SPA 写下的 localStorage:
+//   ts_lang_eff = SPA 当前**有效**语言镜像(含本次页面加载临时采用的账号偏好), 优先;
+//   ts_lang     = 本浏览器显式选择(原有口径), 次之;
+//   都缺失/非法/读不到(隐私模式) 一律按英文 —— 产品决定 D2: 默认英文。
+// 两个键名与 webui/src/utils/i18n.js 的 LANG_KEY / LANG_EFF_KEY **逐字一致**, 两侧必须同步改。
 const LANG_KEY = 'ts_lang';
+const LANG_EFF_KEY = 'ts_lang_eff';
 const DEFAULT_LANG = 'en';
 
-/** 读当前界面语言: 只认 'zh'/'en'; 其余(含 localStorage 不可用)回退缺省英文。 */
+/** 合法语言值: 只认 'zh'/'en', 其余返回 null(调用方按「忽略」处理)。 */
+function validLang(v) {
+  return v === 'zh' || v === 'en' ? v : null;
+}
+
+/** 读当前界面语言: 镜像(有效语言) → 本地显式选择 → 缺省英文; 非法值逐级忽略。 */
 function readLang() {
   try {
-    const lang = localStorage.getItem(LANG_KEY);
-    if (lang === 'zh' || lang === 'en') return lang;
+    const eff = validLang(localStorage.getItem(LANG_EFF_KEY));
+    if (eff) return eff;
+    const local = validLang(localStorage.getItem(LANG_KEY));
+    if (local) return local;
   } catch { /* localStorage 不可用等场景: 按缺省语言渲染 */ }
   return DEFAULT_LANG;
 }
 
-/** 取当前界面语言的文案: 中文取 zh, 英文(含缺省/非法)取 en。 */
-function L(zh, en) {
-  return readLang() === 'zh' ? zh : en;
+/** 取当前界面语言的文案: 中文取 zh, 英文(含缺省/非法)取 en。
+ *  lang 可由组件传入渲染期快照(useLang 的返回值), 保证与触发重渲染的语言一致。 */
+function L(zh, en, lang) {
+  return (lang || readLang()) === 'zh' ? zh : en;
+}
+
+// 外壳文案一律**渲染/求值时**取语言(不再是模块加载期常量):
+//   宿主页在面板打开期间收到 storage 事件 → 订阅者重渲染 → 文案跟着变, 无需刷新宿主。
+/** 官方快捷键目录里的命令名(label 是函数, 目录每次刷新重取)。 */
+function commandLabel(lang) {
+  return L('打开/关闭 Touchstone 面板', 'Open/Close Touchstone Panel', lang);
+}
+/** 侧栏入口按钮的 tooltip / aria-label。 */
+function entryTitle(lang) {
+  return L('Touchstone 测试平台（Alt+T 开关）', 'Touchstone Test Platform (Alt+T to toggle)', lang);
+}
+/** 侧栏入口展开态文案(面板开着时)。 */
+function entryOpenLabel(lang) {
+  return L('关闭 Touchstone', 'Close Touchstone', lang);
+}
+/** 面板左下角关闭按钮的 title。 */
+function closePanelTitle(lang) {
+  return L('关闭 Touchstone 面板', 'Close Touchstone Panel', lang);
+}
+
+// 语言订阅者集合: 宿主页收到 storage 事件(面板 iframe 内 SPA 切语言, 或另一标签页改)
+// 即通知。iframe 里的 SPA 写 localStorage 只在**宿主父文档**触发 storage —— 这是外壳
+// 感知面板内切语言的唯一可靠通道。ts_lang / ts_lang_eff / clear()(key=null) 都算。
+const langListeners = new Set();
+function notifyLang() {
+  langListeners.forEach((fn) => fn());
+}
+try {
+  window.addEventListener('storage', (e) => {
+    if (e.key === LANG_KEY || e.key === LANG_EFF_KEY || e.key === null) notifyLang();
+  });
+} catch { /* 事件面缺失(桩环境/异常)时退化为渲染期读语言 */ }
+
+/** 当前界面语言 + 订阅重渲染(组件用): storage 事件到达时 setState 触发重渲染。 */
+function useLang() {
+  const [lang, setLangState] = React.useState(readLang);
+  React.useEffect(() => {
+    const listener = () => setLangState(readLang());
+    langListeners.add(listener);
+    return () => langListeners.delete(listener);
+  }, []);
+  return lang;
 }
 
 let open = false;
@@ -64,7 +118,6 @@ function useOpen() {
 //     (Web 的纯 Alt+T)由它兜底。它还必须自管 iframe 一侧 —— 面板是全屏**同源 iframe**,
 //     焦点在它里面时按键不会冒泡到宿主页(与本文件关闭按钮热区的 mousemove 同一个坑)。
 const COMMAND_ID = 'touchstone.toggle'; // 官方命令 id(dsh 要求: 小写点分)
-const COMMAND_LABEL = L('打开/关闭 Touchstone 面板', 'Open/Close Touchstone Panel');
 const KEY_CODE = 'KeyT';                // 物理键(Alt+T 的 T)
 let shortcuts = null;                   // 官方 shortcuts 服务(未注册成功时为 null)
 
@@ -139,7 +192,6 @@ function onHostKey(e) { toggleByKey(e); }
 //     7px 8px / margin 0 2px / gap 8 / line-height 22 / --dsw-radius-md), 收起态对齐
 //     .hHd-Xa_collapsed .panelRow(36x36 居中);
 //   · 图标盒 16x16 —— 与 dsh 侧栏 SVG 图标同尺寸; 文字继承侧栏根的 14px。
-const ENTRY_TITLE = L('Touchstone 测试平台（Alt+T 开关）', 'Touchstone Test Platform (Alt+T to toggle)');
 const ENTRY_GLYPH_STYLE = {
   flex: '0 0 16px', width: 16, height: 16, display: 'inline-flex',
   alignItems: 'center', justifyContent: 'center', fontSize: 16, lineHeight: '16px',
@@ -190,6 +242,8 @@ function mountEntryStyle() {
 function Toggle(props) {
   const wide = !!(props && props.wide);
   const isOpen = useOpen();
+  const lang = useLang(); // 订阅语言: 面板打开期间切语言也更新 title/aria/文案
+  const title = entryTitle(lang);
   const style = {
     boxSizing: 'border-box', display: 'flex', alignItems: 'center',
     border: 'none', cursor: 'pointer', textAlign: 'left',
@@ -217,13 +271,13 @@ function Toggle(props) {
     type: 'button',
     className: 'ts-sb-entry' + (isOpen ? ' ts-sb-on' : ''),
     style,
-    title: ENTRY_TITLE,
-    'aria-label': ENTRY_TITLE,
+    title,
+    'aria-label': title,
     'aria-expanded': isOpen,
     onClick: () => setOpen(!isOpen),
   },
   h('span', { style: ENTRY_GLYPH_STYLE, 'aria-hidden': 'true' }, '🧪'),
-  wide ? h('span', { style: ENTRY_LABEL_STYLE }, isOpen ? L('关闭 Touchstone', 'Close Touchstone') : 'Touchstone') : null);
+  wide ? h('span', { style: ENTRY_LABEL_STYLE }, isOpen ? entryOpenLabel(lang) : 'Touchstone') : null);
 }
 
 // 关闭按钮自动隐藏(2026-10-03): 常显会盖住被嵌 SPA 侧栏底部的用户名, 所以平时完全隐藏,
@@ -404,6 +458,7 @@ function useWindowChromeTop() {
 // iframe 同源, /touchstone/app 经薄壳反代到 server.py 的插件版 SPA
 function Panel() {
   const isOpen = useOpen();
+  const lang = useLang(); // 关闭按钮 title 随语言重渲染
   const chromeTop = useWindowChromeTop(); // 窗口装饰顶带高: Windows 标题栏/macOS 红绿灯
   // 保活(2026-10-07): 打开过就在 DOM 里常驻, 关闭只把容器 display:none —— iframe 一旦
   // 从 DOM 摘掉, 内嵌 SPA 整篇文档就没了, 再打开是全新加载(路由/弹窗/滚动/未提交输入全丢)。
@@ -535,7 +590,7 @@ function Panel() {
         pointerEvents: visible ? 'auto' : 'none', // 隐藏时不拦截点击(点击照常落到被嵌页面)
         transition: 'opacity 160ms ease, background 120ms ease',
       },
-      title: L('关闭 Touchstone 面板', 'Close Touchstone Panel'),
+      title: closePanelTitle(lang),
       onMouseEnter: () => { setHover(true); setShown(true); }, // 已浮现时悬停不因热区抖动而消失
       onMouseLeave: () => setHover(false),
       onClick: () => setOpen(false),
@@ -564,7 +619,7 @@ function apply(ctx) {
       shortcuts = sctx.shortcuts;
       sctx.effect(() => sctx.shortcuts.register({
         id: COMMAND_ID,
-        label: () => COMMAND_LABEL,
+        label: () => commandLabel(),
         aliases: ['touchstone', '测试平台', '面板'],
         // 键位矩阵: desktop 三档纯 Alt+T(官方允许, 原生键盘桥接管);
         // Web 只声明白名单放行的组合 —— web:linux 白名单只放行三组固定组合, 故不声明,

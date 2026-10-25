@@ -380,7 +380,8 @@ export async function _slashUpsert(cfg, name, desc, icon, byName) {
  * **不抛异常**（页面照常渲染并给引导）；`need_scope` = 缺「应用指令」scope。
  * @param {number} userId
  * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv, lang?: string}} [options]
- *   透传给 `appConfig`；`lang`（T12d）是请求语言，只影响 error 的固定引导文案。
+ *   透传给 `appConfig`；`lang`（T12d/Task1）是请求语言，只影响 error 的固定引导文案。
+ *   17 条 `desired[].description` 是飞书注册说明，保持中文（KB-08/R23）。
  * @returns {Promise<{configured: boolean, desired: Array<object>, remote: Array<object>,
  *                    extra: string[], need_scope: boolean, error: string}>}
  */
@@ -391,7 +392,9 @@ export async function slashStatus(userId, options = {}) {
   if (cfg === null) {
     return {
       configured: false, desired, remote: [], extra: [], need_scope: false,
-      error: '未配置应用凭据（App ID/App Secret），先在上方「飞书机器人配置」保存后重试',
+      error: i18n.t('api',
+        '未配置应用凭据（App ID/App Secret），先在上方「飞书机器人配置」保存后重试',
+        options.lang),
     };
   }
   let remote;
@@ -465,22 +468,27 @@ export async function syncSlashCommands(userId, options = {}) {
 /**
  * 删除**TS 自己的**指令（名字命中 `SLASH_COMMANDS` 的远端项）；用户其他指令不动。
  * 对齐 `feishu.clear_slash_commands`(feishu.py:1468-1492)。
+ *
+ * `options.lang` 缺省 `'zh'`：设置页 slash 卡既有中文数据面逐字节不变；设置页端点
+ * 按请求语言传入后，`error`/`failed` 里的固定中文引导跟随页面语言。
  * @param {number} userId
- * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
+ * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv, lang?: string}} [options]
  * @returns {Promise<{ok: boolean, deleted?: string[], extra?: string[], failed?: string[],
  *                    need_scope: boolean, error: string}>}
  */
 export async function clearSlashCommands(userId, options = {}) {
+  const lang = options.lang || 'zh';
   const cfg = appConfig(userId, options);
   if (cfg === null) {
-    return { ok: false, need_scope: false, error: '未配置应用凭据（App ID/App Secret）' };
+    return { ok: false, need_scope: false,
+      error: i18n.t('api', '未配置应用凭据（App ID/App Secret）', lang) };
   }
   let remote;
   try {
     remote = await listSlashCommands(cfg);
   } catch (e) {
     if (!(e instanceof FeishuRestError)) throw e;
-    return { ok: false, need_scope: _needScope(e), error: slashErrorHint(e) };
+    return { ok: false, need_scope: _needScope(e), error: slashErrorHint(e, lang) };
   }
   const deleted = [];
   const failed = [];
@@ -493,7 +501,7 @@ export async function clearSlashCommands(userId, options = {}) {
     } catch (e) {
       if (!(e instanceof FeishuRestError)) throw e;
       needScope = needScope || _needScope(e);
-      failed.push(`${r.command}: ${slashErrorHint(e)}`);
+      failed.push(`${r.command}: ${slashErrorHint(e, lang)}`);
     }
   }
   return {

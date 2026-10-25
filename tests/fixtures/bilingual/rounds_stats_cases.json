@@ -1,0 +1,20 @@
+[
+  {"line": "- 执行统计：通过 16 / 失败 0 / 跳过 0", "passed": 16, "failed": 0, "skipped": 0},
+  {"line": "- 执行统计：通过16 / 失败0", "passed": 16, "failed": 0, "skipped": null},
+  {"line": "- 执行统计：通过 3 / 失败 1 / 跳过 2", "passed": 3, "failed": 1, "skipped": 2},
+  {"line": "- 执行统计：Passed 16 / Failed 0 / Skipped 0", "passed": 16, "failed": 0, "skipped": 0},
+  {"line": "- 执行统计：Passed: 16 / Failed: 0 / Skipped: 1", "passed": 16, "failed": 0, "skipped": 1},
+  {"line": "- 执行统计：Passed：16 / Failed：0 / Skipped：2", "passed": 16, "failed": 0, "skipped": 2},
+  {"line": "- 执行统计：PASSED 3 / FAILED 1", "passed": 3, "failed": 1, "skipped": null},
+  {"line": "- 执行统计：pass 7 / fail 2", "passed": 7, "failed": 2, "skipped": null},
+  {"line": "- 执行统计：PaSsEd 4 / fAiLeD 2 / SkIpPeD 3", "passed": 4, "failed": 2, "skipped": 3},
+  {"line": "- 执行统计：Pass 3 / Fail 1 / Skip 2", "passed": 3, "failed": 1, "skipped": 2},
+  {"line": "- 执行统计：pass 7 / fail 0", "passed": 7, "failed": 0, "skipped": null},
+  {"line": "- 执行统计：PASSED 3 / FAILED 1 / SKIPPED 0", "passed": 3, "failed": 1, "skipped": 0},
+  {"line": "- 执行统计：Passed16 / Failed0", "passed": 16, "failed": 0, "skipped": null},
+  {"line": "- 执行统计：通过 5 / Failed 2", "passed": 5, "failed": 2, "skipped": null},
+  {"line": "- 执行统计：Passed 5 / 失败 3 / Skipped: 1", "passed": 5, "failed": 3, "skipped": 1},
+  {"line": "- 执行统计：Passed 16 / Failed 0 / 跳过", "passed": 16, "failed": 0, "skipped": null},
+  {"line": "- 执行统计：通过：16 / 失败 0", "passed": null, "failed": null, "skipped": null},
+  {"line": "- 执行统计：Failed 3 / Passed 1", "passed": null, "failed": null, "skipped": null}
+]

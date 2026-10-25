@@ -41,7 +41,7 @@ def _stub_status(monkeypatch, calls=None, **over):
           "dirty": False, "dirty_count": 0, "ahead": 2, "behind": 0}
     st.update(over)
 
-    def _fake(project, card):
+    def _fake(project, card, lang="zh"):
         if calls is not None:
             calls.append(card["id"])
         return dict(st)

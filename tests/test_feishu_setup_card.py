@@ -252,7 +252,7 @@ def test_switch_action_same_app_only_reconnects(monkeypatch):
 def test_slow_action_doctor_dm_summary(monkeypatch):
     """慢动作「配置自检」：摘要行 + 只列 fail/warn 项（ok 项不刷屏）。"""
     sent = []
-    monkeypatch.setattr(feishu, "doctor", lambda uid: {
+    monkeypatch.setattr(feishu, "doctor", lambda uid, data_lang=None: {
         "items": [
             {"key": "creds", "label": "应用凭据", "state": "ok", "detail": "已配置", "hint": ""},
             {"key": "token", "label": "凭据有效性", "state": "fail", "detail": "code=10003",
@@ -274,22 +274,27 @@ def test_slow_action_apply_and_publish_texts(monkeypatch):
     sent = []
     monkeypatch.setattr(feishu, "_dm_text", lambda oid, text, cfg: sent.append(text))
     monkeypatch.setattr(feishu, "provision_apply",
-                        lambda uid: {"ok": True, "steps": [], "error": "", "need_patch_scope": False})
+                        lambda uid, lang=None: {"ok": True, "steps": [], "error": "",
+                                                "need_patch_scope": False})
     feishu._setup_slow_action(1, "ou_1", "apply", _CFG)
     assert sent[-1].startswith("🧩 配置补齐成功")
     monkeypatch.setattr(feishu, "provision_apply",
-                        lambda uid: {"ok": False, "steps": [], "need_patch_scope": True,
-                                     "error": "应用缺少权限"})
+                        lambda uid, lang=None: {"ok": False, "steps": [],
+                                                "need_patch_scope": True,
+                                                "error": "应用缺少权限"})
     feishu._setup_slow_action(1, "ou_1", "apply", _CFG)
     assert sent[-1] == "❌ 配置补齐失败：应用缺少权限"
     monkeypatch.setattr(feishu, "provision_publish",
-                        lambda uid: {"ok": True, "version": "1.0.4", "version_id": "v1",
-                                     "need_patch_scope": False, "error": ""})
+                        lambda uid, lang=None: {"ok": True, "version": "1.0.4",
+                                                "version_id": "v1",
+                                                "need_patch_scope": False, "error": ""})
     feishu._setup_slow_action(1, "ou_1", "publish", _CFG)
     assert sent[-1] == "🚀 已提交发布版本 1.0.4；仍需租户管理员审批后线上生效。"
     monkeypatch.setattr(feishu, "provision_publish",
-                        lambda uid: {"ok": False, "version": "", "version_id": "",
-                                     "need_patch_scope": False, "error": "发布失败: boom"})
+                        lambda uid, lang=None: {"ok": False, "version": "",
+                                                "version_id": "",
+                                                "need_patch_scope": False,
+                                                "error": "发布失败: boom"})
     feishu._setup_slow_action(1, "ou_1", "publish", _CFG)
     assert sent[-1] == "❌ 提交发布失败：发布失败: boom"
 

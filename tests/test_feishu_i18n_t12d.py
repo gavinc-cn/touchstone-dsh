@@ -657,6 +657,20 @@ def test_http_zh_header_bytes_unchanged(isolated_server):
     assert code == 200 and sha_text(text) == ZH_GOLDEN["status_idle"]
     code, text = zh("/api/me/feishu/provision", "POST", {"action": "cancel"})
     assert code == 200 and sha_text(text) == ZH_GOLDEN["cancel_none"]
+    # KB-28：apply / publish 的 HTTP zh 逐字节门禁（此前只有函数级与无头档）
+    code, text = zh("/api/me/feishu/provision", "POST", {"action": "apply"})
+    assert code == 200 and sha_text(text) == ZH_GOLDEN["apply_no_creds"]
+    code, text = zh("/api/me/feishu/provision", "POST", {"action": "publish"})
+    assert code == 200 and sha_text(text) == ZH_GOLDEN["publish_no_creds"]
+    # 与「无语言头」响应正文逐字节相同（不只 sha 相等：同一次实例内直接对比）
+    code, no_head = srv.admin("/api/me/feishu/provision", "POST", {"action": "apply"})
+    code2, zh_apply = zh("/api/me/feishu/provision", "POST", {"action": "apply"})
+    assert code == code2 == 200
+    assert zh_apply == no_head
+    code, no_head = srv.admin("/api/me/feishu/provision", "POST", {"action": "publish"})
+    code2, zh_publish = zh("/api/me/feishu/provision", "POST", {"action": "publish"})
+    assert code == code2 == 200
+    assert zh_publish == no_head
 
 
 def test_http_en_doctor_and_provision(isolated_server):
@@ -772,3 +786,217 @@ def test_handlers_pass_request_language(monkeypatch):
     handler._api_me_feishu_provision_get()
     handler._api_me_feishu_cfg_set({})
     assert seen == {"cancel": "en", "status": "en", "save": "en"}
+
+
+def test_http_cfg_verify_zh_and_en_body(monkeypatch):
+    """KB-28：`verify` 凭据快检的 HTTP 正文门禁（无头/zh 同字节，en 英文对照）。
+
+    真 isolated server 子进程无法注入飞书 REST 桩（verify 会真连外网），故沿用 ⑥ 的
+    Handler 替身：**真 handler + 真 `save_user_config` + 真 `verify_credentials`**，
+    只桩 REST/DB/入站线程；响应体仍由 `_respond` 原样产出，断言 UTF-8 字节。
+    """
+    monkeypatch.setattr(db, "set_feishu_user_cfg", lambda uid, cfg: None)
+    monkeypatch.setattr(feishu, "start_inbound_for", lambda uid: False)
+    monkeypatch.setattr(feishu, "maybe_send_switch_card", lambda *a, **k: None)
+    _stub_env(monkeypatch)      # user_config / _rest / _tenant_token 确定性桩
+
+    bodies = {}
+    for name, headers in (("nohead", {}), ("zh", {"X-TS-Lang": "zh"}),
+                          ("en", {"X-TS-Lang": "en"})):
+        handler = _FakeHandler(headers=headers, path="/api/me/feishu-cfg",
+                               user=_handler_user())
+        handler._api_me_feishu_cfg_set({})
+        assert len(handler.responses) == 1
+        code, body, ctype = handler.responses[0]
+        assert (code, ctype) == (200, "application/json; charset=utf-8")
+        bodies[name] = body
+
+    expected_zh = ('{"ok": true, "inbound_started": false, "verify": '
+                   '{"ok": true, "detail": "凭据可用：机器人 Bot（已启用）"}}')
+    expected_en = ('{"ok": true, "inbound_started": false, "verify": '
+                   '{"ok": true, "detail": "Credentials are valid: bot Bot (Enabled)"}}')
+    assert bodies["zh"] == bodies["nohead"] == expected_zh.encode("utf-8")
+    assert bodies["en"] == expected_en.encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# ⑦ KB-27 / KB-36：接入卡慢动作 DM 数据面 + slash 设置页数据面跟随语言
+# ---------------------------------------------------------------------------
+
+# 改动前（本任务前）无凭据档的 UTF-8 sha256（同桩抓取；勿手改）：
+#   - GET /api/me/feishu/slash-commands 的 200 体 = json.dumps(slash_status(...))
+#   - POST .../slash-commands {"action": "clear"} 的 200 体（含追加的 card_sent/card_error）
+SLASH_GET_ZH_SHA = "2c4e0e279ca5da65eb987c121d85e2a764e0086bec54309592a30079aa24eac3"
+SLASH_CLEAR_ZH_SHA = "280fc6a5d90f476da5d6a40e695ac3386d7914c743fbe59ce95296868b7b2639"
+# 改动前慢动作 DM（无凭据档，zh）的 sha256：证明新增 data_lang/lang 透传后字节不变
+SLOW_DM_ZH_SHA = {
+    "doctor": "7f2b49c57750cead5b6c13af53e909c83b32469bf72ddf9d23ee647b6c979844",
+    "apply": "929a85a7d5892b7f0bee68853e6d9bbea1ebaedb35d247489aac4b897f285e77",
+    "publish": "757be30948fb76a030b42fe13b8c4c80919e3a615f7b4bb98724f7dc164f0244",
+}
+SLASH_CFG_NULL_KEY = (
+    "未配置应用凭据（App ID/App Secret），先在上方「飞书机器人配置」保存后重试")
+SLASH_CFG_NULL_EN = (
+    "App credentials are not configured (App ID/App Secret); save them under "
+    "“Feishu bot configuration” above and retry")
+SLASH_NO_CREDS_KEY = "未配置应用凭据（App ID/App Secret）"
+SLASH_NO_CREDS_EN = "App credentials are not configured (App ID/App Secret)"
+# en 同场景 payload 的 sha256（Node 孪生断言同一组常量 ⇒ 双端逐字节一致）
+SLASH_GET_EN_SHA = "712d5f2d4963437d943d9be5c140a8087f7e7cfc389533488c54ef3e02b9c031"
+SLASH_CLEAR_EN_SHA = "a86879ec510281f5faf78ff64907d7f9af83234d1de0ec272eb3afe2b54d981f"
+
+
+def _no_creds_env(monkeypatch):
+    """无凭据档的确定性桩：doctor 的八项全部走 skip/fail/warn，零网络。"""
+    _clear_state()
+    monkeypatch.setattr(feishu, "user_config", lambda uid: {})
+    monkeypatch.setattr(feishu, "inbound_status",
+                        lambda uid: {"configured": False, "thread": False})
+    monkeypatch.setattr(feishu, "inbound_thread_app_id", lambda uid: "")
+    monkeypatch.setattr(feishu.db, "get_feishu_binding_by_user", lambda uid: None)
+
+
+def _slow_action_dm(monkeypatch, action, lang="zh"):
+    sent = []
+    monkeypatch.setattr(feishu, "_dm_text",
+                        lambda oid, text, cfg: sent.append(text))
+    feishu._setup_slow_action(UID, "ou_x", action, None, lang)
+    assert len(sent) == 1, sent
+    return sent[0]
+
+
+def test_slow_action_zh_dm_bytes_unchanged(monkeypatch):
+    """硬约束①：无语言信号（默认 zh）时三档 DM 与改动前逐字节一致。"""
+    _no_creds_env(monkeypatch)
+    for action, digest in SLOW_DM_ZH_SHA.items():
+        assert sha_text(_slow_action_dm(monkeypatch, action)) == digest, action
+
+
+def test_en_slow_action_doctor_dm_uses_data_language(monkeypatch):
+    """KB-27：en 收件人点「自检」⇒ DM 的 label/detail/hint 走英文数据面。"""
+    _no_creds_env(monkeypatch)
+    text = _slow_action_dm(monkeypatch, "doctor", "en")
+    assert text == (
+        "🩺 Configuration self-check: ok 0 / fail 1 / warn 1 / skip 6\n"
+        "· App credentials (App ID / App Secret): Not configured "
+        "(Enter the App ID and App Secret under “Feishu bot configuration” "
+        "and save)\n"
+        "· Default push webhook: Not configured (does not affect bot "
+        "conversations; only blocking-event pushes) (Group settings → Group "
+        "bots → add a custom bot, then enter the webhook on the settings page)")
+    assert_no_chinese(text)
+
+
+def test_en_slow_action_apply_publish_errors_use_recipient_language(monkeypatch):
+    """KB-27：en 收件人 apply/publish 失败回执英文（fake provision 返回 en 错误）。"""
+    sent, seen = [], {}
+
+    def fake_apply(uid, lang=None):
+        seen["apply"] = lang
+        return {"ok": False, "need_patch_scope": False, "steps": [],
+                "error": i18n.t("api", "应用凭据未配置（App ID / App Secret），请先保存凭据",
+                                lang)}
+
+    def fake_publish(uid, version=None, remark="", changelog="", lang=None):
+        seen["publish"] = lang
+        return {"ok": False, "version": "", "version_id": "",
+                "need_patch_scope": False,
+                "error": i18n.t("api", "应用凭据未配置（App ID / App Secret），请先保存凭据",
+                                lang)}
+
+    monkeypatch.setattr(feishu, "provision_apply", fake_apply)
+    monkeypatch.setattr(feishu, "provision_publish", fake_publish)
+    monkeypatch.setattr(feishu, "_dm_text",
+                        lambda oid, text, cfg: sent.append(text))
+    feishu._setup_slow_action(UID, "ou_x", "apply", None, "en")
+    feishu._setup_slow_action(UID, "ou_x", "publish", None, "en")
+    assert seen == {"apply": "en", "publish": "en"}
+    assert sent == [
+        "❌ Failed to apply configuration: App credentials are not configured "
+        "(App ID / App Secret); save the credentials first",
+        "❌ Failed to submit for publishing: App credentials are not configured "
+        "(App ID / App Secret); save the credentials first",
+    ]
+
+
+def test_slash_lib_lang_param_localizes_fixed_errors(monkeypatch):
+    """KB-36 lib 层：三个函数都接受 lang，且只翻固定 error（17 条说明保持中文）。"""
+    monkeypatch.setattr(feishu, "app_config", lambda uid: None)
+    zh = feishu.slash_status(1)
+    en = feishu.slash_status(1, lang="en")
+    assert zh["error"] == SLASH_CFG_NULL_KEY
+    assert en["error"] == SLASH_CFG_NULL_EN
+    assert [d["description"] for d in en["desired"]] == [
+        d for _, d, _ in feishu.SLASH_COMMANDS]
+    assert [d["description"] for d in en["desired"]] == [
+        d["description"] for d in zh["desired"]]
+    for name in ("sync_slash_commands", "clear_slash_commands"):
+        fn = getattr(feishu, name)
+        assert fn(1)["error"] == SLASH_NO_CREDS_KEY, name
+        assert fn(1, lang="en")["error"] == SLASH_NO_CREDS_EN, name
+
+
+def test_clear_slash_commands_failed_hint_follows_request_lang(monkeypatch):
+    """clear 逐条失败：failed[0] 与 error 同文案；en 请求走英文权限引导（zh 对照）。"""
+    monkeypatch.setattr(feishu, "app_config",
+                        lambda uid: {"app_id": "cli_x", "app_secret": "s"})
+    monkeypatch.setattr(feishu, "list_slash_commands", lambda cfg: [{
+        "command": "help", "command_id": "c1",
+        "description": "查看可用指令", "icon_key": "skill_outlined"}])
+
+    def boom(cfg, command_id):
+        raise feishu.FeishuRestError("no permission", code=99991640)
+
+    monkeypatch.setattr(feishu, "delete_slash_command", boom)
+    zh = feishu.clear_slash_commands(UID)
+    assert zh["need_scope"] is True and zh["deleted"] == []
+    assert zh["failed"] == ["help: " + feishu._SLASH_PERM_HINT]
+    assert zh["error"] == zh["failed"][0]
+
+    en = feishu.clear_slash_commands(UID, lang="en")
+    assert en["failed"] == ["help: The app lacks the “app slash command” permission: "
+                            "in the Feishu developer console → Permission management, "
+                            "add application:app_slash_command:read and write, then "
+                            "create and publish a new version and retry"]
+    assert en["error"] == en["failed"][0]
+    assert_no_chinese(en["failed"][0])
+
+
+def test_http_zh_slash_payloads_byte_identical(isolated_server):
+    """硬约束①：无头（与显式 zh 头）slash GET/POST 响应与改动前逐字节一致。"""
+    srv = isolated_server
+    code, text = srv.admin("/api/me/feishu/slash-commands")
+    assert code == 200
+    assert sha_text(text) == SLASH_GET_ZH_SHA
+    code, text = srv.admin("/api/me/feishu/slash-commands", "POST",
+                           {"action": "clear"})
+    assert code == 200
+    assert sha_text(text) == SLASH_CLEAR_ZH_SHA
+    zh = _lang_client(srv, {"X-TS-Lang": "zh"})
+    code, text = zh("/api/me/feishu/slash-commands")
+    assert code == 200 and sha_text(text) == SLASH_GET_ZH_SHA
+
+
+def test_http_en_slash_data_follows_request_language(isolated_server):
+    """KB-36：en 头 ⇒ error 英文；desired 的 17 条中文说明原样不动。"""
+    srv = isolated_server
+    en = _lang_client(srv, {"X-TS-Lang": "en"})
+    code, text = en("/api/me/feishu/slash-commands")
+    assert code == 200
+    payload = json.loads(text)
+    assert payload["configured"] is False
+    assert payload["error"] == SLASH_CFG_NULL_EN
+    assert sha_text(text) == SLASH_GET_EN_SHA
+    assert [d["description"] for d in payload["desired"]] == [
+        d for _, d, _ in feishu.SLASH_COMMANDS]
+    assert len(payload["desired"]) == 17
+    # 17 条说明是**机器人协议面**（飞书客户端里的中文指令说明），不许被改成英文
+    assert all(HAN.search(d["description"]) for d in payload["desired"])
+    assert_no_chinese(payload["error"])
+    for action in ("sync", "clear"):
+        code, text = en("/api/me/feishu/slash-commands", "POST", {"action": action})
+        assert code == 200
+        out = json.loads(text)
+        assert out["error"] == SLASH_NO_CREDS_EN, action
+        assert out["card_sent"] is False and out["card_error"] == ""
+        assert sha_text(text) == SLASH_CLEAR_EN_SHA, action

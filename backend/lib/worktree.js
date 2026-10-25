@@ -42,6 +42,8 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { t } from './i18n.js';
+
 /** git 命令超时（毫秒）：查询类很快（`GIT_TIMEOUT` 60s） */
 export const GIT_TIMEOUT_MS = 60_000;
 /** 写类 git 命令超时（`GIT_WRITE_TIMEOUT` 300s）——本文件只读，保留常量供 M4 复用 */
@@ -138,23 +140,36 @@ export function worktreePath(project, cardId, repoRoot = '') {
  * git 不可用（未安装/不可执行）/超时一律按 `rc = -1` 归一，错误串统一文案——调用方只需
  * 判 `rc !== 0`。**不抛异常**（照 Python `_git`）。
  *
+ * `lang`（KB-03，尾参，与 `worktree.py:_git` 的位置逐个对齐）：只翻本函数自己写的
+ * 骨架；`proc.error.message` / 命令行参数是动态内容，原样保留。
+ *
  * @param {string[]} args
  * @param {string} cwd
  * @param {number} [timeoutMs]
+ * @param {'zh'|'en'|string=} [lang]
  * @returns {{rc: number, out: string, err: string}}
  */
-export function git(args, cwd, timeoutMs = GIT_TIMEOUT_MS) {
+export function git(args, cwd, timeoutMs = GIT_TIMEOUT_MS, lang = 'zh') {
   const proc = spawnSync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
     timeout: timeoutMs,
     windowsHide: true,
   });
   if (proc.error) {
-    return { rc: -1, out: '', err: `git 不可用: ${proc.error.message}` };
+    return {
+      rc: -1,
+      out: '',
+      err: t('api', 'git 不可用: {detail}', lang, { detail: proc.error.message }),
+    };
   }
   if (proc.status === null) {
     // 被信号杀死/超时（Python 的 TimeoutExpired 同归一）
-    return { rc: -1, out: '', err: `git 不可用: 命令被中断或超时（${args.join(' ')}）` };
+    return {
+      rc: -1,
+      out: '',
+      err: t('api', 'git 不可用: 命令被中断或超时（{args}）', lang,
+        { args: args.join(' ') }),
+    };
   }
   const err = String(proc.stderr ?? '').trim();
   return { rc: proc.status, out: String(proc.stdout ?? ''), err: err.slice(0, ERR_MAX) };
@@ -167,34 +182,38 @@ export function git(args, cwd, timeoutMs = GIT_TIMEOUT_MS) {
  * 会挂到子目录语义上（git 会拒绝）。
  *
  * @param {string} projectDir
+ * @param {'zh'|'en'|string=} [lang]
  * @returns {{root: string|null, error: string}}
  */
-export function repoRoot(projectDir) {
+export function repoRoot(projectDir, lang = 'zh') {
   const d = String(projectDir ?? '').trim();
-  if (!d) return { root: null, error: '项目目录为空' };
-  if (!isDir(d)) return { root: null, error: `项目目录不存在: ${d}` };
-  const { rc, out, err } = git(['rev-parse', '--show-toplevel'], d);
+  if (!d) return { root: null, error: t('api', '项目目录为空', lang) };
+  if (!isDir(d)) {
+    return { root: null, error: t('api', '项目目录不存在: {path}', lang, { path: d }) };
+  }
+  const { rc, out, err } = git(['rev-parse', '--show-toplevel'], d, undefined, lang);
   if (rc !== 0 || !out.trim()) {
-    return { root: null, error: err || '项目目录不是 git 仓库' };
+    return { root: null, error: err || t('api', '项目目录不是 git 仓库', lang) };
   }
   return { root: out.trim().split('\n')[0].trim(), error: '' };
 }
 
 /**
- * 主仓库当前检出的分支名；游离 HEAD / 读取失败返回 `{name:'', error:中文原因}`。
+ * 主仓库当前检出的分支名；游离 HEAD / 读取失败返回 `{name:'', error:按 lang 渲染的原因}`。
  *
  * 平台的「主分支」口径就是它——worktree 由该分支检出，改动也回流到它。**不猜**
  * `master`/`main`：仓库默认分支名由仓库自己决定，猜错会把改动合到错误的分支上。
  *
  * @param {string} root
+ * @param {'zh'|'en'|string=} [lang]
  * @returns {{name: string, error: string}}
  */
-export function headBranch(root) {
-  const { rc, out, err } = git(['rev-parse', '--abbrev-ref', 'HEAD'], root);
+export function headBranch(root, lang = 'zh') {
+  const { rc, out, err } = git(['rev-parse', '--abbrev-ref', 'HEAD'], root, undefined, lang);
   const name = String(out ?? '').trim();
-  if (rc !== 0) return { name: '', error: err || '无法读取主仓库分支' };
+  if (rc !== 0) return { name: '', error: err || t('api', '无法读取主仓库分支', lang) };
   if (!name || name === 'HEAD') {
-    return { name: '', error: '主仓库处于游离 HEAD 状态，无法判定主分支' };
+    return { name: '', error: t('api', '主仓库处于游离 HEAD 状态，无法判定主分支', lang) };
   }
   return { name, error: '' };
 }
@@ -211,21 +230,22 @@ function isDir(p) {
 /**
  * 预览（**不落盘**）：`{ok, error, path, branch, exists, root}`。
  *
- * `ok=false` 表示该项目不能建 worktree（非 git 仓库等），`error` 为中文原因；
+ * `ok=false` 表示该项目不能建 worktree（非 git 仓库等），`error` 为按 `lang` 渲染的原因；
  * `exists=true` 表示目标路径已存在（前端可据此提示「将复用」）。
  *
  * @param {object} project
  * @param {number|string} cardId
+ * @param {'zh'|'en'|string=} [lang]
  * @returns {{ok: boolean, error: string, path: string, branch: string,
  *            exists: boolean, root: string}}
  */
-export function preview(project, cardId) {
+export function preview(project, cardId, lang = 'zh') {
   const projectDir = String(project.project_dir ?? '').trim();
-  const { root, error } = repoRoot(projectDir);
+  const { root, error } = repoRoot(projectDir, lang);
   if (error) {
     return {
       ok: false,
-      error: `项目目录不是 git 仓库（${error}）`,
+      error: t('api', '项目目录不是 git 仓库（{detail}）', lang, { detail: error }),
       path: '',
       branch: branchFor(cardId),
       exists: false,
@@ -259,9 +279,10 @@ export function preview(project, cardId) {
  *
  * @param {object} project
  * @param {object} card 卡片行（读 id / worktree）
+ * @param {'zh'|'en'|string=} [lang]
  * @returns {object}
  */
-export function mergeStatus(project, card) {
+export function mergeStatus(project, card, lang = 'zh') {
   const out = {
     ok: false,
     error: '',
@@ -278,48 +299,51 @@ export function mergeStatus(project, card) {
   const p = String(card.worktree ?? '').trim();
   out.path = p;
   if (!p) {
-    out.error = '该卡片没有独立 worktree';
+    out.error = t('api', '该卡片没有独立 worktree', lang);
     return out;
   }
   if (!isDir(p)) {
-    out.error = 'worktree 目录不存在';
+    out.error = t('api', 'worktree 目录不存在', lang);
     return out;
   }
   out.exists = true;
-  const { root, error } = repoRoot(project.project_dir);
+  const { root, error } = repoRoot(project.project_dir, lang);
   if (error) {
-    out.error = `项目目录不是 git 仓库（${error}）`;
+    out.error = t('api', '项目目录不是 git 仓库（{detail}）', lang, { detail: error });
     return out;
   }
-  const head = headBranch(root);
+  const head = headBranch(root, lang);
   if (head.error) {
     out.error = head.error;
     return out;
   }
   out.target = head.name;
   const branch = out.branch;
-  const verify = git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root);
+  const verify = git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root,
+    undefined, lang);
   out.branch_exists = verify.rc === 0;
   if (!out.branch_exists) {
     // 分支不存在（被删/从未创建）：没有可合并的东西，按「无待合并」处置
     out.ok = true;
     return out;
   }
-  const ahead = git(['rev-list', '--count', `${out.target}..${branch}`], root);
+  const ahead = git(['rev-list', '--count', `${out.target}..${branch}`], root,
+    undefined, lang);
   if (ahead.rc !== 0) {
-    out.error = `无法读取待合并提交数：${ahead.err}`;
+    out.error = t('api', '无法读取待合并提交数：{detail}', lang, { detail: ahead.err });
     return out;
   }
   out.ahead = gitInt(ahead.out);
-  const behind = git(['rev-list', '--count', `${branch}..${out.target}`], root);
+  const behind = git(['rev-list', '--count', `${branch}..${out.target}`], root,
+    undefined, lang);
   if (behind.rc !== 0) {
-    out.error = `无法读取落后提交数：${behind.err}`;
+    out.error = t('api', '无法读取落后提交数：{detail}', lang, { detail: behind.err });
     return out;
   }
   out.behind = gitInt(behind.out);
-  const dirty = porcelain(p);
+  const dirty = porcelain(p, lang);
   if (!dirty.ok) {
-    out.error = `无法读取工作树状态：${dirty.err}`;
+    out.error = t('api', '无法读取工作树状态：{detail}', lang, { detail: dirty.err });
     return out;
   }
   out.dirty = dirty.lines.length > 0;
@@ -350,10 +374,11 @@ export function gitInt(text) {
  * `\r`/`\u2028` 等行界，故这里用 `/\r\n|\r|\n|\u2028|\u2029/` 拆，再剔除空行。
  *
  * @param {string} p
+ * @param {'zh'|'en'|string=} [lang]
  * @returns {{ok: boolean, lines: string[], err: string}}
  */
-export function porcelain(p) {
-  const { rc, out, err } = git(['status', '--porcelain'], p);
+export function porcelain(p, lang = 'zh') {
+  const { rc, out, err } = git(['status', '--porcelain'], p, undefined, lang);
   if (rc !== 0) return { ok: false, lines: [], err };
   return {
     ok: true,
@@ -400,11 +425,11 @@ function errText(err) {
 }
 
 /** `worktree._readable_worktree`：path 是否已是「可用的、检出指定分支」的工作树（复用判据） */
-function readableWorktree(p, branch) {
+function readableWorktree(p, branch, lang = 'zh') {
   if (!isDir(p)) return false;
-  const inside = git(['rev-parse', '--is-inside-work-tree'], p);
+  const inside = git(['rev-parse', '--is-inside-work-tree'], p, undefined, lang);
   if (inside.rc !== 0 || inside.out.trim() !== 'true') return false;
-  const head = git(['rev-parse', '--abbrev-ref', 'HEAD'], p);
+  const head = git(['rev-parse', '--abbrev-ref', 'HEAD'], p, undefined, lang);
   return head.rc === 0 && head.out.trim() === branch;
 }
 
@@ -478,46 +503,53 @@ function normalizePointers(p) {
  *
  * 幂等语义（plan §3.5）：① 路径已是可用工作树且检出目标分支 ⇒ 直接复用（打回续改/失败重按
  * 开始走这条）；② 路径不存在（用户手删）⇒ 重新创建：分支已存在则检出该分支（保留既往提交），
- * 否则 `-b` 新建；③ 报错一律返回中文错误串（调用方按 400 回给前端）。
+ * 否则 `-b` 新建；③ 报错一律返回按 `lang` 渲染的错误串（调用方按 400 回给前端）。
  *
  * git add 失败先用 `worktree prune` 清注册残留再重试**一次**（用户删过目录的常见形态）。
  * **不抛异常**（错误走第三元）。
  *
  * @param {object} project 项目行（读 project_dir / work_dir）
  * @param {number|string} cardId
+ * @param {'zh'|'en'|string=} [lang]
  * @returns {[string, string, string]}
  */
-export function create(project, cardId) {
+export function create(project, cardId, lang = 'zh') {
   const projectDir = orStrip(project.project_dir);
-  const { root, error } = repoRoot(projectDir);
-  if (error) return ['', '', `无法创建 worktree：项目目录不是 git 仓库（${error}）`];
+  const { root, error } = repoRoot(projectDir, lang);
+  if (error) {
+    return ['', '', t('api', '无法创建 worktree：项目目录不是 git 仓库（{detail}）', lang,
+      { detail: error })];
+  }
   const p = worktreePath(project, cardId, root);
   const branch = branchFor(cardId);
-  if (readableWorktree(p, branch)) return [p, branch, ''];
+  if (readableWorktree(p, branch, lang)) return [p, branch, ''];
   if (fs.existsSync(p)) {
     // 路径被占（文件/非本卡的工作树）：不擅自删用户目录，明确报错交用户处理
-    return ['', '', `worktree 路径已存在且不可复用：${p}`];
+    return ['', '', t('api', 'worktree 路径已存在且不可复用：{path}', lang, { path: p })];
   }
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
   } catch (e) {
-    return ['', '', `无法创建 worktree 目录：${errText(e)}`];
+    return ['', '', t('api', '无法创建 worktree 目录：{detail}', lang,
+      { detail: errText(e) })];
   }
-  const verify = git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root);
+  const verify = git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root,
+    undefined, lang);
   const args = verify.rc === 0
     // 分支已存在（用户删过工作树目录、分支留着）：检出既有分支，保留既往提交
     ? ['worktree', 'add', p, branch]
     : ['worktree', 'add', p, '-b', branch];
-  let res = git(args, root, GIT_WRITE_TIMEOUT_MS);
+  let res = git(args, root, GIT_WRITE_TIMEOUT_MS, lang);
   if (res.rc !== 0) {
     // 目标目录不存在但 git 侧仍有注册残留（用户删过目录）：prune 后重试一次
-    if (git(['worktree', 'prune'], root).rc === 0) {
-      res = git(args, root, GIT_WRITE_TIMEOUT_MS);
+    if (git(['worktree', 'prune'], root, undefined, lang).rc === 0) {
+      res = git(args, root, GIT_WRITE_TIMEOUT_MS, lang);
     }
   }
   if (res.rc !== 0) {
-    const why = String(res.err || res.out || '未知原因').trim().slice(0, ERR_MAX);
-    return ['', '', `git worktree add 失败：${why}`];
+    const why = String(res.err || res.out || t('api', '未知原因', lang)).trim()
+      .slice(0, ERR_MAX);
+    return ['', '', t('api', 'git worktree add 失败：{detail}', lang, { detail: why })];
   }
   normalizePointers(p);
   return [p, branch, ''];
@@ -532,26 +564,29 @@ export function create(project, cardId) {
  *
  * @param {object} project 项目行（本函数暂未用到，形参照 Python 保留）
  * @param {object} card 卡片行（读 id / worktree）
+ * @param {'zh'|'en'|string=} [lang]
  * @returns {object}
  */
-export function status(project, card) {
+export function status(project, card, lang = 'zh') {
   const p = orStrip(card.worktree);
   const branch = branchFor(card.id);
   if (!p) {
     return {
-      ok: false, error: '该卡片没有独立 worktree', path: '', branch, dirty: false, exists: false,
+      ok: false, error: t('api', '该卡片没有独立 worktree', lang),
+      path: '', branch, dirty: false, exists: false,
     };
   }
   if (!isDir(p)) {
     return {
-      ok: false, error: 'worktree 目录不存在', path: p, branch, dirty: false, exists: false,
+      ok: false, error: t('api', 'worktree 目录不存在', lang),
+      path: p, branch, dirty: false, exists: false,
     };
   }
-  const res = git(['status', '--porcelain'], p);
+  const res = git(['status', '--porcelain'], p, undefined, lang);
   if (res.rc !== 0) {
     return {
-      ok: false, error: `无法读取工作树状态：${res.err}`, path: p, branch,
-      dirty: false, exists: true,
+      ok: false, error: t('api', '无法读取工作树状态：{detail}', lang, { detail: res.err }),
+      path: p, branch, dirty: false, exists: true,
     };
   }
   return {
@@ -568,21 +603,27 @@ export function status(project, card) {
  *
  * @param {object} project 项目行（只用于 `repo_root`）
  * @param {object} card 卡片行（读 id / worktree）
+ * @param {'zh'|'en'|string=} [lang]
  * @returns {[boolean, string]}
  */
-export function remove(project, card) {
+export function remove(project, card, lang = 'zh') {
   const p = orStrip(card.worktree);
-  if (!p) return [false, '该卡片没有独立 worktree'];
-  if (!isDir(p)) return [false, 'worktree 目录不存在'];
-  const st = status(project, card);
+  if (!p) return [false, t('api', '该卡片没有独立 worktree', lang)];
+  if (!isDir(p)) return [false, t('api', 'worktree 目录不存在', lang)];
+  const st = status(project, card, lang);
   if (!st.ok) return [false, st.error];
-  if (st.dirty) return [false, '工作树有未提交改动，请先提交或清理后再移除'];
-  const { root, error } = repoRoot(project.project_dir);
-  if (error) return [false, `项目目录不是 git 仓库（${error}）`];
-  const res = git(['worktree', 'remove', p], root, GIT_WRITE_TIMEOUT_MS);
+  if (st.dirty) {
+    return [false, t('api', '工作树有未提交改动，请先提交或清理后再移除', lang)];
+  }
+  const { root, error } = repoRoot(project.project_dir, lang);
+  if (error) {
+    return [false, t('api', '项目目录不是 git 仓库（{detail}）', lang, { detail: error })];
+  }
+  const res = git(['worktree', 'remove', p], root, GIT_WRITE_TIMEOUT_MS, lang);
   if (res.rc !== 0) {
-    const why = String(res.err || res.out || '未知原因').trim().slice(0, ERR_MAX);
-    return [false, `git worktree remove 失败：${why}`];
+    const why = String(res.err || res.out || t('api', '未知原因', lang)).trim()
+      .slice(0, ERR_MAX);
+    return [false, t('api', 'git worktree remove 失败：{detail}', lang, { detail: why })];
   }
   return [true, ''];
 }

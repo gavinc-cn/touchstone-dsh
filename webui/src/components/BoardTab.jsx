@@ -31,7 +31,7 @@ import {
 } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
 import { Play, Trash2, Check, Undo2, ArrowRight, Plus, Settings, MessageSquare, FileText, Maximize2, ExternalLink, X, Zap } from 'lucide-react'
-import { useI18n } from '../utils/i18n'
+import { useI18n, displayTitle } from '../utils/i18n'
 
 // 卡片操作行按钮（2026-10-10 窄屏自适应批次）——两种形态，样式全在 CSS：
 //   OpsTextButton 带文字：<icon(宽列)> + <icon(窄列)> + <label> 三个兄弟节点，由
@@ -913,7 +913,7 @@ export default function BoardTab({ project }) {
                       <OpsIconButton variant="ghost"
                         title={card.session_id ? t('进入主会话') : t('尚无会话')}
                         disabled={!card.session_id}
-                        onClick={() => setSessFor({ sid: card.session_id, cid: card.id, column: card.column, title: card.title || t('未命名') })}>
+                        onClick={() => setSessFor({ sid: card.session_id, cid: card.id, column: card.column, title: displayTitle(card.title) })}>
                         <MessageSquare /></OpsIconButton>
                       {/* 在 dsh 界面打开主会话（仅 dsh 插件面板形态渲染；独立 web 形态宿主桥
                           不应答 caps，按钮不存在）：宿主半收请求后调 uiWorkspace.openSession
@@ -969,7 +969,7 @@ export default function BoardTab({ project }) {
       {/* 打回意见 */}
       <Dialog open={!!rejectFor} onOpenChange={(v) => !v && setRejectFor(null)}>
         <DialogContent className="modal">
-          <DialogHeader><DialogTitle>{t('打回「{title}」', { title: rejectFor?.title })}</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>{t('打回「{title}」', { title: rejectFor?.title ? displayTitle(rejectFor.title) : rejectFor?.title })}</DialogTitle></DialogHeader>
           <Textarea rows={4} placeholder={t('修改意见（将随会话续发改进）')} value={rejectText}
             onChange={(e) => setRejectText(e.target.value)} />
           <DialogFooter>
@@ -1119,7 +1119,7 @@ function CardText({ card, editing, editTitle, onStartEdit, onSaveTitle, onEditCh
     <>
       <div ref={titleRef} className="board-card-title" title={t('单击编辑标题')}
         onClick={(e) => { e.stopPropagation(); onStartEdit(card) }}>
-        {card.title || <span className="board-card-title-empty">{t('未命名')}</span>}
+        {card.title ? displayTitle(card.title) : <span className="board-card-title-empty">{t('未命名')}</span>}
       </div>
       {card.description && descLines > 0 && (
         <div className="board-card-desc" style={{ WebkitLineClamp: descLines }}>{card.description}</div>

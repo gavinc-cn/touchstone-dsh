@@ -11,6 +11,9 @@
 - en 新文件：字段名归一到中文 canonical 键、状态值归一到中文 canonical 值；
 - mixed 混写：同 canonical 键后者覆盖，两端一致；
 - `set_md_field`：中文文件写中文、英文文件写英文键+英文值、混写跟随、字段缺失按文件主语言追加；
+- `set_md_field` 多行同名字段：与 Node 同为全替换（KB-20）；
+- `ROUNDS.md` 执行统计行：zh 原语法零 churn、en 同义写法接受（共享 `rounds_stats_cases.json`，
+  KB-21），以及英文统计行经 `server.parse_rounds` 的端到端解析；
 - 端到端：英文 status.md 经 `cases_all_passed` / `mark_cases_retest` 真实消费链路读回 canonical。
 """
 import json
@@ -34,6 +37,23 @@ def _expected():
 
 
 EXPECTED = _expected()
+
+
+def _load_json(name):
+    with open(os.path.join(BASE, name), encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ROUNDS.md 执行统计行的共享用例表：Python / Node 读同一份（唯一语法真源）。
+# `passed == null` ⇒ 整条不匹配；`skipped == null` ⇒ 可选的跳过段缺失（组 3 无值）。
+ROUNDS_STATS = _load_json("rounds_stats_cases.json")
+
+
+@pytest.fixture(scope="module")
+def server_mod():
+    """延迟导入 server.py：导入即构造 boot_gate Runner 单例，只给 ROUNDS 用例用。"""
+    import server
+    return server
 
 
 def _read(rel):
@@ -121,3 +141,37 @@ def test_english_status_md_flows_through_retest_and_pass_check(tmp_path):
     assert "- **状态**" not in text
     assert lib.parse_status_md(sp)["status"] == "需要复测"
     assert lib.cases_all_passed(root, ["FS0001"]) is False
+
+
+# ---------- ROUNDS.md 执行统计行：双端共享用例表（KB-21） ----------
+
+@pytest.mark.parametrize("case", ROUNDS_STATS, ids=[
+    "case-%d" % i for i in range(len(ROUNDS_STATS))])
+def test_exec_stat_re_bilingual_acceptance(case, server_mod):
+    """共享用例表是唯一语法真源：中文原语法零 churn（`通过：16` 仍不匹配），
+    英文 pass/passed、fail/failed、skip/skipped 大小写不敏感且允许可选冒号。"""
+    m = server_mod.EXEC_STAT_RE.search(case["line"])
+    if case["passed"] is None:
+        assert m is None, "不应匹配: %r" % case["line"]
+        return
+    assert m is not None, "应匹配: %r" % case["line"]
+    assert int(m.group(1)) == case["passed"], case["line"]
+    assert int(m.group(2)) == case["failed"], case["line"]
+    skipped = None if m.group(3) is None else int(m.group(3))
+    assert skipped == case["skipped"], case["line"]
+
+
+def test_parse_rounds_english_stats(tmp_path, server_mod):
+    """端到端：`### 第 1 轮` 小节 + 英文统计行 + 角度表行 → 与 Node parseRounds 同值。"""
+    shutil.copyfile(os.path.join(BASE, "rounds_en.md"),
+                    os.path.join(str(tmp_path), "ROUNDS.md"))
+    assert server_mod.parse_rounds(str(tmp_path)) == [{
+        "round": 1,
+        "time": "2026-10-24 10:00",
+        "angle": "边界",
+        "cases": 5,
+        "new_bugs": 1,
+        "passed": 16,
+        "failed": 0,
+        "skipped": 2,
+    }]

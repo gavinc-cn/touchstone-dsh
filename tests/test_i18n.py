@@ -35,6 +35,15 @@ NORMALIZE_CASES = [c for c in CASES["cases"] if c["kind"] == "normalize"]
 RESOLVE_CASES = [c for c in CASES["cases"] if c["kind"] == "resolve"]
 DICT_CASES = [c for c in CASES["cases"] if c["kind"] == "dict"]
 
+# KB-18 边界 fixture（Python/Node 读同一份；各端期望字段分别钉住现状）
+_FIXTURE_I18N_DIR = Path(__file__).resolve().parent / "fixtures" / "i18n"
+NUMBER_BOUNDARIES = json.loads(
+    (_FIXTURE_I18N_DIR / "number_boundaries.json").read_text(encoding="utf-8"))
+FLOAT_SHORTEST = json.loads(
+    (_FIXTURE_I18N_DIR / "float_shortest.json").read_text(encoding="utf-8"))
+PLURAL_TRIM = json.loads(
+    (_FIXTURE_I18N_DIR / "plural_trim.json").read_text(encoding="utf-8"))
+
 
 class _ThrowingValue:
     """模拟 JS 侧 toString/valueOf 抛错的对象：任何字符串化/取数都会抛错。"""
@@ -136,6 +145,66 @@ def test_shared_cases_t(tmp_path):
     _load_fixture(tmp_path)
     for case in T_CASES:
         assert _call_t(case) == case["expected"], case
+
+
+def test_shared_omitted_lang_defaults_to_zh_bytes(tmp_path):
+    """KB-17：省略 `lang` 走默认参数，输出与显式 `lang='zh'` 逐字节相同。
+
+    共享表里 `lang` 缺省的用例由 `_call_t` 真正省略第三实参；这里再用显式 zh
+    调一次并做 UTF-8 字节比较（Node 侧 `i18n.test.mjs` 同名用例镜像）。
+    """
+    _load_fixture(tmp_path)
+    omitted = [case for case in T_CASES if "lang" not in case]
+    assert omitted, "共享用例表缺少「省略 lang」用例"
+    for case in omitted:
+        default_out = _call_t(case)
+        explicit_zh = i18n.t(case["ns"], case["key"], "zh", **_build_vars(case))
+        assert default_out == case["expected"], case
+        assert default_out.encode("utf-8") == explicit_zh.encode("utf-8"), case
+
+
+def test_number_boundaries_shared_fixture(tmp_path):
+    """KB-18：>2^53 整数排版的**双端各自现状**（共享 fixture，不修产品格式化逻辑）。
+
+    Python int 任意精度 ⇒ 逐位精确；JS Number 是 float64 ⇒ 字面量/JSON 解析先舍入。
+    fixture 用十进制字符串保存输入，两端各按原生类型解析，各自断言自己的期望输出；
+    `any(python != node)` 保证分歧事实被 fixture 记录，而不是被“统一期望”掩盖。
+    """
+    _load_fixture(tmp_path)
+    cases = NUMBER_BOUNDARIES["cases"]
+    assert any(case["python"] != case["node"] for case in cases), \
+        "fixture 应记录已知的 >2^53 双端分歧"
+    for case in cases:
+        value = int(case["value"])
+        assert i18n.t("web", "值 {v}", "en", v=value) == case["python"], case["name"]
+
+
+def test_float_shortest_shared_fixture(tmp_path):
+    """KB-18：浮点最短 round-trip 的确定性边界（替代 T9 的 44,997 doubles fuzz）。
+
+    覆盖 ECMAScript 固定/指数排版阈值（1e-7 / 1e-6 / 1e20 / 1e21）、次正规最小
+    值 5e-324、最大有限值、-0 与常见最短表示；两端读同一 fixture、期望一致。
+    """
+    _load_fixture(tmp_path)
+    for case in FLOAT_SHORTEST["cases"]:
+        value = float(case["literal"])
+        assert i18n.t("web", "值 {v}", "en", v=value) == case["expected"], case["literal"]
+
+
+def test_plural_trim_shared_fixture(tmp_path):
+    """KB-18：复数 n 的 U+FEFF/U+0085 trim 双端差异（共享 fixture 钉住现状）。
+
+    JS `trim` 去 U+FEFF 不去 U+0085；Python `str.strip()` 相反 ⇒ 同一输入可能选中
+    不同复数分支。fixture 的 node/python 字段分别记录两端当前分支，输出模板为
+    `one:{n}` / `other:{n}`（n 原样插入，空白码点保留）。
+    """
+    _load_fixture(tmp_path)
+    cases = PLURAL_TRIM["cases"]
+    assert any(case["node"] != case["python"] for case in cases), \
+        "fixture 应记录 U+FEFF / U+0085 的双端分歧"
+    for case in cases:
+        got = i18n.t("web", "复数 {n}", "en", n=case["n"])
+        assert got == f'{case["python"]}:{case["n"]}', case["name"]
 
 
 def test_shared_cases_normalize():

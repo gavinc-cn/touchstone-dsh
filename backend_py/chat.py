@@ -1145,6 +1145,7 @@ def _send_now(task, project, family, sid, message, inject):
     """
     if family != "dsh_plugin":
         # 单族世界：其余族已全部退场（B0 防呆口径），走到这儿说明有残留调用路径
+        # 单族世界该分支不可达；中文为冻结诊断（无请求语言通道，chat_msgs 无 lang 列），不接词表
         raise RuntimeError(
             f"该智能体族已下线，请在项目设置里改绑 dsh 插件：{family or '未知'}")
     return _dsh_send_now(project, sid, message, inject)

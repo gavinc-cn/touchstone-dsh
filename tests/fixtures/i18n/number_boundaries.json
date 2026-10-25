@@ -1,0 +1,43 @@
+{
+  "doc": [
+    "插值数字排版的双端边界（T9 / KB-18，共享 fixture；Python tests/test_i18n.py 与",
+    "Node backend/test/i18n.test.mjs 读取同一份）。",
+    "value 用十进制字符串保存，各端按原生类型解析：Python int 任意精度；Node Number 为",
+    "float64。python/node 是两端**各自**当前实现的期望输出（不是共同期望）——这是已知",
+    "分歧的现状钉子，不是待修行为：>2^53 的整数在 JS 侧必然先舍入，无法逐字节一致。",
+    "普通数字/字符串（生产实际插值变量）的排版由 backend/test/i18n-cases.json 的可比",
+    "用例覆盖；本文件只钉边界。"
+  ],
+  "cases": [
+    {
+      "name": "max_safe_integer",
+      "value": "9007199254740991",
+      "python": "value 9007199254740991",
+      "node": "value 9007199254740991"
+    },
+    {
+      "name": "two_pow_53",
+      "value": "9007199254740992",
+      "python": "value 9007199254740992",
+      "node": "value 9007199254740992"
+    },
+    {
+      "name": "two_pow_53_plus_1",
+      "value": "9007199254740993",
+      "python": "value 9007199254740993",
+      "node": "value 9007199254740992"
+    },
+    {
+      "name": "two_pow_64_plus_1",
+      "value": "18446744073709551617",
+      "python": "value 18446744073709551617",
+      "node": "value 18446744073709552000"
+    },
+    {
+      "name": "ten_pow_30",
+      "value": "1000000000000000000000000000000",
+      "python": "value 1000000000000000000000000000000",
+      "node": "value 1e+30"
+    }
+  ]
+}

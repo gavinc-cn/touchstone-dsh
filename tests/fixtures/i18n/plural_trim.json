@@ -1,0 +1,55 @@
+{
+  "doc": [
+    "复数 n 的 trim 差异（T9 / KB-18，共享 fixture；Python tests/test_i18n.py 与",
+    "Node backend/test/i18n.test.mjs 读取同一份）。",
+    "差异根因：JS String.prototype.trim 的空白集含 U+FEFF、不含 U+0085；Python",
+    "str.strip() 的空白集含 U+0085、不含 U+FEFF。故同一条 \"<空白>1\" 在两端可能选中",
+    "不同的复数分支（one / other）。node/python 是两端**各自**当前实现的期望分支，",
+    "这是已知分歧的现状钉子，不是待修行为。",
+    "输出按共享词典的复数模板生成：<branch>:<n>（n 原样插值，空白码点保留）。"
+  ],
+  "cases": [
+    {
+      "name": "BOM_prefix",
+      "n": "\uFEFF1",
+      "node": "one",
+      "python": "other"
+    },
+    {
+      "name": "BOM_suffix",
+      "n": "1\uFEFF",
+      "node": "one",
+      "python": "other"
+    },
+    {
+      "name": "NEL_prefix",
+      "n": "\u00851",
+      "node": "other",
+      "python": "one"
+    },
+    {
+      "name": "NEL_suffix",
+      "n": "1\u0085",
+      "node": "other",
+      "python": "one"
+    },
+    {
+      "name": "NBSP_prefix",
+      "n": "\u00A01",
+      "node": "one",
+      "python": "one"
+    },
+    {
+      "name": "line_separator_prefix",
+      "n": "\u20281",
+      "node": "one",
+      "python": "one"
+    },
+    {
+      "name": "ideographic_space_prefix",
+      "n": "\u30001",
+      "node": "one",
+      "python": "one"
+    }
+  ]
+}

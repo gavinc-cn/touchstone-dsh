@@ -110,12 +110,19 @@ function pyStr(value) {
 // 路由实现
 // --------------------------------------------------------------------------
 
-/** `_api_me_feishu_slash_get`(1818)：现状只读（缺凭据/缺权限都走 `error` 字段，不报错） */
+/**
+ * `_api_me_feishu_slash_get`(1818)：现状只读（缺凭据/缺权限都走 `error` 字段，不报错）。
+ * KB-36：`error` 等数据按**请求语言**渲染；`desired` 的 17 条注册说明保持中文。
+ */
 async function apiSlashGet(ctx) {
-  ctx.json(200, await slashStatus(ctx.user.id, { db: ctx.db }));
+  ctx.json(200, await slashStatus(ctx.user.id, { db: ctx.db, lang: ctx.lang }));
 }
 
-/** `_api_me_feishu_slash_set`(1826)：三动作；缺省 sync；缺 scope 时自动补发引导卡片 */
+/**
+ * `_api_me_feishu_slash_set`(1826)：三动作；缺省 sync；缺 scope 时自动补发引导卡片。
+ * KB-36：sync/clear 的 `error`/`failed` 按请求语言渲染；`card_error` 仍由
+ * `sendSlashPermCard` 按其既有收件人语言逻辑产出（本次不改）。
+ */
 async function apiSlashSet(ctx) {
   const body = await ctx.readBody();                 // 读体在分派之前（见文件头③）
   const action = pyStr(pyTruthy(body.action) ? body.action : 'sync');
@@ -123,12 +130,16 @@ async function apiSlashSet(ctx) {
     ctx.errorSpaced(400, 'action 仅支持 sync / clear / notify');
     return;
   }
-  const options = { db: ctx.db };
+  // `ctx.lang` 是**惰性** getter：无 X-TS-Lang/?lang= 时才读一次 user_prefs。notify 分支的
+  // `sendSlashPermCard` 当前不消费请求语言（卡片语言取收件人自己的偏好，见 `userLang()`），
+  // 故只传 `base`，不提前求值 `ctx.lang`（T1 review M1：无头 notify 少一次偏好读库）。
+  const base = { db: ctx.db };
   let out;
   if (action === 'notify') {
-    const [ok, err] = await sendSlashPermCard(ctx.user.id, options);
+    const [ok, err] = await sendSlashPermCard(ctx.user.id, base);
     out = { ok, card_sent: ok, card_error: err };
   } else {
+    const options = { ...base, lang: ctx.lang };
     out = action === 'sync'
       ? await syncSlashCommands(ctx.user.id, options)
       : await clearSlashCommands(ctx.user.id, options);

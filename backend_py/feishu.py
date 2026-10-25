@@ -1607,15 +1607,20 @@ def slash_status(user_id, lang="zh"):
     凭据缺失/权限不足等一律走 error 字段返回，不抛异常（页面照常渲染并给引导）；
     need_scope=缺「应用指令」scope（页面据此提供「发飞书权限卡片」入口）。
 
-    语言（T12d）：默认 ``lang="zh"``（设置页 slash 卡既有中文数据面不变）；
-    doctor 的 slash_scope 项显式传**请求语言**，让该项 detail/hint 跟随页面语言。"""
+    语言（T12d/Task1）：默认 ``lang="zh"``（设置页 slash 卡既有中文数据面不变）；
+    ``lang`` 由设置页端点按请求语言传入，只影响 ``error`` 里的固定中文引导；
+    17 条 ``desired[].description`` 是飞书注册说明，保持中文（KB-08/R23）。
+    doctor 的 slash_scope 项也显式传**请求语言**，让该项 detail/hint 跟随页面语言。"""
     desired = [{"command": c, "description": d, "icon": i}
                for c, d, i in SLASH_COMMANDS]
     cfg = app_config(user_id)
     if cfg is None:
         return {"configured": False, "desired": desired, "remote": [], "extra": [],
                 "need_scope": False,
-                "error": "未配置应用凭据（App ID/App Secret），先在上方「飞书机器人配置」保存后重试"}
+                "error": i18n.t(
+                    "api",
+                    "未配置应用凭据（App ID/App Secret），先在上方「飞书机器人配置」保存后重试",
+                    lang)}
     try:
         remote = list_slash_commands(cfg)
     except FeishuRestError as e:
@@ -1666,16 +1671,20 @@ def sync_slash_commands(user_id, lang="zh"):
             "error": failed[0] if failed else ""}
 
 
-def clear_slash_commands(user_id):
-    """删除**TS 自己的**指令（名字命中 SLASH_COMMANDS 的远端项）；用户其他指令不动。"""
+def clear_slash_commands(user_id, lang="zh"):
+    """删除**TS 自己的**指令（名字命中 SLASH_COMMANDS 的远端项）；用户其他指令不动。
+
+    `lang` 缺省 `"zh"`：设置页 slash 卡既有中文数据面逐字节不变；设置页端点按
+    请求语言传入后，``error``/``failed`` 里的固定中文引导跟随页面语言。"""
     cfg = app_config(user_id)
     if cfg is None:
         return {"ok": False, "need_scope": False,
-                "error": "未配置应用凭据（App ID/App Secret）"}
+                "error": i18n.t("api", "未配置应用凭据（App ID/App Secret）", lang)}
     try:
         remote = list_slash_commands(cfg)
     except FeishuRestError as e:
-        return {"ok": False, "need_scope": _need_scope(e), "error": slash_error_hint(e)}
+        return {"ok": False, "need_scope": _need_scope(e),
+                "error": slash_error_hint(e, lang)}
     deleted, failed = [], []
     need_scope = False
     for r in remote:
@@ -1686,7 +1695,7 @@ def clear_slash_commands(user_id):
             deleted.append(r["command"])
         except FeishuRestError as e:
             need_scope = need_scope or _need_scope(e)
-            failed.append(f"{r['command']}: {slash_error_hint(e)}")
+            failed.append(f"{r['command']}: {slash_error_hint(e, lang)}")
     return {"ok": not failed, "deleted": sorted(deleted),
             "extra": sorted(r["command"] for r in remote if r["command"] not in _SLASH_NAMES),
             "failed": failed, "need_scope": need_scope,
@@ -2822,11 +2831,15 @@ def _setup_slow_action(user_id, sender, action, cfg, lang="zh"):
     """慢动作（自检/补齐配置/提交发布）后台执行，结果 DM 回执。绝不外抛。
     走后台线程的理由：卡片回调要尽快返回 ACK，这几项是多次 REST（2~5s）。
 
-    doctor/provision 的**逐项数据**（label/detail/hint、error 原文）属站点设置页
-    文案面（T12d），这里只本地化飞书消息的框与回执句。"""
+    语言（T12b + KB-27）：`lang` = DM 收件人（绑定用户）语言；除了消息框与回执句，
+    **数据面**（doctor 八项 label/detail/hint、apply/publish 的 error/步骤）也跟随它
+    ——`doctor(data_lang=lang)`、`provision_apply(lang=lang)`、
+    `provision_publish(lang=lang)`。`send_probe=False`（默认）不真发探测 DM，故 doctor
+    的 `lang`（探针收件人语言）无需传。
+    `provision_publish` 的 remark/changelog 是发给飞书的版本说明，保持中文（KB-38）。"""
     try:
         if action == "doctor":
-            out = doctor(user_id)
+            out = doctor(user_id, data_lang=lang)
             summary = out.get("summary") or {}
             bad = [it for it in (out.get("items") or [])
                    if it.get("state") in ("fail", "warn")]
@@ -2844,7 +2857,7 @@ def _setup_slow_action(user_id, sender, action, cfg, lang="zh"):
                        if it.get("hint") else ""))
             text = "\n".join(lines)
         elif action == "apply":
-            out = provision_apply(user_id)
+            out = provision_apply(user_id, lang=lang)
             text = (i18n.t("api", "🧩 配置补齐成功：机器人能力 / 权限 / 长连接订阅 / "
                                   "事件 / 回调已写入（需发布新版本生效）。", lang)
                     if out.get("ok")
@@ -2852,7 +2865,7 @@ def _setup_slow_action(user_id, sender, action, cfg, lang="zh"):
                                 err=out.get("error")
                                 or i18n.t("api", "未知错误", lang)))
         else:
-            out = provision_publish(user_id)
+            out = provision_publish(user_id, lang=lang)
             text = (i18n.t("api", "🚀 已提交发布版本 {version}；"
                                   "仍需租户管理员审批后线上生效。", lang,
                            version=out.get("version") or "")

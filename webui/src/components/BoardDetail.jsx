@@ -21,14 +21,9 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { Send, Trash2, Copy, Shrink, CopyPlus, GitFork } from 'lucide-react'
-import { useI18n } from '../utils/i18n'
+import { useI18n, displayTitle, UNTITLED_TITLE } from '../utils/i18n'
 
 const MEDIA_MAX = 10 * 1024 * 1024  // 附件单文件上限（与后端一致）
-
-// 持久化默认卡名：空标题保存时写库的规范值，必须与界面语言无关（en 界面保存也落
-// 中文原文，保证数据一致），所以不能走 t()。用 \u 转义书写等价于 '未命名'：扫描器
-// 不还原转义，不会把这条**数据**误计成待翻译的界面文案（人工已核对，值即原文）。
-const UNTITLED_TITLE = '\u672a\u547d\u540d'
 
 export default function BoardDetail({ project, card, comments, onClose, reload }) {
   const { t, lang } = useI18n()
@@ -208,7 +203,7 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
         <RzHandles start={rzStart} reset={rzReset} />
         <DialogHeader className="text-left">
           <DialogTitle className="cursor-move select-none text-sm break-words" onMouseDown={rzDragStart}>
-            #{card.id} {card.title || t('未命名')}
+            #{card.id} {displayTitle(card.title)}
           </DialogTitle>
         </DialogHeader>
         <div className="board-detail">
@@ -353,7 +348,7 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
                   value: String(c.id),
                   // 同款：全角括号/空格收进词条，en 输出 “#12 Fix bug (doing)”
                   label: t('#{id} {title}（{column}）', {
-                    id: c.id, title: c.title || t('未命名'), column: c.column,
+                    id: c.id, title: displayTitle(c.title), column: c.column,
                   }),
                   search: c.title || '',
                 })))}
@@ -404,7 +399,8 @@ export default function BoardDetail({ project, card, comments, onClose, reload }
         {/* column 透传：会话窗「通过」按钮按卡片所在列显隐（正在开发/待审核） */}
         <SessionModal
           board={viewSid ? { projectId, sid: viewSid, cid: card.id, column: card.column,
-                             title: card.title } : null}
+                             // 空标题卡保留旧回落（SessionModal 用 sid 兜底），只映射 canonical 占位
+                             title: card.title ? displayTitle(card.title) : card.title } : null}
           onSwitchSession={setViewSid}
           onClose={() => setViewSid(null)} />
       </DialogContent>

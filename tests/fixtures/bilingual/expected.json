@@ -293,6 +293,20 @@
       "expectedHit": true
     },
     {
+      "fixture": "zh/multi_status.md",
+      "field": "状态",
+      "value": "通过",
+      "expectedText": "# FS0001 状态\n\n- **状态**: 通过\n- **最近执行时间**: 2026-10-01 10:00\n- **状态**: 通过\n- **执行环境**: 测试环境 A\n",
+      "expectedHit": true
+    },
+    {
+      "fixture": "en/multi_status.md",
+      "field": "状态",
+      "value": "失败",
+      "expectedText": "# FS0001 Status\n\n- **Status**: Failed\n- **Last run time**: 2026-10-01 10:00\n- **Status**: Failed\n- **Execution environment**: Test environment A\n",
+      "expectedHit": true
+    },
+    {
       "fixture": "__missing__.md",
       "field": "状态",
       "value": "通过",

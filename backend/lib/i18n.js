@@ -397,6 +397,39 @@ export function localizable(error, message, vars = null) {
 }
 
 /**
+ * 嵌套错误 detail 的渲染（KB-01 可翻子集；`i18n.py:detail_text` 的 Node 镜像）。
+ *
+ * 外层固定键（`agent 调用失败: {detail}` 等）的 detail 往往来自 `DshDriverError`：
+ * 它自带 `i18nKey`/`i18nVars`（如驱动 HTTP 错误的 `{driver_detail}`）。本函数是这类
+ * 「嵌套 detail」的唯一渲染口：
+ *   - **zh**（以及任何非法语言）返回 `err.message` / `String(err)`，即旧 `pyStrErr` 口径
+ *     ——响应字节不变；
+ *   - **en** 且 `err.i18nKey` 是字符串时，按同一 key+vars 渲染英文；无 key 的动态异常
+ *     （OSError/网络错误/第三方正文）保持原文（KB-37 口径：不猜译诊断）；
+ *   - 渲染失败/怪异值一律回落旧口径，绝不抛错。
+ *
+ * 与 `localizable()` / `messageVars()` 的分工：那两个负责把「外层固定键 + vars」交给
+ * `ctx.error*`，本函数只负责把 **vars 里那个内层 detail** 先按请求语言渲染好
+ * （响应层不递归）。
+ *
+ * @param {unknown} err 内层异常（通常 DshDriverError；也接受任意值）
+ * @param {'zh'|'en'|string=} lang 语言（缺省 `zh`；接受大小写/地区变体）
+ * @returns {string}
+ */
+export function detailText(err, lang = 'zh') {
+  try {
+    const key = err !== null && typeof err === 'object' ? err.i18nKey : undefined;
+    if (typeof key === 'string' && normalizeLang(lang) === 'en') {
+      return t('api', key, lang, err.i18nVars || undefined);
+    }
+  } catch {
+    // 嵌套 detail 渲染失败必须回落原样
+  }
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+/**
  * 取文案：`zh`（或任何非法/缺省语言）返回插值后的中文 key；`en` 查 `dict[ns][key]`，
  * 缺失/类型非法回落插值后的中文 key。`TS_I18N=0` 恒中文。本函数永不抛错。
  *

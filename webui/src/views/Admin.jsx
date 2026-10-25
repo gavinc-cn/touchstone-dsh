@@ -15,7 +15,7 @@ import {
 } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { ArrowLeft, LogOut, Plus, Pencil, Trash2, Users } from 'lucide-react'
-import { useI18n } from '../utils/i18n'
+import { clearServerLang, useI18n } from '../utils/i18n'
 
 export default function Admin() {
   const navigate = useNavigate()
@@ -92,7 +92,12 @@ export default function Admin() {
   }
 
   async function logout() {
-    await auth.logout()
+    try {
+      await auth.logout()
+    } finally {
+      // 登出失败也要清（与 AppShell.logout 同口径）：别让同页换账号继承上一账号的语言偏好
+      clearServerLang()
+    }
     navigate('/login')
   }
 

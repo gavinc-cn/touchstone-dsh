@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   t, getLang, setLang, initI18n, missingKeys, DEFAULT_LANG, applyServerLang,
-  registerLangPersistor,
+  registerLangPersistor, clearServerLang,
 } from '../utils/i18n'
 import { api } from '../api'
 
@@ -137,7 +137,7 @@ describe('i18n', () => {
     expect(localStorage.getItem('ts_lang')).toBe(null)
   })
 
-  it('applyServerLang 只临时采用：不写 localStorage，手动选择才落本地并覆盖', () => {
+  it('applyServerLang 只临时采用：不写 ts_lang（仅同步镜像 ts_lang_eff），手动选择才落本地并覆盖', () => {
     localStorage.clear()
     applyServerLang('zh')
     expect(localStorage.getItem('ts_lang')).toBe(null)
@@ -222,5 +222,103 @@ describe('api 请求头 X-TS-Lang', () => {
     expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
       'Content-Type': 'application/json', 'X-TS-Lang': 'en',
     })
+  })
+})
+
+// 有效语言镜像 ts_lang_eff：只给插件外壳读的「当前有效语言」，**不是**本 SPA 的第二真源
+//   （真源仍是 ts_lang → 本次页面加载瞬态采纳的账号偏好 → en）。镜像只做 best-effort：
+//   localStorage 写失败静默，读镜像/非法镜像值一律忽略。
+describe('有效语言镜像 ts_lang_eff 与 clearServerLang', () => {
+  beforeEach(() => {
+    setLang(DEFAULT_LANG)
+    localStorage.clear()
+    document.documentElement.lang = ''
+  })
+
+  it('setLang 落 ts_lang 成功后同步镜像', () => {
+    setLang('zh')
+    expect(localStorage.getItem('ts_lang')).toBe('zh')
+    expect(localStorage.getItem('ts_lang_eff')).toBe('zh')
+    setLang('en')
+    expect(localStorage.getItem('ts_lang')).toBe('en')
+    expect(localStorage.getItem('ts_lang_eff')).toBe('en')
+  })
+
+  it('applyServerLang 采用账号偏好后写镜像，但不写 ts_lang', () => {
+    localStorage.clear()
+    applyServerLang({ v: 'zh' })
+    expect(localStorage.getItem('ts_lang')).toBe(null)
+    expect(localStorage.getItem('ts_lang_eff')).toBe('zh')
+    expect(getLang()).toBe('zh')
+  })
+
+  it('applyServerLang 未采用（本地已有选择）时不动镜像', () => {
+    localStorage.clear()
+    setLang('en')
+    applyServerLang('zh')
+    expect(getLang()).toBe('en')
+    expect(localStorage.getItem('ts_lang_eff')).toBe('en')
+  })
+
+  it('initI18n 首屏把镜像置为当前有效语言', () => {
+    localStorage.clear()
+    initI18n()
+    expect(localStorage.getItem('ts_lang_eff')).toBe(DEFAULT_LANG)
+    setLang('zh')
+    localStorage.removeItem('ts_lang_eff')
+    initI18n() // 幂等重入也必须重刷镜像（首屏兜底）
+    expect(localStorage.getItem('ts_lang_eff')).toBe('zh')
+  })
+
+  it('clearServerLang：有 ts_lang 时清内存偏好但保留本地语言，镜像跟随', () => {
+    localStorage.clear()
+    applyServerLang('zh') // 本次页面加载临时采用账号偏好（无本地选择）
+    localStorage.setItem('ts_lang', 'zh') // 另一标签页落本地选择，本页内存偏好仍在
+    clearServerLang()
+    expect(getLang()).toBe('zh')
+    expect(localStorage.getItem('ts_lang')).toBe('zh')
+    expect(localStorage.getItem('ts_lang_eff')).toBe('zh')
+    expect(document.documentElement.lang).toBe('zh-CN')
+  })
+
+  it('clearServerLang：无 ts_lang 时回默认英文并镜像 en', () => {
+    localStorage.clear()
+    applyServerLang('zh')
+    expect(getLang()).toBe('zh')
+    clearServerLang()
+    expect(getLang()).toBe(DEFAULT_LANG)
+    expect(localStorage.getItem('ts_lang')).toBe(null)
+    expect(localStorage.getItem('ts_lang_eff')).toBe('en')
+    expect(document.documentElement.lang).toBe('en')
+  })
+
+  it('镜像键不是第二真源：单独存在或非法值都不影响 getLang', () => {
+    localStorage.clear()
+    localStorage.setItem('ts_lang_eff', 'zh') // 只有镜像 ⇒ 不认
+    expect(getLang()).toBe(DEFAULT_LANG)
+    localStorage.setItem('ts_lang', 'en')
+    localStorage.setItem('ts_lang_eff', 'fr') // 非法镜像值 ⇒ 忽略
+    expect(getLang()).toBe('en')
+    localStorage.removeItem('ts_lang')
+    expect(getLang()).toBe(DEFAULT_LANG)
+    applyServerLang('zh') // 账号偏好仍按原链（与镜像无关）
+    expect(getLang()).toBe('zh')
+  })
+
+  it('镜像写失败（localStorage 拒绝写镜像键）静默，不影响 setLang/clearServerLang', () => {
+    localStorage.clear()
+    const orig = Storage.prototype.setItem
+    Storage.prototype.setItem = function setItem(key, value) {
+      if (key === 'ts_lang_eff') throw new Error('denied')
+      return orig.call(this, key, value)
+    }
+    try {
+      expect(() => setLang('zh')).not.toThrow()
+      expect(localStorage.getItem('ts_lang')).toBe('zh')
+      expect(() => clearServerLang()).not.toThrow()
+    } finally {
+      Storage.prototype.setItem = orig
+    }
+    expect(getLang()).toBe('zh')
   })
 })

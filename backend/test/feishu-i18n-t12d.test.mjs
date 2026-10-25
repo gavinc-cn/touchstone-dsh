@@ -18,8 +18,10 @@ import { test } from 'node:test';
 
 import * as db from '../lib/db.js';
 import * as cfg from '../lib/feishu_cfg.js';
+import * as inbound from '../lib/feishu_inbound.js';
 import * as prov from '../lib/feishu_provision.js';
 import { _TOKEN_CACHE } from '../lib/feishu_rest.js';
+import * as slash from '../lib/feishu_slash.js';
 import { pyJsonDumps } from '../lib/pyjson.js';
 import { dispatch, makeContext } from '../routes/index.js';
 import { routes as appRoutes } from '../routes/feishu_app.js';
@@ -605,6 +607,48 @@ test('HTTP 无头响应逐字节不变（doctor/provision status/cancel/apply/pu
   const zhCancel = await call(env, 'POST', '/api/me/feishu/provision',
     { body: { action: 'cancel' }, headers: zhHeaders });
   assert.equal(sha256(zhCancel.text()), ZH_GOLDEN.cancel_none);
+  // KB-28：apply / publish 的 HTTP zh 逐字节门禁（此前只有函数级与无头档）
+  for (const action of ['apply', 'publish']) {
+    const noHead = await call(env, 'POST', '/api/me/feishu/provision',
+      { body: { action } });
+    const zhRes = await call(env, 'POST', '/api/me/feishu/provision',
+      { body: { action }, headers: zhHeaders });
+    const key = action === 'apply' ? 'apply_no_creds' : 'publish_no_creds';
+    assert.equal(noHead.status, 200);
+    assert.equal(zhRes.status, 200);
+    assert.equal(zhRes.text(), noHead.text(), `${action}: zh 头与无头逐字节相同`);
+    assert.equal(sha256(zhRes.text()), ZH_GOLDEN[key], action);
+  }
+});
+
+test('HTTP verify：无头与 zh 头正文逐字节相同；en 对照（KB-28）', async (t) => {
+  const env = setup('verify-http');
+  const realFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+    cfg.clearInboundThread(1);
+    env.close();
+  });
+  globalThis.fetch = stdFetch();
+  // 入站线程「活着」⇒ saveUserConfig 的 inbound_started 恒 false（消除时序字节差）
+  cfg.setInboundThread(1, { isAlive: () => true }, 'cli_x');
+
+  const noHead = await call(env, 'POST', '/api/me/feishu-cfg', {
+    body: { app_id: 'cli_x', app_secret: 's' },
+  });
+  assert.equal(noHead.status, 200, noHead.text());
+  const zh = await call(env, 'POST', '/api/me/feishu-cfg',
+    { body: {}, headers: { 'x-ts-lang': 'zh' } });
+  const en = await call(env, 'POST', '/api/me/feishu-cfg',
+    { body: {}, headers: { 'x-ts-lang': 'en' } });
+  assert.equal(zh.status, 200, zh.text());
+  assert.equal(en.status, 200, en.text());
+  assert.equal(zh.text(), noHead.text(), 'zh 头与无头逐字节相同');
+  assert.deepEqual(JSON.parse(noHead.text()).verify,
+    { ok: true, detail: '凭据可用：机器人 Bot（已启用）' });
+  assert.deepEqual(JSON.parse(en.text()).verify,
+    { ok: true, detail: 'Credentials are valid: bot Bot (Enabled)' });
+  assert.notEqual(en.text(), noHead.text());
 });
 
 test('HTTP en：doctor/provision 英文 payload；头优先于 query', async (t) => {
@@ -687,5 +731,184 @@ test('TS_I18N=0：恒 zh 且零偏好读库（正对照证明桩可被读）', a
     if (saved === undefined) delete process.env.TS_I18N;
     else process.env.TS_I18N = saved;
     globalThis.fetch = savedFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ⑦ KB-27 / KB-36：接入卡慢动作 DM 数据面 + slash 设置页数据面跟随语言
+// ---------------------------------------------------------------------------
+
+// 改动前（本任务前）无凭据档的 sha256（与 Python 测试同名常量逐字相同；勿手改）
+const SLASH_GET_ZH_SHA = '2c4e0e279ca5da65eb987c121d85e2a764e0086bec54309592a30079aa24eac3';
+const SLASH_CLEAR_ZH_SHA = '280fc6a5d90f476da5d6a40e695ac3386d7914c743fbe59ce95296868b7b2639';
+// 改动前慢动作 DM（无凭据档，zh）的 sha256：证明新增 dataLang/lang 透传后字节不变
+const SLOW_DM_ZH_SHA = {
+  doctor: '7f2b49c57750cead5b6c13af53e909c83b32469bf72ddf9d23ee647b6c979844',
+  apply: '929a85a7d5892b7f0bee68853e6d9bbea1ebaedb35d247489aac4b897f285e77',
+  publish: '757be30948fb76a030b42fe13b8c4c80919e3a615f7b4bb98724f7dc164f0244',
+};
+const SLASH_CFG_NULL_EN = 'App credentials are not configured (App ID/App Secret); '
+  + 'save them under “Feishu bot configuration” above and retry';
+const SLASH_NO_CREDS_EN = 'App credentials are not configured (App ID/App Secret)';
+// en 同场景 payload 的 sha256（与 Python 测试同名常量逐字相同 ⇒ 双端逐字节一致）
+const SLASH_GET_EN_SHA = '712d5f2d4963437d943d9be5c140a8087f7e7cfc389533488c54ef3e02b9c031';
+const SLASH_CLEAR_EN_SHA = 'a86879ec510281f5faf78ff64907d7f9af83234d1de0ec272eb3afe2b54d981f';
+
+/** 用**真** provision 模块跑慢动作，只把 DM 发送收进数组（无凭据 ⇒ 零网络）。 */
+async function slowActionDms(tag, action, lang) {
+  const fx = fresh(`t12d-slow-${tag}`);
+  const dms = [];
+  try {
+    const options = {
+      db: fx.db,
+      rest: { async restSendText(openId, text) { dms.push(text); } },
+      provision: prov,
+      log: () => {},
+    };
+    await inbound.setupSlowAction(UID, 'ou_x', action, null, options, lang);
+    return dms;
+  } finally { fx.close(); }
+}
+
+test('zh 慢动作 DM 逐字节不变（KB-27 硬约束①）', async () => {
+  for (const action of ['doctor', 'apply', 'publish']) {
+    const dms = await slowActionDms(`zh-${action}`, action);
+    assert.equal(dms.length, 1, action);
+    assert.equal(sha256(dms[0]), SLOW_DM_ZH_SHA[action], action);
+  }
+});
+
+test('en 慢动作：doctor/apply/publish DM 数据面英文（KB-27）', async () => {
+  const doctorDms = await slowActionDms('en-doctor', 'doctor', 'en');
+  assert.equal(doctorDms.length, 1);
+  assert.equal(doctorDms[0],
+    '🩺 Configuration self-check: ok 0 / fail 1 / warn 1 / skip 6\n'
+    + '· App credentials (App ID / App Secret): Not configured '
+    + '(Enter the App ID and App Secret under “Feishu bot configuration” and save)\n'
+    + '· Default push webhook: Not configured (does not affect bot conversations; '
+    + 'only blocking-event pushes) (Group settings → Group bots → add a custom bot, '
+    + 'then enter the webhook on the settings page)');
+  assertNoChinese(doctorDms[0]);
+
+  const applyDms = await slowActionDms('en-apply', 'apply', 'en');
+  assert.deepEqual(applyDms, ['❌ Failed to apply configuration: '
+    + 'App credentials are not configured (App ID / App Secret); '
+    + 'save the credentials first']);
+  const publishDms = await slowActionDms('en-publish', 'publish', 'en');
+  assert.deepEqual(publishDms, ['❌ Failed to submit for publishing: '
+    + 'App credentials are not configured (App ID / App Secret); '
+    + 'save the credentials first']);
+});
+
+test('HTTP slash：zh 逐字节不变；en 头 error 英文而 desired 17 条保持中文（KB-36）', async (t) => {
+  const env = setup('slash-lang');
+  t.after(() => env.close());
+  const S = '/api/me/feishu/slash-commands';
+  const zhGet = await call(env, 'GET', S);
+  assert.equal(zhGet.status, 200);
+  assert.equal(sha256(zhGet.text()), SLASH_GET_ZH_SHA);
+  const zhClear = await call(env, 'POST', S, { body: { action: 'clear' } });
+  assert.equal(zhClear.status, 200);
+  assert.equal(sha256(zhClear.text()), SLASH_CLEAR_ZH_SHA);
+  const zhHeader = await call(env, 'GET', S, { headers: { 'x-ts-lang': 'zh' } });
+  assert.equal(sha256(zhHeader.text()), SLASH_GET_ZH_SHA);
+
+  const enGet = await call(env, 'GET', S, { headers: { 'x-ts-lang': 'en' } });
+  assert.equal(enGet.status, 200);
+  const payload = JSON.parse(enGet.text());
+  assert.equal(payload.configured, false);
+  assert.equal(payload.error, SLASH_CFG_NULL_EN);
+  assert.equal(sha256(enGet.text()), SLASH_GET_EN_SHA);
+  assert.equal(payload.desired.length, 17);
+  // 17 条说明是机器人协议面（飞书客户端里的中文指令说明），不许被改成英文
+  assert.ok(payload.desired.every((d) => HAN.test(d.description)));
+  assert.deepEqual(payload.desired.map((d) => d.description),
+    slash.SLASH_COMMANDS.map(([, description]) => description));
+  assertNoChinese(payload.error);
+  for (const action of ['sync', 'clear']) {
+    const r = await call(env, 'POST', S,
+      { body: { action }, headers: { 'x-ts-lang': 'en' } });
+    assert.equal(r.status, 200, action);
+    const out = JSON.parse(r.text());
+    assert.equal(out.error, SLASH_NO_CREDS_EN, action);
+    assert.equal(out.card_sent, false);
+    assert.equal(out.card_error, '');
+    assert.equal(sha256(r.text()), SLASH_CLEAR_EN_SHA, action);
+  }
+});
+
+test('HTTP slash notify：无头请求不求值 ctx.lang（零偏好读库；clear 正对照读一次）', async (t) => {
+  const env = setup('slash-notify-lang');
+  t.after(() => env.close());
+  const saved = process.env.TS_I18N;
+  try {
+    delete process.env.TS_I18N;                       // 确保偏好档是活的（回滚开关不是假绿来源）
+    db.setUserPref(env.user.id, 0, 'lang', { v: 'en' }, { db: env.db });
+    const S = '/api/me/feishu/slash-commands';
+
+    // notify 分支不消费请求语言（卡片语言取收件人偏好）⇒ 无 X-TS-Lang 时必须零偏好读库
+    const notifyDb = countingDb(env.db);
+    const notify = await call({ ...env, db: notifyDb }, 'POST', S,
+      { body: { action: 'notify' } });
+    assert.equal(notify.status, 200);
+    const out = JSON.parse(notify.text());
+    assert.deepEqual(Object.keys(out), ['ok', 'card_sent', 'card_error']);
+    assert.equal(out.card_sent, false);
+    assert.equal(notifyDb.sqls.some((s) => s.includes('user_prefs')), false,
+      `notify 仍读了请求语言偏好: ${JSON.stringify(notifyDb.sqls)}`);
+
+    // 正对照：clear 按请求语言渲染 error ⇒ 无头时读一次偏好（证明计数桩有效）
+    const clearDb = countingDb(env.db);
+    const clear = await call({ ...env, db: clearDb }, 'POST', S,
+      { body: { action: 'clear' } });
+    assert.equal(clear.status, 200);
+    assert.equal(JSON.parse(clear.text()).error, SLASH_NO_CREDS_EN);
+    assert.equal(clearDb.sqls.some((s) => s.includes('user_prefs')), true,
+      '正对照未读到偏好（桩失效）');
+  } finally {
+    if (saved === undefined) delete process.env.TS_I18N;
+    else process.env.TS_I18N = saved;
+  }
+});
+
+test('clearSlashCommands 失败路径：failed[0] 与 error 同文案；en 权限引导英文（zh 对照）', async () => {
+  const fx = fresh('slash-clear-fail');
+  const savedFetch = globalThis.fetch;
+  const HINT_EN = 'The app lacks the “app slash command” permission: in the Feishu '
+    + 'developer console → Permission management, add application:app_slash_command:read '
+    + 'and write, then create and publish a new version and retry';
+  try {
+    setCreds(fx);
+    globalThis.fetch = async (url, init = {}) => {
+      if (url.includes('/tenant_access_token/internal')) {
+        return jsonResponse({ code: 0, tenant_access_token: 'tok', expire: 7200 });
+      }
+      if (url.includes('/app_slash_commands')) {
+        if (String(init.method || 'GET').toUpperCase() === 'DELETE') {
+          return jsonResponse({ code: 99991640, msg: 'no permission' });
+        }
+        return jsonResponse({ code: 0, data: { items: [{
+          command: 'help', command_id: 'c1',
+          description: '查看可用指令', icon_key: 'skill_outlined',
+        }] } });
+      }
+      throw new Error(`未脚本化 fetch：${url}`);
+    };
+
+    const zh = await slash.clearSlashCommands(UID, { db: fx.db });
+    assert.equal(zh.need_scope, true);
+    assert.deepEqual(zh.deleted, []);
+    assert.equal(zh.failed.length, 1);
+    assert.ok(zh.failed[0].startsWith('help: 应用缺少「应用指令」权限'));
+    assert.equal(zh.error, zh.failed[0]);
+
+    const en = await slash.clearSlashCommands(UID, { db: fx.db, lang: 'en' });
+    assert.equal(en.failed.length, 1);
+    assert.equal(en.failed[0], `help: ${HINT_EN}`);
+    assert.equal(en.error, en.failed[0]);
+    assertNoChinese(en.failed[0]);
+  } finally {
+    globalThis.fetch = savedFetch;
+    fx.close();
   }
 });

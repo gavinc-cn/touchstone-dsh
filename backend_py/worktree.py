@@ -27,6 +27,8 @@ import os
 import re
 import subprocess
 
+import i18n
+
 # git 命令超时（秒）：创建/删除工作树可能要拷贝大量文件，给足；查询类很快
 GIT_TIMEOUT = 60
 GIT_WRITE_TIMEOUT = 300
@@ -81,49 +83,53 @@ def worktree_path(project, card_id, repo_root=""):
     return os.path.normpath(cand)
 
 
-def _git(args, cwd, timeout=GIT_TIMEOUT):
+def _git(args, cwd, timeout=GIT_TIMEOUT, lang="zh"):
     """跑一条 git 命令，返回 (returncode, stdout, stderr摘要)。
 
     git 不可用（未安装/不可执行）按 returncode=-1 归一，错误串统一文案——
     调用方只需判 rc != 0。不抛异常（超时同样归一）。
+    lang = 本条请求语言（缺省 zh）：只翻本函数自己写的骨架；异常/git stderr 原文不翻。
     """
     cmd = ["git", "-C", cwd] + list(args)
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=timeout)
     except (OSError, subprocess.SubprocessError) as e:
-        return -1, "", f"git 不可用: {e}"
+        return -1, "", i18n.t("api", "git 不可用: {detail}", lang, detail=str(e))
     err = (p.stderr or "").strip()
     return p.returncode, p.stdout or "", err[:_ERR_MAX]
 
 
-def repo_root(project_dir):
+def repo_root(project_dir, lang="zh"):
     """项目目录所属 git 仓库顶层；非仓库/git 不可用返回 (None, 错误串)。
 
     项目目录只是仓库子目录时返回真正的顶层——`git worktree add` 必须在顶层执行，
     否则工作树会挂到子目录语义上（git 会拒绝）。
+    lang = 本条请求语言（缺省 zh）；git stderr 是动态内容，不翻。
     """
     d = (project_dir or "").strip()
     if not d:
-        return None, "项目目录为空"
+        return None, i18n.t("api", "项目目录为空", lang)
     if not os.path.isdir(d):
-        return None, f"项目目录不存在: {d}"
-    rc, out, err = _git(["rev-parse", "--show-toplevel"], d)
+        return None, i18n.t("api", "项目目录不存在: {path}", lang, path=d)
+    rc, out, err = _git(["rev-parse", "--show-toplevel"], d, lang=lang)
     if rc != 0 or not out.strip():
-        return None, (err or "项目目录不是 git 仓库")
+        return None, (err or i18n.t("api", "项目目录不是 git 仓库", lang))
     return out.strip().splitlines()[0].strip(), ""
 
 
-def preview(project, card_id):
+def preview(project, card_id, lang="zh"):
     """预览（**不落盘**）：{ok, error, path, branch, exists, root}。
 
-    `ok=False` 表示该项目不能建 worktree（非 git 仓库等），error 为中文原因；
+    `ok=False` 表示该项目不能建 worktree（非 git 仓库等），error 为按 `lang` 渲染的原因；
     `exists=True` 表示目标路径已存在（前端可据此提示「将复用」）。
     """
     project_dir = (project["project_dir"] or "").strip()
-    root, err = repo_root(project_dir)
+    root, err = repo_root(project_dir, lang=lang)
     if err:
-        return {"ok": False, "error": f"项目目录不是 git 仓库（{err}）",
+        return {"ok": False,
+                "error": i18n.t("api", "项目目录不是 git 仓库（{detail}）", lang,
+                                detail=err),
                 "path": "", "branch": branch_for(card_id), "exists": False,
                 "root": ""}
     path = worktree_path(project, card_id, root)
@@ -132,14 +138,14 @@ def preview(project, card_id):
             "root": root}
 
 
-def _readable_worktree(path, branch):
+def _readable_worktree(path, branch, lang="zh"):
     """path 是否已是可用的、检出指定分支的 git 工作树（复用判据）。"""
     if not os.path.isdir(path):
         return False
-    rc, out, _ = _git(["rev-parse", "--is-inside-work-tree"], path)
+    rc, out, _ = _git(["rev-parse", "--is-inside-work-tree"], path, lang=lang)
     if rc != 0 or out.strip() != "true":
         return False
-    rc, out, _ = _git(["rev-parse", "--abbrev-ref", "HEAD"], path)
+    rc, out, _ = _git(["rev-parse", "--abbrev-ref", "HEAD"], path, lang=lang)
     return rc == 0 and out.strip() == branch
 
 
@@ -203,66 +209,74 @@ def _normalize_pointers(path):
         pass
 
 
-def create(project, card_id):
+def create(project, card_id, lang="zh"):
     """创建（或复用）卡片的独立 worktree；返回 (path, branch, err)。
 
     幂等语义（plan §3.5）：
     - 路径已是可用工作树且检出目标分支 → 直接复用（打回续改/失败重按开始走这条）；
     - 路径不存在（用户手删）→ 重新创建：分支已存在则检出该分支（保留既往提交），
       否则 `-b` 新建；
-    - 报错一律返回中文错误串，调用方按 400 回给前端。
+    - 报错一律返回按 `lang` 渲染的错误串，调用方按 400 回给前端。
     """
     project_dir = (project["project_dir"] or "").strip()
-    root, err = repo_root(project_dir)
+    root, err = repo_root(project_dir, lang=lang)
     if err:
-        return "", "", f"无法创建 worktree：项目目录不是 git 仓库（{err}）"
+        return "", "", i18n.t(
+            "api", "无法创建 worktree：项目目录不是 git 仓库（{detail}）", lang,
+            detail=err)
     path = worktree_path(project, card_id, root)
     branch = branch_for(card_id)
-    if _readable_worktree(path, branch):
+    if _readable_worktree(path, branch, lang=lang):
         return path, branch, ""
     if os.path.exists(path):
         # 路径被占（文件/非本卡的工作树）：不擅自删用户目录，明确报错交用户处理
-        return "", "", f"worktree 路径已存在且不可复用：{path}"
+        return "", "", i18n.t("api", "worktree 路径已存在且不可复用：{path}", lang,
+                              path=path)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
     except OSError as e:
-        return "", "", f"无法创建 worktree 目录：{e}"
+        return "", "", i18n.t("api", "无法创建 worktree 目录：{detail}", lang,
+                              detail=str(e))
     rc, _, _ = _git(["rev-parse", "--verify", "--quiet",
-                     f"refs/heads/{branch}"], root)
+                     f"refs/heads/{branch}"], root, lang=lang)
     if rc == 0:
         # 分支已存在（用户删过工作树目录、分支留着）：检出既有分支，保留既往提交
         args = ["worktree", "add", path, branch]
     else:
         args = ["worktree", "add", path, "-b", branch]
-    rc, out, err = _git(args, root, timeout=GIT_WRITE_TIMEOUT)
+    rc, out, err = _git(args, root, timeout=GIT_WRITE_TIMEOUT, lang=lang)
     if rc != 0:
         # 目标目录不存在但 git 侧仍有注册残留（用户删过目录）：prune 后重试一次
-        rc2, _, _ = _git(["worktree", "prune"], root)
+        rc2, _, _ = _git(["worktree", "prune"], root, lang=lang)
         if rc2 == 0:
-            rc, out, err = _git(args, root, timeout=GIT_WRITE_TIMEOUT)
+            rc, out, err = _git(args, root, timeout=GIT_WRITE_TIMEOUT, lang=lang)
     if rc != 0:
-        return "", "", f"git worktree add 失败：{(err or out or '未知原因').strip()[:_ERR_MAX]}"
+        why = (err or out or i18n.t("api", "未知原因", lang)).strip()[:_ERR_MAX]
+        return "", "", i18n.t("api", "git worktree add 失败：{detail}", lang,
+                              detail=why)
     _normalize_pointers(path)
     return path, branch, ""
 
 
-def status(project, card):
+def status(project, card, lang="zh"):
     """卡片工作树的改动状态：{ok, error, path, branch, dirty, exists}。
 
     dirty 判据 = `git status --porcelain` 有输出（含未跟踪文件）——与 plan D8 的
-    「只在干净时清理」同口径。
+    「只在干净时清理」同口径。lang = 本条请求语言（缺省 zh）；git stderr 动态原文不翻。
     """
     path = (card["worktree"] or "").strip()
     branch = branch_for(card["id"])
     if not path:
-        return {"ok": False, "error": "该卡片没有独立 worktree", "path": "",
-                "branch": branch, "dirty": False, "exists": False}
+        return {"ok": False, "error": i18n.t("api", "该卡片没有独立 worktree", lang),
+                "path": "", "branch": branch, "dirty": False, "exists": False}
     if not os.path.isdir(path):
-        return {"ok": False, "error": "worktree 目录不存在", "path": path,
-                "branch": branch, "dirty": False, "exists": False}
-    rc, out, err = _git(["status", "--porcelain"], path)
+        return {"ok": False, "error": i18n.t("api", "worktree 目录不存在", lang),
+                "path": path, "branch": branch, "dirty": False, "exists": False}
+    rc, out, err = _git(["status", "--porcelain"], path, lang=lang)
     if rc != 0:
-        return {"ok": False, "error": f"无法读取工作树状态：{err}",
+        return {"ok": False,
+                "error": i18n.t("api", "无法读取工作树状态：{detail}", lang,
+                                detail=err),
                 "path": path, "branch": branch, "dirty": False, "exists": True}
     return {"ok": True, "error": "", "path": path, "branch": branch,
             "dirty": bool(out.strip()), "exists": True}
@@ -271,23 +285,23 @@ def status(project, card):
 # ---------- 合并就绪度（「通过」前判定：有没有待合并提交，2026-10-07 批次） ----------
 
 
-def head_branch(root):
-    """主仓库当前检出的分支名；游离 HEAD / 读取失败返回 ("", 中文原因)。
+def head_branch(root, lang="zh"):
+    """主仓库当前检出的分支名；游离 HEAD / 读取失败返回 ("", 按 lang 渲染的原因)。
 
     平台的「主分支」口径就是它——worktree 由该分支检出，改动也回流到它。
     不猜 `master`/`main`：仓库默认分支名由仓库自己决定，猜错会把改动合到
     错误的分支上（用户 2026-10-07 约定：以项目所在分支为准）。
     """
-    rc, out, err = _git(["rev-parse", "--abbrev-ref", "HEAD"], root)
+    rc, out, err = _git(["rev-parse", "--abbrev-ref", "HEAD"], root, lang=lang)
     name = (out or "").strip()
     if rc != 0:
-        return "", (err or "无法读取主仓库分支")
+        return "", (err or i18n.t("api", "无法读取主仓库分支", lang))
     if not name or name == "HEAD":
-        return "", "主仓库处于游离 HEAD 状态，无法判定主分支"
+        return "", i18n.t("api", "主仓库处于游离 HEAD 状态，无法判定主分支", lang)
     return name, ""
 
 
-def merge_status(project, card):
+def merge_status(project, card, lang="zh"):
     """卡片 worktree 的合并就绪度（只读判定；「通过」时据此决定是否交给 agent 合并）。
 
     返回 dict（**不抛异常**）：
@@ -306,41 +320,46 @@ def merge_status(project, card):
     path = (card["worktree"] or "").strip()
     out["path"] = path
     if not path:
-        out["error"] = "该卡片没有独立 worktree"
+        out["error"] = i18n.t("api", "该卡片没有独立 worktree", lang)
         return out
     if not os.path.isdir(path):
-        out["error"] = "worktree 目录不存在"
+        out["error"] = i18n.t("api", "worktree 目录不存在", lang)
         return out
     out["exists"] = True
-    root, err = repo_root(project["project_dir"])
+    root, err = repo_root(project["project_dir"], lang=lang)
     if err:
-        out["error"] = f"项目目录不是 git 仓库（{err}）"
+        out["error"] = i18n.t("api", "项目目录不是 git 仓库（{detail}）", lang,
+                              detail=err)
         return out
-    target, err = head_branch(root)
+    target, err = head_branch(root, lang=lang)
     if err:
         out["error"] = err
         return out
     out["target"] = target
     branch = out["branch"]
-    rc, _, _ = _git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], root)
+    rc, _, _ = _git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], root,
+                    lang=lang)
     out["branch_exists"] = rc == 0
     if not out["branch_exists"]:
         # 分支不存在（被删/从未创建）：没有可合并的东西，按「无待合并」处置
         out["ok"] = True
         return out
-    rc, cout, err = _git(["rev-list", "--count", f"{target}..{branch}"], root)
+    rc, cout, err = _git(["rev-list", "--count", f"{target}..{branch}"], root,
+                         lang=lang)
     if rc != 0:
-        out["error"] = f"无法读取待合并提交数：{err}"
+        out["error"] = i18n.t("api", "无法读取待合并提交数：{detail}", lang,
+                              detail=err)
         return out
     out["ahead"] = _int(cout)
-    rc, cout, err = _git(["rev-list", "--count", f"{branch}..{target}"], root)
+    rc, cout, err = _git(["rev-list", "--count", f"{branch}..{target}"], root,
+                         lang=lang)
     if rc != 0:
-        out["error"] = f"无法读取落后提交数：{err}"
+        out["error"] = i18n.t("api", "无法读取落后提交数：{detail}", lang, detail=err)
         return out
     out["behind"] = _int(cout)
-    ok, lines, err = _porcelain(path)
+    ok, lines, err = _porcelain(path, lang=lang)
     if not ok:
-        out["error"] = f"无法读取工作树状态：{err}"
+        out["error"] = i18n.t("api", "无法读取工作树状态：{detail}", lang, detail=err)
         return out
     out["dirty"] = bool(lines)
     out["dirty_count"] = len(lines)
@@ -356,38 +375,42 @@ def _int(text):
         return 0
 
 
-def _porcelain(path):
+def _porcelain(path, lang="zh"):
     """工作树 `git status --porcelain` 的非空行（含未跟踪）；读不到返回 (False, [], 原因)。
 
     dirty 判据与 `status` 同口径（有输出即脏）——两处读的是同一条命令，
     合并判定一次取到「脏不脏」与「脏几处」。
     """
-    rc, out, err = _git(["status", "--porcelain"], path)
+    rc, out, err = _git(["status", "--porcelain"], path, lang=lang)
     if rc != 0:
         return False, [], err
     return True, [ln for ln in (out or "").splitlines() if ln.strip()], ""
 
 
-def remove(project, card):
+def remove(project, card, lang="zh"):
     """清理卡片 worktree（plan D8：**只在干净时**、绝不用 `--force`）；返回 (ok, err)。
 
     只 `git worktree remove`；**不删分支**（分支里的提交可能还没回流，删了要 reflog
     才找得回；清理分支交用户在 git 侧自行决定）。
+    lang = 本条请求语言（缺省 zh）；git stderr 动态原文不翻。
     """
     path = (card["worktree"] or "").strip()
     if not path:
-        return False, "该卡片没有独立 worktree"
+        return False, i18n.t("api", "该卡片没有独立 worktree", lang)
     if not os.path.isdir(path):
-        return False, "worktree 目录不存在"
-    st = status(project, card)
+        return False, i18n.t("api", "worktree 目录不存在", lang)
+    st = status(project, card, lang=lang)
     if not st["ok"]:
         return False, st["error"]
     if st["dirty"]:
-        return False, "工作树有未提交改动，请先提交或清理后再移除"
-    root, err = repo_root(project["project_dir"])
+        return False, i18n.t("api", "工作树有未提交改动，请先提交或清理后再移除", lang)
+    root, err = repo_root(project["project_dir"], lang=lang)
     if err:
-        return False, f"项目目录不是 git 仓库（{err}）"
-    rc, out, err = _git(["worktree", "remove", path], root, timeout=GIT_WRITE_TIMEOUT)
+        return False, i18n.t("api", "项目目录不是 git 仓库（{detail}）", lang, detail=err)
+    rc, out, err = _git(["worktree", "remove", path], root,
+                        timeout=GIT_WRITE_TIMEOUT, lang=lang)
     if rc != 0:
-        return False, f"git worktree remove 失败：{(err or out or '未知原因').strip()[:_ERR_MAX]}"
+        why = (err or out or i18n.t("api", "未知原因", lang)).strip()[:_ERR_MAX]
+        return False, i18n.t("api", "git worktree remove 失败：{detail}", lang,
+                             detail=why)
     return True, ""

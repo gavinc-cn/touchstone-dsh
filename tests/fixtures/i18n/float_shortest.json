@@ -1,0 +1,25 @@
+{
+  "doc": [
+    "浮点最短 round-trip 排版的确定性边界（T9 / KB-18，共享 fixture；Python",
+    "tests/test_i18n.py 与 Node backend/test/i18n.test.mjs 读取同一份）。",
+    "T9 曾用 44,997 个 doubles fuzz 验证双端 0 mismatch，但没有留下可复现用例；",
+    "本文件把阈值/极值/常见最短表示钉成最小回归集（两端 expected 相同）。",
+    "literal 用十进制字符串保存，两端各自 Number(literal) / float(literal) 解析，",
+    "覆盖 1e-7 / 1e-6 / 1e20 / 1e21 的 ECMAScript 排版阈值、次正规最小值、",
+    "最大有限值、-0 与常见最短表示。"
+  ],
+  "cases": [
+    {"literal": "0.1", "expected": "value 0.1"},
+    {"literal": "0.30000000000000004", "expected": "value 0.30000000000000004"},
+    {"literal": "123456789.5", "expected": "value 123456789.5"},
+    {"literal": "1e-7", "expected": "value 1e-7"},
+    {"literal": "1e-6", "expected": "value 0.000001"},
+    {"literal": "1.234e-6", "expected": "value 0.000001234"},
+    {"literal": "1e20", "expected": "value 100000000000000000000"},
+    {"literal": "1e21", "expected": "value 1e+21"},
+    {"literal": "5e-324", "expected": "value 5e-324"},
+    {"literal": "1.7976931348623157e308", "expected": "value 1.7976931348623157e+308"},
+    {"literal": "-0", "expected": "value 0"},
+    {"literal": "-2.25", "expected": "value -2.25"}
+  ]
+}

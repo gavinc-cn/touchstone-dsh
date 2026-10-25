@@ -87,8 +87,13 @@ def raw_config():
     return cfg if isinstance(cfg, dict) else None
 
 
-def _cfg_int(value, default, upper, name):
-    """配置整数字段规整：None/空串→默认值；非法或越界抛 ValueError（上限防误填拖垮请求）。"""
+def _cfg_int(value, default, upper, name, lang="zh"):
+    """配置整数字段规整：None/空串→默认值；非法或越界抛 ValueError（上限防误填拖垮请求）。
+
+    `lang` 只决定 `.message` 的语种（`t` 的 key 仍是中文原文）；`i18n_key/i18n_vars`
+    照旧附加，供 `_error*`/`test_connection` 按请求语言重新渲染——zh 侧 `.message`
+    与旧 % 格式化逐字节相同。
+    """
     if value is None or value == "":
         return default
     try:
@@ -96,12 +101,15 @@ def _cfg_int(value, default, upper, name):
     except (TypeError, ValueError):
         # key+vars（不预渲染）：中文插值结果与旧 % 格式化逐字节相同，
         # 英文侧查共享词条（Node rag.js localizable 同 key）
-        raise i18n.localizable(ValueError("%s 须为正整数" % name),
-                               "{name} 须为正整数", {"name": name})
+        raise i18n.localizable(
+            ValueError(i18n.t("api", "{name} 须为正整数", lang, name=name)),
+            "{name} 须为正整数", {"name": name})
     if n < 1 or n > upper:
-        raise i18n.localizable(ValueError("%s 须在 1~%d 之间" % (name, upper)),
-                               "{name} 须在 1~{upper} 之间",
-                               {"name": name, "upper": upper})
+        raise i18n.localizable(
+            ValueError(i18n.t("api", "{name} 须在 1~{upper} 之间", lang,
+                              name=name, upper=upper)),
+            "{name} 须在 1~{upper} 之间",
+            {"name": name, "upper": upper})
     return n
 
 
@@ -145,12 +153,13 @@ def disable():
         return False
 
 
-def test_connection(cfg):
+def test_connection(cfg, lang="zh"):
     """配置连通性探测：按给定配置发一次单文本嵌入请求（管理页「测试连接」用）。
 
     返回 {"ok": True, "dim": 向量维度} 或 {"ok": False, "error": 原因}，绝不抛出；
     timeout_s/batch_size 走同一 _cfg_int 规整，表单误填在探测时一并报出。
     error 文本不含 api_key（urllib 异常只含 URL，Bearer 头不进异常消息）。
+    `lang` 只影响我们自己的固定模板；网络/鉴权/解析原文按诊断原样返回（登记边界）。
     """
     try:
         probe = {
@@ -159,12 +168,22 @@ def test_connection(cfg):
             "api_key": str(cfg.get("api_key") or "").strip(),
         }
         if not (probe["api_base"] and probe["model"] and probe["api_key"]):
-            raise ValueError("api_base / model / api_key 尚未填写完整")
-        probe["timeout_s"] = _cfg_int(cfg.get("timeout_s"), DEF_TIMEOUT_S, 300, "timeout_s")
-        probe["batch_size"] = _cfg_int(cfg.get("batch_size"), DEF_BATCH_SIZE, 256, "batch_size")
+            raise ValueError(i18n.t(
+                "api", "api_base / model / api_key 尚未填写完整", lang))
+        probe["timeout_s"] = _cfg_int(cfg.get("timeout_s"), DEF_TIMEOUT_S, 300,
+                                      "timeout_s", lang)
+        probe["batch_size"] = _cfg_int(cfg.get("batch_size"), DEF_BATCH_SIZE, 256,
+                                       "batch_size", lang)
         vecs = _post_embeddings(probe, ["ping"])
         return {"ok": True, "dim": len(vecs[0]) if vecs and vecs[0] else 0}
     except Exception as exc:  # 网络/鉴权/响应形态异常统一转为可展示文本
+        # 我们自己的固定模板带 i18n_key（含 _cfg_int/_post_embeddings）→ 按请求语言
+        # 重新渲染；其余动态异常（urllib/鉴权/JSON 原文）原样返回，不翻译。
+        key = getattr(exc, "i18n_key", None)
+        if isinstance(key, str):
+            vars_ = getattr(exc, "i18n_vars", None)
+            return {"ok": False, "error": i18n.t(
+                "api", key, lang, **(vars_ if isinstance(vars_, dict) else {}))}
         return {"ok": False, "error": str(exc) or exc.__class__.__name__}
 
 
@@ -202,10 +221,13 @@ def _post_embeddings(cfg, texts):
                 data = json.loads(resp.read().decode("utf-8"))
             items = data.get("data") if isinstance(data, dict) else None
             if not isinstance(items, list):
-                raise ValueError("embeddings 响应缺 data")
+                # 固定模板：附加 i18n_key 供 test_connection 按请求语言渲染，zh 不变
+                raise i18n.localizable(ValueError("embeddings 响应缺 data"),
+                                       "embeddings 响应缺 data")
             items = sorted(items, key=lambda d: d.get("index", 0))
             if len(items) != len(texts):
-                raise ValueError("embeddings 返回条数不符")
+                raise i18n.localizable(ValueError("embeddings 返回条数不符"),
+                                       "embeddings 返回条数不符")
             return [item["embedding"] for item in items]
         except Exception as exc:  # HTTP/超时/解析失败统一计数重试
             if attempt >= HTTP_RETRY:

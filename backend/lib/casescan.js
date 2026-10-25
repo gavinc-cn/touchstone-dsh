@@ -59,9 +59,16 @@ const ROUND_ROW_RE = new RegExp(
 /** ROUNDS.md 轮次明细小节标题：`### 第 1 轮（2026-08-22）` */
 const ROUND_SEC_RE = new RegExp(`^###${PY_WS}*第${PY_WS}*(\\d+)${PY_WS}*轮[^\\n]*$`, 'gm');
 
-/** 明细小节执行统计：`通过 16 / 失败 0 / 跳过 0`（跳过段可缺） */
-const EXEC_STAT_RE = new RegExp(
-  `通过${PY_WS}*(\\d+)${PY_WS}*/${PY_WS}*失败${PY_WS}*(\\d+)(?:${PY_WS}*/${PY_WS}*跳过${PY_WS}*(\\d+))?`);
+/**
+ * 明细小节执行统计：`通过 16 / 失败 0 / 跳过 0`（中文原语法零 churn）；英文
+ * `Passed/Failed/Skipped` 同义：pass/fail/skip + 可选 ed，大小写不敏感，英文分支允许
+ * 一个可选冒号。捕获组 1/2/3 不变；接受集合与 `server.EXEC_STAT_RE` 逐字一致
+ * （共享用例表 `tests/fixtures/bilingual/rounds_stats_cases.json`）。
+ */
+export const EXEC_STAT_RE = new RegExp(
+  `(?:通过|pass(?:ed)?${PY_WS}*[:：]?)${PY_WS}*(\\d+)${PY_WS}*/${PY_WS}*`
+  + `(?:失败|fail(?:ed)?${PY_WS}*[:：]?)${PY_WS}*(\\d+)(?:${PY_WS}*/${PY_WS}*`
+  + `(?:跳过|skip(?:ped)?${PY_WS}*[:：]?)${PY_WS}*(\\d+))?`, 'i');
 
 /** 角度表「入库用例数」：`（15 条）` */
 const CASES_COUNT_RE = new RegExp(`（${PY_WS}*(\\d+)${PY_WS}*条${PY_WS}*）`);
