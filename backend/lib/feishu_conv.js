@@ -1327,7 +1327,7 @@ async function newSession(binding, title = '', options = {}) {
   if (pyTruthy(createErr)) return createErr;
   void sid;
   return txt('已新建并绑定「{title}」（项目：{project}），接下来发消息都进这个会话；'
-    + '它也会出现在看板（sync 卡，不占运行位）', lang,
+    + '说过话后它会出现在看板（sync 卡，不占运行位）', lang,
   { title: finalTitle, project: project.name });
 }
 

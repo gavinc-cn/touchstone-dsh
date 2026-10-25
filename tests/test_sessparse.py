@@ -727,6 +727,39 @@ def test_dsh_first_prompt_image_only_and_cache_refresh():
     assert sessparse.dsh_first_prompt(DSH_SID2) == "新首问"
 
 
+def test_dsh_scan_turn_four_states():
+    """`_dsh_scan_turn`：「跑过一轮」判据（2026-10-25 会话即卡片批次）。
+
+    ①只有 seed/权限/标题帧 ⇒ False（平台建会话后一句话没说的空壳就是这个形态）；
+    ②有 `turn/start` 事件 ⇒ True；③只有标题无 turn ⇒ False；④工具输出文本里出现
+    同名字符串但整行不是该事件 ⇒ False（整行 JSON 校验防误命中，同 `_dsh_scan_titles`）。
+    """
+    seed = _jsonl([
+        {"type": "session", "version": 4, "id": DSH_SID, "cwd": CWD},
+        {"type": "permission/preset", "seq": 1, "time": 1, "data": {}},
+        {"type": "session/title", "seq": 2, "time": 2, "data": {"title": "空壳"}},
+    ])
+    assert sessparse._dsh_scan_turn("") is False
+    assert sessparse._dsh_scan_turn(seed) is False
+    with_turn = seed + _jsonl([{"type": "turn/start", "seq": 3, "time": 3, "data": {}}])
+    assert sessparse._dsh_scan_turn(with_turn) is True
+    fake = seed + _jsonl([{"type": "tool/result", "seq": 4, "time": 4,
+                           "data": {"output": 'see "turn/start" event'}}])
+    assert sessparse._dsh_scan_turn(fake) is False
+
+
+def test_dsh_has_content_and_list_item():
+    """`dsh_has_content` 与 `list_sessions` 条目字段：默认样本（无 turn）⇒ False；
+    追加一枚 `turn/start` 帧后 ⇒ True（stamp 失效重读）。看板 A 类闸据此建卡。"""
+    assert sessparse.dsh_has_content(ABSENT_SID) is False
+    path = _mk_dsh(mtime=1000)
+    assert sessparse.dsh_has_content(DSH_SID) is False
+    assert sessparse.list_sessions("dsh", CWD)[0]["has_content"] is False
+    _append_dsh_frame(path, [{"type": "turn/start", "seq": 90, "time": 90, "data": {}}])
+    assert sessparse.dsh_has_content(DSH_SID) is True
+    assert sessparse.list_sessions("dsh", CWD)[0]["has_content"] is True
+
+
 def test_list_sessions_items_carry_first_prompt():
     """list_sessions 的条目带 first_prompt 与 titles（看板 sync 卡建卡/标题同步的
     数据源），与 title（=当前标题）一起从同一次解压取出（_dsh_meta 缓存）。"""
@@ -735,6 +768,7 @@ def test_list_sessions_items_carry_first_prompt():
     assert [i["sid"] for i in items] == [DSH_SID]
     assert items[0]["title"] == "修复登录" and items[0]["first_prompt"] == "请修复"
     assert items[0]["titles"] == ["修复登录"]        # 全部标题事件（自动形态判定用）
+    assert items[0]["has_content"] is False          # 样本无 turn/start（空壳口径）
     assert items[0]["archived"] is False
 
 

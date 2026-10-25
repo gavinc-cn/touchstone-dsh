@@ -118,7 +118,7 @@ def new_session(binding, title="", lang="zh"):
     if err:
         return err
     return _text("已新建并绑定「{title}」（项目：{project}），接下来发消息都进这个会话；"
-                 "它也会出现在看板（sync 卡，不占运行位）",
+                 "说过话后它会出现在看板（sync 卡，不占运行位）",
                  lang, title=title, project=project["name"])
 
 

@@ -626,7 +626,7 @@ test('convIntent：new 的标题取 groups[0]（None/空 ⇒ 缺省标题）；u
   h.st.projects = [makeProject(7, { name: '甲' })];
   const b = makeBinding({ default_project_id: 7 });
   const reply = await conv.convIntent(b, 'new', ['  修登录  '], 'ou_a', CFG, h.options);
-  assert.equal(reply, `已新建并绑定「修登录」（项目：甲），接下来发消息都进这个会话；它也会出现在看板（sync 卡，不占运行位）`);
+  assert.equal(reply, `已新建并绑定「修登录」（项目：甲），接下来发消息都进这个会话；说过话后它会出现在看板（sync 卡，不占运行位）`);
   // groups 为 [None]（正则未匹配可选组）⇒ .strip() 兜住 ⇒ 缺省标题
   const h2 = harness();
   h2.st.projects = [makeProject(7, { name: '甲' })];

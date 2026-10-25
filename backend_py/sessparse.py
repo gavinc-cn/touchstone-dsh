@@ -421,30 +421,54 @@ def _dsh_scan_prompt(text):
         continue                # 既无文本也无图片：不是有效提问
 
 
+def _dsh_scan_turn(text):
+    """会话是否**跑过至少一轮**（事件流里有 `turn/start` 事件）——「有内容」判据。
+
+    用途（2026-10-25 会话即卡片批次）：看板 A 类闸据此决定该会话是否投影成卡。
+    平台建出的空壳会话只有 seed/权限/沙箱/标题帧，没有任何 turn；真机 863 个会话
+    实测「有 `user/message` 但无 `turn/start`」的为 0 ⇒ 单判 turn/start 即足。
+
+    逐次 find + **整行 JSON 校验**（同 `_dsh_scan_titles`/`_dsh_scan_prompt`）：工具
+    输出、坏行里出现同名字符串一律跳过，只看 `type` 真的是 `turn/start` 的事件行。
+    """
+    pos = 0
+    while True:
+        idx = text.find('"turn/start"', pos)
+        if idx < 0:
+            return False
+        pos = idx + 1
+        d = _obj(_line_at(text, idx))
+        if d is not None and d.get("type") == "turn/start":
+            return True
+
+
 def _dsh_meta(path):
-    """一次解压取出 (当前标题, 主会话首问原文, 全部标题事件)，按文件 stamp 缓存。
+    """一次解压取出 (当前标题, 主会话首问原文, 全部标题事件, 是否跑过一轮)，stamp 缓存。
 
     - 当前标题 = `titles` 的**末枚**（`session/title` 事件 last-wins）= dsh GUI 侧栏
       显示的标题（口径说明见 `_dsh_scan_titles`）；
     - 首问 = 见 `_dsh_scan_prompt`，是看板 sync 卡描述（首问全文）的数据源；
     - 全部标题事件（tuple）= 该会话历史上出现过的每个标题，看板 sync 卡据此判定
       「卡面标题是否仍是平台自动写入的形态」（建卡时只有兜底标题、LLM 标题后到的
-      窗口里，旧的兜底标题只存在于事件历史中）。
+      窗口里，旧的兜底标题只存在于事件历史中）；
+    - has_content = 是否跑过至少一轮（见 `_dsh_scan_turn`）：**标题不算内容**，
+      看板 A 类闸只投影有内容的会话（空壳会话不建卡，2026-10-25 会话即卡片批次）。
     """
     try:
         st = os.stat(path)
         stamp = (st.st_mtime_ns, st.st_size)
     except OSError:
-        return "", "", ()
+        return "", "", (), False
     hit = _DSH_TITLE_CACHE.get(path)
     if hit and hit[0] == stamp:
-        return hit[1], hit[2], hit[3]
+        return hit[1], hit[2], hit[3], hit[4]
     text = _dsh_decompressed(path)
     titles = tuple(_dsh_scan_titles(text))
     title = titles[-1] if titles else ""
     prompt = _dsh_scan_prompt(text)
-    _DSH_TITLE_CACHE[path] = (stamp, title, prompt, titles)
-    return title, prompt, titles
+    has_content = _dsh_scan_turn(text)
+    _DSH_TITLE_CACHE[path] = (stamp, title, prompt, titles, has_content)
+    return title, prompt, titles, has_content
 
 
 def dsh_title(sid):
@@ -461,6 +485,16 @@ def dsh_first_prompt(sid):
     """
     path = _dsh_session_file(sid)
     return _dsh_meta(path)[1] if path else ""
+
+
+def dsh_has_content(sid):
+    """该会话是否跑过至少一轮（`turn/start`，见 `_dsh_scan_turn`）；不可读返回 False。
+
+    看板 A 类闸的「有内容」判据（`board._is_empty_session`）：空壳会话不投影成卡。
+    读失败按「无内容」处理——该闸只影响「建不建卡」，不删任何东西（宁漏不误删）。
+    """
+    path = _dsh_session_file(sid)
+    return _dsh_meta(path)[3] if path else False
 
 
 def _parse_dsh(path):
@@ -792,22 +826,25 @@ def _list_dsh(cwd):
         sid = os.path.basename(sdir)
         if _header_subagent(_dsh_header(zfile)):
             continue            # 子代理会话：先判头行再解全量（省一次整段解压）
-        # 一次解压同时取当前标题、首问与全部标题事件（同 stamp 缓存）：看板 sync 卡
-        # 建卡/标题同步都要后两者，逐会话各调一次读口会重复解压同一个文件（见 _dsh_meta）
-        title, first_prompt, titles = _dsh_meta(zfile)
+        # 一次解压同时取当前标题、首问、全部标题事件与「是否跑过一轮」（同 stamp 缓存）：
+        # 看板 sync 卡建卡/标题同步/A 类空壳闸都要它们，逐会话各调一次读口会
+        # 重复解压同一个文件（见 _dsh_meta）
+        title, first_prompt, titles, has_content = _dsh_meta(zfile)
         out.append({"sid": sid, "title": title, "titles": list(titles),
-                    "first_prompt": first_prompt,
+                    "first_prompt": first_prompt, "has_content": has_content,
                     "mtime": mtime, "archived": sid in archived})
     return out
 
 
 def list_sessions(family, cwd):
-    """按工作区枚举 dsh 会话 [{sid, title, titles, first_prompt, mtime秒, archived}]，
+    """按工作区枚举 dsh 会话 [{sid, title, titles, first_prompt, has_content, mtime秒, archived}]，
     mtime 降序、上限 LIST_SESSIONS_LIMIT。
 
     `title` = **当前**会话标题（末枚 session/title 事件，与 dsh GUI 一致）、
     `titles` = 全部标题事件、`first_prompt` = 主会话第一条真实用户提问原文
-    （看板 sync 卡取它做描述、取 title 做卡标题）。
+    （看板 sync 卡取它做描述、取 title 做卡标题）、`has_content` = 该会话是否
+    **跑过至少一轮**（存在 `turn/start` 事件；看板 A 类闸据此决定是否投影成卡，
+    **标题不算内容**——平台建会话时就会写一枚标题，空壳会话不建卡）。
 
     供看板「绑定已有会话」下拉与「自动同步」共用；`archived` 读宿主归档集
     （`<dsh home>/storages/workspace.json` 的 `global.archivedSessionIds`，读不到

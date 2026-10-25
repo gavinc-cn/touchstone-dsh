@@ -2127,7 +2127,10 @@ export function extCandidates(project, cards) {
     const c = bound[sid];
     if (c === undefined) {
       unbound.add(sid);                    // 在跑但平台无卡：调用方补投影后再反查
-    } else if (cand.has(c.id) && !platformHolds(c.id)) {
+    } else if (cand.has(c.id) && !platformHolds(c.id) && !chatMod.liveOfSid(sid)) {
+      // 2026-10-25 会话即卡片：本卡会话有排队/执行中的**平台消息单元**（`m:` 行，
+      // 飞书/会话窗投递驱动）⇒ 不算「外部直跑占用」（防 m: 与 ext: 双计运行位）；
+      // 纯外部直跑会话（无平台消息单元）判断不变，照常建 desired。
       desired[c.id] = sid;
     }
   }
@@ -4094,15 +4097,19 @@ export function fullFirstPrompt(text) {
 export const _full_first_prompt = fullFirstPrompt;
 
 /**
- * 空会话判定（A 类闸，Python `_is_empty_session`）：会话已存在但**还没有任何内容**
- * （首问与标题事件皆空）。item 缺失（会话已不在本次枚举里）返回 false——那种情况交既有
- * 「存储被删→done」规则处理，本闸不表态。
+ * 空会话判定（A 类闸，Python `_is_empty_session`；2026-10-09 立、2026-10-25 收敛为
+ * 「是否跑过一轮」）：`item.has_content` 为假 ⇒ 空会话（**标题不算内容**——平台建会话
+ * 时就会写一枚标题，旧口径「首问 OR 标题」因此把空壳会话也判成有内容，卡 943/928
+ * 「点进去什么都没有」即由此而来）。
+ *
+ * item 缺失（会话已不在本次枚举里）返回 false——那种情况交既有「存储被删→done」
+ * 规则处理，本闸不表态。
  * @param {object|null} item
  * @returns {boolean}
  */
 export function isEmptySession(item) {
   if (!item) return false;
-  return !String(item.first_prompt || '').trim() && !String(item.title || '').trim();
+  return !item.has_content;
 }
 
 /** `_is_empty_session` 的 Python 名别名。 */
@@ -4133,29 +4140,31 @@ export const _is_placeholder_card = isPlaceholderCard;
 /**
  * 本项目「平台自己持有会话位」的 sid 集合（B 类闸，Python `_platform_owned_sids`）。
  *
- * 两个来源：`tasks.session_id`（任务主会话已有入口）与 `feishu_bindings.cur_sid`
- * （飞书通用对话当前绑定）。看板卡自己的会话不用列——`syncSessions` 的 bound 映射已覆盖；
- * `chat_msgs` **不纳入**（那些会话常常正是 dsh GUI 建出来的外部会话）。
+ * **唯一来源**：`tasks.session_id`（任务主会话已有入口）。看板卡自己的会话不用列——
+ * `syncSessions` 的 bound 映射已覆盖；`chat_msgs` **不纳入**（那些会话常常正是 dsh GUI
+ * 建出来的外部会话）。
+ *
+ * **飞书通用对话当前绑定的会话（`feishu_bindings.cur_sid`）自 2026-10-25 起不再排除**
+ * （会话即卡片 / 路线 A）：飞书绑定的会话同样要投影成卡——卡号是三通道统一寻址
+ * （TS 会话窗归属、飞书作答指令、交互卡推送 dedup 键），否则无卡会话的提问在飞书端
+ * 拿不到作答卡；空壳保护由 A 类闸（`isEmptySession` = 从未跑过一轮）承担。
+ *
  * 一次查库、单轮复用；表缺失/结构演进按空集（归因失败绝不影响建卡）。
  * @param {number} projectId
+ * @param {{db?: object, dbPath?: string, env?: NodeJS.ProcessEnv}} [options]
  * @returns {Set<string>}
  */
 export function platformOwnedSids(projectId, options = {}) {
   const sids = new Set();
   try {
     dbmod.withReadDb(options, (handle) => {
-      for (const [sql, args] of [
-        ['SELECT session_id AS sid FROM tasks WHERE project_id=? AND session_id<>\'\'',
-          [projectId]],
-        ['SELECT cur_sid AS sid FROM feishu_bindings'
-          + ' WHERE cur_project_id=? AND cur_sid<>\'\'', [projectId]],
-      ]) {
-        try {
-          for (const r of handle.prepare(sql).all(...args)) {
-            sids.add(String(r.sid));
-          }
-        } catch { /* 单表不可用只丢该项，不影响另一项与建卡 */ }
-      }
+      try {
+        for (const r of handle.prepare(
+          'SELECT session_id AS sid FROM tasks WHERE project_id=? AND session_id<>\'\''
+        ).all(projectId)) {
+          sids.add(String(r.sid));
+        }
+      } catch { /* 表不可用按空集（归因失败绝不影响建卡） */ }
     });
   } catch {
     return new Set();

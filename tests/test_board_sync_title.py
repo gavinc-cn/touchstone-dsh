@@ -37,7 +37,15 @@ def _mk_card(pid, title="", description="", column="doing", sid="", origin="sync
 
 
 def _patch(monkeypatch, items):
-    """打桩：会话枚举 + busy 判定 + 会话存在性（都不碰真实文件系统）。"""
+    """打桩：会话枚举 + busy 判定 + 会话存在性（都不碰真实文件系统）。
+
+    `has_content` 缺省按 `bool(first_prompt)` 归一化——真实 `list_sessions` 必带该字段
+    （「测试替身打真契约」）；**标题存在但从未跑过一轮**的用例必须显式给
+    `has_content=False`（2026-10-25 会话即卡片批次后，标题不再算内容）。
+    """
+    items = [dict(it, has_content=it.get(
+        "has_content", bool(str(it.get("first_prompt") or "").strip())))
+        for it in items]
     monkeypatch.setattr(board.sessparse, "list_sessions", lambda fam, d: items)
     monkeypatch.setattr(board.sessparse, "session_exists", lambda fam, s: True)
     monkeypatch.setattr(board, "_sync_session_busy", lambda *a, **k: False)
@@ -116,16 +124,14 @@ def test_card_created_before_llm_title_is_updated(monkeypatch):
 
 
 def test_empty_session_not_projected_until_first_prompt(monkeypatch):
-    """A 类闸（2026-10-09）：会话一个字都还没有（首问/标题皆空）⇒ **不建卡**。
-
-    取代旧口径「先落 sid 短码兜底、首问到了再补齐」——看板不再出现
-    `session-xxxx` 占位卡；首问落盘后的下一个节拍才建卡，标题口径直接正确。"""
+    """A 类闸（2026-10-09 立、2026-10-25 收紧为 `has_content`）：从未跑过一轮的会话
+    ⇒ **不建卡**；跑过一轮后（`turn/start` 落盘）的下一个节拍才建卡，标题口径直接正确。"""
     proj = _mk_project()
     _patch(monkeypatch, [{"sid": SID, "title": "", "titles": [], "mtime": 0,
                           "first_prompt": ""}])
     assert board.sync_sessions(proj) == []                     # 空会话不投影
     _patch(monkeypatch, [{"sid": SID, "title": "", "titles": [], "mtime": 0,
-                          "first_prompt": "真实首问\n其余内容"}])
+                          "first_prompt": "真实首问\n其余内容", "has_content": True}])
     created = board.sync_sessions(proj)                        # 首问落盘 → 建卡
     assert len(created) == 1
     c = db.get_board_card(created[0])
@@ -134,17 +140,34 @@ def test_empty_session_not_projected_until_first_prompt(monkeypatch):
     assert board.sync_sessions(proj) == []                     # 不重复建卡
 
 
-def test_title_only_session_still_projected(monkeypatch):
-    """A 类闸的边界：只有会话标题事件、首问未落盘（dsh 自动标题已生成）时照建——
-    标题取会话标题、描述留空，回落链保留（首问后到仍由 `_sync_card_follow` 补齐）。"""
+def test_title_only_session_not_projected(monkeypatch):
+    """A 类闸（2026-10-25 会话即卡片）：**标题不算内容**——平台建会话时就会写一枚
+    标题（`feishu_conv._create_in_project` 建完即 rename），只有标题、从未跑过一轮的
+    会话不投影成卡（卡 943/928 的成因即此）；跑过一轮后才建卡。"""
     proj = _mk_project()
-    _patch(monkeypatch, [{"sid": SID, "title": "dsh 生成的标题",
-                          "titles": ["dsh 生成的标题"], "mtime": 0,
-                          "first_prompt": ""}])
-    created = board.sync_sessions(proj)
+    _patch(monkeypatch, [{"sid": SID, "title": "飞书对话 10-09 13:34",
+                          "titles": ["飞书对话 10-09 13:34"], "mtime": 0,
+                          "first_prompt": "", "has_content": False}])
+    assert board.sync_sessions(proj) == []                     # 空壳：标题不算内容
+    _patch(monkeypatch, [{"sid": SID, "title": "飞书对话 10-09 13:34",
+                          "titles": ["飞书对话 10-09 13:34"], "mtime": 0,
+                          "first_prompt": "为什么TS和DSH中的思考等级不一致?",
+                          "has_content": True}])
+    created = board.sync_sessions(proj)                        # 跑过一轮 → 建卡
     assert len(created) == 1
-    c = db.get_board_card(created[0])
-    assert c["title"] == "dsh 生成的标题" and c["description"] == ""
+    assert db.get_board_card(created[0])["title"] == "飞书对话 10-09 13:34"
+
+
+def test_is_empty_session_reads_has_content():
+    """`_is_empty_session` 只认 `has_content`：标题/首问文本本身不再参与判定
+    （标题不算内容；字段读不到按「无内容」——该闸只影响建不建卡，不删任何东西）。"""
+    assert board._is_empty_session(None) is False              # 会话已不在枚举：不表态
+    assert board._is_empty_session({}) is False                # 空 dict 视同 item 缺失
+    assert board._is_empty_session({"has_content": False}) is True
+    assert board._is_empty_session({"title": "T", "has_content": False}) is True
+    assert board._is_empty_session({"first_prompt": "hi", "has_content": False}) is True
+    assert board._is_empty_session({"first_prompt": "hi", "has_content": True}) is False
+    assert board._is_empty_session({"title": "T", "has_content": True}) is False
 
 
 def test_platform_owned_task_session_not_projected(monkeypatch):
@@ -159,14 +182,30 @@ def test_platform_owned_task_session_not_projected(monkeypatch):
     assert board.sync_sessions(proj) == []
 
 
-def test_feishu_bound_session_not_projected(monkeypatch):
-    """B 类闸的另一来源：飞书通用对话当前绑定的会话（`feishu_bindings.cur_sid`）
-    在飞书侧已有入口，同样不重复投影。"""
+def test_feishu_bound_session_projected_after_content(monkeypatch):
+    """B 类闸（2026-10-25 会话即卡片）：飞书通用对话**当前绑定的会话不再排除**——
+    它跑过一轮后同样投影成卡（卡号即三通道统一寻址：TS 会话窗、飞书作答指令、
+    交互卡推送都靠它；`/new` 回执承诺的 sync 卡自此成立）。"""
     proj = _mk_project()
     db.set_feishu_binding("ou_sync_test", 0, proj["id"])
     db.set_feishu_cur_session("ou_sync_test", proj["id"], SID)
-    _patch(monkeypatch, [{"sid": SID, "title": "", "mtime": 0,
-                          "first_prompt": "飞书里说的话\n其余"}])
+    _patch(monkeypatch, [{"sid": SID, "title": "飞书对话 10-22 13:51", "mtime": 0,
+                          "first_prompt": "飞书里说的话\n其余", "has_content": True}])
+    created = board.sync_sessions(proj)
+    assert len(created) == 1
+    c = db.get_board_card(created[0])
+    assert c["session_id"] == SID and c["origin"] == "sync"
+    assert c["title"] == "飞书对话 10-22 13:51"
+    assert c["description"] == "飞书里说的话\n其余"
+
+
+def test_feishu_bound_empty_session_not_projected(monkeypatch):
+    """飞书绑定会话同样是 A 类闸的下游：从未跑过一轮（只有标题）⇒ 仍不建卡。"""
+    proj = _mk_project()
+    db.set_feishu_binding("ou_sync_test", 0, proj["id"])
+    db.set_feishu_cur_session("ou_sync_test", proj["id"], SID)
+    _patch(monkeypatch, [{"sid": SID, "title": "飞书对话 10-22 11:48", "mtime": 0,
+                          "first_prompt": "", "has_content": False}])
     assert board.sync_sessions(proj) == []
 
 
@@ -470,7 +509,8 @@ def test_list_sessions_item_without_prompt_and_titles_keys(monkeypatch):
     """防回归：list_sessions 桩缺 first_prompt / titles 键时（旧测试桩形态）不炸——
     标题取会话标题、描述不写。"""
     proj = _mk_project()
-    _patch(monkeypatch, [{"sid": SID, "title": "会话标题", "mtime": 0}])
+    _patch(monkeypatch, [{"sid": SID, "title": "会话标题", "mtime": 0,
+                          "has_content": True}])
     created = board.sync_sessions(proj)
     assert len(created) == 1
     c = db.get_board_card(created[0])
@@ -514,8 +554,11 @@ def _mk_session_file(cwd, sid, origin="", title="会话标题"):
         header["origin"] = origin
         header["delegationDepth"] = 1
         header["parentSession"] = MAIN_SID
+    # 标题帧 + 一枚 turn/start（「跑过一轮」判据：A 类闸 2026-10-25 起只认它）
     frames = [[header], [{"type": "session/title", "seq": 1, "time": 1,
-                          "data": {"title": title}}]]
+                          "data": {"title": title}},
+                         {"type": "turn/start", "seq": 2, "time": 2,
+                          "data": {}}]]
     path = os.path.join(board.sessparse.dsh_bucket(cwd), sid, "session.v4.jsonl.zstd")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     comp = zstandard.ZstdCompressor()

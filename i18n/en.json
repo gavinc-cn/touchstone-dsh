@@ -1504,7 +1504,7 @@
     "已收下：卡片 #{cid} 多选「{labels}」，排队送达中": "✅ Received: card #{cid} multi-select \"{labels}\", queued for delivery",
     "已收下：卡片 #{cid} 自定义回答，排队送达中": "✅ Received: card #{cid} custom answer, queued for delivery",
     "已收下：卡片 #{cid} 选择「{label}」，排队送达中": "✅ Received: card #{cid} chose \"{label}\", queued for delivery",
-    "已新建并绑定「{title}」（项目：{project}），接下来发消息都进这个会话；它也会出现在看板（sync 卡，不占运行位）": "Created and bound \"{title}\" (project: {project}); messages will go to this session from now on. It will also appear on the board (sync card, no run slot taken)",
+    "已新建并绑定「{title}」（项目：{project}），接下来发消息都进这个会话；说过话后它会出现在看板（sync 卡，不占运行位）": "Created and bound \"{title}\" (project: {project}); messages will go to this session from now on. Once you talk in it, it will appear on the board (sync card, no run slot taken)",
     "已绑定「{title}」（项目：{project}），接下来发消息都进这个会话": "Bound \"{title}\" (project: {project}); messages will go to this session from now on",
     "已绑定该会话": "Session bound",
     "已解绑。重新绑定请到站点生成新的绑定码": "Unbound. To bind again, generate a new bind code on the site",

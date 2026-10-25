@@ -521,6 +521,35 @@ test('dsh_title / dsh_first_prompt / list_sessions：last-wins 标题、首问�
   assert.equal(sp.list_sessions('dsh', '/nonexistent').length, 0);
 });
 
+test('_dsh_scan_turn / dsh_has_content / list_sessions.has_content：跑过一轮判据 + 防误命中', () => {
+  const root = mkRoot();
+  sp.setSessionsRoot(root);
+  // 空壳：只有头/权限/标题帧（平台建会话后一句话没说——标题不算内容）
+  const shell = 'session-00000000-0000-4000-8000-0000000000e5';
+  writeSession(root, '--p--', shell, [
+    headerFrame(shell),
+    [{ type: 'permission/preset', seq: 1, time: 1, data: {} },
+     { type: 'session/title', seq: 2, time: 2, data: { title: '飞书对话 10-09 13:34' } }],
+  ]);
+  assert.equal(sp.dsh_has_content(shell), false);
+  // 跑过一轮：有 turn/start 事件
+  const used = 'session-00000000-0000-4000-8000-0000000000e6';
+  writeSession(root, '--p--', used, [
+    headerFrame(used),
+    [{ type: 'session/title', seq: 1, time: 1, data: { title: '真实会话' } },
+     { type: 'turn/start', seq: 2, time: 2, data: {} }],
+  ]);
+  assert.equal(sp.dsh_has_content(used), true);
+  const bySid = Object.fromEntries(sp.list_sessions('dsh', '/p').map((i) => [i.sid, i]));
+  assert.equal(bySid[shell].has_content, false);
+  assert.equal(bySid[used].has_content, true);
+  // 整行 JSON 校验：工具输出里出现同名字符串但整行不是该事件 ⇒ 不算
+  const fake = JSON.stringify({ type: 'tool/result', seq: 9, time: 9, data: { output: 'see "turn/start" event' } }) + '\n';
+  assert.equal(sp._dsh_scan_turn(fake), false);
+  assert.equal(sp._dsh_scan_turn(''), false);
+  assert.equal(sp._dsh_scan_turn(JSON.stringify({ type: 'turn/start' }) + '\n'), true);
+});
+
 test('_dsh_scan_prompt：系统注入跳过、只有图片给 [图片]、无有效提问给空串', () => {
   const root = mkRoot();
   sp.setSessionsRoot(root);
@@ -817,9 +846,10 @@ test('Python 对拍：真会话上 load/meta/title/first_prompt/list 逐字段�
     load: (o) => sp.load(o.family, o.sid, o.agent, o.after),
     meta: (o) => {
       const p = sp._dsh_session_file(o.sid);
-      if (!p) return { path: null, title: '', prompt: '', titles: [] };
+      if (!p) return { path: null, title: '', prompt: '', titles: [], has_content: false };
       const m = sp._dsh_meta(p);
-      return { path: p, title: m.title, prompt: m.prompt, titles: m.titles };
+      return { path: p, title: m.title, prompt: m.prompt, titles: m.titles,
+        has_content: m.has_content };
     },
     title: (o) => sp.session_title(o.family, o.sid),
     first_prompt: (o) => sp.dsh_first_prompt(o.sid),
@@ -862,7 +892,8 @@ test('Python 对拍：合成会话上 entry 序列逐字段一致（含截断/�
   assert.deepEqual(sp.load('dsh', sid, 'main'), py[0].value);
   const p = sp._dsh_session_file(sid);
   const m = sp._dsh_meta(p);
-  assert.deepEqual({ path: p, title: m.title, prompt: m.prompt, titles: m.titles }, py[1].value);
+  assert.deepEqual({ path: p, title: m.title, prompt: m.prompt, titles: m.titles,
+    has_content: m.has_content }, py[1].value);
   assert.deepEqual(sp._dsh_header(p), py[2].value);
   assert.deepEqual(sp.dsh_user_anchors(sid), py[3].value);
   assert.equal(sp.dsh_fork_boundary(sid, sp.dsh_user_anchors(sid)[0].mid), py[4].value);

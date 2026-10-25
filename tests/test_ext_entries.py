@@ -264,7 +264,8 @@ def test_ext_refresh_probes_session_without_card(monkeypatch):
     proj = _mk_project()
     pid = proj["id"]
     monkeypatch.setattr(board.sessparse, "list_sessions",
-                        lambda fam, d: [{"sid": "s-new", "title": "新会话", "mtime": 0}])
+                        lambda fam, d: [{"sid": "s-new", "title": "新会话", "mtime": 0,
+                                     "has_content": True}])
     monkeypatch.setattr(board.dshevents, "connected", lambda: True)
     monkeypatch.setattr(board.dshevents, "snapshot", lambda: {
         "s-new": {"session_id": "s-new", "status": "running",
@@ -538,8 +539,10 @@ def test_sync_sessions_web_family_skips_bound_busy_probe(monkeypatch):
     monkeypatch.setattr(board, "_web_busy", fake_web_busy)
     monkeypatch.setattr(board.sessparse, "list_sessions",
                         lambda fam, d: [
-                            {"sid": "s-have", "title": "存量", "mtime": 0},
-                            {"sid": "s-new", "title": "新会话", "mtime": 0}])
+                            {"sid": "s-have", "title": "存量", "mtime": 0,
+                             "has_content": True},
+                            {"sid": "s-new", "title": "新会话", "mtime": 0,
+                             "has_content": True}])
     monkeypatch.setattr(board.sessparse, "session_exists", lambda fam, s: True)
     created = board.sync_sessions(proj)
     assert len(created) == 1                        # 只有 s-new 建卡
@@ -578,6 +581,30 @@ def test_ext_candidates_dsh_reads_hub_by_cwd(monkeypatch):
     assert desired == {card: "session-a"}
     assert unbound == {"session-d"}
     assert hold == set() and unknown == set()
+
+
+def test_ext_candidates_skips_live_msg_session(monkeypatch):
+    """desired 排除**平台消息单元在管**的会话（2026-10-25 会话即卡片）。
+
+    飞书/会话窗投递的会话既有 `m:` 行（waitq 消息单元）又在跑：若同时建 `ext:` 行会
+    双计运行位、多阻断一个补位节拍。判据 = `chat.live_of_sid(sid)`（本会话有排队/
+    执行中的平台消息单元）——为真则不算外部占用；为假照常建 desired。"""
+    proj = _mk_project(agent_path="dsh-plugin:/usr/bin/dsh", name="extlive")
+    pid = proj["id"]
+    card = _mk_card(pid, "消息驱动卡", sid="session-live")
+    monkeypatch.setattr(board, "_RUNS", {})
+    monkeypatch.setattr(board.dshevents, "connected", lambda: True)
+    monkeypatch.setattr(board.dshevents, "snapshot", lambda: {
+        "session-live": {"session_id": "session-live", "status": "running",
+                         "owned": False, "cwd": proj["project_dir"]},
+    })
+    live = {"value": True}
+    monkeypatch.setattr(board.chat, "live_of_sid", lambda sid: live["value"])
+    desired, _, unbound, _ = board._ext_candidates(proj, db.list_board_cards(pid))
+    assert desired == {}                       # 消息单元在管：不建 ext 行
+    live["value"] = False
+    desired, _, unbound, _ = board._ext_candidates(proj, db.list_board_cards(pid))
+    assert desired == {card: "session-live"}   # 纯外部直跑：照常建 desired
 
 
 def test_ext_refresh_dsh_driver_down_keeps_rows(monkeypatch):

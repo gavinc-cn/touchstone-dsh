@@ -455,6 +455,20 @@ test('extCandidates/extRefresh（中枢在线）：有候选 ⇒ 建行；已有
     const cand2 = board.extCandidates(proj, db.listBoardCards(s.pid, s.opts));
     assert.deepEqual(cand2.desired, {});
     assert.equal(cand2.unbound.size, 0);          // cwd 不匹配 ⇒ 连 unbound 都不进
+    // ⑥ 平台消息单元在管的会话不算外部占用（2026-10-25 会话即卡片）：
+    //    会话在跑 + 有排队/执行中的 `m:` 行 ⇒ 若同时建 `ext:` 行会双计运行位
+    d.drv.sendFrame('session/created', 'sid-live', { cwd: s.dir, origin: '' }, 10);
+    d.drv.sendFrame('agent/status', 'sid-live', { status: 'running' }, 11);
+    assert.ok(await until(() => (dshevents.get('sid-live') || {}).status === 'running'));
+    const liveCard = insertCard(s.fx.db, s.pid,
+      { title: 'L', columnKey: 'doing', sessionId: 'sid-live' });
+    assert.deepEqual(
+      board.extCandidates(proj, db.listBoardCards(s.pid, s.opts)).desired,
+      { [liveCard]: 'sid-live' });                // 纯外部直跑：照常占用
+    insertMsg(s.fx.db, { id: 'm-live', projectId: s.pid, sid: 'sid-live', state: 'running' });
+    assert.deepEqual(
+      board.extCandidates(proj, db.listBoardCards(s.pid, s.opts)).desired, {});
+    clearRegistries(liveCard);
     clearRegistries(card);
   } finally {
     await dshevents.stop(200);

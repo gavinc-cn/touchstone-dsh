@@ -302,6 +302,7 @@ def test_new_session_creates_binds_and_receipts(monkeypatch):
     assert (row["cur_sid"], row["cur_project_id"], row["cur_title"]) == \
         ("session-ns", pid, "修登录")
     assert "已新建并绑定「修登录」" in reply and "p_ns" in reply and "sync 卡" in reply
+    assert "说过话后" in reply          # 2026-10-25 会话即卡片：只在有内容后建卡
 
 
 def test_conv_intent_current_and_new(monkeypatch):

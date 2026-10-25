@@ -336,7 +336,7 @@ test('GET /board/sessions：真会话文件枚举 + bound 标记（族归一 dsh
       assert.equal(bySid.get(boundSid).first_prompt, '第一问');
       // 键集与 Python list_sessions 条目同形（bound 追加在末尾）
       assert.deepEqual(Object.keys(bySid.get(freeSid)),
-        ['sid', 'title', 'titles', 'first_prompt', 'mtime', 'archived', 'bound']);
+        ['sid', 'title', 'titles', 'first_prompt', 'has_content', 'mtime', 'archived', 'bound']);
     });
     assert.equal((await getJson(`${srv.url}/api/projects/999999/board/sessions`)).status, 404);
   } finally {

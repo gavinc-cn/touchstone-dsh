@@ -45,9 +45,11 @@ def _meta(sid):
     """内部 `_dsh_meta` 直读（标题 / 首问 / 全部标题事件 + 命中的文件），供逐字段对拍。"""
     path = _path_of(sid)
     if not path:
-        return {"path": None, "title": "", "prompt": "", "titles": []}
-    title, prompt, titles = sessparse._dsh_meta(path)
-    return {"path": path, "title": title, "prompt": prompt, "titles": list(titles)}
+        return {"path": None, "title": "", "prompt": "", "titles": [],
+                "has_content": False}
+    title, prompt, titles, has_content = sessparse._dsh_meta(path)
+    return {"path": path, "title": title, "prompt": prompt, "titles": list(titles),
+            "has_content": has_content}
 
 
 def _header(sid):

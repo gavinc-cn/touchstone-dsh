@@ -700,29 +700,54 @@ export function _dsh_scan_prompt(text) {
 }
 
 /**
- * 一次解压取出 {title, prompt, titles}，按文件 stamp 缓存。
+ * 会话是否**跑过至少一轮**（事件流里有 `turn/start` 事件）——「有内容」判据。
+ *
+ * 用途（2026-10-25 会话即卡片批次）：看板 A 类闸据此决定该会话是否投影成卡。
+ * 平台建出的空壳会话只有 seed/权限/沙箱/标题帧，没有任何 turn；真机 863 个会话实测
+ * 「有 `user/message` 但无 `turn/start`」的为 0 ⇒ 单判 turn/start 即足。
+ *
+ * 逐次 indexOf + **整行 JSON 校验**（同 `_dsh_scan_titles`/`_dsh_scan_prompt`）：
+ * 工具输出、坏行里出现同名字符串一律跳过，只看 `type` 真的是 `turn/start` 的事件行。
+ */
+export function _dsh_scan_turn(text) {
+  let pos = 0;
+  for (;;) {
+    const idx = text.indexOf('"turn/start"', pos);
+    if (idx < 0) return false;
+    pos = idx + 1;
+    const d = _obj(_line_at(text, idx));
+    if (d !== null && dget(d, 'type') === 'turn/start') return true;
+  }
+}
+
+/**
+ * 一次解压取出 {title, prompt, titles, has_content}，按文件 stamp 缓存。
  *
  * - title = `titles` 的**末枚**（last-wins = dsh GUI 侧栏显示的标题）；
  * - prompt = 看板 sync 卡描述（首问全文）的数据源；
- * - titles（全部标题事件）= 看板 sync 卡据此判定「卡面标题是否仍是平台自动写入的形态」。
+ * - titles（全部标题事件）= 看板 sync 卡据此判定「卡面标题是否仍是平台自动写入的形态」；
+ * - has_content = 是否跑过至少一轮（见 `_dsh_scan_turn`）：**标题不算内容**，看板
+ *   A 类闸只投影有内容的会话（空壳会话不建卡，2026-10-25 会话即卡片批次）。
  */
 export function _dsh_meta(p) {
   let stamp;
   try {
     stamp = statStamp(p);
   } catch {
-    return { title: '', prompt: '', titles: [] };
+    return { title: '', prompt: '', titles: [], has_content: false };
   }
   const hit = _DSH_TITLE_CACHE.get(p);
   if (hit && sameStamp(hit.stamp, stamp)) {
-    return { title: hit.title, prompt: hit.prompt, titles: hit.titles };
+    return { title: hit.title, prompt: hit.prompt, titles: hit.titles,
+      has_content: hit.has_content };
   }
   const text = _dsh_decompressed(p);
   const titles = _dsh_scan_titles(text);
   const title = titles.length ? titles[titles.length - 1] : '';
   const prompt = _dsh_scan_prompt(text);
-  _DSH_TITLE_CACHE.set(p, { stamp, title, prompt, titles });
-  return { title, prompt, titles };
+  const has_content = _dsh_scan_turn(text);
+  _DSH_TITLE_CACHE.set(p, { stamp, title, prompt, titles, has_content });
+  return { title, prompt, titles, has_content };
 }
 
 /** 读取 dsh 会话当前标题（最后一枚 session/title 事件），无/不可读返回 ''。 */
@@ -735,6 +760,17 @@ export function dsh_title(sid) {
 export function dsh_first_prompt(sid) {
   const p = _dsh_session_file(sid);
   return p ? _dsh_meta(p).prompt : '';
+}
+
+/**
+ * 该会话是否跑过至少一轮（`turn/start`，见 `_dsh_scan_turn`）；不可读返回 false。
+ *
+ * 看板 A 类闸的「有内容」判据（`board.isEmptySession`）：空壳会话不投影成卡。
+ * 读失败按「无内容」处理——该闸只影响「建不建卡」，不删任何东西（宁漏不误删）。
+ */
+export function dsh_has_content(sid) {
+  const p = _dsh_session_file(sid);
+  return p ? _dsh_meta(p).has_content : false;
 }
 
 /**
@@ -1126,13 +1162,14 @@ export function _list_dsh(cwd) {
       continue;
     }
     if (_header_subagent(_dsh_header(zfile))) continue;   // 子代理会话
-    // 一次解压同时取当前标题、首问与全部标题事件（同 stamp 缓存）
+    // 一次解压同时取当前标题、首问、全部标题事件与「是否跑过一轮」（同 stamp 缓存）
     const meta = _dsh_meta(zfile);
     out.push({
       sid,
       title: meta.title,
       titles: meta.titles.slice(),      // Python `list(titles)`：下发副本，不暴露缓存内数组
       first_prompt: meta.prompt,
+      has_content: meta.has_content,
       mtime,
       archived: archived.has(sid),
     });
@@ -1141,8 +1178,11 @@ export function _list_dsh(cwd) {
 }
 
 /**
- * 按工作区枚举 dsh 会话 `[{sid, title, titles, first_prompt, mtime秒, archived}]`，
+ * 按工作区枚举 dsh 会话 `[{sid, title, titles, first_prompt, has_content, mtime秒, archived}]`，
  * mtime 降序、上限 `LIST_SESSIONS_LIMIT`。
+ *
+ * `has_content` = 该会话是否**跑过至少一轮**（存在 `turn/start` 事件；看板 A 类闸据此
+ * 决定是否投影成卡，**标题不算内容**——平台建会话时就会写一枚标题，空壳会话不建卡）。
  *
  * 族不在白名单 / cwd 为空 / 异常一律静默返回 []（列表是增强能力）。
  */

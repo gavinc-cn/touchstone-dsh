@@ -1017,10 +1017,14 @@ test('splitFirstPrompt/fullFirstPrompt：截断与溢出并行的口径', () => 
 });
 
 test('isEmptySession / isPlaceholderCard：A 类空会话闸与占位形态硬闸', () => {
+  // 2026-10-25 收敛：判据只认 has_content（跑过一轮），**标题不算内容**
   assert.equal(board.isEmptySession(null), false);
   assert.equal(board.isEmptySession({}), true);
-  assert.equal(board.isEmptySession({ first_prompt: 'hi' }), false);
-  assert.equal(board.isEmptySession({ title: 'T' }), false);
+  assert.equal(board.isEmptySession({ title: 'T' }), true);               // 只有标题 ⇒ 空壳
+  assert.equal(board.isEmptySession({ title: 'T', has_content: false }), true);
+  assert.equal(board.isEmptySession({ first_prompt: 'hi', has_content: false }), true);
+  assert.equal(board.isEmptySession({ has_content: true }), false);
+  assert.equal(board.isEmptySession({ title: 'T', has_content: true }), false);
   assert.equal(board.isPlaceholderCard({ title: '' }, new Set(['abcdef0123456789'])), true);
   assert.equal(board.isPlaceholderCard({ title: 'abcdef012345' }, new Set(['abcdef0123456789'])), true);
   assert.equal(board.isPlaceholderCard({ title: '真实标题' }, new Set(['abcdef0123456789'])), false);
