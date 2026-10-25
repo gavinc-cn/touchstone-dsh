@@ -1008,6 +1008,10 @@ body.tabbar-dragging, body.tabbar-dragging * { cursor: grabbing !important; user
 .sess-msg.assistant { align-self: flex-start; max-width: 100%; width: 100%; font-size: calc(12.5px * var(--fs)); line-height: 1.65; }
 .sess-img { max-height: 160px; max-width: 320px; border-radius: 8px; border: 1px solid var(--border); display: block; margin-top: 6px; cursor: zoom-in; }
 .sess-img-ph { color: var(--dim); font-size: calc(11px * var(--fs)); }
+/* 用户提问气泡里的 markdown 截图（renderMd 的 img.md-img）：与 .sess-img 同款「可放大」
+   光标，单击弹全屏大图查看器（卡 #1088，2026-10-25）；缩略尺寸仍沿用
+   `.sess-view .md-body .md-img` 的 320×200 上限（本条只补 cursor，不抢尺寸） */
+.sess-view .sess-msg.user .md-body .md-img { cursor: zoom-in; }
 /* 思考过程(默认折叠, 灰字斜体, 与 kimi web 一致) */
 .sess-msg.think { align-self: flex-start; width: 100%; }
 .sess-msg.think summary { cursor: pointer; color: var(--dim); font-size: calc(11.5px * var(--fs)); font-style: italic; }
@@ -1317,6 +1321,61 @@ body.tabbar-dragging, body.tabbar-dragging * { cursor: grabbing !important; user
   font-size: calc(11.5px * var(--fs)); color: var(--muted-foreground);
   word-break: break-all; line-height: 1.6;
 }
+
+/* ===== 会话截图大图查看器（components/ImageViewer.jsx，卡 #1088，2026-10-25） =====
+   形态＝**嵌套 Radix Dialog**（外层会话窗也是 Dialog）：Esc 只关本层、焦点陷阱/body
+   锁滚动由 Radix 层栈自动叠对（为什么不用自建 portal 见组件头注释）。
+   本块只负责「全屏舞台 + 大图 + 工具条」的视觉；对话框自身的覆盖（inset/全屏/透明/
+   无边框）写在 JSX 的 Tailwind 工具类里——本文件整体在 @layer legacy，低于 utilities，
+   用类名覆盖基类才能稳赢。 */
+.imgv-stage {
+  position: absolute; inset: 0; z-index: 0;
+  display: flex; align-items: center; justify-content: center;
+  padding: 56px 28px 32px;
+  background: rgba(8, 10, 14, .9);
+  cursor: zoom-out;
+  animation: imgv-fade .12s ease-out;
+}
+@keyframes imgv-fade { from { opacity: 0; } to { opacity: 1; } }
+.imgv-figure {
+  position: relative; z-index: 0; margin: 0;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  max-width: 94vw; max-height: 100%;
+}
+.imgv-img {
+  max-width: 94vw; max-height: 82vh; width: auto; height: auto;
+  border-radius: 8px; border: 1px solid rgba(255, 255, 255, .16);
+  box-shadow: 0 18px 56px rgba(0, 0, 0, .62); background: #0b0d10;
+  cursor: zoom-out;
+  animation: imgv-pop .16s ease-out;
+}
+@keyframes imgv-pop {
+  from { opacity: 0; transform: scale(.985); }
+  to { opacity: 1; transform: scale(1); }
+}
+.imgv-cap {
+  max-width: 88vw; color: rgba(255, 255, 255, .7);
+  font-size: calc(12px * var(--fs));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.imgv-bar {
+  position: absolute; top: 14px; right: 16px; z-index: 2;
+  display: flex; align-items: center; gap: 8px;
+}
+.imgv-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, .22);
+  background: rgba(20, 24, 30, .72); color: #e8ecf1;
+  cursor: pointer; text-decoration: none;
+}
+.imgv-btn:hover { background: rgba(62, 70, 84, .92); color: #fff; }
+.imgv-btn-i { width: 15px; height: 15px; }
+.imgv-err {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  color: #f2f4f7; font-size: calc(13px * var(--fs));
+}
+.imgv-raw { color: #8ab4ff; text-decoration: underline; }
 
 } /* end @layer legacy */
 

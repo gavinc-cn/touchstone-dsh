@@ -238,9 +238,10 @@ describe('i18nScan 项目基线（零残留 ratchet）', () => {
     // 只断言「文件数 > 0」时，把根目录收窄（如只扫 components/）仍会绿。
     expect(SCAN_SRC_DIR).toBe(SRC_DIR)
     const files = listSourceFiles(SCAN_SRC_DIR)
-    // 文件数钉死（T7 迁移终态 80 + T8 新增 utils/dataLabels.js = 81 个源文件；
+    // 文件数钉死（T7 迁移终态 80 + T8 新增 utils/dataLabels.js = 81 个源文件
+    // + 卡 #1088 新增 components/ImageViewer.jsx = 82；
     // 新增/删除源文件需同步更新本断言）
-    expect(files).toHaveLength(81)
+    expect(files).toHaveLength(82)
     // 每个顶层源码目录都必须有文件进入清单：某个目录整体消失（遍历被打断/根被收窄）立即失败
     for (const sentinel of [
       'App.jsx', 'api/index.js', 'components/TasksTab.jsx', 'hooks/useDshHost.js',

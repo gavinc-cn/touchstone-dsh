@@ -20,6 +20,7 @@ import ComposerBar from './ComposerBar'
 import { permissionLabel } from '../utils/permission'
 import { effortChoices, effortText } from '../utils/sessionEffort'
 import FilePreview from './FilePreview'
+import ImageViewer from './ImageViewer'
 import MergeHandoffDialog from './MergeHandoffDialog'
 import { Button } from '@/components/ui/button'
 import { findSlashToken } from '../utils/slashToken'
@@ -97,10 +98,30 @@ function rowAt(off, y) {
     - 无可见内容（空正文 think / 空 usage / 未知 kind）时**整体返回 null**——与改造前逐字一致，
       否则会留下只有 margin 的幽灵行（真机数据里空正文 think 占 think 的 41%）
     entries 为 append-only 不可变数据, memo 后历史消息不随新消息重渲染(避免 O(n²) renderMd) */
-const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, roots, boardPid,
-                                            boardSid, expand, rwState, copied,
-                                            onCopy, onRewind, onOpenPath }) {
+export const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, roots,
+                                                   boardPid, boardSid, expand, rwState, copied,
+                                                   onCopy, onRewind, onOpenPath }) {
   const { t } = useI18n()
+  // 用户提问截图的大图查看器（卡 #1088，2026-10-25）：气泡里的缩略图单击 → 全屏浮层。
+  // 状态挂在本条 EntryBody 上（不开到 SessionView）：① 谁点的谁开，不牵动 memo 化的
+  // MessageList/ProcRow props 链（长会话下每多传一个回调都会让整棵消息子树重渲染）；
+  // ② 浮层经 Radix Dialog portal 挂到 body，DOM 位置与本条无关；打开期间 body 被锁滚动，
+  //    本行不会被虚拟滚动卸掉（卸载时浮层自然随之关闭）。
+  const [imgView, setImgView] = useState(null)
+  const closeImgView = useCallback(() => setImgView(null), [])
+  const openImgView = useCallback((src, alt) => {
+    const s = typeof src === 'string' ? src : ''
+    if (!s) return                       // 空/异常 src 不产生空浮层
+    setImgView({ src: s, alt: alt || '' })
+  }, [])
+  // 用户气泡正文里的 markdown 截图（renderMd 生成 img.md-img，经 dangerouslySetInnerHTML
+  // 注入）：事件委托单击开大图。只认 img.md-img，正文其它节点（inline code/链接）不拦
+  const onUserBodyClick = useCallback((ev) => {
+    const img = ev.target && ev.target.closest ? ev.target.closest('img.md-img') : null
+    if (!img) return
+    ev.preventDefault()
+    openImgView(img.getAttribute('src'), img.getAttribute('alt') || '')
+  }, [openImgView])
   // 回答正文里的路径链接（.md-path）：点击开文件预览弹窗。内容由
   // dangerouslySetInnerHTML 生成，故用事件委托——只拦 .md-path，普通外链保持默认跳转
   const onBodyClick = useCallback((ev) => {
@@ -125,7 +146,8 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
       <>
         <div className="sess-msg user">
           <div className="bubble">
-            {text && <div className="md-body" dangerouslySetInnerHTML={{ __html: renderMd(text) }}></div>}
+            {text && <div className="md-body" onClick={onUserBodyClick}
+              dangerouslySetInnerHTML={{ __html: renderMd(text) }}></div>}
             {(e.images || []).map((img, i) => {
               // media 寻址：任务模式按任务、board 模式按 项目+卡片会话 sid；
               // 两者皆不可用（board 未绑定 sid 等）→ [图片] 占位
@@ -133,8 +155,16 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
                 : taskId ? taskApi.sessionMediaUrl(taskId, agent, img.media)
                 : (boardPid && boardSid
                   ? boardApi.sessionMediaUrl(boardPid, boardSid, agent, img.media) : '')
+              // 单击缩略图弹大图（卡 #1088）；中键/Ctrl/⌘/Shift 点击不拦，
+              // 保留浏览器原生「新标签页打开」语义（<a> 的 href/target 仍在）
+              const openLarge = (ev) => {
+                if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return
+                ev.preventDefault()
+                openImgView(mediaUrl, t('图片'))
+              }
               return mediaUrl ? (
-                <a key={i} href={mediaUrl} target="_blank" rel="noreferrer">
+                <a key={i} href={mediaUrl} target="_blank" rel="noreferrer"
+                  title={t('查看大图')} onClick={openLarge}>
                   <img className="sess-img" src={mediaUrl}
                     alt={t('图片')} onError={(ev) => { ev.currentTarget.closest('a').replaceWith(t('[图片]')) }} />
                 </a>
@@ -165,6 +195,10 @@ const EntryBody = memo(function EntryBody({ e, wrap, flash, taskId, agent, pid, 
               </button>
             )}
           </div>
+        )}
+        {/* 截图大图浮层（卡 #1088）：portal 到 body，打开时 block 会话窗的点击/滚动 */}
+        {imgView && (
+          <ImageViewer src={imgView.src} alt={imgView.alt} onClose={closeImgView} />
         )}
       </>
     )
