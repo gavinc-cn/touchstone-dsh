@@ -569,9 +569,9 @@ export function pushEvent(projectId, kind, ctx, options = {}) {
  * @param {object} ctx
  * @returns {[object|null, string]}
  */
-export function singleMultiSelectPick(cid, ctx, lang = 'zh') {
+export function singleMultiSelectPick(cid, ctx, lang = 'zh', otherTail = true) {
   const q = singleQuestionView(ctx, lang);
-  const tail = q.allow_other
+  const tail = (otherTail && q.allow_other)
     ? i18n.t('api', '；自定义文字回复「作答 {cid} <文字>」', lang, { cid }) : '';
   if (!q.options.length) {
     return [null, q.allow_other
@@ -667,49 +667,120 @@ export function multiSelectForm(cid, v, btnText = '', lang = 'zh') {
 }
 
 /**
- * 多子题 → 「逐题点选卡」元素，对齐 `feishu._multi_click_elements`(feishu.py:386)：
- * 返回 `[elements, 只能文本作答的题号列表]`。单选放**根级** `select_static`；多选包一层
- * 单题 mini 表单（超预算或没选项 ⇒ 该题进 text_only，绝不发出必被拒的卡）。
+ * 自定义回答 → **单题 mini 表单**（`input` 输入框 + 提交按钮），2026-10-26 新增，
+ * 对齐 `feishu._custom_input_form`(feishu.py:596)。
+ *
+ * 飞书官方《输入框》嵌套规则：「要结合使用输入框组件与按钮组件，你需将输入框组件
+ * 与按钮组件内嵌于表单容器中」；表单容器只能放卡片根级。用户输入的文字在提交回调里
+ * 以 `action.form_value[<输入框 name>]`（**字符串**）带回——2026-10-25 真机探针定论，
+ * 且 `action.value` 取的是**提交按钮**的 behaviors.value，故 `t=ao` 挂在按钮上
+ * （输入框上带同值只作冗余兜底，与 `multiSelectForm` 同款做法）。
+ *
+ * @param {string|number} cid 卡号
+ * @param {number} no 题号（1 起；单题卡恒 1，多子题卡按题号区分）
+ * @param {string} lang
+ * @returns {object} 表单元素（体积由 `customInputElem` 校验）
+ */
+export function customInputForm(cid, no, lang = 'zh') {
+  const btn = no > 1
+    ? i18n.t('api', '提交第 {no} 题自定义回答', lang, { no })
+    : i18n.t('api', '提交自定义回答', lang);
+  return {
+    tag: 'form',
+    name: `aof${cid}_${no}`,
+    elements: [
+      {
+        tag: 'input',
+        name: `ao${cid}_${no}`,
+        placeholder: { tag: 'plain_text', content: i18n.t('api', '输入自定义回答', lang) },
+        max_length: 1000,          // 飞书输入框组件上限（1~1000，默认 1000）
+        behaviors: [{ type: 'callback', value: { t: 'ao', c: cid, n: no } }],
+      },
+      {
+        tag: 'button',
+        name: `aos${cid}_${no}`,
+        form_action_type: 'submit',
+        type: 'primary',
+        text: { tag: 'plain_text', content: btn },
+        behaviors: [{ type: 'callback', value: { t: 'ao', c: cid, n: no } }],
+      },
+    ],
+  };
+}
+
+/**
+ * `customInputForm` 的体积预算版：装得进 form 硬限返回元素，否则 `null`
+ * （绝不发出必被 `230099/11310` 拒收的卡；与多选 mini 表单同款守卫）。
+ */
+export function customInputElem(cid, no, lang = 'zh') {
+  const form = customInputForm(cid, no, lang);
+  return formCharLen(form) > MQ_FORM_MAX_BYTES ? null : form;
+}
+
+/**
+ * 多子题 → 「逐题点选卡」元素，对齐 `feishu._multi_click_elements`(feishu.py:803)：
+ * 返回 `[elements, 只能文本作答的题号列表, 发过输入框的题号列表, 发过多选表单的题号列表]`。
+ * 单选放**根级** `select_static`；多选包一层单题 mini 表单（超预算或没选项 ⇒ 不该题
+ * 有控件，绝不发出必被拒的卡）；`allow_other` 的题追加「自定义回答输入框」mini 表单
+ * （2026-10-26）——「有控件」= 选项控件或输入框任一发出，两者都发不出才进 textOnly。
  */
 export function multiClickElements(cid, views, lang = 'zh') {
   const els = [];
   const textOnly = [];
+  const customForms = [];
+  const multiForms = [];
   const n = views.length;
   for (const v of views) {
     els.push(questionMdElement(v, n, lang));
-    if (!v.options.length) {
-      textOnly.push(v.no);
-      continue;
+    let hasControl = false;
+    if (v.options.length) {
+      if (v.multi_select) {
+        const form = multiSelectForm(cid, v, '', lang);
+        if (formCharLen(form) <= MQ_FORM_MAX_BYTES) {
+          els.push(form);
+          multiForms.push(v.no);
+          hasControl = true;
+        }
+      } else {
+        els.push({
+          tag: 'select_static',
+          name: `mq${cid}_${v.no}`,
+          placeholder: { tag: 'plain_text', content: i18n.t('api', '请选择', lang) },
+          options: v.options.map((o) => ({
+            text: { tag: 'plain_text', content: o.label },
+            value: String(o.no),
+          })),
+          behaviors: [{ type: 'callback', value: { t: 'mq', c: cid, n: v.no } }],
+        });
+        hasControl = true;
+      }
     }
-    if (v.multi_select) {
-      const form = multiSelectForm(cid, v, '', lang);
-      if (formCharLen(form) <= MQ_FORM_MAX_BYTES) els.push(form);
-      else textOnly.push(v.no);        // 组件装不进 form 硬限：退回文本作答
-      continue;
+    if (v.allow_other) {
+      const cform = customInputElem(cid, v.no, lang);
+      if (cform !== null) {
+        els.push(cform);
+        customForms.push(v.no);
+        hasControl = true;
+      }
     }
-    els.push({
-      tag: 'select_static',
-      name: `mq${cid}_${v.no}`,
-      placeholder: { tag: 'plain_text', content: i18n.t('api', '请选择', lang) },
-      options: v.options.map((o) => ({
-        text: { tag: 'plain_text', content: o.label },
-        value: String(o.no),
-      })),
-      behaviors: [{ type: 'callback', value: { t: 'mq', c: cid, n: v.no } }],
-    });
+    if (!hasControl) textOnly.push(v.no);   // 没有可点控件：退回文本作答
   }
-  return [els, textOnly];
+  return [els, textOnly, customForms, multiForms];
 }
 
 /**
- * 逐题点选卡末行指引，对齐 `feishu._multi_click_hint`(feishu.py:455)。
- * `textOnly` = 卡片上没有可点控件的题号；`multiForms` = 发了多选 mini 表单的题号。
+ * 逐题点选卡末行指引，对齐 `feishu._multi_click_hint`(feishu.py:973)。
+ * `textOnly` = 卡片上没有可点控件的题号；`multiForms` = 发了多选 mini 表单的题号；
+ * `customForms` = 发了「自定义回答输入框」的题号（不再进文本补答清单）。
  */
-export function multiClickHint(cid, qs, textOnly = [], multiForms = [], lang = 'zh') {
+export function multiClickHint(cid, qs, textOnly = [], multiForms = [], lang = 'zh',
+  customForms = []) {
+  const custom = [...new Set(customForms)].sort((a, b) => a - b);
+  const customSet = new Set(custom);
   const extra = [...new Set([
     ...textOnly,
     ...qs.map((q, i) => ((q || {}).allow_other ? i + 1 : null)).filter((v) => v !== null),
-  ])].sort((a, b) => a - b);
+  ])].filter((i) => !customSet.has(i)).sort((a, b) => a - b);
   const lines = [i18n.t('api', '逐题选择即可，答满 {n} 题自动送达 agent。', lang,
     { n: qs.length })];
   const forms = [...new Set(multiForms)].sort((a, b) => a - b);
@@ -717,6 +788,11 @@ export function multiClickHint(cid, qs, textOnly = [], multiForms = [], lang = '
     const sep = i18n.t('api', '；', lang);
     lines.push(forms.map((i) => i18n.t('api',
       '第 {i} 题是多选：勾选后点「提交第 {i} 题」', lang, { i })).join(sep));
+  }
+  if (custom.length) {
+    const nos = custom.join(i18n.t('api', '、', lang));
+    lines.push(i18n.t('api',
+      '第 {nos} 题可在下方输入框填写自定义回答（点带题号的提交按钮）', lang, { nos }));
   }
   if (extra.length) {
     const nos = i18n.t('api', '、', lang);
@@ -736,7 +812,10 @@ export function multiClickHint(cid, qs, textOnly = [], multiForms = [], lang = '
  * 形态分支（与 `render` 的文本分支**不是**同一套，别互相套用）：可远程作答的多子题 ⇒
  * 逐题点选卡（单选根级下拉 / 多选 mini 表单）+ 指引；不可远程作答的多子题 ⇒ 逐题只读 +
  * 统一引导；审批 ⇒ 批准/会话内批准/拒绝三按钮；单题多选 ⇒ mini 表单（装不下则文字指引）；
- * 单题单选 ⇒ 每选项一个按钮。按钮 value 精简键 `t/c/n/i`。
+ * 单题单选 ⇒ 每选项一个按钮。**2026-10-26 起** `allow_other` 的题（单题单选/多选/无选项、
+ * 多子题逐题）再追加「输入框 + 提交」mini 表单（`customInputForm`，回调 t=ao，
+ * 见 `answerCustomText`）⇒ 单题多选/多子题卡可**同时出现多张 form**。
+ * 按钮 value 精简键 `t/c/n/i`。
  * @param {object} ctx
  * @param {string} projectName
  * @returns {object}
@@ -804,14 +883,14 @@ export function buildInteractionCard(ctx, projectName, lang = 'zh') {
         ].join('\n'),
       });
       if (pyTruthy(ctx.answerable)) {
-        const [clickEls, textOnly] = multiClickElements(cid, views, lang);
+        // 可远程作答：逐题点选（单选根级下拉 / 多选 mini 表单）；允许自定义的题
+        // 另给「输入框 + 提交」mini 表单（2026-10-26）；放不下控件的题走文本补答
+        const [clickEls, textOnly, customForms, multiForms] =
+          multiClickElements(cid, views, lang);
         elements.push(...clickEls);
-        const forms = views
-          .filter((v) => v.multi_select && !textOnly.includes(v.no))
-          .map((v) => v.no);
         elements.push({
           tag: 'markdown',
-          content: multiClickHint(cid, qs, textOnly, forms, lang),
+          content: multiClickHint(cid, qs, textOnly, multiForms, lang, customForms),
         });
       } else {
         elements.push(...questionCardBlocks(views, lang));
@@ -831,6 +910,7 @@ export function buildInteractionCard(ctx, projectName, lang = 'zh') {
         md.push(`${i}) ${pyStr(o)}`);
       }
       elements.push({ tag: 'markdown', content: md.join('\n') });
+      const view = singleQuestionView(ctx, lang);
       let hint = null;
       if (!pyTruthy(ctx.answerable)) {
         hint = noRemoteAnswerHint(lang);
@@ -838,9 +918,28 @@ export function buildInteractionCard(ctx, projectName, lang = 'zh') {
         hint = i18n.t('api', '该提问含 {n} 道子题，请到站点会话窗口逐题作答', lang,
           { n: pyStr(ctx.questions_count || qs.length) });
       } else if (pyTruthy(ctx.multi_select)) {
-        const [form, pickHint] = singleMultiSelectPick(cid, ctx, lang);
+        // 单题多选：多选 mini 表单（装不下/无选项时只给文本指引）；
+        // 2026-10-26：允许自定义的题再加一个「输入框 + 提交」mini 表单
+        const [form, pickHint] = singleMultiSelectPick(cid, ctx, lang, false);
         hint = pickHint;
         if (form !== null) elements.push(form);
+        if (view.allow_other) {
+          const cform = customInputElem(cid, 1, lang);
+          if (cform !== null) {
+            elements.push(cform);
+            hint = form !== null
+              ? i18n.t('api',
+                '多选题：勾选后点「提交作答」；自定义文字在下方输入框'
+                + '填写后点「提交自定义回答」（也可回复「作答 {cid} <文字>」）',
+                lang, { cid: pyStr(cid) })
+              : i18n.t('api',
+                '在下方输入框填写自定义回答后点「提交自定义回答」，'
+                + '也可回复「作答 {cid} <文字>」', lang, { cid: pyStr(cid) });
+          } else {
+            hint += i18n.t('api', '；自定义文字回复「作答 {cid} <文字>」',
+              lang, { cid: pyStr(cid) });
+          }
+        }
       }
       if (pyTruthy(ctx.answerable) && !hint && kind === 'question') {
         let k = 0;
@@ -853,9 +952,17 @@ export function buildInteractionCard(ctx, projectName, lang = 'zh') {
             behaviors: [{ type: 'callback', value: { t: 'a', c: cid, i: k } }],
           });
         }
-        if (pyTruthy(ctx.allow_other)) {
-          hint = i18n.t('api', '自定义回答请回复「作答 {cid} <文字>」', lang,
-            { cid: pyStr(cid) });
+        if (view.allow_other) {
+          const cform = customInputElem(cid, 1, lang);
+          if (cform !== null) {
+            elements.push(cform);
+            hint = i18n.t('api',
+              '自定义回答：在下方输入框填写后点「提交自定义回答」，'
+              + '也可回复「作答 {cid} <文字>」', lang, { cid: pyStr(cid) });
+          } else {
+            hint = i18n.t('api', '自定义回答请回复「作答 {cid} <文字>」', lang,
+              { cid: pyStr(cid) });
+          }
         }
       }
       if (hint) elements.push({ tag: 'markdown', content: hint });

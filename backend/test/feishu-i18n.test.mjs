@@ -30,7 +30,7 @@ const cardSha = (card) => sha256(pyJsonDumps(card));
 const GOLDEN = {
   question_card: 'd7831a0720879f39d5d83daa4819246fe84edbdd03e652a19918bfb62cd97782',
   approval_card: '15ce9ac0da8637592c97f2056eed0f945c82f0cb0c492aabe36fe2e288df76fe',
-  multi_card: '017f0c872f74238f729c8a2ed731c4bcbe524d06d718cbe15e344a77f76b000a',
+  multi_card: 'a04301c696c1cd222d899b63ed61f755bda7826cf5c6c1cafa80d71267346d37',
   multi_hint: 'f3d95646d415d34e1b4d6508834530d5bb0ef3f9ce32eda9166aebd702e2a648',
   multi_answer_help: 'c4bbb506ec2d6ed1ec8fcbe1e70f97c1c236d8e1d0c8ebf45ee9d374869ae1a9',
   instruction_bind_reply: '84010a0d9a54f4d0c55d960dc4fd749e20147b30a1c4e209d4f52df6797ed6d4',

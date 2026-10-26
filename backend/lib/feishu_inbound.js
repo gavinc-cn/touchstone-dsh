@@ -545,6 +545,12 @@ const MSG_SEEN_MAX = 512;
 const EVT_SEEN_MAX = 512;
 /** `_MQ_STAGE`（2109）：`(卡号:int, qid:str) -> {n, vals:Map<no,val>, at}`（桶键见 `mqKey`） */
 const MQ_STAGE = new Map();
+/**
+ * 2026-10-26：卡片「自定义回答」输入框（t=ao）提交的文本在逐题暂存里用该前缀标记，
+ * 让 `multiAnswers` 把「纯数字文本」按**自由文本**（kind=other）处理，而不是误判成
+ * 选项序号（「作答 卡号 1:2」那条文本指令路径的语义不变）。控制字符用户敲不出来。
+ */
+export const MQ_TEXT_MARK = '\u0001';
 
 // ---- M11（2026-10-17）：可停长连接 + 接入卡片 nonce（对齐 feishu.py 的 `_WS_CLIENTS`/`_SETUP_NONCES`）
 
@@ -880,6 +886,20 @@ export function multiAnswers(qs, parts, options = {}) {
     const wire = pyStr(pyOr(dget(q, 'id'), `q_${i - 1}`));
     const opts = pyOr(dget(q, 'options'), []);
     const multi = pyTruthy(dget(q, 'multi_select'));
+    if (val.startsWith(MQ_TEXT_MARK)) {
+      // 输入框提交的自定义回答：强制按自由文本处理（纯数字也当文字），
+      // 见 `answerCustomText`；文本指令路径不会产生该前缀（用户敲不出控制字符）。
+      const text = val.slice(MQ_TEXT_MARK.length);
+      if (!pyTruthy(text)) {
+        return [null, i18n.t('api', '第 {no} 题未作答', lang, { no: i })];
+      }
+      if (pyLen(text) > 2000) {
+        return [null, i18n.t('api', '第 {no} 题自定义输入过长（限 2000 字）', lang,
+          { no: i })];
+      }
+      out.push({ wire, kind: 'other', text });
+      continue;
+    }
     if (INDEX_CSV.test(val)) {                              // 序号形态（单个/逗号多选）
       if (!pyTruthy(opts)) {
         return [null, i18n.t('api', '第 {no} 题没有选项，请直接写回答文字', lang,
@@ -1277,6 +1297,105 @@ export async function answerMultiClick(p, c, value, action, options = {}) {
       toast('error', i18n.t('api', '作答未提交', lang))];
   }
   const err2 = await d.board.answerInteraction(p, c, dget(st, 'qid'), answers, options);
+  if (pyTruthy(err2)) {
+    return [i18n.t('api', '作答失败：{err}', lang, { err: pyStr(err2) }),
+      toast('error', i18n.t('api', '作答失败', lang))];
+  }
+  return [i18n.t('api', '已收下：卡片 #{cid} {n} 道作答，排队送达中', lang,
+    { cid: c.id, n: answers.length }),
+  toast('success', i18n.t('api', '{n} 题已答完，已送达', lang,
+    { n: answers.length }))];
+}
+
+/**
+ * 卡片「自定义回答」输入框提交（回调 `t=ao`，2026-10-26）：读 `form_value` 文本作答。
+ * 对齐 `feishu._answer_custom_text`(feishu.py:3466)。
+ *
+ * 真机探针定论（2026-10-25）：表单提交帧 `action.tag="button"`、`action.name`=提交
+ * 按钮 name、`action.value`=**提交按钮**的 behaviors.value，用户输入文字在
+ * `action.form_value[<输入框 name>]`（字符串，键名 `ao<卡号>_<题号>`）。
+ *
+ * - **单题（n<=1）**：直接按 `kind=other` 送达。**不解析数字**——输入框语义就是自定义
+ *   文本，填「123」就是文字 123（`answerByToken` 那条文本指令路径才把纯数字当序号）。
+ * - **多子题（n>1）**：文本写进逐题暂存（`MQ_TEXT_MARK` 前缀标记「文本」，避免
+ *   `multiAnswers` 误判数字为序号），答满整批送达；缺题只回带进度的 toast。
+ * 返回 `[DM 回执文案 or "", toast]`，与 `answerMultiClick` 同形。
+ */
+export async function answerCustomText(p, c, value, action, options = {}) {
+  const d = dep(options);
+  const lang = options.lang || 'zh';
+  const st = d.board.interactionOfSid(pyOr(c.session_id, ''));
+  if (!pyTruthy(st) || !pyTruthy(dget(st, 'pending'))) {
+    return [i18n.t('api', '卡片 #{cid} 当前没有等待中的提问', lang, { cid: c.id }),
+      toast('error', i18n.t('api', '提问已结束', lang))];
+  }
+  if (dget(st, 'kind') === 'approval') {
+    return [i18n.t('api', '该等待是工具审批，请回复「同意 {cid}」或「拒绝 {cid}」',
+      lang, { cid: c.id }),
+    toast('error', i18n.t('api', '该等待是审批', lang))];
+  }
+  if (!pyTruthy(dget(st, 'answerable'))) {
+    return [d.feishu.noRemoteAnswerHint(lang),
+      toast('error', i18n.t('api', '请到 dsh 会话窗口作答', lang))];
+  }
+  const qs = (dget(st, 'questions') || []).filter((q) => pyTruthy(q));
+  const n = qs.length;
+  let no = 0;
+  try { no = pyInt(pyOr(dget(value, 'n'), '')); } catch { no = 0; }
+  if (n > 1 && (no < 1 || no > n)) {
+    return [i18n.t('api', '题号无效（卡片可能已过期），请重新作答', lang),
+      toast('error', i18n.t('api', '题号无效', lang))];
+  }
+  if (n <= 1) no = 1;
+  const q = n > 0 ? pyOr(qs[no - 1], {}) : {};
+  const raw = pyOr(dget(action, 'form_value'), {})[`ao${c.id}_${no}`];
+  if (typeof raw !== 'string') {
+    return [i18n.t('api', '没收到输入内容，请重新输入后再提交', lang),
+      toast('error', i18n.t('api', '未收到输入内容', lang))];
+  }
+  const text = raw.trim();
+  if (!pyTruthy(text)) {
+    return [i18n.t('api', '请先在输入框输入自定义回答', lang),
+      toast('error', i18n.t('api', '未填写自定义回答', lang))];
+  }
+  if (pyLen(text) > 2000) {
+    return [i18n.t('api', '输入内容过长（限 2000 字）', lang),
+      toast('error', i18n.t('api', '输入内容过长', lang))];
+  }
+  if (!pyTruthy(dget(q, 'allow_other'))) {
+    return [i18n.t('api', '该问题不支持自定义输入', lang),
+      toast('error', i18n.t('api', '该问题不支持自定义输入', lang))];
+  }
+  const qid = dget(st, 'qid');
+  if (n <= 1) {
+    const wire = pyOr(dget(q, 'id'), 'q_0');
+    const err = await d.board.answerInteraction(p, c, qid,
+      [{ wire, kind: 'other', text }], options);
+    if (pyTruthy(err)) {
+      return [i18n.t('api', '作答失败：{err}', lang, { err: pyStr(err) }),
+        toast('error', i18n.t('api', '作答失败', lang))];
+    }
+    return [i18n.t('api', '已收下：卡片 #{cid} 自定义回答，排队送达中', lang,
+      { cid: c.id }),
+    toast('success', i18n.t('api', '自定义回答已提交，排队送达中', lang))];
+  }
+  const [done, total, ready] = mqPut(c.id, qid, n, no, MQ_TEXT_MARK + text, options);
+  if (!ready) {
+    return ['', toast('success', i18n.t('api', '已记下第 {no} 题（{done}/{total}）',
+      lang, { no, done, total }))];
+  }
+  const parts = mqTake(c.id, qid, n, options);
+  if (parts.length < n) {
+    // 极端竞态（取走前被 TTL 清掉/并发取走）：不提交半份，让用户重填
+    return [i18n.t('api', '作答未提交（暂存已过期），请重新逐题选择', lang),
+      toast('error', i18n.t('api', '暂存过期，请重选', lang))];
+  }
+  const [answers, err] = multiAnswers(qs, parts, options);
+  if (pyTruthy(err)) {
+    return [i18n.t('api', '作答未提交：{err}', lang, { err }),
+      toast('error', i18n.t('api', '作答未提交', lang))];
+  }
+  const err2 = await d.board.answerInteraction(p, c, qid, answers, options);
   if (pyTruthy(err2)) {
     return [i18n.t('api', '作答失败：{err}', lang, { err: pyStr(err2) }),
       toast('error', i18n.t('api', '作答失败', lang))];
@@ -1995,7 +2114,7 @@ export async function onCardAction(data, cfg, options = {}) {
       return await d.conv.onCardAction(sender, binding, value, action, cfg,
         { ...options, lang: langOfBinding(binding, options) });
     }
-    if (!['a', 'mq', 'p', 's', 'd'].includes(t) || !pyTruthy(key)) return null;
+    if (!['a', 'mq', 'ao', 'p', 's', 'd'].includes(t) || !pyTruthy(key)) return null;
     const binding = d.db.getFeishuBindingByOpen(sender, options);
     if (binding === null || binding === undefined) {
       await dmText(sender, i18n.t('api', UNBOUND_DM_CARD, 'zh'), cfg, options);
@@ -2014,6 +2133,13 @@ export async function onCardAction(data, cfg, options = {}) {
       const [dm, replyToast] = await answerMultiClick(p, c, value, action, opts);
       if (pyTruthy(dm)) await dmText(sender, dm, cfg, opts);
       return replyToast;                 // 每次点击都回 toast（含进度）（1932-1937）
+    }
+    if (t === 'ao') {
+      // 自定义回答输入框提交（2026-10-26）：多子题未答满只回进度 toast（无 DM），
+      // 单题/答满才发 DM 回执
+      const [dm, replyToast] = await answerCustomText(p, c, value, action, opts);
+      if (pyTruthy(dm)) await dmText(sender, dm, cfg, opts);
+      return replyToast;
     }
     if (t === 'a') {
       reply = await answerByToken(p, c, pyStr(pyOr(dget(value, 'i'), '')), opts);

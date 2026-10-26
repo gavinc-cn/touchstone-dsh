@@ -379,7 +379,7 @@ def _single_question_view(ctx, lang="zh"):
 
 
 
-def _single_multi_select_pick(cid, ctx, lang="zh"):
+def _single_multi_select_pick(cid, ctx, lang="zh", other_tail=True):
     """单题**多选**且可远程作答 → `(mini 表单元素 or None, 指引文案)`。
 
     多选组件 `multi_select_static` 按飞书官方规定**只能内嵌表单容器**（`checker`
@@ -389,10 +389,14 @@ def _single_multi_select_pick(cid, ctx, lang="zh"):
 
     表单 JSON 超 `_MQ_FORM_MAX_BYTES`（飞书 form 元素 1000 字节硬限，超限必被
     `230099/11310` 拒收且整卡静默丢失）或该题没有选项时**不发控件**，只回文本
-    作答指引——绝不发出必被拒的卡。"""
+    作答指引——绝不发出必被拒的卡。
+
+    `other_tail=False` 供 `_build_interaction_card` 用：2026-10-26 起允许自定义的
+    题另发一个「输入框 + 提交」mini 表单，调用方要自己拼自定义回答的指引，故
+    这里不再带「自定义文字回复…」尾巴（默认 True 保持既有调用面输出不变）。"""
     q = _single_question_view(ctx, lang)
     tail = (i18n.t("api", "；自定义文字回复「作答 {cid} <文字>」", lang, cid=cid)
-            if q["allow_other"] else "")
+            if (other_tail and q["allow_other"]) else "")
     if not q["options"]:
         return None, (i18n.t("api", "请回复「作答 {cid} <文字>」作答", lang, cid=cid)
                       if q["allow_other"]
@@ -501,31 +505,46 @@ def _multi_click_elements(cid, views, lang="zh"):
 
     选项 `value` 取 1 起序号：回调时按**当前**服务端白名单换回 option id（与文本
     指令/选项按钮同款校验，天然防过期卡片重放与伪造）。
-    无选项的题不发组件，同样进「只能文本作答」列表。"""
-    els, text_only = [], []
+    无选项的题不发组件，同样进「只能文本作答」列表。
+
+    2026-10-26：`allow_other` 的题在选项控件之后追加「自定义回答输入框」mini 表单
+    （`_custom_input_form`）——用户可直接打字提交，不必再记「作答 卡号 题号:文字」。
+    返回 `(elements, 只能文本作答的题号, 发过输入框的题号, 发过多选表单的题号)`；
+    「有控件」= 选项控件或输入框任一发出，两者都发不出才算 text_only。"""
+    els, text_only, custom_forms, multi_forms = [], [], [], []
     n = len(views)
     for v in views:
         els.append(_question_md_element(v, n, lang))
-        if not v["options"]:
-            text_only.append(v["no"])
-            continue
-        if v["multi_select"]:
-            form = _multi_select_form(cid, v, lang=lang)
-            if len(json.dumps(form, ensure_ascii=False)) <= _MQ_FORM_MAX_BYTES:
-                els.append(form)
+        has_control = False
+        if v["options"]:
+            if v["multi_select"]:
+                form = _multi_select_form(cid, v, lang=lang)
+                if len(json.dumps(form, ensure_ascii=False)) <= _MQ_FORM_MAX_BYTES:
+                    els.append(form)
+                    multi_forms.append(v["no"])
+                    has_control = True
             else:
-                text_only.append(v["no"])   # 组件装不进 form 硬限：退回文本作答
-            continue
-        els.append({
-            "tag": "select_static",
-            "name": f"mq{cid}_{v['no']}",
-            "placeholder": {"tag": "plain_text",
-                            "content": i18n.t("api", "请选择", lang)},
-            "options": [{"text": {"tag": "plain_text", "content": o["label"]},
-                         "value": str(o["no"])} for o in v["options"]],
-            "behaviors": [{"type": "callback",
-                           "value": {"t": "mq", "c": cid, "n": v["no"]}}]})
-    return els, text_only
+                els.append({
+                    "tag": "select_static",
+                    "name": f"mq{cid}_{v['no']}",
+                    "placeholder": {"tag": "plain_text",
+                                    "content": i18n.t("api", "请选择", lang)},
+                    "options": [{"text": {"tag": "plain_text",
+                                          "content": o["label"]},
+                                 "value": str(o["no"])} for o in v["options"]],
+                    "behaviors": [{"type": "callback",
+                                   "value": {"t": "mq", "c": cid,
+                                             "n": v["no"]}}]})
+                has_control = True
+        if v["allow_other"]:
+            cform = _custom_input_elem(cid, v["no"], lang)
+            if cform is not None:
+                els.append(cform)
+                custom_forms.append(v["no"])
+                has_control = True
+        if not has_control:
+            text_only.append(v["no"])    # 没有可点控件：退回文本作答
+    return els, text_only, custom_forms, multi_forms
 
 
 def _multi_select_form(cid, v, btn_text="", lang="zh"):
@@ -553,14 +572,58 @@ def _multi_select_form(cid, v, btn_text="", lang="zh"):
         ]}
 
 
-def _multi_click_hint(cid, qs, text_only=(), multi_forms=(), lang="zh"):
+def _custom_input_form(cid, no, lang="zh"):
+    """自定义回答 → **单题 mini 表单**（`input` 输入框 + 提交按钮），2026-10-26 新增。
+
+    飞书官方《输入框》嵌套规则：「要结合使用输入框组件与按钮组件，你需将输入框组件
+    与按钮组件内嵌于表单容器中」；表单容器只能放卡片根级。用户输入的文字在提交
+    回调里以 `action.form_value[<输入框 name>]`（**字符串**）带回——2026-10-25 真机
+    探针实测定论，且 `action.value` 取的是**提交按钮**的 behaviors.value，故 `t=ao`
+    挂在按钮上（输入框上带同值只作冗余兜底，与 `_multi_select_form` 同款做法）。
+
+    `no` = 题号（1 起）：单题卡恒 1；多子题卡按题号区分（按钮文案带题号）。
+    体积由调用方按 `_MQ_FORM_MAX_BYTES` 校验（超预算不发控件、退回文本指引）。"""
+    btn = (i18n.t("api", "提交第 {no} 题自定义回答", lang, no=no)
+           if no > 1 else i18n.t("api", "提交自定义回答", lang))
+    return {
+        "tag": "form", "name": f"aof{cid}_{no}",
+        "elements": [
+            {"tag": "input", "name": f"ao{cid}_{no}",
+             "placeholder": {"tag": "plain_text",
+                             "content": i18n.t("api", "输入自定义回答", lang)},
+             "max_length": 1000,      # 飞书输入框组件上限（1~1000，默认 1000）
+             "behaviors": [{"type": "callback",
+                            "value": {"t": "ao", "c": cid, "n": no}}]},
+            {"tag": "button", "name": f"aos{cid}_{no}",
+             "form_action_type": "submit", "type": "primary",
+             "text": {"tag": "plain_text", "content": btn},
+             "behaviors": [{"type": "callback",
+                            "value": {"t": "ao", "c": cid, "n": no}}]},
+        ]}
+
+
+def _custom_input_elem(cid, no, lang="zh"):
+    """`_custom_input_form` 的体积预算版：装得进 form 硬限返回元素，否则 None。
+    绝不发出必被 `230099/11310` 拒收的卡（与多选 mini 表单同款守卫）。"""
+    form = _custom_input_form(cid, no, lang)
+    if len(json.dumps(form, ensure_ascii=False)) > _MQ_FORM_MAX_BYTES:
+        return None
+    return form
+
+
+def _multi_click_hint(cid, qs, text_only=(), multi_forms=(), lang="zh",
+                      custom_forms=()):
     """逐题点选卡末行指引：点满自动整批送达；要写自定义文字（或控件放不下的题）
     给文本补答语法（文本指令与已点选的答案**可混用**——已点选的题不必重复给，
     见 `_answer_by_token`）。`text_only` = 卡片上没有可点控件的题号；
     `multi_forms` = 卡片上发了多选 mini 表单的题号（多选是「勾选 + 点提交」两步，
-    不点名容易被当成勾上就算答了）。`lang` 只影响包装文案，题号/卡号是数据。"""
-    extra = sorted(set(text_only)
-                   | {i for i, q in enumerate(qs, 1) if (q or {}).get("allow_other")})
+    不点名容易被当成勾上就算答了）；`custom_forms` = 卡片上发了「自定义回答输入框」
+    的题号（2026-10-26）——这些题打字后点提交即可，不再进文本补答清单。
+    `lang` 只影响包装文案，题号/卡号是数据。"""
+    custom = sorted(set(custom_forms))
+    extra = sorted((set(text_only)
+                    | {i for i, q in enumerate(qs, 1)
+                       if (q or {}).get("allow_other")}) - set(custom))
     lines = [i18n.t("api", "逐题选择即可，答满 {n} 题自动送达 agent。", lang,
                     n=len(qs))]
     forms = sorted(set(multi_forms))
@@ -569,6 +632,11 @@ def _multi_click_hint(cid, qs, text_only=(), multi_forms=(), lang="zh"):
         lines.append(sep.join(
             i18n.t("api", "第 {i} 题是多选：勾选后点「提交第 {i} 题」", lang,
                    i=i) for i in forms))
+    if custom:
+        nos = i18n.t("api", "、", lang).join(str(i) for i in custom)
+        lines.append(i18n.t(
+            "api", "第 {nos} 题可在下方输入框填写自定义回答（点带题号的提交按钮）",
+            lang, nos=nos))
     if extra:
         nos = i18n.t("api", "、", lang).join(str(i) for i in extra)
         values = " ".join(i18n.t("api", "{i}:<值>", lang, i=i) for i in extra)
@@ -596,10 +664,16 @@ def _build_interaction_card(ctx, project_name, lang="zh"):
     - 单题**多选**提问：卡片上给单题 mini 表单（`multi_select_static` + 「提交作答」
       按钮，飞书规定多选组件只能内嵌表单容器），回调 t=mq/n=1 单题点满即送达
       （2026-10-07 第四档，此前只给文字指引）；表单超预算/无选项则退回文字指引
-    - 单题自由文本：文字指引（仍走「作答 卡号 …」指令）
-    按钮 value 精简键：t=动作（a 作答单题 / mq 多选题点选 / p 批准 / s 会话内批准 /
-    d 拒绝）、c=卡号、n=题号、i=选项序号——回调时重读 interaction_of_sid 取服务端
-    选项白名单，天然防过期 qid 重放与伪造（board 侧还有整批白名单校验兜底）。
+    - **自定义回答输入框（2026-10-26）**：`allow_other` 的题（单题单选/多选/无选项、
+      多子题逐题）在选项控件之后追加「输入框 + 提交」mini 表单
+      （`_custom_input_form`，回调 t=ao，见 `_answer_custom_text`）——用户可直接在
+      卡上打字，不必再记「作答 卡号 题号:文字」；单题多选/多子题卡可**同时出现多张
+      form**。装不进 form 体积预算时退回文字指引
+    - 单题自由文本：文字指引（仍走「作答 卡号 …」指令；有输入框时作为兜底）
+    按钮 value 精简键：t=动作（a 作答单题 / mq 多选题点选 / ao 自定义回答提交 /
+    p 批准 / s 会话内批准 / d 拒绝）、c=卡号、n=题号、i=选项序号——回调时重读
+    interaction_of_sid 取服务端选项白名单，天然防过期 qid 重放与伪造（board 侧还有
+    整批白名单校验兜底）。
     `lang` 只影响包装文案；标题/题面/选项等数据原样插入（不翻译）。"""
     kind = ctx.get("kind")
     cid = ctx.get("card_id")
@@ -652,14 +726,15 @@ def _build_interaction_card(ctx, project_name, lang="zh"):
                        title=(ctx.get("title") or "")[:60])])})
             if ctx.get("answerable"):
                 # 可远程作答：逐题点选（单选=根级下拉；多选=单题 mini 表单），
+                # 允许自定义的题另给「输入框 + 提交」mini 表单（2026-10-26）；
                 # 点满自动整批送达；放不下控件的题由指引点名走文本补答
-                click_els, text_only = _multi_click_elements(cid, views, lang)
+                click_els, text_only, custom_forms, multi_forms = \
+                    _multi_click_elements(cid, views, lang)
                 elements.extend(click_els)
-                forms = [v["no"] for v in views
-                         if v["multi_select"] and v["no"] not in text_only]
                 elements.append({"tag": "markdown",
                                  "content": _multi_click_hint(cid, qs, text_only,
-                                                              forms, lang)})
+                                                              multi_forms, lang,
+                                                              custom_forms)})
             else:
                 # 不可远程作答（会话非平台自持）：逐题只读展示 + dsh 会话窗口引导。
                 # 2026-10-06 前的实现落到下面的单题分支，只渲染首题（q0），其余
@@ -679,6 +754,7 @@ def _build_interaction_card(ctx, project_name, lang="zh"):
             for i, o in enumerate(ctx.get("options") or [], 1):
                 md.append(f"{i}) {o}")
             elements.append({"tag": "markdown", "content": "\n".join(md)})
+            view = _single_question_view(ctx, lang)
             hint = None
             if not ctx.get("answerable"):
                 # 不可远程作答：站点会话窗也答不了（见 _NO_REMOTE_ANSWER_HINT）
@@ -689,10 +765,30 @@ def _build_interaction_card(ctx, project_name, lang="zh"):
                               n=ctx.get("questions_count") or len(qs))
             elif ctx.get("multi_select"):
                 # 单题多选：卡片上给单题 mini 表单（多选组件只能内嵌表单容器）；
-                # 装不下/无选项时只给文本指引（见 _single_multi_select_pick）
-                form, hint = _single_multi_select_pick(cid, ctx, lang)
+                # 装不下/无选项时只给文本指引（见 _single_multi_select_pick）。
+                # 2026-10-26：允许自定义的题再加一个「输入框 + 提交」mini 表单。
+                form, hint = _single_multi_select_pick(cid, ctx, lang,
+                                                       other_tail=False)
                 if form is not None:
                     elements.append(form)
+                if view["allow_other"]:
+                    cform = _custom_input_elem(cid, 1, lang)
+                    if cform is not None:
+                        elements.append(cform)
+                        hint = (i18n.t(
+                            "api",
+                            "多选题：勾选后点「提交作答」；自定义文字在下方输入框"
+                            "填写后点「提交自定义回答」（也可回复「作答 {cid} <文字>」）",
+                            lang, cid=str(cid)) if form is not None
+                            else i18n.t(
+                                "api",
+                                "在下方输入框填写自定义回答后点「提交自定义回答」，"
+                                "也可回复「作答 {cid} <文字>」",
+                                lang, cid=str(cid)))
+                    else:
+                        hint += i18n.t("api",
+                                       "；自定义文字回复「作答 {cid} <文字>」",
+                                       lang, cid=str(cid))
             if ctx.get("answerable") and not hint and kind == "question":
                 for i, o in enumerate(ctx.get("options") or [], 1):
                     elements.append({
@@ -700,9 +796,18 @@ def _build_interaction_card(ctx, project_name, lang="zh"):
                         "text": {"tag": "plain_text", "content": f"{i}) {o}"},
                         "behaviors": [{"type": "callback",
                                        "value": {"t": "a", "c": cid, "i": i}}]})
-                if ctx.get("allow_other"):
-                    hint = i18n.t("api", "自定义回答请回复「作答 {cid} <文字>」",
-                                  lang, cid=str(cid))
+                if view["allow_other"]:
+                    cform = _custom_input_elem(cid, 1, lang)
+                    if cform is not None:
+                        elements.append(cform)
+                        hint = i18n.t(
+                            "api",
+                            "自定义回答：在下方输入框填写后点「提交自定义回答」，"
+                            "也可回复「作答 {cid} <文字>」",
+                            lang, cid=str(cid))
+                    else:
+                        hint = i18n.t("api", "自定义回答请回复「作答 {cid} <文字>」",
+                                      lang, cid=str(cid))
             if hint:
                 elements.append({"tag": "markdown", "content": hint})
     return {"schema": "2.0",
@@ -2536,7 +2641,7 @@ def _on_card_action(data, cfg):
                                   "content": i18n.t("api", "尚未绑定站点账号", "zh")}}
             return feishu_conv.on_card_action(sender, binding, value, action, cfg,
                                               user_lang(binding["user_id"]))
-        if t not in ("a", "mq", "p", "s", "d") or not key:
+        if t not in ("a", "mq", "ao", "p", "s", "d") or not key:
             return None
         binding = db.get_feishu_binding_by_open(sender)
         if binding is None:
@@ -2555,6 +2660,13 @@ def _on_card_action(data, cfg):
         if t == "mq":
             # 多选类点选：每次点击自带 toast（含进度），答满那次才发 DM 文本
             reply, toast = _answer_multi_click(p, c, value, action, lang)
+            if reply:
+                _dm_text(sender, reply, cfg)
+            return toast
+        if t == "ao":
+            # 自定义回答输入框提交（2026-10-26）：每次提交自带 toast；
+            # 多子题未答满时只回进度 toast（无 DM），答满/单题才发 DM 回执
+            reply, toast = _answer_custom_text(p, c, value, action, lang)
             if reply:
                 _dm_text(sender, reply, cfg)
             return toast
@@ -3063,6 +3175,10 @@ def _set_default_project(binding, name, project_id=0, lang=None):
 # （不引 DB——暂存是中转态，落库反而要处理与 qid 的一致性）。
 _MQ_LOCK = threading.Lock()
 _MQ_STAGE = {}         # (card_id:int, qid:str) -> {"n":int, "vals":{no:val}, "at":float}
+# 2026-10-26：卡片「自定义回答」输入框（t=ao）提交的文本在逐题暂存里用该前缀标记，
+# 让 `_multi_answers` 把「纯数字文本」按**自由文本**（kind=other）处理，而不是误判成
+# 选项序号（「作答 卡号 1:2」那条文本指令路径的语义不变）。控制字符用户敲不出来。
+_MQ_TEXT_MARK = "\x01"
 
 
 def _mq_prune_locked(now):
@@ -3242,6 +3358,94 @@ def _answer_multi_click(p, c, value, action, lang="zh"):
                                      n=len(answers))))
 
 
+def _answer_custom_text(p, c, value, action, lang="zh"):
+    """卡片「自定义回答」输入框提交（回调 `t=ao`，2026-10-26）：读 `form_value` 文本作答。
+
+    真机探针定论（2026-10-25）：表单提交帧 `action.tag="button"`、`action.name`=提交
+    按钮 name、`action.value`=**提交按钮**的 behaviors.value，用户输入文字在
+    `action.form_value[<输入框 name>]`（字符串，键名 `ao<卡号>_<题号>`）。
+
+    - **单题（n<=1）**：直接按 `kind=other` 送达。**不解析数字**——输入框语义就是
+      自定义文本，用户填「123」就是文字 123（`_answer_by_token` 那条文本指令路径
+      才把纯数字当选项序号）。
+    - **多子题（n>1）**：文本写进逐题暂存（`_MQ_TEXT_MARK` 前缀标记「文本」，避免
+      `_multi_answers` 误判数字为序号），答满整批送达；缺题只回带进度的 toast。
+    返回 `(DM 回执文案 or "", toast 载荷)`，与 `_answer_multi_click` 同形。"""
+    import board
+    st = board.interaction_of_sid(c["session_id"] or "")
+    if not st or not st.get("pending"):
+        return (i18n.t("api", "卡片 #{cid} 当前没有等待中的提问", lang, cid=c["id"]),
+                _toast("error", i18n.t("api", "提问已结束", lang)))
+    if st.get("kind") == "approval":
+        return (i18n.t("api", "该等待是工具审批，请回复「同意 {cid}」或「拒绝 {cid}」",
+                       lang, cid=c["id"]),
+                _toast("error", i18n.t("api", "该等待是审批", lang)))
+    if not st.get("answerable"):
+        return (i18n.t("api", _NO_REMOTE_ANSWER_HINT, lang),
+                _toast("error", i18n.t("api", "请到 dsh 会话窗口作答", lang)))
+    qs = [q for q in (st.get("questions") or []) if q]
+    n = len(qs)
+    try:
+        no = int(value.get("n"))
+    except (TypeError, ValueError):
+        no = 0
+    if n > 1 and (no < 1 or no > n):
+        return (i18n.t("api", "题号无效（卡片可能已过期），请重新作答", lang),
+                _toast("error", i18n.t("api", "题号无效", lang)))
+    if n <= 1:
+        no = 1
+    q = (qs[no - 1] if qs else {}) or {}
+    raw = (action.get("form_value") or {}).get(f"ao{c['id']}_{no}")
+    if not isinstance(raw, str):
+        return (i18n.t("api", "没收到输入内容，请重新输入后再提交", lang),
+                _toast("error", i18n.t("api", "未收到输入内容", lang)))
+    text = raw.strip()
+    if not text:
+        return (i18n.t("api", "请先在输入框输入自定义回答", lang),
+                _toast("error", i18n.t("api", "未填写自定义回答", lang)))
+    if len(text) > 2000:
+        return (i18n.t("api", "输入内容过长（限 2000 字）", lang),
+                _toast("error", i18n.t("api", "输入内容过长", lang)))
+    if not q.get("allow_other"):
+        return (i18n.t("api", "该问题不支持自定义输入", lang),
+                _toast("error", i18n.t("api", "该问题不支持自定义输入", lang)))
+    qid = st.get("qid")
+    if n <= 1:
+        wire = q.get("id") or "q_0"
+        err = board.answer_interaction(p, c, qid,
+                                       [{"wire": wire, "kind": "other",
+                                         "text": text}])
+        if err:
+            return (i18n.t("api", "作答失败：{err}", lang, err=str(err)),
+                    _toast("error", i18n.t("api", "作答失败", lang)))
+        return (i18n.t("api", "已收下：卡片 #{cid} 自定义回答，排队送达中", lang,
+                       cid=c["id"]),
+                _toast("success",
+                       i18n.t("api", "自定义回答已提交，排队送达中", lang)))
+    done, total, ready = _mq_put(c["id"], qid, n, no, _MQ_TEXT_MARK + text)
+    if not ready:
+        return ("", _toast("success",
+                           i18n.t("api", "已记下第 {no} 题（{done}/{total}）", lang,
+                                  no=no, done=done, total=total)))
+    parts = _mq_take(c["id"], qid, n)
+    if len(parts) < n:
+        # 极端竞态（取走前被 TTL 清掉/并发取走）：不提交半份，让用户重填
+        return (i18n.t("api", "作答未提交（暂存已过期），请重新逐题选择", lang),
+                _toast("error", i18n.t("api", "暂存过期，请重选", lang)))
+    answers, err = _multi_answers(qs, parts, lang)
+    if err:
+        return (i18n.t("api", "作答未提交：{err}", lang, err=str(err)),
+                _toast("error", i18n.t("api", "作答未提交", lang)))
+    err = board.answer_interaction(p, c, qid, answers)
+    if err:
+        return (i18n.t("api", "作答失败：{err}", lang, err=str(err)),
+                _toast("error", i18n.t("api", "作答失败", lang)))
+    return (i18n.t("api", "已收下：卡片 #{cid} {n} 道作答，排队送达中", lang,
+                   cid=c["id"], n=len(answers)),
+            _toast("success", i18n.t("api", "{n} 题已答完，已送达", lang,
+                                     n=len(answers))))
+
+
 def _multi_answer_parts(token):
     """多题作答 token → `[(题号, 题值)]`；非多题形态返回 None。
 
@@ -3284,7 +3488,10 @@ def _multi_answers(qs, parts, lang="zh"):
     返回 `(answers, err)`：err 非空即 answers=None（**不提交**）。kind 规则对齐
     站点会话窗（SessionView.answerOf）：单选=single、多选=multi、自定义=other；
     序号按**当前**服务端白名单换回 option id，防过期卡片/提问已变。缺题直接回执
-    所缺题号，不落地半份答案。文本指令与卡片点选暂存两路的题值都走这里。"""
+    所缺题号，不落地半份答案。文本指令与卡片点选暂存两路的题值都走这里。
+
+    2026-10-26：以 `_MQ_TEXT_MARK` 开头的暂存值是「卡片输入框提交的自定义文本」，
+    一律按 other 处理（纯数字也当文字），见 `_answer_custom_text`。"""
     n = len(qs)
     seen = {}
     for no, val in parts:
@@ -3310,6 +3517,16 @@ def _multi_answers(qs, parts, lang="zh"):
         wire = str(q.get("id") or f"q_{i - 1}")
         opts = q.get("options") or []
         multi = bool(q.get("multi_select"))
+        if val.startswith(_MQ_TEXT_MARK):
+            # 输入框提交的自定义回答：强制按自由文本处理（纯数字也当文字）
+            text = val[len(_MQ_TEXT_MARK):]
+            if not text:
+                return None, i18n.t("api", "第 {no} 题未作答", lang, no=i)
+            if len(text) > 2000:
+                return None, i18n.t("api", "第 {no} 题自定义输入过长（限 2000 字）",
+                                    lang, no=i)
+            out.append({"wire": wire, "kind": "other", "text": text})
+            continue
         if re.fullmatch(r"\d+(?:\s*,\s*\d+)*", val):    # 序号形态（单个/逗号多选）
             if not opts:
                 return None, i18n.t("api", "第 {no} 题没有选项，请直接写回答文字", lang,

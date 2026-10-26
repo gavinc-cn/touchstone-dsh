@@ -46,7 +46,7 @@ GOLDEN = {
     "instruction_unbind_reply": "f0772d6370cc0a047b8f66d7ee4051fe0b7345c8e8bc942119e30bcb8717d047",
     "multi_answer_help": "c4bbb506ec2d6ed1ec8fcbe1e70f97c1c236d8e1d0c8ebf45ee9d374869ae1a9",
     "multi_answers_err": "c7cc684cfdd722c3a20070df3f6824e6ece98f7a1491a2e155465365a365b63b",
-    "multi_card": "017f0c872f74238f729c8a2ed731c4bcbe524d06d718cbe15e344a77f76b000a",
+    "multi_card": "a04301c696c1cd222d899b63ed61f755bda7826cf5c6c1cafa80d71267346d37",
     "multi_hint": "f3d95646d415d34e1b4d6508834530d5bb0ef3f9ce32eda9166aebd702e2a648",
     "plan_doc_md": "8f567d19c734e17d28954c2c08a3fd928ad43e042a2afec415d8060efb37d5c6",
     "plan_question_md": "ee0f3bfa84d1834c44a2330387ffd20040ef17a9fa4b453a52e22afab1bb7f69",

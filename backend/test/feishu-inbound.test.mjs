@@ -864,6 +864,125 @@ test('onCardAction：t=mq 每次回 toast（含进度）；t=p/s/d ⇒ decideApp
   } finally { h.close(); }
 });
 
+// --------------------------------------------------------------------------
+// 自定义回答输入框回调（t=ao，2026-10-26）
+//
+// 真机探针定论（2026-10-25）：表单提交帧 `action.tag=button`、`action.name`=提交按钮、
+// `action.value` 取**提交按钮**的 behaviors.value，用户文字在
+// `action.form_value[ao<卡号>_<题号>]`（字符串）。单题直接按 other 送达；多子题走
+// 逐题暂存（`MQ_TEXT_MARK` 标记文本 ⇒ 纯数字也当文字），答满整批送达。
+// --------------------------------------------------------------------------
+
+/** 自定义回答输入框提交载荷（对齐真机表单提交帧形状） */
+function aoEvt(c, no, text, eid = 'ev_ao') {
+  return {
+    header: { event_id: eid },
+    event: {
+      operator: { open_id: 'ou_a' },
+      action: {
+        tag: 'button',
+        name: `aos${c.id}_${no}`,
+        value: { t: 'ao', c: c.id, n: no },
+        form_value: text === undefined ? {} : { [`ao${c.id}_${no}`]: text },
+      },
+    },
+  };
+}
+
+test('onCardAction：t=ao 单题自定义文本 ⇒ kind=other 直接送达；纯数字也是文本', async () => {
+  const qs = [{ id: 'q_0', header: '甲题', options: [{ id: 'o1', label: 'a' }, { id: 'o2', label: 'b' }], allow_other: true }];
+  const h = harness('inbound-card-ao-single', {
+    interaction: () => ({ pending: true, kind: 'question', qid: 'q1', answerable: true, questions: qs }),
+  });
+  try {
+    bind('ou_a', 1, 0, h.options);
+    const { c } = cardFixture(h.fx);
+    const cfg = { app_id: 'cli_x', app_secret: 's' };
+    const t1 = await inbound.onCardAction(aoEvt(c, 1, '用 sqlite 就行', 'ev_ao1'), cfg, h.options);
+    assert.deepEqual(h.calls.board.answer[3],
+      [{ wire: 'q_0', kind: 'other', text: '用 sqlite 就行' }]);
+    assert.equal(h.calls.board.answer[2], 'q1');
+    assert.equal(h.calls.dm[0][1], `已收下：卡片 #${c.id} 自定义回答，排队送达中`);
+    assert.deepEqual(t1, { toast: { type: 'success', content: '自定义回答已提交，排队送达中' } });
+    // 纯数字文本：输入框语义是自定义文本，不得按选项序号解析
+    const t2 = await inbound.onCardAction(aoEvt(c, 1, '123', 'ev_ao2'), cfg, h.options);
+    assert.deepEqual(h.calls.board.answer[3],
+      [{ wire: 'q_0', kind: 'other', text: '123' }]);
+    assert.deepEqual(t2, { toast: { type: 'success', content: '自定义回答已提交，排队送达中' } });
+  } finally { h.close(); }
+});
+
+test('onCardAction：t=ao 空文本 / 缺 form_value ⇒ 错误 toast 且不提交', async () => {
+  const qs = [{ id: 'q_0', options: [], allow_other: true }];
+  const cfg = { app_id: 'cli_x', app_secret: 's' };
+  for (const [name, text, wantToast, wantDm] of [
+    ['blank', '   ', '未填写自定义回答', '请先在输入框输入自定义回答'],
+    ['missing', undefined, '未收到输入内容', '没收到输入内容，请重新输入后再提交'],
+  ]) {
+    const h = harness(`inbound-card-ao-${name}`, {
+      interaction: () => ({ pending: true, kind: 'question', qid: 'q1', answerable: true, questions: qs }),
+    });
+    try {
+      bind('ou_a', 1, 0, h.options);
+      const { c } = cardFixture(h.fx);
+      const got = await inbound.onCardAction(aoEvt(c, 1, text, `ev_ao_${name}`), cfg, h.options);
+      assert.deepEqual(got, { toast: { type: 'error', content: wantToast } });
+      assert.equal(h.calls.dm[0][1], wantDm);
+      assert.equal(h.calls.board.answer, undefined, '不得提交空作答');
+    } finally { h.close(); }
+  }
+});
+
+test('onCardAction：t=ao 多子题暂存 ⇒ 进度 toast；答满整批送达（数字文本按 other）', async () => {
+  inbound.resetInboundState();
+  const qs = [{ id: 'q_0', options: [{ id: 'o1', label: 'a' }], allow_other: true },
+    { id: 'q_1', options: [], allow_other: true }];
+  const h = harness('inbound-card-ao-multi', {
+    interaction: () => ({ pending: true, kind: 'question', qid: 'q1', answerable: true, questions: qs }),
+  });
+  try {
+    bind('ou_a', 1, 0, h.options);
+    const { c } = cardFixture(h.fx);
+    const cfg = { app_id: 'cli_x', app_secret: 's' };
+    const t1 = await inbound.onCardAction(aoEvt(c, 1, '123', 'ev_ao_m1'), cfg, h.options);
+    assert.deepEqual(t1, { toast: { type: 'success', content: '已记下第 1 题（1/2）' } });
+    assert.deepEqual(h.calls.dm, [], '未答满不发 DM');
+    assert.equal(h.calls.board.answer, undefined);
+    const t2 = await inbound.onCardAction(aoEvt(c, 2, '保留旧名', 'ev_ao_m2'), cfg, h.options);
+    assert.deepEqual(t2, { toast: { type: 'success', content: '2 题已答完，已送达' } });
+    assert.equal(h.calls.dm[0][1], `已收下：卡片 #${c.id} 2 道作答，排队送达中`);
+    assert.equal(h.calls.board.answer[2], 'q1');
+    assert.deepEqual(h.calls.board.answer[3], [
+      { wire: 'q_0', kind: 'other', text: '123' },
+      { wire: 'q_1', kind: 'other', text: '保留旧名' },
+    ], '数字文本不得被解析成选项序号');
+  } finally { h.close(); }
+});
+
+test('answerCustomText：提问已结束 / 审批等待 各有其文案（不触执行器）', async () => {
+  const cfg = { app_id: 'cli_x', app_secret: 's' };
+  const h = harness('inbound-card-ao-stale', { interaction: () => null });
+  try {
+    bind('ou_a', 1, 0, h.options);
+    const { c } = cardFixture(h.fx);
+    const [dm, t] = await inbound.answerCustomText({ id: 1 }, c, { n: 1 }, {}, h.options);
+    assert.equal(dm, `卡片 #${c.id} 当前没有等待中的提问`);
+    assert.deepEqual(t, { toast: { type: 'error', content: '提问已结束' } });
+    assert.equal(h.calls.board.answer, undefined);
+  } finally { h.close(); }
+  const hp = harness('inbound-card-ao-approval', {
+    interaction: () => ({ pending: true, kind: 'approval', qid: 'q9', approval_id: 42 }),
+  });
+  try {
+    bind('ou_a', 1, 0, hp.options);
+    const { c } = cardFixture(hp.fx);
+    const [dm, t] = await inbound.answerCustomText({ id: 1 }, c, { n: 1 }, {}, hp.options);
+    assert.equal(dm, `该等待是工具审批，请回复「同意 ${c.id}」或「拒绝 ${c.id}」`);
+    assert.deepEqual(t, { toast: { type: 'error', content: '该等待是审批' } });
+    assert.equal(hp.calls.board.answer, undefined);
+  } finally { hp.close(); }
+});
+
 // ==========================================================================
 // ⑤ 多选暂存桶（`feishu.py:2096-2199`）
 // ==========================================================================

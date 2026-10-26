@@ -597,7 +597,8 @@ def test_build_card_multi_question_click_card():
     assert [o["value"] for o in sel["options"]] == ["1", "2"]   # 序号编码（重读白名单）
     assert [o["text"]["content"] for o in sel["options"]] == ["A", "B"]
     # 多选第 2 题：单题 mini 表单（组件 + 提交按钮），按钮与组件同带 t=mq/c/n
-    form = [e for e in els if e.get("tag") == "form"][0]
+    form = [e for e in els if e.get("tag") == "form"
+            and e.get("name") == "mqf7_2"][0]
     assert form["name"] == "mqf7_2"
     msel = [e for e in form["elements"]
             if e.get("tag") == "multi_select_static"][0]
@@ -605,13 +606,16 @@ def test_build_card_multi_question_click_card():
     btn = [e for e in form["elements"] if e.get("tag") == "button"][0]
     assert btn["form_action_type"] == "submit"
     assert btn["behaviors"][0]["value"] == {"t": "mq", "c": 7, "n": 2}
-    # 每个 form 只装一道题（不是旧「一张 form 装全部子题」）
-    assert sum(1 for e in els if e.get("tag") == "form") == 1
+    # 2026-10-26：允许自定义的第 1 题另有一张「输入框 + 提交」mini 表单
+    cform = _custom_form(card)
+    assert cform is not None and cform["name"] == "aof7_1"
+    # 每个 form 只装一道题的控件（不是旧「一张 form 装全部子题」）
+    assert sum(1 for e in els if e.get("tag") == "form") == 2
     md = _card_md(card)
     assert "**1/2 场景**" in md and "**2/2 覆盖哪些模块？**" in md  # 逐题题面
     assert "（多选）" in md                                        # 能力标注
     assert "答满 2 题自动送达" in md                                # 点选指引
-    assert "第 1 题请回复「作答 7 1:<值>」" in md                   # 自定义题补答语法
+    assert "第 1 题可在下方输入框填写自定义回答" in md              # 自定义题给输入框
     assert _btn_values(card) == []                                 # 多题不发逐选项按钮
 
 
@@ -647,11 +651,15 @@ def test_build_card_multiselect_form_over_budget_falls_back_to_text():
         "card_id": 7, "title": "t", "kind": "question", "question": "q？",
         "options": [], "answerable": True, "multi_select": False,
         "allow_other": False, "questions_count": 2, "questions": qs}, "p")
-    assert not any(e.get("tag") == "form" for e in card["body"]["elements"])
+    # 只发得出「自定义回答输入框」（第 1 题）；第 2 题多选表单超预算不发、退回文本
+    assert all(not any(x.get("tag") == "multi_select_static"
+                       for x in (f.get("elements") or [])) for f in _forms(card))
+    assert _custom_form(card) is not None
     assert len(_clicks_of(card)) == 1                 # 只剩第 1 题的单选下拉
     md = _card_md(card)
-    assert "第 1、2 题请回复" in md                     # 两题都被点名（1 可自定义、2 放不下）
-    assert "作答 7 1:<值> 2:<值>" in md
+    assert "第 2 题请回复" in md                        # 放不下的那题被点名
+    assert "第 1 题可在下方输入框填写自定义回答" in md
+    assert "作答 7 2:<值>" in md
 
 
 def _card_md(card):
@@ -735,7 +743,10 @@ def test_build_card_long_multi_question_still_clickable():
     assert "**4/4 第 4 题**" in md                          # 四题全在
     assert len(_clicks_of(card)) == 4                       # 四个逐题下拉
     assert [s["behaviors"][0]["value"]["n"] for s in _clicks_of(card)] == [1, 2, 3, 4]
-    assert not any(el.get("tag") == "form" for el in card["body"]["elements"])
+    # 2026-10-26：四题都 allow_other ⇒ 各挂一张自定义回答输入 mini 表单
+    forms = [e for e in card["body"]["elements"] if e.get("tag") == "form"]
+    assert [f["name"] for f in forms] == [f"aof819_{i}" for i in range(1, 5)]
+    assert "第 1、2、3、4 题可在下方输入框填写自定义回答" in md
 
 
 def test_build_card_single_multiselect_form():
@@ -876,3 +887,113 @@ def test_send_one_and_mark_retry_and_giveup(monkeypatch):
     rec = db.feishu_outbox_recent(5)[0]
     assert rec["status"] == "failed" and "19021" in rec["last_error"]
     assert db.feishu_outbox_due(time.time() + 3600) == []   # 不再重试
+
+
+# ---------- 自定义回答输入框（2026-10-26：卡上直接输入，不再只靠文本指令） ----------
+
+def _forms(card):
+    """卡片根级 form 元素列表（多选 mini 表单 / 自定义回答输入框都在这）。"""
+    return [e for e in card["body"]["elements"] if e.get("tag") == "form"]
+
+
+def _custom_form(card):
+    """卡片里的「自定义回答输入框」mini 表单（按首个组件 tag=input 识别）。"""
+    for f in _forms(card):
+        if any(e.get("tag") == "input" for e in f.get("elements") or []):
+            return f
+    return None
+
+
+def test_build_card_single_allow_other_has_input_form():
+    """单题单选 + allow_other：选项按钮之外再给「输入框 + 提交」mini 表单。
+
+    真机探针（2026-10-25）定论：表单提交帧里输入框文字在
+    `action.form_value[<输入框 name>]`（字符串），`action.value` 取的是**提交按钮**
+    的 behaviors.value ⇒ `t=ao` 挂在提交按钮上（输入框同带一份只作冗余兜底）。"""
+    card = feishu._build_interaction_card({
+        "card_id": 935, "title": "边界", "kind": "question",
+        "question": "边界划到哪里？", "options": ["只前端", "前端+后端"],
+        "answerable": True, "multi_select": False, "allow_other": True,
+        "questions_count": 1}, "演示项目")
+    form = _custom_form(card)
+    assert form is not None and form["name"] == "aof935_1"
+    inp, btn = form["elements"]
+    assert inp["tag"] == "input" and inp["name"] == "ao935_1"
+    assert inp["max_length"] == 1000
+    assert inp["behaviors"][0]["value"] == {"t": "ao", "c": 935, "n": 1}
+    assert btn["form_action_type"] == "submit" and btn["name"] == "aos935_1"
+    assert btn["text"]["content"] == "提交自定义回答"
+    assert btn["behaviors"][0]["value"] == {"t": "ao", "c": 935, "n": 1}
+    # 指引行保留文本指令兜底，同时点名输入框
+    hints = [e for e in card["body"]["elements"]
+             if e.get("tag") == "markdown" and "输入框" in e["content"]]
+    assert hints and "作答 935 <文字>" in hints[0]["content"]
+
+
+def test_build_card_single_no_allow_other_has_no_input_form():
+    card = feishu._build_interaction_card({
+        "card_id": 7, "title": "t", "kind": "question", "question": "q？",
+        "options": ["A"], "answerable": True, "multi_select": False,
+        "allow_other": False, "questions_count": 1}, "p")
+    assert _custom_form(card) is None
+
+
+def test_build_card_single_free_text_input_form():
+    """无选项 + allow_other（纯自由文本提问）：只有输入框，没有选项按钮。"""
+    card = feishu._build_interaction_card({
+        "card_id": 8, "title": "t", "kind": "question", "question": "说说？",
+        "options": [], "answerable": True, "multi_select": False,
+        "allow_other": True, "questions_count": 1}, "p")
+    assert _btn_values(card) == []
+    assert _custom_form(card) is not None
+
+
+def test_build_card_single_multiselect_allow_other_two_forms():
+    """单题多选 + allow_other：多选 mini 表单 + 自定义输入 mini 表单（两张 form）。"""
+    card = feishu._build_interaction_card({
+        "card_id": 17, "title": "t", "kind": "question", "question": "选哪些？",
+        "options": ["甲", "乙"], "answerable": True, "multi_select": True,
+        "allow_other": True, "questions_count": 1}, "p")
+    forms = _forms(card)
+    assert len(forms) == 2
+    assert [f["elements"][0]["tag"] for f in forms] == \
+        ["multi_select_static", "input"]
+    assert "提交自定义回答" in str(card["body"]["elements"])
+
+
+def test_build_card_multi_subquestion_input_forms():
+    """多子题：allow_other 的题各挂一个输入表单（无选项的题也靠它作答）。"""
+    card = feishu._build_interaction_card({
+        "card_id": 9, "title": "t", "kind": "question", "answerable": True,
+        "questions_count": 2,
+        "questions": [
+            {"id": "q0", "question": "甲？", "options": ["A", "B"],
+             "allow_other": True, "multi_select": False},
+            {"id": "q1", "question": "乙？", "options": [],
+             "allow_other": True, "multi_select": False}]}, "p")
+    forms = [f for f in _forms(card)
+             if any(e.get("tag") == "input" for e in f["elements"])]
+    assert [f["name"] for f in forms] == ["aof9_1", "aof9_2"]
+    assert [f["elements"][0]["name"] for f in forms] == ["ao9_1", "ao9_2"]
+    assert forms[1]["elements"][1]["text"]["content"] == "提交第 2 题自定义回答"
+    assert "第 1、2 题可在下方输入框填写自定义回答" in str(card["body"]["elements"])
+
+
+def test_build_card_unanswerable_no_input_form():
+    """不可远程作答（会话非平台自持）：不发任何作答控件。"""
+    card = feishu._build_interaction_card({
+        "card_id": 7, "title": "t", "kind": "question", "question": "q？",
+        "options": ["A"], "answerable": False, "multi_select": False,
+        "allow_other": True, "questions_count": 1}, "p")
+    assert _custom_form(card) is None
+
+
+def test_build_card_custom_form_over_budget_falls_back(monkeypatch):
+    """form 体积超预算：不发输入框、退回文本指引（绝不发必被 1000 硬限拒收的卡）。"""
+    monkeypatch.setattr(feishu, "_MQ_FORM_MAX_BYTES", 10)
+    card = feishu._build_interaction_card({
+        "card_id": 7, "title": "t", "kind": "question", "question": "q？",
+        "options": ["A"], "answerable": True, "multi_select": False,
+        "allow_other": True, "questions_count": 1}, "p")
+    assert _custom_form(card) is None
+    assert "作答 7 <文字>" in str(card["body"]["elements"])

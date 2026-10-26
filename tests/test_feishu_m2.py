@@ -1046,3 +1046,82 @@ def test_ws_frame_routing_card_and_event(monkeypatch):
     asyncio.run(client._handle_data_frame(
         _frame("other", b"{}")))
     assert client.wrote == 2                           # 未知类型：仅父类兜底路径
+
+
+# ---------- 自定义回答输入框回调（t=ao，2026-10-26） ----------
+
+def _ao_evt(eid, cid=7, no=1, text=None, form=None):
+    """自定义回答输入框提交回调：表单提交帧 tag=button/name=提交按钮，
+    文字在 `form_value[ao<卡号>_<题号>]`（2026-10-25 真机探针实证）。"""
+    action = {"tag": "button", "name": f"aos{cid}_{no}",
+              "value": {"t": "ao", "c": cid, "n": no}}
+    if form is not None:
+        action["form_value"] = form
+    elif text is not None:
+        action["form_value"] = {f"ao{cid}_{no}": text}
+    return {"schema": "2.0", "header": {"event_id": eid},
+            "event": {"operator": {"open_id": "ou_x"}, "action": action}}
+
+
+def test_card_action_custom_text_single(monkeypatch):
+    """单题输入框提交：文字 → kind=other 直接送达，DM 回执 + 成功 toast。"""
+    sent, calls = _stub_card_env(monkeypatch, answer=lambda sid: {
+        "pending": True, "qid": "Q-1", "kind": "question", "answerable": True,
+        "questions": [{"id": "q_0", "allow_other": True,
+                       "options": [{"id": "a", "label": "A"}]}]})
+    toast = feishu._on_card_action(_ao_evt("ev_ao1", text="用 sqlite 就行"), _CFG)
+    assert calls["answer"] == [("Q-1", [{"wire": "q_0", "kind": "other",
+                                         "text": "用 sqlite 就行"}])]
+    assert sent and "自定义回答" in sent[-1]
+    assert toast["toast"]["type"] == "success"
+
+
+def test_card_action_custom_text_numeric_stays_text(monkeypatch):
+    """输入框语义是自由文本：填「123」就是文字 123，不按选项序号解析。"""
+    _, calls = _stub_card_env(monkeypatch, answer=lambda sid: {
+        "pending": True, "qid": "Q-1", "kind": "question", "answerable": True,
+        "questions": [{"id": "q_0", "allow_other": True,
+                       "options": [{"id": "a", "label": "A"},
+                                   {"id": "b", "label": "B"}]}]})
+    feishu._on_card_action(_ao_evt("ev_ao2", text="123"), _CFG)
+    assert calls["answer"][0][1] == [{"wire": "q_0", "kind": "other", "text": "123"}]
+
+
+def test_card_action_custom_text_empty_and_missing(monkeypatch):
+    """空白/没带 form_value：不提交，错误 toast（绝不当成空作答送出去）。"""
+    for eid, form in (("ev_ao3", {"ao7_1": "   "}), ("ev_ao4", {})):
+        sent, calls = _stub_card_env(monkeypatch, answer=lambda sid: {
+            "pending": True, "qid": "Q-1", "kind": "question",
+            "answerable": True,
+            "questions": [{"id": "q_0", "allow_other": True}]})
+        toast = feishu._on_card_action(_ao_evt(eid, form=form), _CFG)
+        assert calls["answer"] == [] and sent
+        assert toast["toast"]["type"] == "error"
+
+
+def test_card_action_custom_text_multi_stage_then_submit(monkeypatch):
+    """多子题：输入框文本先进暂存，答满整批送达；纯数字文本也按文字处理。"""
+    st = {"pending": True, "qid": "Q-1", "kind": "question", "answerable": True,
+          "questions": [
+              {"id": "q_0", "allow_other": True,
+               "options": [{"id": "a", "label": "A"},
+                           {"id": "b", "label": "B"}]},
+              {"id": "q_1", "allow_other": True, "options": []}]}
+    sent, calls = _stub_card_env(monkeypatch, answer=lambda sid: st)
+    t1 = feishu._on_card_action(_ao_evt("ev_ao_m1", no=1, text="123"), _CFG)
+    assert calls["answer"] == [] and t1["toast"]["type"] == "success"   # 1/2 进度
+    t2 = feishu._on_card_action(_ao_evt("ev_ao_m2", no=2, text="保留旧名"), _CFG)
+    assert len(calls["answer"]) == 1
+    qid, answers = calls["answer"][0]
+    assert qid == "Q-1"
+    assert answers == [{"wire": "q_0", "kind": "other", "text": "123"},
+                       {"wire": "q_1", "kind": "other", "text": "保留旧名"}]
+    assert t2["toast"]["type"] == "success" and sent and "2 道作答" in sent[-1]
+
+
+def test_card_action_custom_text_not_pending(monkeypatch):
+    """提问已结束/过期：错误 toast + DM 文本说明，不触执行器。"""
+    sent, calls = _stub_card_env(monkeypatch, answer=lambda sid: None)
+    toast = feishu._on_card_action(_ao_evt("ev_ao5", text="x"), _CFG)
+    assert calls["answer"] == [] and toast["toast"]["type"] == "error"
+    assert sent and "等待" in sent[-1]
