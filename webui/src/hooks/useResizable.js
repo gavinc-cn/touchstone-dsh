@@ -7,23 +7,32 @@
 // 手柄 8 个方向: n / s / e / w / ne / nw / se / sw, 双击任一方向可复位默认尺寸
 // persistKey 非空时: 移动/缩放结束把 {w,h} 写入 localStorage, 下次挂载恢复
 // (恢复时只带尺寸不带位置, 弹窗仍居中; 双击复位同时清除记忆)
-import { useCallback, useRef, useState } from 'react'
+// 2026-10-25 小分辨率自适应:
+//   ① 恢复记忆尺寸时按**当前视口**夹取（记忆只代表偏好，不能在小窗口上原样恢复成比
+//      视口还大 —— 用户报「会话详情页…超出浏览器显示范围」）；
+//   ② 挂 window resize 监听，视口变小（浏览器窗口/面板缩窄）时把弹窗自动夹回视口内；
+//   两条路径与拖动路径共用 utils/rzClamp 的同一套边界口径（PAD/MIN_W/MIN_H 单源）。
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  RZ_MIN_W as MIN_W, RZ_MIN_H as MIN_H, RZ_PAD as PAD,
+  clampRzSize, clampRzBox, clampRzState,
+} from '../utils/rzClamp'
 
-const MIN_W = 400   // 最小宽度
-const MIN_H = 240   // 最小高度
-const PAD = 8       // 距视口边缘最小间距
 const CURSOR = {
   n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize',
   ne: 'nesw-resize', nw: 'nwse-resize', se: 'nwse-resize', sw: 'nesw-resize',
 }
 
 function loadSaved(persistKey, persistH) {
-  /* 从 localStorage 恢复 {w, h}（非法/过小返回 null）；persistH=false 时只恢复宽度。 */
+  /* 从 localStorage 恢复 {w, h}（非法/过小返回 null）；persistH=false 时只恢复宽度。
+     恢复时按**当前视口**夹取（clampRzSize）：记忆中存的是偏好像素尺寸，不是「合法渲染
+     尺寸」——大屏拖出来的 1500×900 在 1024×640 窗口上必须缩到视口内再交给行内样式。 */
   if (!persistKey) return null
   try {
     const v = JSON.parse(localStorage.getItem(persistKey))
     if (v && +v.w >= MIN_W && (persistH ? +v.h >= MIN_H : true)) {
-      return persistH ? { w: +v.w, h: +v.h } : { w: +v.w }
+      const s = clampRzSize(+v.w, persistH ? +v.h : 0, window.innerWidth, window.innerHeight)
+      return persistH ? { w: s.w, h: s.h } : { w: s.w }
     }
   } catch { /* 解析失败按未保存处理 */ }
   return null
@@ -83,6 +92,24 @@ export function useResizable(persistKey, persistH = true) {
         return cur
       })
     }
+  }, [persistKey, persistH])
+
+  // 视口变化（浏览器窗口/面板缩窄）时自动重夹：开着的弹窗不能跑到浏览器窗口外。
+  // - 拖过/移动过（带 left/top）⇒ 整框夹取（尺寸先夹、再把左上角收进视口）；
+  // - 仅记忆尺寸（仍居中）⇒ 以 localStorage 里的偏好为基准重新夹取——窗口先变小再放大时
+  //   能回弹到用户偏好尺寸，而不是永久停在缩小时的那一档。
+  useEffect(() => {
+    const onResize = () => {
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      setRz((cur) => {
+        if (!cur) return cur
+        if (cur.left != null || cur.top != null) return clampRzBox(cur, vw, vh)
+        return clampRzState(loadSaved(persistKey, persistH) || cur, vw, vh)
+      })
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
   }, [persistKey, persistH])
 
   const start = useCallback((e, dir) => {

@@ -1,6 +1,8 @@
 // session 对话弹窗: Dialog 壳 + SessionView(会话内容/续发消息, 与修复页内嵌版共用)
 // 两种用法: task={任务行}(任务会话) / board={{projectId, sid, cid, title}}(看板卡片会话, 轮询增量)
-// 默认占 75vw × 90vh（高度 9/10 屏幕）；尺寸随拖动记忆（ts.sessW，重开恢复宽高）
+// 默认尺寸随视口自适应（components.css 的 .modal.sess-modal:not(.rz-drag)：
+// max(75vw, min(880px,96vw)) × 90vh，小分辨率下让宽到 96vw 且内容可折行/收缩；
+// 尺寸随拖动记忆（ts.sessW，重开恢复宽高，恢复/窗口 resize 时按视口夹取）
 // 标题行右侧两枚徽标（顺序固定：卡片队列 → 统一队列）：
 //   「卡片队列」= 卡片当前所在列（board 模式，随 2s 轮询跟随移列），
 //   「队列」= 该会话所属单元（任务/卡片）在统一队列中的态；
@@ -90,7 +92,10 @@ export default function SessionModal({ task, board, onClose, onSwitchSession }) 
         // grid-rows: DialogContent 是 grid 容器且弹窗固定 90vh——默认 align-content:stretch
         // 会把 标题行/会话行 两条 auto 轨均分多余空间，内容少时会话区被顶到弹窗中段；
         // 显式 auto + minmax(0,1fr) 让标题行只占内容高、会话区吃掉剩余空间顶格显示
-        className={'modal modal-rz sess-modal w-[75vw] h-[90vh] sm:max-w-[94vw] grid-rows-[auto_minmax(0,1fr)]' + (rzOn ? ' rz-drag' : '')}
+        // 宽度**只由** components.css 的 `.modal.sess-modal:not(.rz-drag)` 响应式规则给
+        // （max(75vw, min(880px,96vw))，2026-10-25 小分辨率自适应）；className 里再写死
+        // 75vw 会形成两处口径（且优先级竞争难判）。高度仍由 h-[90vh] 工具类给（max-height 88vh 封顶）。
+        className={'modal modal-rz sess-modal h-[90vh] grid-rows-[auto_minmax(0,1fr)]' + (rzOn ? ' rz-drag' : '')}
         style={{ ...rzStyle, marginTop: 0 }}
         showCloseButton={false}
       >

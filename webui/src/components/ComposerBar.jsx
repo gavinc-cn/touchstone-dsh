@@ -341,22 +341,26 @@ export default function ComposerBar({ value, onChange, atts, onRemoveAtt, upload
           )}
           <text x="9" y="9" dominantBaseline="central" textAnchor="middle">{ctxPct}</text>
         </svg>
-        <span style={{ flex: 1 }}></span>
-        {/* 停止/取消排队（有排队消息或会话运行中；两者可并存——停止不影响继续排队发送）；
-            外部会话（stopGreyed）仍显示按钮但置灰：那是 dsh GUI 持有的轮次，平台停不了 */}
-        {canStop && (
-          <Button variant="outline" size="sm" title={cancelOnly
-              ? t('取消排队：撤销本会话全部排队消息，并把原文放回输入框（不打断当前轮次）')
-              : t('停止当前对话（打断当前轮次）')}
-            onClick={cancelOnly ? onCancelQueue : onStop}
-            disabled={cancelOnly ? cancelling === '__all__' : stopGreyed}>
-            <Square /> {stopLabel}
+        {/* 尾部按钮组（停止/发送）：单行时靠右（margin-left: auto）；窄弹窗底栏折行时
+            整组仍贴右。2026-10-25 小分辨率自适应：原先用 flex:1 空 span 占位顶右，
+            折行后空 span 会把按钮留在新行左边（见 .sess-endgroup） */}
+        <div className="sess-endgroup">
+          {/* 停止/取消排队（有排队消息或会话运行中；两者可并存——停止不影响继续排队发送）；
+              外部会话（stopGreyed）仍显示按钮但置灰：那是 dsh GUI 持有的轮次，平台停不了 */}
+          {canStop && (
+            <Button variant="outline" size="sm" title={cancelOnly
+                ? t('取消排队：撤销本会话全部排队消息，并把原文放回输入框（不打断当前轮次）')
+                : t('停止当前对话（打断当前轮次）')}
+              onClick={cancelOnly ? onCancelQueue : onStop}
+              disabled={cancelOnly ? cancelling === '__all__' : stopGreyed}>
+              <Square /> {stopLabel}
+            </Button>
+          )}
+          <Button size="sm" onClick={onSend}
+            disabled={!value.trim() || sending || inputLocked}>
+            <Send /> {queueMode ? t('排队') : t('发送')}
           </Button>
-        )}
-        <Button size="sm" onClick={onSend}
-          disabled={!value.trim() || sending || inputLocked}>
-          <Send /> {queueMode ? t('排队') : t('发送')}
-        </Button>
+        </div>
       </div>
     </div>
   )

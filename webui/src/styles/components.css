@@ -921,17 +921,35 @@ body.tabbar-dragging, body.tabbar-dragging * { cursor: grabbing !important; user
 /* 详情弹窗描述的 md 排版走全局 .md-body 基座（2026-10-06 合并批次） */
 
 /* ============ SessionModal 会话窗口(复刻 kimi code web 会话页; .sess- 前缀独立, 不影响 .bugs-tab) ============ */
-/* 默认尺寸: 75vw × 90vh（高度 9/10 屏幕; 宽高由 className 的 w-[75vw]/h-[90vh] 工具类设定,
-   legacy 层 width/height 会被 DialogContent 的 w-full/sm:max-w-lg 工具类压住, 这里只留定位） */
-.modal.sess-modal { left: calc(50% - 37.5vw); top: 5vh; }
+/* 默认尺寸随视口动态调整（2026-10-25 小分辨率自适应；用户原话「会话详情页，在分辨率比较
+   小的时候会超出浏览器显示范围. 应该能够根据浏览器框的大小动态调整」）。
+   旧口径是固定 75vw×90vh（w-[75vw] 工具类）：小窗口里 75vw 只剩 600~768px，而会话内容的
+   最小宽度被「底栏控件行 ~601px（nowrap）+ 提问索引 240px」顶到 ~841px ⇒ 内容比弹窗宽、
+   右侧控件被裁掉（真机 1024×640：弹窗 scrollWidth 889 > clientWidth 766）。
+   新口径：宽度 ≥ 880px（底栏控件单行放得下的量级），小视口让到 96vw；大屏维持 75vw 观感。
+   两个实现细节（改前必读）：
+   - 本文件整体在 @layer legacy（层序低于 utilities），而 DialogContent 自带
+     w-full / max-w-[calc(100%-2rem)] / sm:max-w-lg 工具类 ⇒ 宽/高的生效值必须 !important；
+   - !important 必须限定 `:not(.rz-drag)`：拖动/记忆尺寸由 useResizable 的行内 width/height
+     驱动（rz-drag 时生效），不排除的话这里的 !important 会把用户拖出来的尺寸永久压回
+     默认值（本批最危险的回归点，静态守卫见 tests/test_sess_layout_fit.py）。
+   定位：宽度不再固定 75vw（旧的 calc 居中口径已退场）⇒ 左右贴边 + margin 自动居中。 */
+.modal.sess-modal:not(.rz-drag) {
+  left: 0; right: 0; margin-inline: auto; top: 5vh;
+  width: max(75vw, min(880px, 96vw)) !important;
+  max-width: 96vw !important;
+}
 /* 看板详情弹窗(52vw×82vh)的 calc 居中(同 .sess-modal 手法);
    grid-template-columns: minmax(0,1fr) 防长 URL/附件路径(long unbreakable token)把
    shadcn grid 单列撑出弹窗(列宽限制, 文本换行由 .board-detail 的 overflow-wrap 负责) */
 .modal.board-detail-modal { left: calc(50% - 26vw); top: 9vh; grid-template-columns: minmax(0, 1fr); }
 /* 会话视图根(SessionView): 弹窗与修复页内嵌共用, 撑满父容器、消息区内部滚动 */
-.sess-view { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-/* 左右布局: 提问索引侧边栏 + 会话主区 */
-.sess-wrap { display: flex; flex: 1; min-height: 0; }
+.sess-view { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+/* min-width: 0 是 2026-10-25 小分辨率自适应的关键：DialogContent 是 grid 容器，grid 子项
+   默认 min-width:auto ⇒ 本容器的 min-content（底栏控件行 ~601px + 提问索引 240px ≈ 841px）
+   会把内容顶出弹窗右边界（真机 800×600：.sess-view 右边界 965 > 弹窗右边界 700）。 */
+.sess-wrap { display: flex; flex: 1; min-width: 0; min-height: 0; }
+/* 左右布局: 提问索引侧边栏 + 会话主区（.sess-wrap 的 min-width: 0 见 .sess-view 上方的合并规则） */
 .sess-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
 .sess-qbar { width: 240px; flex: none; border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
 .sess-qbar-t { padding: 8px 10px; font-size: calc(12px * var(--fs)); font-weight: 600; color: var(--muted-foreground); }
@@ -1093,9 +1111,14 @@ body.tabbar-dragging, body.tabbar-dragging * { cursor: grabbing !important; user
   border: none; background: none; padding: 0; cursor: pointer; color: var(--dim);
 }
 .sess-chip-x:hover { color: var(--fail); }
-/* 底栏一行: 「+」/立即注入/权限开关/模型下拉/上下文圈圈/发送-停止(分隔线 + 呼吸间距) */
-.sess-bottombar { display: flex; align-items: center; gap: 8px; flex: none;
-  border-top: 1px solid var(--border); padding-top: 6px; margin-top: 6px; }
+/* 底栏一行: 「+」/权限开关/模型下拉/思考等级/上下文圈圈/发送-停止(分隔线 + 呼吸间距)
+   窄弹窗自适应（2026-10-25）：控件行 min-content 实测 ~601px，小分辨率弹窗放不下 ⇒
+   flex-wrap: wrap 折行兜底（宁可两行也不裁按钮），行距只加在折行之间（row-gap 4px） */
+.sess-bottombar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; row-gap: 4px;
+  flex: none; border-top: 1px solid var(--border); padding-top: 6px; margin-top: 6px; }
+/* 底栏尾部按钮组（停止/发送）：替代原先的 flex:1 空 span 占位——单行时整组靠右；
+   折行时整组仍然贴右（空 span 方案在折行后会把按钮留在新行左边） */
+.sess-endgroup { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 /* 权限开关 label: 12px 一行, 对齐「立即注入」行内样式(checkbox + 文案) */
 .sess-ctl { display: inline-flex; align-items: center; gap: 4px; font-size: calc(12px * var(--fs));
   cursor: pointer; user-select: none; }

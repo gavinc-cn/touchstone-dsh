@@ -239,9 +239,10 @@ describe('i18nScan 项目基线（零残留 ratchet）', () => {
     expect(SCAN_SRC_DIR).toBe(SRC_DIR)
     const files = listSourceFiles(SCAN_SRC_DIR)
     // 文件数钉死（T7 迁移终态 80 + T8 新增 utils/dataLabels.js = 81 个源文件
-    // + 卡 #1088 新增 components/ImageViewer.jsx = 82；
+    // + 卡 #1088 新增 components/ImageViewer.jsx = 82
+    // + 会话详情页小分辨率自适应新增 utils/rzClamp.js = 83；
     // 新增/删除源文件需同步更新本断言）
-    expect(files).toHaveLength(82)
+    expect(files).toHaveLength(83)
     // 每个顶层源码目录都必须有文件进入清单：某个目录整体消失（遍历被打断/根被收窄）立即失败
     for (const sentinel of [
       'App.jsx', 'api/index.js', 'components/TasksTab.jsx', 'hooks/useDshHost.js',
