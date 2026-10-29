@@ -1,14 +1,15 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { taskApi } from '../api'
 import { stLabel } from '../utils/renderMd'
+import { isPluginBuild } from '../lib/taskLog'
 import TouchstoneLogo from '../components/TouchstoneLogo'
 import LoadDashboard from '../components/LoadDashboard'
 import { Button } from '@/components/ui/button'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
-import { ArrowDownToLine } from 'lucide-react'
+import { ArrowDownToLine, ArrowLeft } from 'lucide-react'
 import { useI18n } from '../utils/i18n'
 
 /** 日志行着色分类（沿用原任务详情内联面板的规则） */
@@ -27,10 +28,15 @@ function logCls(line) {
 // 单轮日志拉取行数上限（与服务端 tail 上限一致）
 const LOG_TAIL = 5000
 
-// 独立日志页: 由任务详情「查看日志」以新标签页打开, URL 形如 /log?task=<id>&round=<n>
+// 任务日志页: URL 形如 /log?task=<id>&round=<n>。
+//   - 独立 web 形态：由任务详情「查看日志」以新标签页打开（window.open，见 lib/taskLog.js）；
+//   - dsh 插件形态（web/桌面）：面板内路由导航进入，头部给「返回任务列表」出口
+//     （桌面壳会把 window.open(相对地址) 解析成 dsh:// 自定义 scheme 并拦掉，所以插件形态
+//     不能走新标签页——见 lib/taskLog.js 头注释）。
 export default function TaskLogPage() {
   // 文案取 t()：切换语言即时重渲染（lang 变化时浏览器标题也重算）
   const { t, lang } = useI18n()
+  const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const taskId = +(params.get('task') || 0)
   const round = +(params.get('round') || 0)
@@ -43,6 +49,13 @@ export default function TaskLogPage() {
   const logBox = useRef(null)
   const atBottomRef = useRef(true)
   const logLines = useMemo(() => (logText ? logText.split('\n') : []), [logText])
+
+  /** 返回任务列表（仅插件形态渲染）：回主页面（项目/标签页由 AppShell 按 localStorage 恢复，
+   *  任务详情展开由 TasksTab 的返回记忆恢复）。用 replace 不留 /log 历史条目——日志页是
+   *  面板内的「旁路视图」，切轮次也只改查询串，退出不该要求用户连按多次返回。 */
+  function backToApp() {
+    navigate('/app', { replace: true })
+  }
 
   // 任务与轮次列表: 进入页面及切换轮次时加载（顺带刷新任务状态徽标）
   useEffect(() => {
@@ -108,13 +121,23 @@ export default function TaskLogPage() {
   return (
     <div className="log-page">
       <div className="log-page-head">
+        {isPluginBuild() && (
+          <Button variant="outline" size="sm" className="h-7 px-2 text-xs"
+            title={t('返回任务列表')} onClick={backToApp}>
+            <ArrowLeft /> {t('返回任务列表')}
+          </Button>
+        )}
         <TouchstoneLogo size={20} />
         <span className="t">{t('任务日志')}</span>
         {task && <span className="dim">{t('「{name}」', { name: task.name })}</span>}
         {task && <span className={'badge st-' + task.status}><span className="dot"></span>{stLabel(task.status)}</span>}
         <span className="spacer"></span>
         {rounds.length > 0 && (
-          <Select value={String(round)} onValueChange={(v) => setParams({ task: String(taskId), round: v })}>
+          // 轮次切换只是同一页的查询串变化：插件形态用 replace，别在面板历史里堆条目
+          // （独立形态保持既有 push 语义，浏览器返回可回上一轮）。
+          <Select value={String(round)}
+            onValueChange={(v) => setParams({ task: String(taskId), round: v },
+              { replace: isPluginBuild() })}>
             <SelectTrigger size="sm" className="h-7 min-w-[90px] text-xs">
               <SelectValue />
             </SelectTrigger>

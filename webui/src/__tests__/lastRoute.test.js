@@ -26,7 +26,7 @@ describe('writeLastRoute / readLastRoute', () => {
     expect(readLastRoute()).toBe('/app?pid=3')
   })
 
-  it('登录页与旁路日志页不记（/log 是 window.open 出来的新标签页）', () => {
+  it('登录页与日志页不记（/log：插件形态面板内导航、独立形态新标签页）', () => {
     writeLastRoute('/login')
     expect(readLastRoute()).toBe('')
     writeLastRoute('/log', '?task=5&round=2')

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAppStore } from '../stores/app'
 import { projectApi, taskApi } from '../api'
 import { toast } from '../utils/toast'
@@ -6,6 +7,7 @@ import { fmtTime, stLabel } from '../utils/renderMd'
 import { RETEST_ALL_FAILED, RETEST_NONE, RETEST_RANGE, retestLabel } from '../utils/taskEnums'
 import { t, useI18n } from '../utils/i18n'
 import { permissionLabel } from '../utils/permission'
+import { logOpenTarget, markLogReturn, takeLogReturn } from '../lib/taskLog'
 import { useResizable } from '../hooks/useResizable'
 import { RzHandles } from './RzHandles'
 import SessionModal from './SessionModal'
@@ -155,6 +157,7 @@ export default function TasksTab({ onCreated } = {}) {
   useI18n()
   const store = useAppStore()
   const project = store.currentProject
+  const navigate = useNavigate()
 
   const [nt, setNt] = useState(NT_DEFAULT)
   const [showNew, setShowNew] = useState(false)
@@ -197,6 +200,24 @@ export default function TasksTab({ onCreated } = {}) {
 
   // 当前项目的任务(AppShell 已按项目加载 store.tasks)
   const tasks = store.tasks.filter((task) => task.project_id === project?.id)
+
+  // 「查看日志」面板内导航返回后恢复原任务详情的展开：跨路由 mount 的一次性记忆
+  // （见 lib/taskLog.js 的 markLogReturn/takeLogReturn）。任务已删/不属于当前项目则静默放弃；
+  // 任务列表尚未加载完时等下一次 tasks 变化再试（take 只取一次，存 ref）。
+  const logReturnId = useRef(0)
+  const logReturnDone = useRef(false)
+  useEffect(() => {
+    if (logReturnDone.current) return
+    if (!logReturnId.current) logReturnId.current = takeLogReturn()
+    const tid = logReturnId.current
+    if (!tid) { logReturnDone.current = true; return }
+    if (!tasks.some((x) => x.id === tid)) {
+      if (!store.loading.tasks) logReturnDone.current = true
+      return
+    }
+    logReturnDone.current = true
+    toggleTask(tid)
+  }, [tasks, store.loading.tasks]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // 按关键字过滤（名称 / 会话标题 / session id 子串匹配）
   const filteredTasks = useMemo(() => {
@@ -331,9 +352,16 @@ export default function TasksTab({ onCreated } = {}) {
     setRounds(await taskApi.rounds(id))
   }
 
-  /** 新标签页打开某轮日志（独立日志页 /log） */
+  /** 打开某轮日志（独立日志页 /log；插件形态面板内导航，独立形态新标签页，见 lib/taskLog.js）。
+   *  面板内导航会卸载本组件，故先记下任务 id，返回时自动恢复详情展开。 */
   function openLog(taskId, roundNo) {
-    window.open(`/log?task=${taskId}&round=${roundNo}`, '_blank')
+    const target = logOpenTarget(taskId, roundNo)
+    if (target.kind === 'navigate') {
+      markLogReturn(taskId)
+      navigate(target.to)
+      return
+    }
+    window.open(target.href, '_blank')
   }
 
   // 新建模式打开弹窗(模型不在此选择, 由服务端按项目设置回落)。
