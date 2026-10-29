@@ -137,10 +137,10 @@ def _stub_git_ok(monkeypatch, commits=("abc123 2026-01-02 张三 修复登录",)
 # 最近提交样例：同一天两条 + 前一天一条（同一天的两条要并组展示，顺序保持取数倒序）
 _RECENT_COMMITS = [
     {"hash": "abc1234", "date": "2026-10-13",
-     "subject": "refactor(interface): 定长字符类型宏与 CharCs 下沉 zrtools 并加 ZRT_ 前缀",
-     "files": ["src/interface/str_types.h", "src/utilities/zrtools/zrt_str_types.h"]},
-    {"hash": "def5678", "date": "2026-10-13", "subject": "test: 补 zrt 单测",
-     "files": ["test/unit/zrtools/zrt_str_types_test.cpp"]},
+     "subject": "refactor(interface): 抽取订单编号格式化工具",
+     "files": ["src/interface/order_format.h", "src/utilities/order_format.h"]},
+    {"hash": "def5678", "date": "2026-10-13", "subject": "test: 补订单编号格式化单测",
+     "files": ["test/unit/order_format_test.cpp"]},
     {"hash": "aaa1111", "date": "2026-10-12", "subject": "fix: 修复下单链路",
      "files": ["src/order.py"]},
 ]
@@ -283,9 +283,8 @@ def test_normal_prompt_recent_changes_priority(tmp_path, monkeypatch):
     assert "  【2026-10-12】1 条提交：" in p
     assert p.index("【2026-10-13】") < p.index("【2026-10-12】")
     # 提交行与变更文件行（文件用顿号并列，供 agent 做功能聚类）
-    assert ("    - abc1234 refactor(interface): 定长字符类型宏与 CharCs 下沉 zrtools "
-            "并加 ZRT_ 前缀") in p
-    assert "      文件：src/interface/str_types.h、src/utilities/zrtools/zrt_str_types.h" in p
+    assert "    - abc1234 refactor(interface): 抽取订单编号格式化工具" in p
+    assert "      文件：src/interface/order_format.h、src/utilities/order_format.h" in p
     assert "      文件：src/order.py" in p
     # 位置：约束块里、停止条件之前
     assert p.index("- 优先范围（最近变更优先）") < p.index("- 停止条件")
