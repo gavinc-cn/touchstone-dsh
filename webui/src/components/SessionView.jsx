@@ -593,6 +593,29 @@ const QuestionBar = memo(function QuestionBar({ withQBar, qbarOpen, questions, f
   )
 })
 
+/* Ctrl+Enter 提交提问（2026-11-01）：agent 提问卡挂 window 捕获监听，全部子题答完
+   （canSubmit=true）后按 Ctrl+Enter 等价于点「提交」。
+   - capture + stopPropagation 是刻意为之（同 SlashMenu）：composer 的 Enter 发送也监听
+     keydown，不先拦截会对同一按键双发（作答 + 发消息）；
+   - 只在可作答的提问卡上挂载（answerable=false 的只读卡、审批卡都不挂）；未答完/
+     提交中不装监听 ⇒ 按键原样落给既有处理，普通 Enter / composer 语义不变；
+   - 组词中的回车不响应（与 SlashMenu / composer 同判据）。 */
+function QuestionSubmitHotkey({ canSubmit, submit }) {
+  useEffect(() => {
+    if (!canSubmit) return undefined
+    function onKey(e) {
+      if (e.key !== 'Enter' || !e.ctrlKey || e.altKey || e.metaKey) return
+      if (e.isComposing || e.keyCode === 229) return   // 中文输入法组词中的回车不拦截
+      e.preventDefault()
+      e.stopPropagation()
+      submit()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [canSubmit, submit])
+  return null
+}
+
 /* 等待回答 / 待审批的交互卡片（对齐 kimi code＝设计出处，2026-09-10；多子题 2026-09-11；
    多题翻页 + 最小化 2026-09-19）：
    - 提问：一次提问可含多道子题（questions[]）——序号 + 单选
@@ -733,18 +756,27 @@ export const InteractionCard = memo(function InteractionCard({ data, answer }) {
   // 最小化：收成一行摘要条（多题带已答进度；点条展开）
   if (min) {
     return (
-      <button type="button" className="sess-interaction-bar" title={t('展开')}
-        onClick={() => setMin(false)}>
-        <span className="sess-interaction-bar-t">
-          🤔 {t('agent 等待你的回答')}{multiQ
-            ? t(' · 已答 {done}/{total}', { done: answeredN, total: qs.length }) : ''}
-        </span>
-        <ChevronUp className="h-3.5 w-3.5" />
-      </button>
+      <>
+        {/* 折叠也保留快捷键：答满后不必先展开再提交（未答满时组件内部不装监听） */}
+        {data.answerable && (
+          <QuestionSubmitHotkey canSubmit={canSubmit} submit={submitQuestion} />
+        )}
+        <button type="button" className="sess-interaction-bar" title={t('展开')}
+          onClick={() => setMin(false)}>
+          <span className="sess-interaction-bar-t">
+            🤔 {t('agent 等待你的回答')}{multiQ
+              ? t(' · 已答 {done}/{total}', { done: answeredN, total: qs.length }) : ''}
+          </span>
+          <ChevronUp className="h-3.5 w-3.5" />
+        </button>
+      </>
     )
   }
   return (
     <div className="sess-interaction">
+      {data.answerable && (
+        <QuestionSubmitHotkey canSubmit={canSubmit} submit={submitQuestion} />
+      )}
       <div className="sess-interaction-head">
         {/* 单题保持原文案；多题带序号并翻页（一次一题），便于对照多子题提问 */}
         <div className="sess-interaction-q">
