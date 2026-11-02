@@ -1,9 +1,9 @@
 /**
  * 发包前自检 —— package.json 的 `prepack` 钩子（`npm pack` / `npm publish` 前自动执行）。
  *
- * 三道检查:
+ * 四道检查:
  *  ① **必需文件在不在**：本包是自包含的（插件壳 + Python 平台 + 预构建 webui/dist-plugin +
- *     内置提示词/内置资产），少任何一块装到 profile 里都跑不起来；
+ *     内置提示词 + 自动提交守卫），少任何一块装到 profile 里都跑不起来；
  *  ② **三处「包名」逐字一致**：包根 package.json 的 `name`、`dsh-plugin/cordis.patch.yml`
  *     里 insert 行的 `name`、`dsh-plugin/lib/client.bundle.js` 里 `__ModuleLoader__.load({id})`
  *     的 id —— dsh 宿主按注册行的包名给浏览器半预留模块槽，三者不一致时页面报
@@ -15,6 +15,9 @@
  *     `node backend/server.js` 直接 ERR_MODULE_NOT_FOUND（`backend/server.js:61` import 它）。
  *     算法在 `dsh-plugin/lib/pack-closure.mjs`（与 `tools/parity/test/pack-closure.test.mjs`
  *     **同一份**，不是一个抄一个）；这里只读文件、**绝不递归调用 `npm pack`**（会被自己再触发）。
+ *  ④ **第二行（自动提交守卫）三处对齐**（2026-11-01 新增）：patch 行名、`exports["./autocommit"]`、
+ *     被导出的文件路径三者一致且文件存在 —— 对不上的后果是「dsh 加载该行失败」，只出现在用户的
+ *     宿主日志里，发版前在这里挡住。
  *
  * 任一项不过就非 0 退出，让 `npm pack` / `npm publish` 直接中断：宁可发不出去，不可发出坏包。
  * 用法: node dsh-plugin/scripts/prepack-check.mjs
@@ -47,7 +50,9 @@ const REQUIRED = [
   // 词典唯一真源（T15）：`backend/lib/i18n.js` / `backend_py/i18n.py` 运行时读
   // `<repo>/i18n/en.json`；缺了它 en 请求静默回落中文（用户可见 bug），必须在自检里挡住。
   'i18n/en.json',
-  'extensions/dsh-autocommit/asset.json',
+  // 第二行（自动提交守卫，2026-11-01 并入本包）：bundle patch 按包内子路径导出加载它，
+  // 缺了等于「卡片挂起时不再落提交」，而且 dsh 在加载该行时就报模块解析失败。
+  'dsh-plugin/autocommit/index.mjs',
   'webui/dist-plugin/index.html',
   'dsh-plugin/cordis.patch.yml',
   'dsh-plugin/lib/index.js',
@@ -74,6 +79,24 @@ if (!bundle.includes(`id: ${JSON.stringify(pkg.name)}`)) {
   failures.push(`dsh-plugin/lib/client.bundle.js 的模块 id 不是 "${pkg.name}"（跑 node dsh-plugin/scripts/build.mjs 重建）`);
 }
 if (pkg.private === true) failures.push('package.json 里 private: true, 发不出去（发布前删掉）');
+
+// 第二行（自动提交守卫）: 行名必须是本包的子路径导出，且那个导出真的指向一个存在的文件。
+// 三者（patch 行名 / exports 键 / 文件路径）任意一处对不上，dsh 装上去就是「行加载失败」，
+// 而失败只出现在用户机器上的宿主日志里 —— 必须在这里挡住。
+const AUTOCOMMIT_SUBPATH = `${pkg.name}/autocommit`;
+const autoExport = pkg.exports?.['./autocommit'];
+const autoRel = typeof autoExport === 'string' ? autoExport : autoExport?.default;
+if (!patch.includes('id: dsh-autocommit')) {
+  failures.push('dsh-plugin/cordis.patch.yml 里没有 id: dsh-autocommit 的第二行（自动提交守卫）');
+}
+if (!patch.includes(`name: ${JSON.stringify(AUTOCOMMIT_SUBPATH)}`)) {
+  failures.push(`dsh-plugin/cordis.patch.yml 里自动提交守卫那行的 name 不是 "${AUTOCOMMIT_SUBPATH}"`);
+}
+if (typeof autoRel !== 'string') {
+  failures.push('package.json 缺 exports["./autocommit"]（自动提交守卫的子路径导出）');
+} else if (!existsSync(join(PKG_ROOT, autoRel))) {
+  failures.push(`package.json 的 exports["./autocommit"] 指向不存在的文件: ${autoRel}`);
+}
 
 // 闭包 ⊆ 白名单: 从入口正推运行时必需文件, 逐条要求在 files 展开结果里
 // （算法见 dsh-plugin/lib/pack-closure.mjs；只读文件, 不跑 npm pack ⇒ 可以安全地待在 prepack 里）

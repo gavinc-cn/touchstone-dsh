@@ -1,5 +1,6 @@
 /**
- * `extensions/dsh-autocommit` agent 侧提示语言（T15 D）——`TS_AGENT_LANG` 兜底开关。
+ * `dsh-plugin/autocommit`（包内子路径 @gavinc-cn/touchstone-dsh/autocommit）agent 侧提示语言
+ * （T15 D）——`TS_AGENT_LANG` 兜底开关。
  *
  * 为什么这样测：插件运行在 DSH 宿主进程里、依赖 `@deepseek-ai/dsh-llm`（本仓不安装
  * node_modules），且 `buildReason` 不导出。这里把插件源码**拷到临时目录**，配一个
@@ -21,7 +22,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
-const SOURCE = path.join(ROOT, 'extensions', 'dsh-autocommit', 'pkg', 'lib', 'index.mjs');
+const SOURCE = path.join(ROOT, 'dsh-plugin', 'autocommit', 'index.mjs');
 
 /** 临时 HOME（标记文件不会命中真实用户目录）+ 插件副本 + dsh-llm 桩。 */
 function makeHarness() {

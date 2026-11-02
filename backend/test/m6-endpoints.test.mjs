@@ -317,12 +317,34 @@ test('GET /agents/models：目录形状非法（非 dict 段）⇒ 上抛断连�
 // ③ 内置资产：403（用户级写仅管理员）/ 成功档（双隔离）/ 500（磁盘 OSError）
 // --------------------------------------------------------------------------
 
-/** 把仓库 `extensions/` 拷进夹具，并把两个落点 env 指过去（双隔离） */
+/**
+ * 双隔离：造一个**合成**的内置资产清单根 + 把两个落点 env 指过去。
+ *
+ * 为什么不拷仓库 `extensions/`（2026-11-01 改）：仓库已不再自带资产 ——
+ * dsh-autocommit 并进了本包的 bundle 行（`dsh-plugin/autocommit/`，装包即自带）。
+ * 端点行为不该被「仓库现在恰好有没有资产」牵着走，所以夹具自己写一份最小 dsh_plugin 资产：
+ * 包名/行 id 仍用 `dsh-autocommit`（下面几条断言按它写）。
+ */
 function isolateAssets() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'm6-assets-'));
   const extDir = path.join(root, 'extensions');
-  fs.cpSync(path.resolve(import.meta.dirname, '..', '..', 'extensions'), extDir,
-    { recursive: true });
+  const assetDir = path.join(extDir, 'dsh-autocommit');
+  fs.mkdirSync(path.join(assetDir, 'pkg', 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(assetDir, 'pkg', 'package.json'),
+    JSON.stringify({ name: '@gavinc-cn/dsh-autocommit', version: '0.0.0-fixture', type: 'module', main: './lib/index.mjs' }, null, 2));
+  fs.writeFileSync(path.join(assetDir, 'pkg', 'lib', 'index.mjs'), 'export function apply() {}\n');
+  fs.writeFileSync(path.join(assetDir, 'asset.json'), JSON.stringify({
+    id: 'dsh-autocommit',
+    name: '夹具插件资产',
+    type: 'dsh_plugin',
+    family: 'dsh_plugin',
+    targets: ['user'],
+    plugin: { package: '@gavinc-cn/dsh-autocommit', entry_id: 'dsh-autocommit', profile: 'web' },
+    files: [
+      { from: 'pkg/package.json', to: 'package.json' },
+      { from: 'pkg/lib/index.mjs', to: 'lib/index.mjs' },
+    ],
+  }, null, 2));
   const profiles = path.join(root, 'profiles');
   fs.mkdirSync(path.join(profiles, 'web'), { recursive: true });
   fs.writeFileSync(path.join(profiles, 'web', 'cordis.patch.yml'), '# 夹具 profile\n', 'utf8');

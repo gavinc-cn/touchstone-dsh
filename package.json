@@ -13,6 +13,9 @@
     "./client": {
       "default": "./dsh-plugin/lib/client.bundle.js"
     },
+    "./autocommit": {
+      "default": "./dsh-plugin/autocommit/index.mjs"
+    },
     "./package.json": "./package.json"
   },
   "dsh": {
@@ -35,6 +38,7 @@
     "builtin_prompts",
     "i18n",
     "extensions",
+    "dsh-plugin/autocommit",
     "dsh-plugin/cordis.patch.yml",
     "dsh-plugin/install.sh",
     "dsh-plugin/lib",

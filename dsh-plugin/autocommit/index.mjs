@@ -1,5 +1,11 @@
 // dsh-autocommit: 把 kimi-code 的 session_autocommit hook 移植为 DSH 原生 Cordis 插件。
 //
+// 打包位置（2026-11-01 起随 Touchstone 一起发）：本文件属于 @gavinc-cn/touchstone-dsh 包，
+// 以子路径 @gavinc-cn/touchstone-dsh/autocommit 被 dsh 加载，组合行见 dsh-plugin/cordis.patch.yml
+// 的第二行（id: dsh-autocommit）。典型场景 = Touchstone 看板卡片一轮结束/挂起（agent/turn-stopping）
+// 时把本会话改动落成提交，别让卡片带着未提交改动停在那儿。仍是独立行（Plugins 面板可单独开关），
+// 只是不再需要单独装一个包。
+//
 // 与 kimi hook 的触发点对应关系（kimi 事件 → DSH 扩展点）：
 //   Stop                   → agent/turn-stopping（serial，靠 agent.steer() 强制再跑一步）
 //   PreToolUse(让行工具)     → tools/pre-execute（返回 {kind:'deny', reason}）

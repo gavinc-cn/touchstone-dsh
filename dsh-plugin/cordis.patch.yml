@@ -24,3 +24,26 @@
 - insert:
     - id: touchstone-dsh
       name: "@gavinc-cn/touchstone-dsh"
+
+# ── 第二行：自动提交守卫（id: dsh-autocommit，2026-11-01 并入本包）─────────────────
+# 为什么它属于本包：这是 Touchstone 的**产品行为** —— 看板卡片一轮结束/挂起
+# （agent/turn-stopping）时，把本会话改过的文件落成提交，卡片不会带着未提交改动停在那儿。
+# 在此之前它以 @gavinc-cn/dsh-autocommit 独立组件包随 @gavinc-cn/dsh-plugins-runtime 分发；
+# 并进本包后「装一个包就自带」：不用再单独装组件包，也不用跑内置资产安装。
+#
+# name 是本包的**子路径导出**（package.json 的 exports["./autocommit"] ⇒ dsh-plugin/autocommit/index.mjs）。
+# 子路径当行名是 dsh 自己的既有形态（如 @deepseek-ai/dsh-plugin-manager/tools、
+# @deepseek-ai/dsh-tool-subagent-control/list-agents）；client-modules 对子路径说明符直接判
+# 「非 client 包」，所以它不会被当成第二个浏览器半，只加载宿主侧。
+#
+# 可调参数（要改才在 profile 的覆盖行里加 config:，缺省即下面的行为）：
+#   enabled(true) / dryRun(false) / commitOnApproval(false) / maxBlocks(2) /
+#   blockWindowMs(900000) / logPath(~/.kimi-code/hooks/logs/session_autocommit.dsh.log)
+#   语义见 dsh-plugin/autocommit/index.mjs 的 normalizeConfig。
+#
+# **与旧的独立组件包互斥**：同一个行 id 在整棵组合树里只能出现一次。装本包就别再让
+# @gavinc-cn/dsh-plugins-runtime 带 dsh-autocommit 那一行（该行已于 2026-11-01 退役），
+# profile 里也不要再手写 `- insert: - id: dsh-autocommit`。
+- insert:
+    - id: dsh-autocommit
+      name: "@gavinc-cn/touchstone-dsh/autocommit"

@@ -226,8 +226,13 @@ test('ext_dir：TS_EXT_DIR 覆盖；空串/未设回落到仓库 extensions/（�
       assert.equal(ba.DEFAULT_EXT_DIR, path.join(REPO_ROOT, 'extensions'), '缺省 = 仓库根的 extensions/');
     });
   }
-  assert.ok(fs.existsSync(path.join(ba.DEFAULT_EXT_DIR, 'dsh-autocommit', 'asset.json')),
-    '缺省清单根里确实有平台自带资产（证明默认根指向真仓库，不是空目录）');
+  assert.ok(fs.existsSync(path.join(ba.DEFAULT_EXT_DIR, 'README.md')),
+    '缺省清单根指向真仓库的 extensions/（目录里有 README）');
+  // 2026-11-01 起仓库不再自带资产：dsh-autocommit 已并进本包的 bundle 行
+  // （dsh-plugin/autocommit/），不再是「装一次」的内置资产。清单根仍存在、仍被扫描 ⇒ 空列表。
+  assert.deepEqual(fs.readdirSync(ba.DEFAULT_EXT_DIR).filter((n) => fs.existsSync(
+    path.join(ba.DEFAULT_EXT_DIR, n, 'asset.json'))), [],
+  '仓库 extensions/ 下不应再有 asset.json（自动提交守卫已随包发）');
 });
 
 // --------------------------------------------------------------------------

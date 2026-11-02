@@ -314,7 +314,8 @@ touchstone-dsh/
 │                        (+ requirements.txt). Legacy-but-kept; used by standalone mode / backend: python
 ├── builtin_prompts/     Prompt assets injected into first-round prompts
 ├── dsh-plugin/          The dsh plugin package (thin Node shell + driver + client bundle)
-├── extensions/          Built-in assets installable from the settings page
+│                        + autocommit/ (auto-commit guard, bundle row 2, shipped in the package)
+├── extensions/          Built-in asset manifest root (empty: its only asset moved into dsh-plugin/autocommit/)
 ├── webui/               React + Vite front end
 ├── tests/               pytest / vitest suites and the isolated-instance harness
 └── touchstone.sh|py|cmd Launchers (Linux / cross-platform / Windows)

@@ -21,7 +21,8 @@
  *                                   migrations.json 真被读到）
  *        /app                     → 200 HTML 含 /assets/（证明 webui/dist-plugin 在包里）
  *        /api/projects            → 200 JSON 数组（证明 routes/index.js 与路由族真被 import）
- *        /api/builtin-assets      → 200 且含 dsh-autocommit（证明 extensions/ 在包里且真被扫描）
+ *        /api/builtin-assets      → 200 且 assets 是数组（证明 extensions/ 清单根在包里且真被扫描）
+ *        dsh-plugin/autocommit/** → 在包里且 cordis.patch.yml 的第二行引用了它（自动提交守卫随包发）
  *   ④ **隔离红线**：子进程 `HOME` 指到临时目录，且库路径必须落在临时目录里（从子进程自己的
  *      stderr 行 `touchstone-node: 数据库 <path>` 里解析 —— 不猜），同时断言**生产库**
  *      `~/.touchstone/touchstone.db` 的 mtime/size 前后一字不变（它与活动插件共用，绝不能写）。
@@ -191,6 +192,15 @@ try {
   const missingRoutes = routeNames.filter((n) => !fs.existsSync(path.join(UNPACK, 'backend', 'routes', n)));
   check(`解包产物里 backend/routes/*.js 齐全（${routeNames.length} 个）`, missingRoutes.length === 0,
     `缺: ${missingRoutes.join(', ')}`);
+  // 第二行（自动提交守卫，2026-11-01 并入本包）：包里要有实体文件，patch 里那行要按包内子路径名引用它
+  const autoFile = path.join(UNPACK, 'dsh-plugin', 'autocommit', 'index.mjs');
+  check('解包产物里有 dsh-plugin/autocommit/index.mjs（自动提交守卫随包发）',
+    fs.existsSync(autoFile), autoFile);
+  const unpackedPatch = fs.readFileSync(path.join(UNPACK, 'dsh-plugin', 'cordis.patch.yml'), 'utf8');
+  check('解包产物的 cordis.patch.yml 有 id: dsh-autocommit 行且 name 是包内子路径',
+    unpackedPatch.includes('id: dsh-autocommit')
+    && unpackedPatch.includes('name: "@gavinc-cn/touchstone-dsh/autocommit"'),
+    unpackedPatch.slice(-400));
   if (!fs.existsSync(entryPath)) throw new Error('入口不在包里，起不了后端');
 
   // ---- ③/④ 真起后端 + 接口 + 隔离红线 ----
@@ -232,8 +242,8 @@ try {
     const assets = await probe(port, '/api/builtin-assets');
     const ids = assets.json && Array.isArray(assets.json.assets)
       ? assets.json.assets.map((a) => a && a.id) : [];
-    check('/api/builtin-assets → 200 且含 dsh-autocommit（extensions/ 真在包里且被扫描）',
-      assets.status === 200 && ids.includes('dsh-autocommit'),
+    check('/api/builtin-assets → 200 且 assets 是数组（extensions/ 清单根在包里且被扫描；当前无内置资产 ⇒ 空）',
+      assets.status === 200 && Array.isArray(assets.json && assets.json.assets),
       `status=${assets.status} ids=${JSON.stringify(ids)} body=${assets.text.slice(0, 160)}`);
   });
 

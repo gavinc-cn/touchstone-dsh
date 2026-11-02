@@ -284,7 +284,8 @@ touchstone-dsh/
 │                        （+ requirements.txt）；「保留但不退役」，独立形态 / backend: python 走它
 ├── builtin_prompts/     注入首轮提示词的提示词资产
 ├── dsh-plugin/          dsh 插件包（Node 薄壳 + 驱动 + 客户端 bundle）
-├── extensions/          设置页可一键安装的内置资产
+│                        + autocommit/（自动提交守卫，bundle 第二行，随包发）
+├── extensions/          内置资产清单根（当前为空：唯一的资产已并进 dsh-plugin/autocommit/）
 ├── webui/               React + Vite 前端
 ├── tests/               pytest / vitest 套件与隔离实例夹具
 └── touchstone.sh|py|cmd 启停入口（Linux / 跨平台 / Windows）

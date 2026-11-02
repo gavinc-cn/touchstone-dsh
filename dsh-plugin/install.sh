@@ -82,6 +82,19 @@ dsh plugin --profile "$PROFILE" add "file:$REPO_DIR"
 #    writeProfileManifest 一致（2 空格 JSON + 尾换行）。
 node "$REPO_DIR/dsh-plugin/scripts/select-bundle.mjs" "$PROFILE_DIR/package.json" "$PKG_NAME"
 
+# 3) 存量提醒（2026-11-01 自动提交守卫并进本包起）：本包的第二行 = dsh-autocommit。
+#    旧通道（内置资产安装 / 手写 insert）也会写同一个行 id ⇒ 组合树里同 id 两行会被
+#    dsh-plugin-manager 判成 unaddressable（面板既没开关也拨不动），且两份实例各拦一次。
+#    这里只提醒不自动删：profile patch 是用户/面板写的，平台不擅自改别人的配置。
+LEGACY_ROW='^[[:space:]]*-[[:space:]]*id:[[:space:]]*dsh-autocommit[[:space:]]*$'
+if [[ -f "$PROFILE_DIR/cordis.patch.yml" ]] && grep -qE "$LEGACY_ROW" "$PROFILE_DIR/cordis.patch.yml"; then
+  echo
+  echo "警告: $PROFILE_DIR/cordis.patch.yml 里还有一条 dsh-autocommit 的行（旧通道留下的：内置资产或手写 insert）。"
+  echo "      本包自带该行（bundle patch 第二行），同 id 两行会被判 unaddressable 且双份拦截 ——"
+  echo "      请把那段删掉，或确认它不是 @gavinc-cn/dsh-autocommit 那一路的残留注册行。"
+  echo
+fi
+
 echo "完成（包名 $PKG_NAME）。重启 dsh web 生效（package.json 变更 dsh-hmr 也会热重载）;"
 echo "之后侧栏 Plugins 面板里会出现 Touchstone 卡片与该行开关。"
 echo "后端缺省＝包内 Node 实现（backend/server.js，要求宿主 Node ≥ 22.19）;"
