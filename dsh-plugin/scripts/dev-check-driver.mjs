@@ -20,6 +20,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { AgentDriver } from '../lib/agent-driver.js';
 
+/** 1×1 PNG（真实可解码字节；图片转原生附件用例按魔数嗅探 mediaType）。 */
+const PNG_1PX = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64');
+
 let failures = 0;
 function check(name, ok, detail = '') {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}${ok || !detail ? '' : '  → ' + detail}`);
@@ -174,11 +179,49 @@ function makeCtx() {
       if (name === 'workspaceRegistry') return sockets.workspaceRegistry;
       // P3 对齐端点用到的业务服务（形状对齐 .d.ts：SessionController / CommandsService）
       if (name === 'attachments') {
-        // 形状对齐 dsh-attachment：imageHostPath(ref) 返回宿主机只读路径
+        if (sockets.attachmentsMissing) return undefined;   // 服务缺席：图片转换必须回落原文
+        // 形状对齐 dsh-attachment：imageHostPath(ref) 返回宿主机只读路径；
+        // saveImages(inputs) 成批校验后落盘、按序回 attachment ref（图片转原生附件用）。
         return {
+          imageLimits: {
+            maxImagesPerMessage: sockets.maxImages ?? 20,
+            maxImageBytes: sockets.maxImageBytes ?? 20 * 1024 * 1024,
+            maxMessageImageBytes: sockets.maxTotalBytes ?? 200 * 1024 * 1024,
+          },
           imageHostPath: (ref) => {
             sockets.mediaRef = ref;
             return sockets.mediaPath || '';
+          },
+          async saveImages(inputs) {
+            sockets.saveImageCalls = (sockets.saveImageCalls || 0) + 1;
+            if (sockets.saveImagesThrows) throw new Error(sockets.saveImagesThrows);
+            sockets.savedImages = [...(sockets.savedImages || []), ...inputs];
+            return inputs.map((img, i) => {
+              const hex = i.toString(16).padStart(2, '0');
+              return {
+                attachmentId: `sha256:${'a'.repeat(62)}${hex}`,
+                mediaType: img.mediaType,
+                bytes: img.data.length,
+                width: 1,
+                height: 1,
+                ...(img.name ? { name: img.name } : {}),
+              };
+            });
+          },
+        };
+      }
+      // 模型目录（图片转附件前判能力；缺省未声明 inputModalities ⇒ 驱动按「未知」放行）
+      if (name === 'llm') {
+        if (sockets.llmMissing) return undefined;
+        return {
+          async resolveModelInfo(provider, model) {
+            sockets.modelInfoCalls = (sockets.modelInfoCalls || 0) + 1;
+            if (sockets.modelInfoThrows) throw new Error(sockets.modelInfoThrows);
+            const info = { provider, model };
+            if (sockets.inputModalities !== undefined) {
+              info.inputModalities = sockets.inputModalities;
+            }
+            return info;
           },
         };
       }
@@ -476,6 +519,96 @@ async function main() {
     && msg[1].source.kind === 'user', JSON.stringify(msg[1]));
   await call(base, token, 'POST', '/steer', { session_id: sid, prompt: 'stop' });
   check('steer → agent.steer', agent.calls.at(-1)[0] === 'steer');
+
+  // --- 平台图片引用 → DSH 原生附件（2026-10-29）---
+  // 真机链路：飞书截图/会话窗附件把图存进 <work_dir>/board_media/<fid>，正文投递
+  // markdown 绝对路径；驱动在这里把它换成 content 里的 image 块（DSH 用户气泡只认
+  // 原生附件）。桩面要覆盖「转成功」与「任一环节不成立 ⇒ 逐字保留原文」两半。
+  const imgRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-driver-img-'));
+  const mediaDir = path.join(imgRoot, 'board_media');
+  fs.mkdirSync(mediaDir, { recursive: true });
+  const imgPath = path.join(mediaDir, 'm1700000000000_abcdef0123.png');
+  fs.writeFileSync(imgPath, PNG_1PX);
+  const imgPath2 = path.join(mediaDir, 'm1700000000001_0123456789.png');
+  fs.writeFileSync(imgPath2, PNG_1PX);
+  const missingPath = path.join(mediaDir, 'm1700000000002_fedcba9876.png');
+  const savedBefore = (sockets.savedImages || []).length;
+
+  sockets.inputModalities = ['text', 'image'];
+  await call(base, token, 'POST', '/prompt',
+    { session_id: sid, prompt: `看这个 ![截图](${imgPath}) 怎么修` });
+  const imgMsg = agent.calls.at(-1)[1];
+  check('prompt 里的 board_media 图 → 原生图片附件（正文去掉引用、名字取 alt）',
+    imgMsg.content.length === 2
+    && imgMsg.content[0].type === 'text' && imgMsg.content[0].text === '看这个 怎么修'
+    && imgMsg.content[1].type === 'image'
+    && imgMsg.content[1].attachment.mediaType === 'image/png'
+    && imgMsg.content[1].attachment.name === '截图',
+    JSON.stringify(imgMsg.content));
+  check('附件字节按魔数嗅探后交 saveImages（png + 原 alt）',
+    (sockets.savedImages || []).length === savedBefore + 1
+    && sockets.savedImages.at(-1).mediaType === 'image/png'
+    && sockets.savedImages.at(-1).name === '截图',
+    JSON.stringify(sockets.savedImages?.at(-1)?.mediaType));
+
+  await call(base, token, 'POST', '/steer',
+    { session_id: sid, prompt: `![](${imgPath})` });
+  const steerMsg = agent.calls.at(-1)[1];
+  check('steer 同样转原生附件（纯图消息只有 image 块）',
+    agent.calls.at(-1)[0] === 'steer'
+    && steerMsg.content.length === 1 && steerMsg.content[0].type === 'image',
+    JSON.stringify(steerMsg.content));
+
+  sockets.inputModalities = ['text'];                    // 模型明确 text-only ⇒ 保持原文
+  await call(base, token, 'POST', '/prompt',
+    { session_id: sid, prompt: `看这个 ![截图](${imgPath}) 怎么修` });
+  check('模型明确不支持图片输入 → 逐字保留原文本（不转）',
+    agent.calls.at(-1)[1].content.length === 1
+    && agent.calls.at(-1)[1].content[0].text === `看这个 ![截图](${imgPath}) 怎么修`,
+    JSON.stringify(agent.calls.at(-1)[1].content));
+
+  sockets.inputModalities = undefined;                   // 能力未知 ⇒ 与 dsh 同口径放行
+  await call(base, token, 'POST', '/prompt', { session_id: sid, prompt: `![](${imgPath})` });
+  check('模型能力未知 → 按放行处理（仍转原生附件）',
+    agent.calls.at(-1)[1].content.length === 1
+    && agent.calls.at(-1)[1].content[0].type === 'image');
+
+  sockets.inputModalities = ['text', 'image'];
+  await call(base, token, 'POST', '/prompt', { session_id: sid, prompt: `![](${missingPath})` });
+  check('图片文件不存在 → 逐字保留原文（不产生半截消息）',
+    agent.calls.at(-1)[1].content.length === 1
+    && agent.calls.at(-1)[1].content[0].text === `![](${missingPath})`);
+
+  sockets.attachmentsMissing = true;
+  await call(base, token, 'POST', '/prompt', { session_id: sid, prompt: `![](${imgPath})` });
+  check('attachments 服务缺席 → 逐字保留原文',
+    agent.calls.at(-1)[1].content[0].text === `![](${imgPath})`);
+  delete sockets.attachmentsMissing;
+
+  process.env.TS_DSH_INLINE_IMAGES = '0';                // 回滚阀：一个字节也不动
+  await call(base, token, 'POST', '/prompt', { session_id: sid, prompt: `![](${imgPath})` });
+  check('TS_DSH_INLINE_IMAGES=0 → 逐字保留原文（回滚阀生效）',
+    agent.calls.at(-1)[1].content[0].text === `![](${imgPath})`);
+  delete process.env.TS_DSH_INLINE_IMAGES;
+
+  sockets.maxImages = 1;                                 // 张数超限 ⇒ 全有或全无
+  await call(base, token, 'POST', '/prompt',
+    { session_id: sid, prompt: `![](${imgPath})\n![](${imgPath2})` });
+  check('超过单条张数上限 → 整体不转（全有或全无）',
+    agent.calls.at(-1)[1].content[0].text === `![](${imgPath})\n![](${imgPath2})`);
+  delete sockets.maxImages;
+
+  // 宿主 createUserMessage 工厂路径（真机必走：`@deepseek-ai/dsh-llm` 可解析）——
+  // 桩里默认工厂为 null 会走本地降级构造，这条把「content 数组原样交给工厂」也钉住。
+  const savedFactory = driver._userMessageFactory;
+  driver._userMessageFactory = ({ content, source }) => ({ id: 'factory-msg', role: 'user', content, source });
+  await call(base, token, 'POST', '/prompt', { session_id: sid, prompt: `![](${imgPath})` });
+  const factoryMsg = agent.calls.at(-1)[1];
+  check('宿主 createUserMessage 工厂路径：image 块原样进 content',
+    factoryMsg.id === 'factory-msg' && factoryMsg.content.length === 1
+    && factoryMsg.content[0].type === 'image', JSON.stringify(factoryMsg.content));
+  driver._userMessageFactory = savedFactory;
+  fs.rmSync(imgRoot, { recursive: true, force: true });
 
   // --- 事件流：会话事件按 seq 推给 SSE（含 ring 补发）---
   const ssePromise = readFrames(base, token, `/events?session_id=${sid}&since=0`, 2);
@@ -1266,6 +1399,23 @@ async function main() {
   check('watched：/steer 回落（external=true）',
     s1.ok === true && s1.external === true
     && watchAgent.calls.some((c) => c[0] === 'steer'), JSON.stringify(s1));
+  // 图片转原生附件对**池外回落**同样生效（外部会话没有 entry，模型取活 agent options）
+  const extImgRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-driver-extimg-'));
+  const extMedia = path.join(extImgRoot, 'board_media');
+  fs.mkdirSync(extMedia, { recursive: true });
+  const extImg = path.join(extMedia, 'm1700000000003_abcdef0123.png');
+  fs.writeFileSync(extImg, PNG_1PX);
+  sockets.inputModalities = ['text', 'image'];
+  await call(base, token, 'POST', '/prompt',
+    { session_id: 'session-ext-w1', prompt: `外部图 ![ext](${extImg})` });
+  const extMsg = watchAgent.calls.at(-1)[1];
+  check('watched 外部会话：图引用同样转原生附件（模型取活 agent options）',
+    extMsg.content.length === 2 && extMsg.content[0].text === '外部图'
+    && extMsg.content[1].type === 'image'
+    && extMsg.content[1].attachment.mediaType === 'image/png',
+    JSON.stringify(extMsg.content));
+  delete sockets.inputModalities;
+  fs.rmSync(extImgRoot, { recursive: true, force: true });
   // /status 回落（brief Step 3 第三段）：形状 = 最小实时态 + external + 旁听 interaction，
   // **不含 last_seq**（外部会话的会话事件 seq 不进本池，平台基线口径由 T6 统一走 dshevents）。
   for (const fn of handlers['session/created'] || []) {

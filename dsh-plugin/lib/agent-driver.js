@@ -37,7 +37,8 @@
  *     解析不到时降级为等价的本地构造（见 _userMessage）。
  */
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
+import { BOARD_MEDIA_MAX_IMAGES, scanBoardMediaImages } from './board-media.js';
 
 /** 驱动路由前缀（与 /touchstone 反代前缀并列，互不重叠） */
 export const DRIVER_PREFIX = '/touchstone-agent';
@@ -93,6 +94,20 @@ const TEXT_BLOCK_LIMIT = 20000;
 
 /** 可驱动 agent 的合法来源地址（Node 在不同栈下回环地址写法不同，三种都收） */
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+/**
+ * 平台 board_media 图片引用 → DSH 原生附件（2026-10-29）的回滚开关。
+ *
+ * 飞书截图接收与站点会话窗附件都把图写成 markdown 绝对路径；DSH 的用户气泡是纯
+ * 文本渲染、只认原生 image 块，故投递口把这类引用转成 `ctx.attachments` 里的
+ * 不可变附件。`TS_DSH_INLINE_IMAGES=0`（或 false/off/no）⇒ 一个字节也不动，
+ * 回到「正文里只有链接」的旧行为。**每次投递现读**，与平台侧回滚阀同口径。
+ */
+const INLINE_IMAGES_ENV = 'TS_DSH_INLINE_IMAGES';
+/** 宿主未提供 attachments.imageLimits 时的兜底上限（与 dsh 缺省值同量级） */
+const INLINE_IMAGES_DEFAULT_MAX = BOARD_MEDIA_MAX_IMAGES;
+const INLINE_IMAGES_DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
+const INLINE_IMAGES_DEFAULT_TOTAL_BYTES = 200 * 1024 * 1024;
 
 /** 平台会话池里的一格：一个平台任务/卡片 ↔ 一个常驻 dsh 会话 */
 class DriverSession {
@@ -1534,6 +1549,9 @@ export class AgentDriver {
    *
    * 重构（评审 Important 1）：池外三档判定收敛到 `_externalTarget`（唯一闸门），本端点只留
    * 自己独有的三行——空 prompt→400、`live.followup` 投递、200 `external:true` 回执。
+   *
+   * 图片（2026-10-29）：正文里的平台 `board_media` 位图引用先经 `_messageForPrompt`
+   * 转成原生 image 附件（失败/不适用则逐字回落到原文本），见 `_admitInlineImages`。
    */
   async _prompt(res, req) {
     const body = await this._body(req);
@@ -1546,7 +1564,7 @@ export class AgentDriver {
         this._json(res, 400, { error: 'prompt 不能为空' });
         return;
       }
-      live.followup(this._userMessage(text));
+      live.followup(await this._messageForPrompt(sid, text, this._modelOf(null, live)));
       this._json(res, 200, { ok: true, session_id: sid, external: true });
       return;
     }
@@ -1556,7 +1574,8 @@ export class AgentDriver {
       this._json(res, 400, { error: 'prompt 不能为空' });
       return;
     }
-    entry.agent.followup(this._userMessage(text));
+    entry.agent.followup(
+      await this._messageForPrompt(sid, text, this._modelOf(entry, entry.agent)));
     this._json(res, 200, { ok: true, session_id: entry.sessionId });
   }
 
@@ -1640,6 +1659,9 @@ export class AgentDriver {
    *
    * 重构（评审 Important 1）：池外三档判定收敛到 `_externalTarget`（唯一闸门），本端点只留
    * 自己独有的三行——空 prompt→400、`live.steer` 插话、200 `external:true` 回执。
+   *
+   * 图片（2026-10-29）：与 `/prompt` 共用 `_messageForPrompt`（steer 也是用户消息，
+   * 同样要把平台图片引用转成原生附件）。
    */
   async _steer(res, req) {
     const body = await this._body(req);
@@ -1652,7 +1674,7 @@ export class AgentDriver {
         this._json(res, 400, { error: 'prompt 不能为空' });
         return;
       }
-      live.steer(this._userMessage(text));
+      live.steer(await this._messageForPrompt(sid, text, this._modelOf(null, live)));
       this._json(res, 200, { ok: true, session_id: sid, external: true });
       return;
     }
@@ -1662,7 +1684,8 @@ export class AgentDriver {
       this._json(res, 400, { error: 'prompt 不能为空' });
       return;
     }
-    entry.agent.steer(this._userMessage(text));
+    entry.agent.steer(
+      await this._messageForPrompt(sid, text, this._modelOf(entry, entry.agent)));
     this._json(res, 200, { ok: true, session_id: entry.sessionId });
   }
 
@@ -2553,15 +2576,223 @@ export class AgentDriver {
    * 构造 user 消息。首选宿主 `@deepseek-ai/dsh-llm` 的 createUserMessage（与官方驱动
    * 完全同构：结构化克隆 + 深冻结 + 随机 id）；该包解析不到时退化为等价本地对象
    * ——MessageId 运行时就是字符串，宿主不按类校验。
+   *
+   * @param {string|object[]} input - 纯文本（既有调用点）或已组装好的 content 块数组
+   *   （图片转原生附件后：`[{type:'text'}, {type:'image'}, …]`）
    */
-  _userMessage(text) {
-    const content = [{ type: 'text', text }];
+  _userMessage(input) {
+    const content = Array.isArray(input)
+      ? input
+      : [{ type: 'text', text: String(input == null ? '' : input) }];
     if (this._userMessageFactory) {
       return this._userMessageFactory({ content, source: { kind: 'user' } });
     }
     return Object.freeze({
       id: randomUUID(), role: 'user', content, source: { kind: 'user' },
     });
+  }
+
+  /**
+   * 平台 board_media 图片引用 → DSH 原生附件（2026-10-29）的回滚开关。
+   * 每次投递现读，环境变量改动不必重载驱动。
+   *
+   * @returns {boolean} 关闭时 false
+   */
+  _inlineImagesEnabled() {
+    const raw = String(process.env[INLINE_IMAGES_ENV] ?? '').trim().toLowerCase();
+    return !(raw === '0' || raw === 'false' || raw === 'off' || raw === 'no');
+  }
+
+  /**
+   * 解析「该会话当前用的模型」：池内优先 `/model` 改过的选择、其次创建时落下的
+   * `model`、再其次 agent.options；池外看管会话读活 agent 的 options；最后回落
+   * profile 默认模型。取不到返回 null（调用方按「能力未知」放行，与 dsh 原生
+   * 附件口径一致）。
+   *
+   * @param {DriverSession|null} entry - 池条目（池外传 null）
+   * @param {object|null} live - 宿主活 agent（池内也传，作为 options 兜底）
+   * @returns {{provider: string, model: string}|null} 选择
+   */
+  _modelOf(entry, live) {
+    const pick = (obj) => (obj && obj.provider && obj.model
+      ? { provider: String(obj.provider), model: String(obj.model) } : null);
+    const fromEntry = entry
+      ? (pick(entry.selection && entry.selection.current)
+        || pick(entry.model)
+        || pick(entry.agent && entry.agent.options))
+      : null;
+    if (fromEntry) return fromEntry;
+    const fromLive = pick(live && live.options);
+    if (fromLive) return fromLive;
+    let svc = null;
+    try {
+      svc = this.agentCtx ? this.agentCtx.get('agentDefaultModel') : null;
+    } catch {
+      svc = null;
+    }
+    if (svc && typeof svc.currentSelection === 'function') {
+      try {
+        return pick(svc.currentSelection());
+      } catch {
+        /* 服务报错按未知处理 */
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 模型是否声明支持图片输入。
+   *
+   * 口径与 dsh 自身一致（`dsh-api-session-controller` 的 prompt 准入）：**只有明确
+   * 声明了 `inputModalities` 且不含 image 才拒绝**；未声明/目录读不到按「未知」
+   * 放行，绝不因为查不到目录就把用户的图默默降级成链接。
+   *
+   * @param {{provider: string, model: string}|null} model - 当前选择
+   * @returns {Promise<boolean|undefined>} true/false；undefined=未知（放行）
+   */
+  async _modelAcceptsImages(model) {
+    if (!model || !model.provider || !model.model) return undefined;
+    const ctx = this.ctx || null;
+    const agentCtx = this.agentCtx || null;
+    const llm = (ctx && typeof ctx.get === 'function' ? ctx.get('llm') : null)
+      || (agentCtx && typeof agentCtx.get === 'function' ? agentCtx.get('llm') : null);
+    if (!llm || typeof llm.resolveModelInfo !== 'function') return undefined;
+    try {
+      const info = await llm.resolveModelInfo(model.provider, model.model);
+      const modalities = info && info.inputModalities;
+      if (Array.isArray(modalities)) return modalities.includes('image');
+    } catch (err) {
+      this.logger.warn(`touchstone: 读取模型能力失败（按未知放行）: ${(err && err.message) || err}`);
+    }
+    return undefined;
+  }
+
+  /**
+   * 把消息文本里的平台图片引用转成 DSH 原生附件（2026-10-29）。
+   *
+   * 为什么在这里做：飞书截图接收与会话窗附件最终都经平台的 `dshdriver.prompt/steer`
+   * 走到本端点，在投递口转一次即可覆盖全部来源，且**平台双后端/数据库/前端零改动**。
+   * DSH 的用户气泡是纯文本渲染、只认会话里的原生 image 块；转成附件后 DSH 会话窗
+   * 显示缩略图、站点会话窗经 `/media` 读同一份附件，模型也直接收到图（不必再
+   * `read_image`）。图片本体仍留在项目 board_media/（平台既有产物不动）。
+   *
+   * **全有或全无**：任一环节不成立（服务缺席、模型明确不支持、文件缺失/非位图/
+   * 超限、批次被附件服务拒收）⇒ 返回 null，调用方逐字保留原文本，行为与改造前
+   * 完全一致。绝不产出「一部分图变附件、一部分留 markdown」的半截消息。
+   *
+   * @param {string} text - 平台投递的原始提示词
+   * @param {{provider: string, model: string}|null} model - 当前模型选择（能力判定）
+   * @param {string} sid - 会话 id（只用于日志）
+   * @returns {Promise<object[]|null>} content 块数组；null=不转换（保持原文）
+   */
+  async _admitInlineImages(text, model, sid) {
+    if (!this._inlineImagesEnabled()) return null;
+    if (typeof text !== 'string' || !text.includes('board_media')) return null;
+    const store = this.ctx && typeof this.ctx.get === 'function'
+      ? this.ctx.get('attachments') : null;
+    if (!store || typeof store.saveImages !== 'function') return null;
+
+    const limits = (store && store.imageLimits) || {};
+    const maxImages = Number.isFinite(limits.maxImagesPerMessage)
+      ? limits.maxImagesPerMessage : INLINE_IMAGES_DEFAULT_MAX;
+    const maxBytes = Number.isFinite(limits.maxImageBytes)
+      ? limits.maxImageBytes : INLINE_IMAGES_DEFAULT_MAX_BYTES;
+    const maxTotal = Number.isFinite(limits.maxMessageImageBytes)
+      ? limits.maxMessageImageBytes : INLINE_IMAGES_DEFAULT_TOTAL_BYTES;
+
+    const scan = scanBoardMediaImages(text, maxImages);
+    if (scan.reason === 'overflow') {
+      this.logger.warn(`touchstone: 会话 ${sid} 图片超过单条上限 ${maxImages} 张，保留原文`);
+      return null;
+    }
+    if (!scan.images.length) return null;
+
+    const accepted = await this._modelAcceptsImages(model);
+    if (accepted === false) {
+      // 模型明确 text-only：保持旧行为（正文带路径，agent 需要时用 read_image）
+      this.logger.info(`touchstone: 会话 ${sid} 模型 ${model.model} 不支持图片输入，保留原文`);
+      return null;
+    }
+
+    const inputs = [];
+    let total = 0;
+    for (const img of scan.images) {
+      let st;
+      try {
+        st = await stat(img.path);
+      } catch (err) {
+        this.logger.warn(`touchstone: 会话 ${sid} 图片不可读（保留原文）: ${img.path}`);
+        return null;
+      }
+      if (!st.isFile()) {
+        this.logger.warn(`touchstone: 会话 ${sid} 图片不是普通文件（保留原文）: ${img.path}`);
+        return null;
+      }
+      if (st.size > maxBytes) {
+        this.logger.warn(`touchstone: 会话 ${sid} 单张图片超过 ${maxBytes} 字节（保留原文）`);
+        return null;
+      }
+      total += st.size;
+      if (total > maxTotal) {
+        this.logger.warn(`touchstone: 会话 ${sid} 图片总量超过 ${maxTotal} 字节（保留原文）`);
+        return null;
+      }
+      let data;
+      try {
+        data = await readFile(img.path);
+      } catch (err) {
+        this.logger.warn(`touchstone: 会话 ${sid} 图片读取失败（保留原文）: ${img.path}`);
+        return null;
+      }
+      if (data.length > maxBytes) {
+        this.logger.warn(`touchstone: 会话 ${sid} 单张图片超过 ${maxBytes} 字节（保留原文）`);
+        return null;
+      }
+      const mediaType = sniffImageType(data);
+      if (!mediaType) {
+        this.logger.warn(`touchstone: 会话 ${sid} 图片不是受支持的位图（保留原文）: ${img.path}`);
+        return null;
+      }
+      inputs.push({ data, mediaType, name: img.name });
+    }
+
+    let refs;
+    try {
+      refs = await store.saveImages(inputs);
+    } catch (err) {
+      this.logger.warn(`touchstone: 会话 ${sid} 图片转附件被拒（保留原文）: ${(err && err.message) || err}`);
+      return null;
+    }
+    if (!Array.isArray(refs) || refs.length !== inputs.length) {
+      this.logger.warn(`touchstone: 会话 ${sid} 图片转附件回执不完整（保留原文）`);
+      return null;
+    }
+
+    const kept = scan.kept.trim();
+    const content = [];
+    if (kept) content.push({ type: 'text', text: kept });
+    for (const ref of refs) content.push({ type: 'image', attachment: ref });
+    this.logger.info(`touchstone: 会话 ${sid} 的 ${refs.length} 张图片已转为原生附件`);
+    return content;
+  }
+
+  /**
+   * 投递用消息：优先尝试把平台图片引用转成原生附件，任何异常/不适用都回落原文。
+   * 图片处理绝不允许拖垮一次投递（可观测的只有「这张图还是链接」）。
+   *
+   * @param {string} sid - 会话 id
+   * @param {string} text - 原始提示词
+   * @param {{provider: string, model: string}|null} model - 当前模型选择
+   * @returns {Promise<object>} 可直接交给 agent.followup/steer 的 user 消息
+   */
+  async _messageForPrompt(sid, text, model) {
+    try {
+      const content = await this._admitInlineImages(text, model, sid);
+      if (content) return this._userMessage(content);
+    } catch (err) {
+      this.logger.warn(`touchstone: 会话 ${sid} 图片转换异常（保留原文）: ${(err && err.message) || err}`);
+    }
+    return this._userMessage(text);
   }
 
   /**
