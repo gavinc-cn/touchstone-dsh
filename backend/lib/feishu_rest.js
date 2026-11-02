@@ -402,13 +402,18 @@ export async function restSendText(openId, text, cfg) {
 /**
  * 主动发单聊交互卡片（schema 2.0 dict）。对齐 `feishu.rest_send_card`(feishu.py:1149-1157)：
  * `content` 直接传卡片 JSON 串；`{"data": …}` 包裹会被 230099 拒绝（2026-09-27 spike 实测）。
+ *
+ * **返回值**（2026-10-30 新增）：发卡响应里的 `data.message_id`（拿不到时空串）。
+ * 用途＝作答后置灰：点卡路径可回在回调响应里；**站点/DSH 作答**没有回调可挂，
+ * 只能按 message_id 调 `PATCH /open-apis/im/v1/messages/:id` 原地更新（14 天窗口）。
+ * 返回空串不抛——调用方把它当「这条卡以后更新不了」处理即可，绝不阻断发卡。
  * @param {string} openId
  * @param {object} card
  * @param {object} cfg
- * @returns {Promise<void>}
+ * @returns {Promise<string>} message_id（`data.message_id`；缺失为空串）
  */
 export async function restSendCard(openId, card, cfg) {
-  await rest('POST', '/open-apis/im/v1/messages', {
+  const out = await rest('POST', '/open-apis/im/v1/messages', {
     params: { receive_id_type: 'open_id' },
     jsonBody: {
       receive_id: openId,
@@ -417,6 +422,9 @@ export async function restSendCard(openId, card, cfg) {
     },
     cfg,
   });
+  const data = out !== null && typeof out === 'object' ? out.data : null;
+  const mid = data !== null && typeof data === 'object' ? data.message_id : null;
+  return mid === null || mid === undefined ? '' : String(mid);
 }
 
 /**

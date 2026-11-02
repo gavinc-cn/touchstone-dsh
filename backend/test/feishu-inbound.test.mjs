@@ -1821,3 +1821,77 @@ test('onMessageEvent：SDK 模型链 → 6 键 dict（mentions 的 open_id 缺�
     assert.match(h.stderr[n], /^feishu inbound: 事件解析异常: AttributeError\(/);
   } finally { h.close(); }
 });
+
+// ==========================================================================
+// ⑫ 作答后置灰（2026-10-30）：点卡路径在回调响应里换卡
+// ==========================================================================
+
+/**
+ * 成功终态（`已收下`/`✅` 前缀）⇒ 回调响应带 `card:{type:'raw',data:置灰卡}`；
+ * 失败/非终态/未登记 ⇒ 原样返回 toast（与旧版逐字节相同，由上面各条的 deepEqual 兜底）。
+ * 站点/DSH 作答通道见 `feishu-answer-card.test.mjs` 的 `interactionClosed`。
+ */
+test('onCardAction：作答成功 ⇒ 响应里带置灰卡；失败/未登记 ⇒ 只有 toast', async () => {
+  const h = harness('inbound-card-grey', {
+    interaction: () => ({
+      pending: true, kind: 'question', qid: 'q1', answerable: true,
+      questions: [{ id: 'q_0', options: [{ id: 'o1', label: '甲' }], allow_other: true }],
+    }),
+  });
+  try {
+    bind('ou_a', 1, 0, h.options);
+    const { c } = cardFixture(h.fx);
+    const card = feishu.buildInteractionCard({
+      card_id: c.id, title: '登录接口调试', kind: 'question', question: '用哪个？',
+      options: ['甲', '乙'], answerable: true, qid: 'q1',
+    }, 'P1');
+    feishu.rememberInteractionCard({
+      cardId: c.id, qid: 'q1', messageId: 'om_1', card, name: 'P1',
+      openId: 'ou_a', userId: 1, cfg: CFG, lang: 'zh',
+    });
+    const out = await inbound.onCardAction(cardEvt({ t: 'a', c: c.id, i: 1 }), CFG, h.options);
+    assert.equal(out.toast.type, 'success');
+    assert.equal(out.card.type, 'raw');
+    assert.equal(out.card.data.header.template, 'green');
+    assert.equal(out.card.data.header.title.content, `✅ 卡片已作答 [P1]`);
+    assert.equal(out.card.data.body.elements[0].content, '✅ 已作答');
+    assert.equal(out.card.data.schema, '2.0');
+    // 按钮全灰（可点控件一个不剩）
+    const buttons = out.card.data.body.elements.filter((e) => e.tag === 'button');
+    assert.ok(buttons.length >= 2);
+    for (const b of buttons) assert.equal(b.disabled, true);
+  } finally { h.close(); }
+
+  // 失败回执（非成功前缀）⇒ 不带卡
+  const bad = harness('inbound-card-grey-bad', {
+    interaction: () => ({ pending: true, kind: 'question', qid: 'q1', answerable: true,
+      questions: [{ id: 'q_0', options: [{ id: 'o1', label: '甲' }], allow_other: true }] }),
+    answerErr: '当前没有等待中的提问',
+  });
+  try {
+    bind('ou_a', 1, 0, bad.options);
+    const { c } = cardFixture(bad.fx);
+    const card = feishu.buildInteractionCard({
+      card_id: c.id, title: 't', kind: 'question', question: 'q',
+      options: ['甲'], answerable: true, qid: 'q1',
+    }, 'P1');
+    feishu.rememberInteractionCard({
+      cardId: c.id, qid: 'q1', messageId: 'om_1', card, name: 'P1',
+      openId: 'ou_a', userId: 1, cfg: CFG, lang: 'zh',
+    });
+    const out = await inbound.onCardAction(cardEvt({ t: 'a', c: c.id, i: 1 }), CFG, bad.options);
+    assert.deepEqual(out, { toast: { type: 'error', content: '操作失败，详情看机器人单聊' } });
+  } finally { bad.close(); }
+
+  // 未登记（进程重启后的老卡）⇒ 只回 toast，不试图换卡
+  const none = harness('inbound-card-grey-none', {
+    interaction: () => ({ pending: true, kind: 'question', qid: 'q1', answerable: true,
+      questions: [{ id: 'q_0', options: [{ id: 'o1', label: '甲' }], allow_other: true }] }),
+  });
+  try {
+    bind('ou_a', 1, 0, none.options);
+    const { c } = cardFixture(none.fx);
+    const out = await inbound.onCardAction(cardEvt({ t: 'a', c: c.id, i: 1 }), CFG, none.options);
+    assert.deepEqual(out, { toast: { type: 'success', content: '已收下，详情看机器人单聊' } });
+  } finally { none.close(); }
+});

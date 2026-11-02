@@ -1046,6 +1046,7 @@ const HOOK_MILESTONES = Object.freeze({
   watchBeforeDelivery: 'M5-3（外部会话看管声明）',
   isSubagent: 'M5-3（sync 会话归类 / sessparse.is_subagent）',
   feishuCardReview: 'M7（飞书推送）',
+  feishuInteractionClosed: 'M7（飞书推送 / 作答后置灰）',
 });
 
 /** 钩子表：值为 null 表示「本批还没搬到」。 */
@@ -1053,6 +1054,7 @@ const HOOKS = {
   enterDoing: null, stopCard: null, finish: null, archiveCardSessions: null,
   syncSessions: null, iwClear: null, ensureWatch: null, watchBeforeDelivery: null,
   isSubagent: null, feishuCardReview: null, feishuCardBlocked: null,
+  feishuInteractionClosed: null,
 };
 
 /** 看板钩子未注入（响亮失败；对应 M4 的 `UnitHandlerMissing` 口径）。 */
@@ -5055,9 +5057,25 @@ export async function iwOnce(options = {}) {
           touchUnit(KIND_CARD, card.id, `busy=${r.busy ? 1 : 0}(poll)`, options);
         }
         const c = IW_CACHE.get(sid) || {};
+        // 等待态边沿（2026-10-30，作答后置灰）：上一轮 pending ⇒ 本轮消失，说明提问
+        // 已在**任意通道**被处理（站点/DSH 界面作答、agent 自行放弃、会话被叫停）。
+        // 站点/文字作答走 `queueAnswerUnit` 的同步通知；这里补的是「没有经过平台队列」
+        // 的那条路（尤其 DSH 会话窗里直接作答）。取值必须在 Object.assign 之前。
+        const wasPending = c.pending === true;
+        const closedMeta = { sid, qid: c.qid, approval_id: c.approval_id };
         Object.assign(c, r);           // pending/busy/qid/question/options/answerable/text
         c.ts = now;
         IW_CACHE.set(sid, c);
+        if (wasPending && r.pending !== true) {
+          const closed = optionalHook('feishuInteractionClosed');
+          if (closed !== null) {
+            try {
+              closed(card.id, closedMeta, options);
+            } catch {
+              /* 置灰通知失败不影响调和（下一处判定照旧） */
+            }
+          }
+        }
         const liveMsg = chatMod.liveOfSid(sid, options);   // 本卡消息在跑/排队
         // 孤儿运行行只在「本卡确有排队/执行中的消息」时才影响判定 ⇒ 短路那次行点查
         const orphan = Boolean(liveMsg) && orphanHold(card.id, options);
@@ -5554,6 +5572,17 @@ export function queueAnswerUnit(proj, cardId, sid, meta, options = {}) {
   } catch (e) {
     console.log('[board] 作答排队落列失败（答案已收，列待送达时归位）'
       + ` card=${cardId}: ${errText(e)}`);
+  }
+  // 作答已受理 ⇒ 通知飞书把对应 DM 交互卡置灰（站点/文字作答没有卡片回调可挂，
+  // 只能走这条关闭事件）。点卡作答走回调响应里的换卡，这条补丁对同一张卡幂等跳过。
+  // 未注入 = 「该分支不存在」（可选钩子，与 feishuCardBlocked 同口径）。
+  const closed = optionalHook('feishuInteractionClosed');
+  if (closed !== null) {
+    try {
+      closed(cardId, meta, options);
+    } catch (e) {
+      console.log(`[board] 作答关闭通知失败（作答已受理）card=${cardId}: ${errText(e)}`);
+    }
   }
 }
 

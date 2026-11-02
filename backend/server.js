@@ -388,7 +388,13 @@ async function main() {
     feishu.taskFailed(projectId, taskId, taskName, taskType, error, skippedN, { dbPath }));
   // ⑤ `board.setBoardHooks`：D1 拆名后 review 路径 3 位、blocked 路径 4 位，
   //    各自一一对应 `feishu.cardReview` / `feishu.cardBlocked`（不再靠元数猜形态）。
-  board.setBoardHooks({ feishuCardReview: feishu.cardReview, feishuCardBlocked: feishu.cardBlocked });
+  //    2026-10-30 追加 `feishuInteractionClosed`：作答/审批受理或等待态消失时，把对应的
+  //    DM 交互卡置灰（点卡路径另有回调响应换卡；这条补的是站点/DSH 作答通道）。
+  board.setBoardHooks({
+    feishuCardReview: feishu.cardReview,
+    feishuCardBlocked: feishu.cardBlocked,
+    feishuInteractionClosed: feishu.interactionClosed,
+  });
 
   const server = http.createServer(createHandler({
     webDir,

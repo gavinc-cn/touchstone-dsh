@@ -1264,3 +1264,78 @@ test('iwOnce：中枢在线但未对齐（未知）⇒ 排队中也不搬列', a
     s.close();
   }
 });
+
+// ==========================================================================
+// ⑬ 作答后置灰的关闭通知（2026-10-30，`feishuInteractionClosed`）
+// ==========================================================================
+
+/**
+ * 两条关闭通道各一条用例：
+ *   ① 平台队列受理（站点/网页/文字作答）⇒ `queueAnswerUnit` 同步通知；
+ *   ② 等待态在调和器眼里消失（DSH 会话窗直接作答）⇒ `iwOnce` 的 pending→false 边沿通知。
+ * 点卡作答另在 `feishu_inbound.onCardAction` 的回调响应里换卡，不走这里。
+ */
+test('queueAnswerUnit：作答受理 ⇒ 通知 feishuInteractionClosed(cardId, meta)', () => {
+  const s = setup('answer-closed');
+  const cid = insertCard(s.fx.db, s.pid, {
+    title: 'C', columnKey: 'blocked', blockKind: 'interaction', blockText: '等待',
+    sessionId: 'sid-a',
+  });
+  const proj = { id: s.pid, agent_path: 'dsh-plugin:/dsh', project_dir: s.fx.dir };
+  const calls = [];
+  board.setBoardHooks({ feishuInteractionClosed: (id, meta) => calls.push([id, meta]) });
+  try {
+    board.queueAnswerUnit(proj, cid, 'sid-a',
+      { sid: 'sid-a', qid: 'call-1', answers: [] }, s.opts);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][0], cid);
+    assert.equal(calls[0][1].qid, 'call-1');
+    assert.equal(calls[0][1].sid, 'sid-a');
+    // 审批同样走这条（meta 带 approval_id，无 qid）
+    board.queueAnswerUnit(proj, cid, 'sid-a',
+      { sid: 'sid-a', approval_id: 'ap-1', decision: 'approved' }, s.opts);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1][1].approval_id, 'ap-1');
+  } finally {
+    board.setBoardHooks({ feishuInteractionClosed: null });
+    s.close();
+  }
+});
+
+test('iwOnce：等待态消失（DSH 界面作答）⇒ 通知一次；仍在等待 ⇒ 不通知', async () => {
+  const s = setup('iw-closed');
+  const sid = 'sid-closed-1';
+  const cid = insertCard(s.fx.db, s.pid, {
+    title: 'C', columnKey: 'blocked', blockKind: 'interaction', blockText: '等待',
+    sessionId: sid,
+  });
+  const wasConnected = dshevents.HUB._connected;
+  dshevents.HUB._setConnected(true);
+  dshevents.HUB._onFrame({ type: 'session/created', session_id: sid,
+    data: { cwd: s.fx.dir, owned: false } });
+  dshevents.HUB._onFrame({ type: 'agent/status', session_id: sid, data: { status: 'running' } });
+  dshevents.HUB._onFrame({ type: 'driver/interaction', session_id: sid,
+    data: { state: 'asked', interaction: { kind: 'question', call_id: 'call-9',
+      questions: [{ id: 'q_0', question: '选？', options: [{ id: 'o1', label: '甲' }] }] } } });
+  const calls = [];
+  board.setBoardHooks({ feishuInteractionClosed: (id, meta) => calls.push([id, meta]) });
+  try {
+    await board.iwOnce(s.opts);
+    assert.equal(calls.length, 0, '还在等待 ⇒ 不通知');
+    // DSH 会话窗里作答：等待态消失（会话仍 running）
+    dshevents.HUB._onFrame({ type: 'driver/interaction', session_id: sid,
+      data: { state: 'answered' } });
+    await board.iwOnce(s.opts);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][0], cid);
+    assert.equal(calls[0][1].qid, 'call-9');
+    assert.equal(calls[0][1].sid, sid);
+    // 再跑一轮：缓存已是 pending=false ⇒ 不再重复通知（边沿只报一次）
+    await board.iwOnce(s.opts);
+    assert.equal(calls.length, 1);
+  } finally {
+    board.setBoardHooks({ feishuInteractionClosed: null });
+    dshevents.HUB._setConnected(wasConnected);
+    s.close();
+  }
+});

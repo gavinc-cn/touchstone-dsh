@@ -614,11 +614,16 @@ export function evtSeenSize() { return EVT_SEEN.size; }
 /** Node 专有测试缝：暂存桶数量（oracle 判据 `len > 64` ⇒ 稳态恰好 64） */
 export function mqStageSize() { return MQ_STAGE.size; }
 
-/** Node 专有测试缝：清空三个进程内态（产品路径不调用）——对齐 oracle 的「重启即丢」 */
+/**
+ * Node 专有测试缝：清空四个进程内态（产品路径不调用）——对齐 oracle 的「重启即丢」。
+ * 第四个 = `feishu.js` 的 DM 交互卡登记表（作答后置灰用）：它也是模块级全局，
+ * 不清会让「上一条用例发过的卡」在下一条用例里被误认成可更新目标。
+ */
 export function resetInboundState() {
   MSG_SEEN.clear();
   EVT_SEEN.clear();
   MQ_STAGE.clear();
+  feishuMod.resetInteractionCards();
 }
 
 // ==========================================================================
@@ -682,6 +687,40 @@ export function toastFor(reply, lang = 'zh') {
         : '操作失败，详情看机器人单聊', lang),
     },
   };
+}
+
+/**
+ * 作答成功后把 toast 升级成「toast + 置灰卡」（2026-10-30）。
+ *
+ * 卡片回传交互的响应体除了 `toast` 还能带 `card`（`{type:'raw', data:...}`），飞书拿它
+ * **就地替换用户刚点的那条消息**——零额外 API、不受 14 天限制。只在回执是成功终态
+ * （`已收下` / `✅` 前缀，与 `toastFor` 同一判据）且发卡时登记过 message_id 时挂卡；
+ * 其余情况原样返回 toast（行为与旧版逐字节相同）。
+ *
+ * 站点/DSH 作答走 `feishu.interactionClosed` 的 PATCH 补丁，两条通道写出的卡内容一致
+ * （见 `feishu.answeredCard`），所以同一次作答即使先补丁、后回调也不会出现两种文案。
+ * @param {object|null} toastPayload `toast` 对象（可能为 null）
+ * @param {string|null} reply 执行器回执（判成功用）
+ * @param {object} card 看板卡行
+ * @param {object|null} st 作答**之前**的交互快照（`interactionOfSid`）
+ * @param {object} options 依赖袋
+ * @returns {object|null}
+ */
+export function withAnsweredCard(toastPayload, reply, card, st, options = {}) {
+  const d = dep(options);
+  if (reply === null || reply === undefined) return toastPayload;
+  const text = pyStr(reply);
+  const ok = text.startsWith('已收下') || text.startsWith('✅');
+  if (!ok) return toastPayload;
+  let cardResp = null;
+  try {
+    cardResp = d.feishu.answeredCardResponse(card.id, st || {});
+  } catch (e) {
+    d.log(`feishu inbound: 置灰卡构建失败: ${errorRepr(e)}`);
+    return toastPayload;
+  }
+  if (cardResp === null || cardResp === undefined) return toastPayload;
+  return { ...(toastPayload || {}), card: cardResp };
 }
 
 /** `_dm_text`（1876-1881）：DM 文本旁路发送，失败留痕不外抛 */
@@ -2128,18 +2167,22 @@ export async function onCardAction(data, cfg, options = {}) {
       return toast('error', i18n.t('api', '没找到对应卡片', opts.lang));
     }
     const [p, c] = found;
+    // 交互快照必须在作答**之前**取：作答成功会 `iwClear` 掉缓存，之后再查就配不上
+    // 登记表里的 (卡, qid) 键（置灰卡要靠它找回原卡 JSON）
+    const st = d.board.interactionOfSid(pyOr(c.session_id, ''));
     let reply;
     if (t === 'mq') {
       const [dm, replyToast] = await answerMultiClick(p, c, value, action, opts);
       if (pyTruthy(dm)) await dmText(sender, dm, cfg, opts);
-      return replyToast;                 // 每次点击都回 toast（含进度）（1932-1937）
+      // 每次点击都回 toast（含进度）（1932-1937）；只有「已收下」终态才顺带换卡
+      return withAnsweredCard(replyToast, dm, c, st, opts);
     }
     if (t === 'ao') {
       // 自定义回答输入框提交（2026-10-26）：多子题未答满只回进度 toast（无 DM），
       // 单题/答满才发 DM 回执
       const [dm, replyToast] = await answerCustomText(p, c, value, action, opts);
       if (pyTruthy(dm)) await dmText(sender, dm, cfg, opts);
-      return replyToast;
+      return withAnsweredCard(replyToast, dm, c, st, opts);
     }
     if (t === 'a') {
       reply = await answerByToken(p, c, pyStr(pyOr(dget(value, 'i'), '')), opts);
@@ -2148,7 +2191,7 @@ export async function onCardAction(data, cfg, options = {}) {
       reply = await decideApproval(p, c, decision, t === 's' ? 'session' : '', opts);
     }
     if (pyTruthy(reply)) await dmText(sender, reply, cfg, opts);
-    return toastFor(reply, opts.lang);
+    return withAnsweredCard(toastFor(reply, opts.lang), reply, c, st, opts);
   } catch (e) {
     d.log(`feishu inbound: 卡片回调处理异常: ${errorRepr(e)}`);
     return null;

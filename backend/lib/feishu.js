@@ -1466,10 +1466,202 @@ export async function dmInteractionCard(projectId, ctx, options = {}) {
       await attachPlan(ctx, name, cfg, binding.open_id || '', lang);
     }
     const lane = await loadRestLane();
-    await lane.restSendCard(binding.open_id, buildInteractionCard(ctx, name, lang), cfg);
+    // `config.update_multi: true`：JSON 2.0 卡片的默认语义，同时是「更新已发送消息卡片」
+    // （PATCH）的硬前置——站点/DSH 作答后的置灰补丁要靠它（飞书要求更新前后都显式声明）。
+    const card = buildInteractionCard(ctx, name, lang);
+    card.config = { ...(card.config || {}), update_multi: true };
+    const messageId = await lane.restSendCard(binding.open_id, card, cfg);
+    // 登记「这条卡还能被更新」：点卡路径在回调响应里换卡；站点/DSH 作答靠 PATCH 换卡
+    rememberInteractionCard({
+      cardId: ctx.card_id, qid: ctx.qid, approvalId: ctx.approval_id,
+      messageId, card, name, openId: binding.open_id, userId: owner, cfg, lang,
+    });
   } catch (error) {
     stderrLine('feishu outbound: DM 交互卡片发送失败: ' + errRepr(error));
   }
+}
+
+// --------------------------------------------------------------------------
+// 作答后置灰（2026-10-30）：DM 交互卡登记表 + 卡片变换 + 关闭补丁
+//
+// 两条通道，互补而非二选一：
+//   ① 点卡作答 → `card.action.trigger` 回调响应里直接回一张置灰卡（`{toast, card}`），
+//      飞书拿它替换用户刚点的那条消息（3 秒内、零额外 API、不受 14 天限制）。
+//   ② 站点/DSH 上作答 → 没有回调可挂，只能按发卡时拿到的 `message_id` 调
+//      `PATCH /open-apis/im/v1/messages/:id`（14 天窗口；卡片须 update_multi=true）。
+// 两条通道写出的卡内容**逐字相同**（通用状态行，不含具体选项）⇒ 同一次作答先回调、
+// 后补丁也不会让用户看到两种文案。
+// --------------------------------------------------------------------------
+
+/** 登记表存活上限（秒）：飞书 PATCH 窗口 14 天，内存按 7 天回收足够 */
+export const DM_CARD_TTL = 7 * 86400;
+/** 登记表条目上限（Map 插入序即最旧在前，超限删最旧） */
+export const DM_CARD_MAX = 200;
+/** cardId → 登记项（进程内；重启后老卡退化为「仍可点、服务端拒绝」） */
+const DM_CARDS = new Map();
+
+/** 登记键：提问用 qid（= dsh 的 call_id）；审批没有 qid，用 approval_id */
+function dmCardKey(cardId, meta = {}) {
+  const aid = pyStrOrEmpty(meta.approvalId || meta.approval_id);
+  if (aid) return `${pyStrOrEmpty(cardId)}:a:${aid}`;
+  return `${pyStrOrEmpty(cardId)}:q:${pyStrOrEmpty(meta.qid)}`;
+}
+
+function dmCardPrune(now) {
+  for (const [k, e] of DM_CARDS) {
+    if (now - e.at > DM_CARD_TTL * 1000) DM_CARDS.delete(k);
+  }
+  while (DM_CARDS.size > DM_CARD_MAX) {
+    const first = DM_CARDS.keys().next();
+    if (first.done) break;
+    DM_CARDS.delete(first.value);
+  }
+}
+
+/**
+ * 记下一条刚发出的 DM 交互卡（供作答后置灰）。**没有 message_id 就不登记**——
+ * 登记了也更新不了，反而让回调路径误以为能换卡。
+ * @param {{cardId:number|string, qid?:string, approvalId?:string, messageId:string,
+ *   card:object, name:string, openId:string, userId:number, cfg:object, lang:string}} entry
+ * @returns {void}
+ */
+export function rememberInteractionCard(entry) {
+  if (!entry || !pyTruthy(entry.messageId) || entry.cardId === undefined
+      || entry.cardId === null) return;
+  const key = dmCardKey(entry.cardId, entry);
+  DM_CARDS.delete(key);
+  DM_CARDS.set(key, { ...entry, at: Date.now(), answered: false });
+  dmCardPrune(Date.now());
+}
+
+/**
+ * 按「卡 + 当前交互」查登记项（只读；找不到返 null）。
+ * @param {number|string} cardId
+ * @param {{qid?:string|null, approval_id?:string|null, approvalId?:string}} [meta]
+ * @returns {object|null}
+ */
+export function interactionCardEntry(cardId, meta = {}) {
+  const e = DM_CARDS.get(dmCardKey(cardId, meta));
+  return e === undefined ? null : e;
+}
+
+/** 测试缝：清空登记表（oracle 侧对应「进程重启」）。 */
+export function resetInteractionCards() { DM_CARDS.clear(); }
+
+/** 登记表快照（测试/诊断用） */
+export function interactionCards() { return new Map(DM_CARDS); }
+
+/** 交互组件标签（只有这些组件吃 `disabled`；form/column 只是容器，递归进去） */
+const DISABLE_TAGS = new Set(['button', 'select_static', 'multi_select_static', 'input']);
+
+function disableElements(elements) {
+  if (!Array.isArray(elements)) return;
+  for (const el of elements) {
+    if (el === null || typeof el !== 'object') continue;
+    if (DISABLE_TAGS.has(el.tag)) el.disabled = true;
+    if (Array.isArray(el.elements)) disableElements(el.elements);
+    if (Array.isArray(el.columns)) {
+      for (const col of el.columns) {
+        if (col !== null && typeof col === 'object') disableElements(col.elements);
+      }
+    }
+  }
+}
+
+/**
+ * 「等待回复」卡 → 「已作答」卡（**纯函数**，不改入参）。
+ *
+ * 变换：头部换绿 + 标题改「✅ 卡片已作答/已处理 [项目名]」；body 顶部插一行状态；
+ * 所有交互组件 `disabled: true`（按钮/下拉单选/下拉多选/输入框；form、column 递归，
+ * 飞书 V7.4+ 客户端生效，更老客户端忽略该属性——那时按旧行为点一下只会收到
+ * 「当前没有等待中的提问」）。原卡内容（题面/选项/方案摘要）**原样保留**。
+ * @param {object} card 原卡片 JSON（schema 2.0）
+ * @param {{name?:string, lang?:string, statusText?:string, kind?:string}} [opts]
+ * @returns {object}
+ */
+export function answeredCard(card, opts = {}) {
+  const {
+    name = '', lang = 'zh', statusText = '', kind = 'question',
+  } = opts;
+  const out = JSON.parse(JSON.stringify(card));
+  out.config = { ...(out.config || {}), update_multi: true };
+  out.header = out.header || {};
+  out.header.template = 'green';
+  out.header.title = {
+    tag: 'plain_text',
+    content: i18n.t('api',
+      kind === 'approval' ? '✅ 卡片已处理 [{name}]' : '✅ 卡片已作答 [{name}]',
+      lang, { name: pyStrOrEmpty(name) }),
+  };
+  const body = out.body || {};
+  out.body = body;
+  const els = Array.isArray(body.elements) ? body.elements : [];
+  body.elements = els;
+  disableElements(els);
+  els.unshift({ tag: 'markdown', content: pyStrOrEmpty(statusText) });
+  return out;
+}
+
+/** 置灰卡的状态行（两条通道共用同一文案；`kind` 由登记项判断） */
+export function answeredStatusText(kind, lang = 'zh') {
+  return kind === 'approval'
+    ? i18n.t('api', '✅ 审批已处理', lang)
+    : i18n.t('api', '✅ 已作答', lang);
+}
+
+/**
+ * 把登记过的 DM 交互卡改写成置灰卡（点卡回调路径用；找不到登记项返 null）。
+ * @param {number|string} cardId
+ * @param {{qid?:string|null, approval_id?:string|null}} meta
+ * @returns {object|null} `{type:'raw', data:card}`（直接塞进回调响应的 `card` 字段）
+ */
+export function answeredCardResponse(cardId, meta = {}) {
+  const entry = interactionCardEntry(cardId, meta);
+  if (entry === null) return null;
+  const kind = pyTruthy(entry.approvalId) ? 'approval' : 'question';
+  return {
+    type: 'raw',
+    data: answeredCard(entry.card, {
+      name: entry.name, lang: entry.lang, kind,
+      statusText: answeredStatusText(kind, entry.lang),
+    }),
+  };
+}
+
+/**
+ * 交互关闭（作答/审批已受理，或调和器观察到等待已消失）→ 用 PATCH 把 DM 卡置灰。
+ *
+ * **只改登记过、且尚未改过的卡**（`answered` 幂等）；找不到/已改过 ⇒ 静默 no-op。
+ * 同步返回、内部 async（调用方是 board 的同步队列函数），异常只留痕不外抛。
+ * @param {number|string} cardId
+ * @param {{qid?:string|null, approval_id?:string|null, sid?:string}} meta
+ * @param {{rest?:object, log?:(s:string)=>void}} [options] 测试缝
+ * @returns {void}
+ */
+export function interactionClosed(cardId, meta = {}, options = {}) {
+  void closeInteractionCard(cardId, meta, options).catch((error) => {
+    const line = 'feishu outbound: 作答复卡置灰失败: ' + errRepr(error);
+    if (typeof options.log === 'function') options.log(line);
+    else stderrLine(line);
+  });
+}
+
+async function closeInteractionCard(cardId, meta, options) {
+  const entry = interactionCardEntry(cardId, meta);
+  if (entry === null || entry.answered) return;
+  const kind = pyTruthy(entry.approvalId) ? 'approval' : 'question';
+  const card = answeredCard(entry.card, {
+    name: entry.name, lang: entry.lang, kind,
+    statusText: answeredStatusText(kind, entry.lang),
+  });
+  const lane = options.rest || await loadRestLane();
+  await lane.rest('PATCH',
+    `/open-apis/im/v1/messages/${encodeURIComponent(pyStrOrEmpty(entry.messageId))}`, {
+      jsonBody: { content: pyJsonDumps(card) },
+      cfg: entry.cfg,
+      timeout: 8,
+    });
+  entry.answered = true;                 // 只有真的更新成功才算改过（失败留给回调路径兜底）
 }
 
 /**
@@ -1509,6 +1701,9 @@ export function cardBlocked(projectId, card, interaction, options = {}) {
     ctx.tool = interaction.tool || '';
     ctx.action = interaction.action || '';
     ctx.input = interaction.input || '';
+    // 登记键：审批没有 qid（dsh 的审批只有 approval_id），发卡时要靠它把「这条卡」
+    // 和「这次审批」对上，否则作答后置灰会像提问一样落到 `q:` 空键上
+    ctx.approval_id = pyStrOrEmpty(interaction.approval_id);
   } else {
     ctx.questions_count = qs.length;
     ctx.multi_select = pyTruthy(dictGet(q0, 'multi_select', interaction.multi_select));
