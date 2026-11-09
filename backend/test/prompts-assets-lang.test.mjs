@@ -255,7 +255,8 @@ test('first_round_prompt：en 头部语言指令 + 英文模板，去头后与 b
     const p = await prompts.first_round_prompt(proj, tk);
     assert.ok(p.startsWith(LANG_HEAD_EN), taskType);
     assert.ok(p.includes('# FS0000_Case name'));
-    assert.equal(p.slice(LANG_HEAD_EN.length), prompts.normal_prompt(proj, tk));
+    assert.equal(p.slice(LANG_HEAD_EN.length),
+      prompts._write_scope_head(proj) + prompts.normal_prompt(proj, tk));
   }
 });
 

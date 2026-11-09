@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Touchstone 每轮 prompt 模板。
 
-首轮携带完整约束（案例库根目录/bug_report 目录/阅读范围/选项/红线）；
+首轮携带完整约束（写盘范围/案例库根目录/bug_report 目录/阅读范围/选项/红线）；
 常规测试轮还注入内置流程文档与文件模板（builtin_prompts/free_style/），
 不依赖 agent 侧配置任何 skill；续轮同一会话只发短 prompt，约束靠会话上下文保持。
 任务类型（task.task_type）决定首轮提示词：
@@ -39,6 +39,23 @@ def _output_lang_head(task):
     """
     directive = i18n.t("prompt", OUTPUT_LANG_DIRECTIVE, i18n.task_lang(task))
     return f"【产出语言】{directive}\n\n---\n\n"
+
+
+def _write_scope_head(project):
+    """prompt 头部的写盘范围硬约束段（`【写盘范围】…` + 分隔线）。
+
+    与 `_output_lang_head` 同在 `first_round_prompt` 分派层注入一次：七类首轮任务
+    全覆盖，各 builder 自身不拼该段（避免重复/漏加）。语义（2026-11-06 用户要求）：
+    任务的全部产出只落**工作目录**，工作目录之外（含项目目录）不得新建文件或留下
+    临时产物；修复/部署类任务对项目源码与配置的必要改动是唯一例外，且需清理命令
+    产生的缓存。续轮不重复注入（约束靠会话上下文保持）。
+    """
+    return ("【写盘范围】本次任务的所有产出（用例、执行记录、报告、脚本、数据、日志、"
+            "截图、临时文件）只能写在工作目录 "
+            f"{project['work_dir']} 内；工作目录之外（含项目目录 {project['project_dir']}）"
+            "不得新建文件或留下临时产物；"
+            "修复/部署类任务按报告与部署说明修改项目源码或配置时，只做任务要求的最小改动，"
+            "并清理执行命令产生的缓存与临时文件。\n\n---\n\n")
 
 # 内置提示词资产目录：<仓库>/builtin_prompts/free_style/（流程文档 + 文件模板；
 # 资产留在仓库根——Node 后端 backend/lib/prompts.js 读的是同一个真实目录）
@@ -131,8 +148,9 @@ def first_round_prompt(project, task, log=None):
     """构建首轮 prompt。project/task: sqlite Row；log 可选任务日志回调
     （日期范围复测的 RAG 检索统计行，见 retest_range_prompt）。
 
-    返回内容**最前**是产出语言指令段（`_output_lang_head`，按 task.lang 取 zh/en）：
-    只在分派层注入这一次，各 builder 自身不拼该段（避免重复/漏加）。
+    返回内容**最前**是两段头部：产出语言指令段（`_output_lang_head`，按 task.lang 取
+    zh/en）与写盘范围硬约束段（`_write_scope_head`，产物只落工作目录）。两者都只在
+    分派层注入这一次，各 builder 自身不拼（避免重复/漏加）。
     """
     task_type = task["task_type"] or "normal"
     if task_type == "fix":
@@ -159,7 +177,7 @@ def first_round_prompt(project, task, log=None):
     if extra:
         prompt += ("\n\n---\n用户附加要求（平台转达，务必遵守；如与上面约束冲突以本段为准）:\n"
                    + extra + "\n")
-    return _output_lang_head(task) + prompt
+    return _output_lang_head(task) + _write_scope_head(project) + prompt
 
 
 def _project_context(project):

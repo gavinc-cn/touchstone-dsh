@@ -276,7 +276,8 @@ def test_first_round_en_has_head_and_english_templates(tmp_path):
         p = prompts.first_round_prompt(proj, task)
         assert p.startswith(_LANG_HEAD_EN)
         assert "# FS0000_Case name" in p
-        assert p[len(_LANG_HEAD_EN):] == prompts.normal_prompt(proj, task)
+        assert p[len(_LANG_HEAD_EN):] == (prompts._write_scope_head(proj)
+                                          + prompts.normal_prompt(proj, task))
 
 
 def test_stress_prompt_uses_lang_specific_templates(tmp_path):

@@ -117,6 +117,25 @@ function _output_lang_head(task) {
   return `【产出语言】${i18nT('prompt', OUTPUT_LANG_DIRECTIVE, taskLang(task))}\n\n---\n\n`;
 }
 
+/**
+ * `prompts._write_scope_head`：prompt 头部的写盘范围硬约束段（`【写盘范围】…` + 分隔线）。
+ *
+ * 与 `_output_lang_head` 同在 `first_round_prompt` 分派层注入一次：七类首轮任务全覆盖，
+ * 各 builder 自身不拼该段（避免重复/漏加）。语义（2026-11-06 用户要求）：任务的全部产出
+ * 只落**工作目录**，工作目录之外（含项目目录）不得新建文件或留下临时产物；修复/部署类
+ * 任务对项目源码与配置的必要改动是唯一例外，且需清理命令产生的缓存。续轮不重复注入。
+ * @param {object} project
+ * @returns {string}
+ */
+export function _write_scope_head(project) {
+  return ('【写盘范围】本次任务的所有产出（用例、执行记录、报告、脚本、数据、日志、'
+    + '截图、临时文件）只能写在工作目录 '
+    + `${pyGetItem(project, 'work_dir')} 内；`
+    + `工作目录之外（含项目目录 ${pyGetItem(project, 'project_dir')}）不得新建文件或留下临时产物；`
+    + '修复/部署类任务按报告与部署说明修改项目源码或配置时，只做任务要求的最小改动，'
+    + '并清理执行命令产生的缓存与临时文件。\n\n---\n\n');
+}
+
 // --------------------------------------------------------------------------
 // Python 语义小工具（本文件私有；`rag.js` 有同名私有实现，各文件不互相 import 私有名）
 // --------------------------------------------------------------------------
@@ -389,8 +408,9 @@ export function _free_style_doc(lang = 'zh') {
 /**
  * `prompts.first_round_prompt`：构建首轮 prompt。project/task 为 db 视图（sqlite Row 或 dict）。
  *
- * 返回内容**最前**是产出语言指令段（`_output_lang_head`，按 `task.lang` 取 zh/en）：
- * 只在分派层注入这一次，各 builder 自身不拼该段（避免重复/漏加）。
+ * 返回内容**最前**是两段头部：产出语言指令段（`_output_lang_head`，按 `task.lang` 取 zh/en）
+ * 与写盘范围硬约束段（`_write_scope_head`，产物只落工作目录）。两者都只在分派层注入这一次，
+ * 各 builder 自身不拼（避免重复/漏加）。
  *
  * `log` 形参在 oracle 里就是**死参数**（没有转给 `retest_prompt`，见文件头「oracle 的活缺陷」），
  * 本文件照旧保留、照旧不用。返回 Promise（见文件头 ①）。
@@ -426,7 +446,7 @@ export async function first_round_prompt(project, task, log = null) {
     prompt += ('\n\n---\n用户附加要求（平台转达，务必遵守；如与上面约束冲突以本段为准）:\n'
       + extra + '\n');
   }
-  return _output_lang_head(task) + prompt;
+  return _output_lang_head(task) + _write_scope_head(project) + prompt;
 }
 
 /**

@@ -618,7 +618,8 @@ test('first_round_prompt：语言指令只加头部，去掉后与 builder 输�
       const p = await prompts.first_round_prompt(proj, tk);
       assert.ok(p.startsWith(head), `${lang}/${taskType}`);
       assert.equal(p.split('【产出语言】').length - 1, 1);
-      assert.equal(p.slice(head.length), prompts.normal_prompt(proj, tk));
+      assert.equal(p.slice(head.length),
+        prompts._write_scope_head(proj) + prompts.normal_prompt(proj, tk));
     }
   }
 });
@@ -670,4 +671,56 @@ test('next_round_prompt：同注入、task=null 回落 zh、两语言 body 相�
   assert.equal(en.slice(LANG_HEAD_EN.length), zh.slice(LANG_HEAD_ZH.length));
   assert.ok(prompts.next_round_prompt(3, null).startsWith(LANG_HEAD_ZH));
   assert.equal(prompts.compact_prompt(), '/compact');
+});
+
+// --------------------------------------------------------------------------
+// 写盘范围（2026-11-06：测试任务产物只落工作目录，不落项目目录）
+// --------------------------------------------------------------------------
+
+/** 期望的写盘范围段（逐字；与 Python `_SCOPE_HEAD` 模板同文案） */
+function scopeHead(workDir, projectDir) {
+  return ('【写盘范围】本次任务的所有产出（用例、执行记录、报告、脚本、数据、日志、截图、'
+    + `临时文件）只能写在工作目录 ${workDir} 内；`
+    + `工作目录之外（含项目目录 ${projectDir}）不得新建文件或留下临时产物；`
+    + '修复/部署类任务按报告与部署说明修改项目源码或配置时，只做任务要求的最小改动，'
+    + '并清理执行命令产生的缓存与临时文件。\n\n---\n\n');
+}
+
+test('写盘范围头部：文案逐字、路径取 project 视图', () => {
+  const proj = project(tmpDir());
+  const want = scopeHead(proj.work_dir, proj.project_dir);
+  assert.equal(prompts._write_scope_head(proj), want);
+  assert.ok(want.startsWith('【写盘范围】'));
+  assert.ok(want.endsWith('\n\n---\n\n'));
+  assert.ok(want.includes('修复/部署类任务') && want.includes('最小改动'));
+});
+
+test('写盘范围：七类首轮最外层各注入一次（语言头之后、正文之前）', async () => {
+  const { proj, bugName } = bugEnv(tmpDir());
+  const payloads = {
+    fix: { bug_dir: bugName },
+    retest_bug: { bug_dir: bugName },
+    reject: { bug_dir: bugName, reason: '误报' },
+    pipeline: { bug_dirs: [bugName] },
+    stress: { brief: '压测登录接口' },
+    regression: {},
+    normal: {},
+  };
+  const scope = prompts._write_scope_head(proj);
+  for (const [taskType, data] of Object.entries(payloads)) {
+    const tk = task({
+      task_type: taskType,
+      payload: Object.keys(data).length ? JSON.stringify(data) : '',
+    });
+    const p = await prompts.first_round_prompt(proj, tk);
+    assert.ok(p.startsWith(LANG_HEAD_ZH + scope), taskType);
+    assert.equal(p.split('【写盘范围】').length - 1, 1, taskType);
+    assert.ok(scope.includes(proj.work_dir) && scope.includes(proj.project_dir), taskType);
+  }
+});
+
+test('写盘范围：续轮不重复注入（约束靠会话上下文保持）', () => {
+  assert.ok(!prompts.next_round_prompt(3).includes('【写盘范围】'));
+  assert.ok(!prompts.next_round_prompt(3, task({ task_type: 'regression' }))
+    .includes('【写盘范围】'));
 });

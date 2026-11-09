@@ -700,7 +700,8 @@ def test_language_directive_head_zh_en_and_body_unchanged(tmp_path):
             p = prompts.first_round_prompt(proj, task)
             assert p.startswith(head), (lang, task_type)
             assert p.count("【产出语言】") == 1
-            assert p[len(head):] == prompts.normal_prompt(proj, task)
+            assert p[len(head):] == (prompts._write_scope_head(proj)
+                                     + prompts.normal_prompt(proj, task))
 
 
 def test_language_directive_reads_task_lang_normalized(tmp_path):
@@ -745,3 +746,54 @@ def test_language_directive_sqlite_row_and_next_round():
         len(_LANG_HEAD_ZH):]
     assert prompts.next_round_prompt(3, None).startswith(_LANG_HEAD_ZH)
     assert prompts.compact_prompt() == "/compact"
+
+
+# ---------- 12. 写盘范围（2026-11-06：测试任务产物只落工作目录，不落项目目录） ----------
+
+_SCOPE_HEAD = ("【写盘范围】本次任务的所有产出（用例、执行记录、报告、脚本、数据、日志、截图、"
+               "临时文件）只能写在工作目录 {work_dir} 内；"
+               "工作目录之外（含项目目录 {project_dir}）不得新建文件或留下临时产物；"
+               "修复/部署类任务按报告与部署说明修改项目源码或配置时，只做任务要求的最小改动，"
+               "并清理执行命令产生的缓存与临时文件。\n\n---\n\n")
+
+
+def test_write_scope_head_exact_text(tmp_path):
+    """文案逐字钉住：产物只写工作目录；工作目录之外（含项目目录）不得新建/留临时产物。"""
+    proj = _project(tmp_path)
+    want = _SCOPE_HEAD.format(work_dir=proj["work_dir"],
+                              project_dir=proj["project_dir"])
+    assert prompts._write_scope_head(proj) == want
+    assert want.startswith("【写盘范围】") and want.endswith("\n\n---\n\n")
+    # 修复/部署类任务是唯一例外（否则修复任务无法改源码）
+    assert "修复/部署类任务" in want and "最小改动" in want
+
+
+def test_write_scope_head_for_all_task_types(tmp_path):
+    """七类首轮最外层都带写盘范围段（语言头之后、正文之前），且只注入一次。"""
+    proj, bug = _bug_env(tmp_path)
+    payload = {
+        "fix": {"bug_dir": bug},
+        "retest_bug": {"bug_dir": bug},
+        "reject": {"bug_dir": bug, "reason": "误报"},
+        "pipeline": {"bug_dirs": [bug]},
+        "stress": {"brief": "压测登录接口"},
+        "regression": {},
+        "normal": {},
+    }
+    scope = prompts._write_scope_head(proj)
+    for task_type, data in payload.items():
+        task = _task(task_type=task_type,
+                     payload=json.dumps(data, ensure_ascii=False) if data else "")
+        p = prompts.first_round_prompt(proj, task)
+        assert p.startswith(_LANG_HEAD_ZH + scope), task_type
+        assert p.count("【写盘范围】") == 1, task_type
+        assert proj["work_dir"] in scope and proj["project_dir"] in scope, task_type
+
+
+def test_write_scope_head_not_reinjected_in_next_round(tmp_path):
+    """续轮不重复注入（约束靠会话上下文保持）；工作目录/项目目录路径来自 project 视图。"""
+    assert "【写盘范围】" not in prompts.next_round_prompt(3)
+    assert "【写盘范围】" not in prompts.next_round_prompt(3, _task(task_type="regression"))
+    other = _project(tmp_path, work_dir=os.path.join(str(tmp_path), "wd2"))
+    head = prompts._write_scope_head(other)
+    assert other["work_dir"] in head and other["project_dir"] in head
