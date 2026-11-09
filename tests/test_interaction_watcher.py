@@ -951,3 +951,22 @@ def test_iw_once_lost_session_unaligned_does_not_move(monkeypatch):
     applies = _once(monkeypatch, cards, None, live=True,
                     connected=True, aligned=False)
     assert applies == []
+
+
+# ---------- 平台侧事件唤醒（2026-11-08） ----------
+
+def test_kick_interaction_watcher_notifies_hub(monkeypatch):
+    """`kick_interaction_watcher` 走 `dshevents.notify_local`（不伪造驱动帧）。"""
+    calls = []
+    monkeypatch.setattr(board.dshevents, "notify_local",
+                        lambda: calls.append(1))
+    board.kick_interaction_watcher()
+    assert calls == [1]
+
+
+def test_kick_interaction_watcher_swallows_notify_failure(monkeypatch):
+    """唤醒失败不许打穿投递（兜底拍仍在，下轮会自愈）。"""
+    def boom():
+        raise RuntimeError("hub down")
+    monkeypatch.setattr(board.dshevents, "notify_local", boom)
+    board.kick_interaction_watcher()        # 不抛

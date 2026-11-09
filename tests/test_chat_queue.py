@@ -365,6 +365,22 @@ def test_deliver_comment_busy_session_enqueues_followup(monkeypatch):
     assert sent["t"] == "直接改吧"          # 忙时排队交 dsh followup（inbox）承接
 
 
+def test_deliver_comment_kicks_interaction_watcher(monkeypatch):
+    """追问入队成功后立即踢调和器（2026-11-08：不等 60s 兜底拍才归位开发列）。
+
+    卡片评论入队是**平台侧**事件，dsh 不会为它发状态帧；唤醒口必须显式踢一次，
+    否则待审核卡的追问最长要等 `IW_SAFETY_SECONDS`(60s)。"""
+    fake, _calls = _fake_runner(busy=True)
+    monkeypatch.setattr(runner, "INSTANCE", fake)
+    _stub_project(monkeypatch)
+    _patch_delivery(monkeypatch, {})
+    kicks = []
+    monkeypatch.setattr(board, "kick_interaction_watcher", lambda: kicks.append(1))
+    rec = board.deliver_comment(_proj(), _card(), _cmt())
+    assert rec is not None and rec["queued"] is True
+    assert kicks == [1]                    # 入队后踢一拍（一次）
+
+
 def test_deliver_comment_no_session_raises(monkeypatch):
     """无会话仍即时 400 语义（进队前的前置校验）。"""
     fake, _calls = _fake_runner(busy=True)

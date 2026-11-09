@@ -2163,16 +2163,21 @@ def deliver_comment(project, card, comment_row, inject=False, lang=""):
     if inst is None:
         # 无统一队列（单测/独立脚本）：保持既有立即投递行为（请求语言随之下传）
         _deliver_now(project, card, comment_row, text, inject, lang=lang)
+        kick_interaction_watcher()
         return None
     # 排队中的消息可「立即注入」（见 chat.inject_now）：family/model/
     # comment_id 提交时定格进等待项 meta（chat_msgs 零加列，P3 裁决 R1），执行时
     # 由 chat 侧按行＋快照重建 _deliver_unit/_deliver_now
-    return chat.submit(project["id"], sid, text,
-                       card_id=card["id"], comment_id=comment_row["id"],
-                       inject=inject,
-                       family=runner.agent_family(project["agent_path"] or ""),
-                       model=(card["model"] or "").strip()
-                             or (project["model"] or "").strip())
+    rec = chat.submit(project["id"], sid, text,
+                      card_id=card["id"], comment_id=comment_row["id"],
+                      inject=inject,
+                      family=runner.agent_family(project["agent_path"] or ""),
+                      model=(card["model"] or "").strip()
+                            or (project["model"] or "").strip())
+    # 入队成功即踢一拍：不等 60s 兜底拍就把「待审核」卡归位「正在开发」
+    # （review + live_msg ⇒ to_doing；写前复核仍在 _iw_apply 里）。
+    kick_interaction_watcher()
+    return rec
 
 
 def _deliver_unit(project, card, comment_row, text, inject):
@@ -5432,6 +5437,20 @@ def answer_approval(proj, card, approval_id, decision, scope=""):
 IW_SAFETY_SECONDS = 60.0
 IW_DEBOUNCE_SECONDS = 0.15     # 事件风暴合并：同批帧只跑一轮调和
 IW_MIN_INTERVAL = 0.5          # 两轮调和最小间隔（把 dsh 事件速率对 CPU 的影响封顶）
+
+
+def kick_interaction_watcher():
+    """请求调和器尽快跑一轮（平台侧事件用；与 Node `board.kickInteractionWatcher` 同义）。
+
+    2026-11-08：卡片评论入队（`chat_msgs`+`m:` 行）是平台侧事件，dsh 不会为它发状态帧。
+    只靠 `IW_SAFETY_SECONDS`(60s) 兜底拍时，待审核卡的追问会长时间不归位「正在开发」。
+    `deliver_comment` 在入队成功后调本函数——复用 `dshevents` 的变更等待口唤醒线程
+    （不伪造驱动帧、不改注册表/归档集/订阅者），失败也不阻断（兜底拍仍在）。
+    """
+    try:
+        dshevents.notify_local()
+    except Exception:                   # noqa: BLE001 — 唤醒失败不许打穿投递
+        pass
 
 
 def start_interaction_watcher():

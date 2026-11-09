@@ -22,10 +22,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import * as board from '../lib/board.js';
+import * as chat from '../lib/chat.js';
 import * as db from '../lib/db.js';
 import * as dshevents from '../lib/dshevents.js';
 import * as waitq from '../lib/waitq.js';   // `getActive` 是 waitq 的读口（原写 db 是笔误）
-import { freshDb, insertCard, insertMsg, insertProject, insertWait } from './m3fixture.mjs';
+import {
+  freshDb, insertCard, insertComment, insertMsg, insertProject, insertWait,
+} from './m3fixture.mjs';
 
 /**
  * 把 dshevents 的归档集折成「**已知**」快照——走**生产路径**：驱动 `driver/archived`
@@ -1179,6 +1182,63 @@ test('startInteractionWatcher：订阅中枢；帧到达即调和（待审核卡
     // 摘掉本用例加的订阅者（中枢是进程单例，防串味到后续用例）
     dshevents.HUB._subscribers = dshevents.HUB._subscribers.filter((cb) => before.includes(cb));
     dshevents.HUB._setConnected(wasConnected);
+    s.close();
+  }
+});
+
+// ==========================================================================
+// ⑪b 平台侧事件唤醒（2026-11-08：卡片追问入队后不再等 60s 兜底拍）
+// ==========================================================================
+
+/**
+ * 2026-11-08 用户报障：**待审核**卡的追问发出去后，有时要很久才进「正在开发」队列。
+ *
+ * 根因不是状态机（`review + liveMsg ⇒ to_doing` 早已有），而是**唤醒源**：评论入队是
+ * 平台侧事件（`chat_msgs` + `m:` 行），dsh 不会为它发状态帧；P4 事件化后只有
+ * `dshevents.subscribe` 与 60s 兜底拍两个驱动，于是卡片最长等一拍（生产实测 27s~60s）。
+ * 修法：`deliverComment` 在入队成功后 `kickInteractionWatcher()`（在飞则记 pending，
+ * 收尾补跑，不丢唤醒）。
+ *
+ * 判据按行为写：**不灌任何 dsh 帧**，只调一次 `deliverComment`，≤1s 内卡片应落 doing。
+ */
+test('deliverComment：追问入队后立即唤醒调和器（待审核卡 ⇒ ≤1s 进开发列）', async () => {
+  const s = setup('iw-queue-kick');
+  const sid = 'session-queue-kick-1';
+  const cid = insertCard(s.fx.db, s.pid, {
+    title: '待审核卡', columnKey: 'review', sessionId: sid,
+  });
+  const commentId = insertComment(s.fx.db, cid, '继续', { sessionId: sid, sentText: '继续' });
+  const restoreHub = withHubAligned(true, true);
+  const prevSessions = new Set(dshevents.HUB._sessions.keys());
+  const chats = [];
+  chat.setRunnerInstance({ submitMsg: (...args) => chats.push(args) });
+  try {
+    // 会话已在宿主里（owned=true）且空闲：不触发外部会话闸/看管路径
+    dshevents.HUB._onFrame({
+      type: 'driver/attached', session_id: sid, data: { cwd: s.fx.dir },
+    });
+    dshevents.HUB._onFrame({ type: 'agent/status', session_id: sid, data: { status: 'idle' } });
+
+    const project = {
+      id: s.pid, agent_path: 'dsh-plugin:/usr/bin/dsh', project_dir: s.fx.dir, model: '',
+    };
+    const rec = await board.deliverComment(
+      project, cardRow(s.fx, cid), { id: commentId, text: '继续' }, false, 'zh', s.opts,
+    );
+    assert.equal(rec.state, 'queued');
+    assert.equal(chats.length, 1, '消息已交 runner（m: 行已入队）');
+    assert.equal(cardRow(s.fx, cid).column_key, 'review', '前置：调用前卡仍在待审核');
+
+    // 不再灌任何 dsh 状态帧：只有 deliverComment 的那次踢拍
+    await new Promise((r) => setTimeout(r, 900));
+    assert.equal(cardRow(s.fx, cid).column_key, 'doing',
+      '入队后 ≤1s：待审核卡（本会话有排队追问）应被踢进「正在开发」');
+  } finally {
+    chat.setRunnerInstance(null);
+    for (const key of [...dshevents.HUB._sessions.keys()]) {
+      if (!prevSessions.has(key)) dshevents.HUB._sessions.delete(key);
+    }
+    restoreHub();
     s.close();
   }
 });

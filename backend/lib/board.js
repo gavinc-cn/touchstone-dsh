@@ -3014,10 +3014,11 @@ export async function deliverComment(project, card, commentRow, inject = false, 
   if (inst === null) {
     // 无统一队列（单测/独立脚本）：保持既有立即投递行为（请求语言随之下传）
     await deliverNow(project, card, commentRow, text, inject, options, lang);
+    kickInteractionWatcher();
     return null;
   }
   // 排队中的消息可「立即注入」：family/model/comment_id 提交时定格进等待项 meta
-  return chatMod.submit(project.id, sid, text, {
+  const res = await chatMod.submit(project.id, sid, text, {
     cardId: card.id,
     commentId: commentRow.id,
     inject,
@@ -3025,6 +3026,11 @@ export async function deliverComment(project, card, commentRow, inject = false, 
     model: String(card.model || '').trim() || String(project.model || '').trim(),
     ...options,
   });
+  // 2026-11-08：消息入队是**平台侧**事件，dsh 不会为它发状态帧。不主动踢一拍，调和器
+  // 只能等 `IW_SAFETY_SECONDS`(60s) 兜底拍——待审核卡追问后长时间不归位「正在开发」
+  // （生产实测 27s~60s）。入队已提交，立刻请求调和（review + live_msg ⇒ to_doing）。
+  kickInteractionWatcher();
+  return res;
 }
 
 /** `deliver_comment` 的 Python 名别名。 */
@@ -5203,6 +5209,12 @@ export const formatLocalForTest = formatLocalSec;
 export function resetIwState() {
   IW_CACHE.clear();
   IW_STARTED = false;
+  IW_PENDING = false;
+  IW_LAST = 0.0;
+  if (IW_KICK_TIMER !== null) {
+    try { clearTimeout(IW_KICK_TIMER); } catch { /* 已清 */ }
+    IW_KICK_TIMER = null;
+  }
 }
 
 // ---------- 调和器节拍（P4 事件化，board.py:5213-5284） ----------
@@ -5224,8 +5236,12 @@ export const IW_MIN_INTERVAL = 0.5;
  * @returns {Promise<boolean>} 本轮是否真的跑了（false = 上一轮还在飞，跳过）
  */
 let IW_RUNNING = false;
+let IW_PENDING = false;
 export async function iwTick() {
-  if (IW_RUNNING) return false;
+  // 在飞时**记一笔待补**（不是丢弃）：平台侧事件（如卡片消息入队）不像 dsh 状态帧那样
+  // 会连续到达，丢一次就可能要等满 IW_SAFETY_SECONDS 兜底拍（2026-11-08 用户报「待审核
+  // 卡追问后很久才进开发列」的形态）。
+  if (IW_RUNNING) { IW_PENDING = true; return false; }
   IW_RUNNING = true;
   try {
     await iwOnce();
@@ -5233,6 +5249,10 @@ export async function iwTick() {
     console.log(`[board] 调和轮异常: ${errText(e)}`);   // 后台拍子不许打死进程
   } finally {
     IW_RUNNING = false;
+    if (IW_PENDING) {
+      IW_PENDING = false;
+      kickInteractionWatcher();       // 本轮起飞后到达的唤醒，收尾立即补一轮
+    }
   }
   return true;
 }
@@ -5244,7 +5264,39 @@ export async function iwTick() {
 export function iwRunning() { return IW_RUNNING; }
 
 let IW_TIMER = null;
+let IW_KICK_TIMER = null;
 let IW_LAST = 0.0;
+
+/**
+ * 请求尽快跑一轮调和（事件驱动面 **与平台侧事件共用** 的唯一唤醒口）。
+ *
+ * 2026-11-08：卡片评论入队（`chat_msgs`+`m:` 行）是**平台侧**事件，dsh 不会为它发状态帧；
+ * 若只靠 `IW_SAFETY_SECONDS` 兜底拍，待审核卡的追问最长要等 ~60s 才归位「正在开发」。
+ * `board.deliverComment` 在入队成功后调用本函数，把「入队 → 卡片归位」压到一拍内。
+ *
+ * 语义（三条都必须）：
+ *   ① 已有一轮在飞 ⇒ 记 `IW_PENDING`，由 `iwTick` 收尾补跑（**不丢唤醒**）；
+ *   ② 已排好踢一拍 ⇒ 直接合并（事件风暴不排一串定时器）；
+ *   ③ 否则按 `IW_MIN_INTERVAL` 限速排一拍（与 Python 同值）。
+ *
+ * 幂等、廉价（只碰内存与一个 unref 定时器）；调用方无需 await。
+ * @returns {void}
+ */
+export function kickInteractionWatcher() {
+  if (IW_RUNNING) { IW_PENDING = true; return; }
+  if (IW_KICK_TIMER !== null) return;
+  const gap = nowSec() - IW_LAST;
+  const delay = gap < IW_MIN_INTERVAL ? (IW_MIN_INTERVAL - gap) * 1000 : 0;
+  IW_KICK_TIMER = setTimeout(() => {
+    IW_KICK_TIMER = null;
+    IW_LAST = nowSec();
+    void iwTick();
+  }, delay);
+  IW_KICK_TIMER.unref?.();
+}
+
+/** `kick_interaction_watcher` 的 Python 名别名。 */
+export const _kick_interaction_watcher = kickInteractionWatcher;
 
 /**
  * 启动交互检测常驻泵（Python `start_interaction_watcher`；幂等）。
@@ -5261,17 +5313,8 @@ let IW_LAST = 0.0;
 export function startInteractionWatcher() {
   if (IW_STARTED) return false;
   IW_STARTED = true;
-  const kick = () => {
-    const now = nowSec();
-    const gap = now - IW_LAST;
-    const delay = gap < IW_MIN_INTERVAL ? (IW_MIN_INTERVAL - gap) * 1000 : 0;
-    setTimeout(() => {
-      IW_LAST = nowSec();
-      void iwTick();
-    }, delay).unref?.();
-  };
   try {
-    eventSubscribe(() => kick());
+    eventSubscribe(() => kickInteractionWatcher());
   } catch (e) {
     // 留痕（2026-10-16 实障）：这里原本写的是 `dshMod.subscribe(...)`——`dshMod` 是
     // `./dshdriver.js`（无该导出），TypeError 被空 catch 吞掉 ⇒ 事件面从没接上，调和器
@@ -5280,8 +5323,7 @@ export function startInteractionWatcher() {
     console.log(`[board] 调和器事件订阅失败（退化为 ${IW_SAFETY_SECONDS}s 兜底轮询）: ${errText(e)}`);
   }
   IW_TIMER = setInterval(() => {
-    IW_LAST = nowSec();
-    void iwTick();                     // 兜底对账（60s）；事件面未接时的唯一驱动
+    kickInteractionWatcher();          // 兜底对账（60s）；事件面未接时的唯一驱动
   }, IW_SAFETY_SECONDS * 1000);
   IW_TIMER.unref?.();
   return true;
@@ -5302,6 +5344,11 @@ export function stopInteractionWatcher() {
     if (IW_TIMER !== null) clearInterval(IW_TIMER);
   } catch { /* 已清 */ }
   IW_TIMER = null;
+  try {
+    if (IW_KICK_TIMER !== null) clearTimeout(IW_KICK_TIMER);
+  } catch { /* 已清 */ }
+  IW_KICK_TIMER = null;
+  IW_PENDING = false;
   return true;
 }
 

@@ -288,6 +288,34 @@ def test_wait_wakes_on_change_and_subscribers(monkeypatch):
     assert seen == ["agent/status"]
 
 
+def test_notify_local_wakes_wait_without_faking_a_frame(monkeypatch):
+    """平台侧事件唤醒：`notify_local()` 立即唤醒 `wait()`，但**不**追加驱动帧/不通知订阅者。
+
+    看板调和器的第二个驱动口（2026-11-08 卡片追问入队）：入队没有 dsh 状态帧，
+    只靠 60s 兜底拍会让「待审核 ⇒ 正在开发」的归位迟滞。"""
+    hub = _hub(monkeypatch)
+    seen = []
+    hub.subscribe(lambda f: seen.append(f))
+    threading.Timer(0.05, hub.notify_local).start()
+    assert hub.wait(2.0) is True
+    assert seen == []                      # 本地唤醒 ≠ 伪造帧：订阅者零调用
+    assert hub.get("s1") is None            # 注册表未被改动（_hub 没喂会话帧）
+
+
+def test_notify_local_before_wait_is_not_lost(monkeypatch):
+    """本地唤醒落在「上一轮调和还没开始等」的窗口里也不能丢（Node `IW_PENDING` 同义）。
+
+    看板线程的时序是：`wait()` → `_iw_once()` → 再 `wait()`。若入队 kick 落在
+    `_iw_once()` 执行期间，`_changed` 差分（wait 前后）看不到它；`_local_pending`
+    把它留到下一次 wait 开头消费。"""
+    hub = _hub(monkeypatch)
+    hub.notify_local()                      # wait 之前就落下（模拟 tick 在飞）
+    started = time.monotonic()
+    assert hub.wait(2.0) is True
+    assert time.monotonic() - started < 0.5
+    assert hub.wait(0.05) is False          # 已消费：不重复唤醒
+
+
 def test_subscriber_exception_does_not_break_consumption(monkeypatch):
     hub = _hub(monkeypatch)
     hub.subscribe(lambda f: (_ for _ in ()).throw(RuntimeError("boom")))
@@ -341,6 +369,7 @@ def test_module_singleton_helpers(monkeypatch):
     assert dshevents.snapshot() == {}
     assert dshevents.archived("s1") is None          # 未连接=未知（不推断未归档）
     assert dshevents.archived_set() is None
+    dshevents.wait(0)                                # 消费其他用例留下的本地唤醒（语义见 notify_local）
     assert dshevents.wait(0.01) is False
     assert dshevents.stats()["frames"] == 0
     dshevents.stop(timeout=0.1)                     # 幂等、无异常

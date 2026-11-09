@@ -77,6 +77,11 @@ class EventHub:
         self._frames = 0
         self._reconnects = 0
         self._changed = 0            # 变更计数（测试/诊断用；每次变更 +1）
+        # 本进程内部唤醒的「待消费」标志（2026-11-08）：`notify_local()` 可能发生在
+        # 调和器正在跑 `_iw_once` 的窗口里，此时 `_cond.wait()` 还没开始等、`_changed`
+        # 差分会把它漏掉。标志保留到下一次 `wait()` 开头消费 ⇒ 唤醒不丢（等价于 Node
+        # `IW_PENDING` 的收尾补跑）。
+        self._local_pending = False
         self._subscribers = []
         self._thread = None
         self._stop = False
@@ -199,11 +204,39 @@ class EventHub:
 
         看板调和器的驱动口：事件到达即醒，超时只作为**对账兜底**（不是轮询
         远端状态——醒后读的是本地注册表）。
+
+        先消费 `_local_pending`（`notify_local()` 在上一轮调和工作期间落下时，
+        `_changed` 差分已经错过，但这次唤醒仍必须立刻返回）；等待**期间**落下的
+        本地唤醒由 `_changed` 差分覆盖，并把待消费标志清掉（避免下一轮空转）。
         """
         with self._cond:
+            if self._local_pending:
+                self._local_pending = False
+                return True
             before = self._changed
             self._cond.wait(timeout)
-            return self._changed != before
+            changed = self._changed != before
+            if changed:
+                self._local_pending = False
+            return changed
+
+    def notify_local(self):
+        """本进程内部唤醒一次 `wait()`（**不是** dsh 状态帧，不碰注册表/订阅者）。
+
+        看板调和器的第二个驱动口（2026-11-08）：卡片评论入队是**平台侧**事件，
+        dsh 不会为它发状态帧；只靠 `IW_SAFETY_SECONDS`(60s) 兜底拍，待审核卡的
+        追问会长时间不归位「正在开发」。`board.deliver_comment` 在入队成功后调
+        本函数，把 `wait()` 立即唤醒（≠ 伪造驱动帧：注册表、归档集、订阅者全部
+        不动，只有"变更计数" +1 让等待者醒）。
+
+        `_local_pending` 兜住「调和器正在跑 `_iw_once`、还没开始 `wait()`」的
+        窗口：该标志保留到下一次 `wait()` 开头消费，唤醒不丢（Node `IW_PENDING`
+        同义）。
+        """
+        with self._cond:
+            self._changed += 1
+            self._local_pending = True
+            self._cond.notify_all()
 
     def wait_connected(self, timeout):
         """等（首）次连接就绪：就绪返回 True，超时返回 False。
@@ -528,6 +561,11 @@ def stats():
 
 def wait(timeout):
     return HUB.wait(timeout)
+
+
+def notify_local():
+    """本进程内部唤醒 `wait()`（平台侧事件，如卡片消息入队）。见 `EventHub.notify_local`。"""
+    return HUB.notify_local()
 
 
 def wait_connected(timeout):
