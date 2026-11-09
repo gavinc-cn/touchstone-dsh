@@ -117,16 +117,33 @@ function tmpDir(tag) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `ts-pw-${tag}-`));
 }
 
-/** 夹具：临时库 + 两个用户（种子 admin=1 / bob=101）+ 一个数据根目录 */
+/** 缺省工作目录的路径 id（约定见 lib.project_path_id：`/` `\` `:` 全换 `-`） */
+function workDirId(dir) {
+  return dir.replace(/[/\\]+$/, '').replace(/[/\\:]/g, '-');
+}
+
+/**
+ * 夹具：临时库 + 两个用户（种子 admin=1 / bob=101）+ 一个数据根目录。
+ *
+ * HOME 也指到 `dat`：新建项目未填工作目录时缺省在 `~/.touchstone/projects/` 下
+ * （2026-11-08 起不再落进项目目录），不隔离就会写进真实家目录；`close()` 还原。
+ */
 function setup(tag) {
   const fx = freshDb(`pw-${tag}`);
   fx.db.prepare('INSERT INTO users(id, username, pass_hash, salt, must_change_pw, created_at)'
     + ' VALUES (?,?,?,?,?,?)').run(101, 'bob', 'x', '', 0, '2026-10-12 00:00:00');
+  const dat = tmpDir(tag);
+  const oldHome = process.env.HOME;
+  process.env.HOME = dat;                    // os.homedir() 与 Python os.path.expanduser("~") 同源
   return {
     ...fx,
     admin: fx.db.prepare('SELECT * FROM users WHERE id=1').get(),
     bob: fx.db.prepare('SELECT * FROM users WHERE id=101').get(),
-    dat: tmpDir(tag),
+    dat,
+    close() {
+      fx.close();
+      if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    },
   };
 }
 
@@ -165,7 +182,7 @@ const isDirNow = (p) => {
 // POST /api/projects —— 建项目
 // --------------------------------------------------------------------------
 
-test('建项目：只给 project_dir ⇒ 名称取末段 + work_dir 派生 .touchstone + 三目录真被创建', async (t) => {
+test('建项目：只给 project_dir ⇒ 名称取末段 + work_dir 派生家目录项目路径 id + 三目录真被创建', async (t) => {
   const env = setup('create-min');
   t.after(() => env.close());
   const pdir = path.join(env.dat, 'newproj');
@@ -178,16 +195,18 @@ test('建项目：只给 project_dir ⇒ 名称取末段 + work_dir 派生 .touc
   assert.equal(row.name, 'newproj');                       // path_last_segment
   assert.equal(row.project_dir, pdir);
   assert.equal(row.agent_path, '');
-  assert.equal(row.work_dir, path.join(pdir, '.touchstone'));
+  // 缺省工作目录 = <HOME>/.touchstone/projects/<项目路径 id>（2026-11-08 起不在项目目录内）
+  assert.equal(row.work_dir, path.join(env.dat, '.touchstone', 'projects', workDirId(pdir)));
   assert.equal(row.bug_dir, '');                           // 列已废弃，恒空串
   assert.equal(row.commit_spec, '');                       // 建项目恒传空串
   assert.equal(row.deploy_spec, '');
   assert.equal(row.user_id, 1);
-  // 三个目录真实落盘（`os.makedirs(exist_ok=True)` 三连）
+  // 三个目录真实落盘（`os.makedirs(exist_ok=True)` 三连），项目目录里一个都不留
   for (const d of [row.work_dir,
     path.join(row.work_dir, 'free_style'), path.join(row.work_dir, 'bug_report')]) {
     assert.ok(isDirNow(d), d);
   }
+  assert.equal(isDirNow(path.join(pdir, '.touchstone')), false, '项目目录不许再出 .touchstone');
 });
 
 test('建项目：name 为空/纯空白 ⇒ 同样取 project_dir 末段；work_dir 显式给出时不派生', async (t) => {
@@ -348,8 +367,9 @@ test('建项目：project_dir 缺省（带 name）⇒ os.homedir()（HOME 指到
     const row = projectRow(env, r.json().id);
     assert.equal(row.project_dir, home);
     assert.equal(row.name, 'home-proj');
-    assert.equal(row.work_dir, path.join(home, '.touchstone'));
-    assert.ok(isDirNow(path.join(home, '.touchstone', 'bug_report')));
+    assert.equal(row.work_dir,
+      path.join(home, '.touchstone', 'projects', workDirId(home)));
+    assert.ok(isDirNow(path.join(row.work_dir, 'bug_report')));
   } finally {
     if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
   }
@@ -370,8 +390,8 @@ test('建项目：空请求体（无 name/project_dir 键）⇒ 400 明确文案
     await expectBody(env, 'POST', '/api/projects', { body: {} },
       400, '{"error": "未收到项目信息（请求体为空或格式非法），请刷新页面后重试"}');
     assert.equal(countOf(env, 'projects'), 0, '空体守卫必须一条项目行都不落');
-    assert.equal(isDirNow(path.join(env.dat, '.touchstone')), false,
-      '不许建出 homedir/.touchstone 目录');
+    assert.equal(isDirNow(path.join(env.dat, '.touchstone', 'projects')), false,
+      '不许建出 homedir/.touchstone/projects 目录');
   } finally {
     if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
   }

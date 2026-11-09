@@ -114,7 +114,7 @@ test('preview：真仓库 ⇒ ok=true，path 落 <work_dir>/worktrees/card_<id>�
 
 test('worktreePath：落点在仓库内 ⇒ 回退仓库同级 .touchstone-worktrees/<名>_card_<id>', () => {
   const fx = gitRepo();
-  // work_dir 落进仓库内部（项目常见形态：<project_dir>/.touchstone）
+  // work_dir 落进仓库内部（用户自定义：<project_dir>/.touchstone；2026-11-08 起缺省已在家目录）
   const inner = { ...fx.project, work_dir: path.join(fx.repo, '.touchstone') };
   const p = worktree.worktreePath(inner, 9, fx.repo);
   assert.equal(p, path.join(fx.dir, '.touchstone-worktrees', 'repo_card_9'));

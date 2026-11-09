@@ -5,7 +5,8 @@
 （下称 plan）。本模块只做「路径推导 + git 调用 + 结果归一」，不碰数据库与队列：
 
 - **路径**（plan D4）：`<work_dir>/worktrees/card_<id>`；若该路径落在 git 仓库内部
-  （work_dir 在项目目录内的项目，例如 `proj` 的 `work_dir=/opt/proj/.touchstone`），
+  （用户把工作目录设进项目目录的项目，例如 `proj` 的 `work_dir=/opt/proj/.touchstone`；
+  2026-11-08 起缺省已改到 `~/.touchstone/projects/`，这只剩自定义配置的形态），
   回退为 `<project_dir 的父目录>/.touchstone-worktrees/<项目名>_card_<id>`
   ——worktree 不得建在仓库内部（嵌套工作树会污染主仓库状态）。
 - **分支**（plan D5）：`ts/card-<id>`，确定性命名、一卡一分支，无需新增 DB 列。

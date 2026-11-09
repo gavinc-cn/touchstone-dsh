@@ -408,12 +408,15 @@ test('GET /board/media/<fid>：fid 白名单 400、MIME 反查、work_dir 派生
   }
 });
 
-test('GET /board/media/<fid>：work_dir 为空时回落 <project_dir>/.touchstone/board_media', async () => {
+test('GET /board/media/<fid>：work_dir 为空时回落 <HOME>/.touchstone/projects/<路径 id>/board_media', async () => {
   const fx = freshDb('board-media-fallback');
   const srv = await startServer(fx.db);
+  const oldHome = process.env.HOME;
+  process.env.HOME = fx.dir;            // 缺省工作目录在 ~/.touchstone/projects/ 下，指到夹具
   try {
     const projectDir = path.join(fx.dir, 'proj');
-    const mdir = path.join(projectDir, '.touchstone', 'board_media');
+    const mdir = path.join(fx.dir, '.touchstone', 'projects',
+      projectDir.replace(/[/\\]+$/, '').replace(/[/\\:]/g, '-'), 'board_media');
     fs.mkdirSync(mdir, { recursive: true });
     fs.writeFileSync(path.join(mdir, 'm1700000000000_0123456789.txt'), 'hello');
     const pid = insertProject(fx.db, { name: 'p', projectDir });
@@ -424,6 +427,7 @@ test('GET /board/media/<fid>：work_dir 为空时回落 <project_dir>/.touchston
     assert.equal(r.type, 'text/plain');
     assert.equal(r.text, 'hello');
   } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
     await srv.close();
     fx.close();
   }

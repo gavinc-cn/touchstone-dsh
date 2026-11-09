@@ -16,6 +16,7 @@ import chat  # noqa: E402
 import db  # noqa: E402
 import feishu  # noqa: E402
 import feishu_conv  # noqa: E402
+import lib  # noqa: E402
 
 db.init_db()  # 幂等；conftest 已把 TOUCHSTONE_DB 指到临时库
 
@@ -147,8 +148,7 @@ def _md_items(composed):
 
 def _media_dir(project_id):
     p = db.get_project(project_id)
-    return os.path.join(p["work_dir"] or
-                        os.path.join(p["project_dir"], ".touchstone"),
+    return os.path.join(p["work_dir"] or lib.default_work_dir(p["project_dir"]),
                         "board_media")
 
 

@@ -74,6 +74,36 @@ test('pyJoin：后段绝对路径覆盖前段（os.path.join 与 path.join 的�
   assert.equal(lib.pyJoin('', 'a'), 'a');
 });
 
+test('projectPathId：`/` `\\` `:` 全换 `-`（Windows 形态在 Linux 上同一条规则）', () => {
+  assert.equal(lib.projectPathId('/opt/win/touchstone-dsh'), '-opt-win-touchstone-dsh');
+  assert.equal(lib.projectPathId('/opt/win/touchstone-dsh/'), '-opt-win-touchstone-dsh');
+  assert.equal(lib.projectPathId('D:\\own\\touchstone-dsh'), 'D--own-touchstone-dsh');
+  assert.equal(lib.projectPathId('D:/own/touchstone-dsh'), 'D--own-touchstone-dsh');
+  assert.equal(lib.projectPathId('relative/proj'), 'relative-proj');
+  assert.equal(lib.projectPathId('C:\\'), 'C-');       // 结尾分隔符去掉，盘符冒号仍要换
+  assert.equal(lib.projectPathId('/'), '-');           // 根目录不能 rstrip 成空串
+});
+
+test('projectPathId：只展开裸 `~` / `~/` / `~\\`（`~user` 原样保留）', () => {
+  const home = os.homedir();
+  const homeId = home.replace(/[/\\:]/g, '-');
+  assert.equal(lib.projectPathId('~'), homeId);
+  assert.equal(lib.projectPathId('~/work'), `${homeId}-work`);
+  assert.equal(lib.projectPathId('~\\work'), `${homeId}-work`);
+  assert.equal(lib.projectPathId('~someone/work'), '~someone-work');
+});
+
+test('defaultWorkDir：<家目录>/.touchstone/projects/<路径 id>，不在项目目录内', () => {
+  const home = os.homedir();
+  const project = '/opt/win/touchstone-dsh';
+  assert.equal(lib.defaultWorkDir(project),
+    path.join(home, '.touchstone', 'projects', '-opt-win-touchstone-dsh'));
+  assert.equal(lib.defaultWorkDir(project).startsWith(`${project}${path.sep}`), false);
+  // 空值兜底到家目录项目（建项目时 project_dir 已先兜底，这里只防 helper 直接崩）
+  assert.equal(lib.defaultWorkDir(''),
+    path.join(home, '.touchstone', 'projects', home.replace(/[/\\:]/g, '-')));
+});
+
 test('pyIsDigits / pyIntOr：ASCII 数字与 int(str) 的容错口径', () => {
   assert.equal(lib.pyIsDigits('123'), true);
   assert.equal(lib.pyIsDigits(' 1 '), false);         // isdigit 不吃空白（int() 才吃）

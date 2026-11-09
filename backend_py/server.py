@@ -2390,10 +2390,11 @@ class Handler(BaseHTTPRequestHandler):
         name = normalize_project_name(
             (body.get("name") or "").strip() or path_last_segment(project_dir))
         agent_path = (body.get("agent_path") or "").strip()
-        # 项目设置只填一个工作目录（未填默认 <项目目录>/.touchstone）；
-        # 案例库根 free_style 与 bug 报告目录 bug_report 由平台按固定子目录派生、自动创建
+        # 项目设置只填一个工作目录（未填默认 ~/.touchstone/projects/<项目路径 id>，
+        # 见 lib.default_work_dir：不再落进项目目录）；案例库根 free_style 与
+        # bug 报告目录 bug_report 由平台按固定子目录派生、自动创建
         work_dir = (body.get("work_dir") or "").strip() or \
-            os.path.join(project_dir, ".touchstone")
+            lib.default_work_dir(project_dir)
         guide_text = str(body.get("guide_text", "") or "")
         env_label = str(body.get("env_label", "") or "")
         model = str(body.get("model", "") or "").strip()
@@ -3034,7 +3035,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- 卡片附件媒体（描述粘贴图片/文件） ----------
     # fid 格式 m<毫秒>_<hex10>.<ext>（只含安全字符，防路径穿越）；
-    # 存储于项目工作目录 board_media/ 子目录（工作目录缺省 <项目目录>/.touchstone，
+    # 存储于项目工作目录 board_media/ 子目录（工作目录缺省 ~/.touchstone/projects/<项目路径 id>，
     # 由 lib.ensure_runtime_dirs 创建并写入 .gitignore）
     BOARD_MEDIA_SUBDIR = "board_media"
     BOARD_MEDIA_MAX = 10 * 1024 * 1024  # 单文件上限 10MB
@@ -3074,7 +3075,7 @@ class Handler(BaseHTTPRequestHandler):
         ext = self.BOARD_MEDIA_EXTS.get(mime, "bin")
         fid = f"m{int(time.time() * 1000)}_{secrets.token_hex(5)}.{ext}"
         mdir = os.path.join(row["work_dir"] or
-                            os.path.join(row["project_dir"], ".touchstone"),
+                            lib.default_work_dir(row["project_dir"]),
                             self.BOARD_MEDIA_SUBDIR)
         try:
             os.makedirs(mdir, exist_ok=True)
@@ -3100,7 +3101,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(400, 'bad fid')
             return
         mdir = os.path.join(row["work_dir"] or
-                            os.path.join(row["project_dir"], ".touchstone"),
+                            lib.default_work_dir(row["project_dir"]),
                             self.BOARD_MEDIA_SUBDIR)
         ext = fid.rsplit(".", 1)[-1].lower()
         ctype = {v: k for k, v in self.BOARD_MEDIA_EXTS.items()}.get(ext,

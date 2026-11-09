@@ -80,7 +80,7 @@ window.TS_I18N = {
       perm: '权限',
       permDefault: '默认（宿主默认）',
       workdir: '工作目录',
-      phWorkdir: '默认 <项目目录>/.touchstone；其下自动生成案例库 free_style 与 bug 报告 bug_report',
+      phWorkdir: '默认 ~/.touchstone/projects/<项目路径 id>；其下自动生成案例库 free_style 与 bug 报告 bug_report',
       env: '环境标签',
       phEnv: '如 test4 / sitA1，测试、修复、部署针对的环境',
       skill: '测试项目',
@@ -611,7 +611,7 @@ window.TS_I18N = {
     seed: {
       projectName: 'order-service',
       projectDir: '/srv/repos/order-service',
-      workDir: '/srv/repos/order-service/.touchstone',
+      workDir: '/home/demo/.touchstone/projects/-srv-repos-order-service',
       envTag: 'test4',
       projectPrompt: '如何理解项目：Spring Boot 单体，订单/支付/结算三个模块；部署到 test4 用 deploy.sh；commit message 用 feat/fix 前缀。',
       cards: {
@@ -723,7 +723,7 @@ window.TS_I18N = {
       perm: 'Permission',
       permDefault: 'Default (host default)',
       workdir: 'Working directory',
-      phWorkdir: 'Defaults to <project dir>/.touchstone; it grows the case library free_style and bug_report inside',
+      phWorkdir: 'Defaults to ~/.touchstone/projects/<path id>; it grows the case library free_style and bug_report inside',
       env: 'Env tag',
       phEnv: 'e.g. test4 / sitA1 — the environment tests, fixes and deploys target',
       skill: 'Testing skill',
@@ -1219,7 +1219,7 @@ window.TS_I18N = {
     seed: {
       projectName: 'order-service',
       projectDir: '/srv/repos/order-service',
-      workDir: '/srv/repos/order-service/.touchstone',
+      workDir: '/home/demo/.touchstone/projects/-srv-repos-order-service',
       envTag: 'test4',
       projectPrompt: 'How to read the project: a Spring Boot monolith with order/payment/settlement modules; deploy to test4 with deploy.sh; commit messages use feat/fix prefixes.',
       cards: {

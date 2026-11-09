@@ -40,6 +40,8 @@ function makeWebDir() {
 async function startBackend(webDir) {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-node-run-'));
   const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ts-node-db-')), 't.db');
+  // HOME 也指到临时目录：建项目未填 work_dir 时缺省落在 ~/.touchstone/projects/ 下
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-node-home-'));
   const child = spawn(process.execPath, [
     '--disable-warning=ExperimentalWarning',
     SERVER_JS,
@@ -49,7 +51,7 @@ async function startBackend(webDir) {
   ], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, TOUCHSTONE_DB: dbPath, TOUCHSTONE_RUN_DIR: runDir,
-      TS_ADMIN_PASSWORDLESS: '1' },
+      HOME: home, TS_ADMIN_PASSWORDLESS: '1' },
   });
   let stdout = '';
   let stderr = '';
@@ -74,7 +76,7 @@ async function startBackend(webDir) {
     child.once('exit', resolve);
     child.kill('SIGTERM');
   });
-  return { child, port, dbPath, stdout: () => stdout, stderr: () => stderr, stop };
+  return { child, port, dbPath, home, stdout: () => stdout, stderr: () => stderr, stop };
 }
 
 /**
@@ -143,9 +145,14 @@ test('分块请求体：chunked 建项目 ⇒ 200（桌面端 dsh-app 协议形�
     assert.equal(rows.length, 1);
     assert.equal(rows[0].name, '分块项目');
     assert.equal(rows[0].project_dir, projectDir);
-    // 派生目录真被创建（建目录发生在 insert 之前，与定长请求同一条路径）
-    assert.ok(fs.statSync(path.join(projectDir, '.touchstone', 'free_style')).isDirectory());
-    assert.ok(fs.statSync(path.join(projectDir, '.touchstone', 'bug_report')).isDirectory());
+    // 派生目录真被创建（建目录发生在 insert 之前，与定长请求同一条路径）；
+    // 工作目录缺省 = <HOME>/.touchstone/projects/<项目路径 id>，不再落进项目目录
+    const workDir = path.join(b.home, '.touchstone', 'projects',
+      projectDir.replace(/[/\\]+$/, '').replace(/[/\\:]/g, '-'));
+    assert.equal(rows[0].work_dir, workDir);
+    assert.ok(fs.statSync(path.join(workDir, 'free_style')).isDirectory());
+    assert.ok(fs.statSync(path.join(workDir, 'bug_report')).isDirectory());
+    assert.equal(fs.existsSync(path.join(projectDir, '.touchstone')), false);
   } finally {
     await b.stop();
   }

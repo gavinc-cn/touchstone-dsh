@@ -47,6 +47,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { messageVars } from './i18n.js';
@@ -686,6 +687,56 @@ export function bugCases(bugDirPath) {
  */
 export function runtimeDir(workDir, name) {
   return pyJoin(workDir, name);
+}
+
+// --------------------------------------------------------------------------
+// 默认工作目录（对齐 `lib.py:DEFAULT_WORK_ROOT` / `project_path_id` /
+// `default_work_dir`）：`<家目录>/.touchstone/projects/<项目路径 id>`。
+// 以前缺省在 `<项目目录>/.touchstone`，被测仓库里会白多一个业务无关目录。
+// --------------------------------------------------------------------------
+
+/** 默认工作目录父目录（`~` 走 `expandTilde`；与 `lib.py` 同名常量逐字一致） */
+export const DEFAULT_WORK_ROOT = '~/.touchstone/projects';
+const PATH_ID_UNSAFE = /[/\\:]/g;
+
+/**
+ * 只展开开头的 `~` / `~/` / `~\`；`~user` 原样保留（与 `lib.py:_expand_tilde` 同口径，
+ * **不用** shell 家目录以外的东西：双后端必须逐字节一致）。
+ * @param {string} value
+ * @returns {string}
+ */
+function expandTilde(value) {
+  const p = String(value == null ? '' : value);
+  if (p === '~') return os.homedir();
+  if (p.startsWith('~/') || p.startsWith('~\\')) return os.homedir() + p.slice(1);
+  return p;
+}
+
+/**
+ * `lib.project_path_id`：项目目录 → 单级目录名（项目路径 id）。
+ *
+ * 规则：展开 `~` → 去掉结尾分隔符 → 把 `/` `\` `:` 全部换成 `-`。
+ *   /opt/win/touchstone-dsh → -opt-win-touchstone-dsh
+ *   D:\own\touchstone-dsh   → D--own-touchstone-dsh
+ * 不做 normpath/realpath：POSIX 不认反斜杠、ntpath 认，双后端各用本平台实现会分叉。
+ * @param {string} projectDir
+ * @returns {string}
+ */
+export function projectPathId(projectDir) {
+  const p = expandTilde(String(projectDir == null ? '' : projectDir).trim() || '~');
+  const trimmed = p.replace(/[/\\]+$/, '') || p;
+  return trimmed.replace(PATH_ID_UNSAFE, '-');
+}
+
+/**
+ * `lib.default_work_dir`：新建项目未填工作目录（或库里 work_dir 为空）时的派生值。
+ * 用 `path.join` 而非 `pyJoin`：Windows 上 Python 的 `os.path.join` 出 `\`，`pyJoin`
+ * 是 POSIX 口径会拼出混合分隔符；id 段永远不含分隔符，两种 join 只在这里分叉。
+ * @param {string} projectDir
+ * @returns {string}
+ */
+export function defaultWorkDir(projectDir) {
+  return path.join(expandTilde(DEFAULT_WORK_ROOT), projectPathId(projectDir));
 }
 
 /** 运行产物目录名（对齐 `lib.py:RUNTIME_DIR_NAMES`；顺序即 .gitignore 追加序） */

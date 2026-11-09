@@ -1099,7 +1099,7 @@ export default function AppShell() {
             </div>
             <div className="hint" style={{ margin: '-4px 0 8px 110px' }}>{t('选项来自当前智能体可用的 skill（dsh 无 skill 机制恒为空）；理解/测试项目/用例规范项注入每类任务首轮，部署/提交项仅注入修复任务的对应条款（自动提交/部署=开时）')}</div>
             <div className="form-row"><label>{t('工作目录')}</label>
-              <Input value={pf.work_dir} onChange={(e) => setPf({ ...pf, work_dir: e.target.value.trim() })} placeholder={t('默认 <项目目录>/.touchstone；其下自动生成案例库 free_style 与 bug 报告 bug_report')} />
+              <Input value={pf.work_dir} onChange={(e) => setPf({ ...pf, work_dir: e.target.value.trim() })} placeholder={t('默认 ~/.touchstone/projects/<项目路径 id>；其下自动生成案例库 free_style 与 bug 报告 bug_report')} />
               <Button variant="outline" size="sm" onClick={() => openDirModal('work_dir')} title={t('浏览服务端目录并选择')}>
                 <FolderOpen /> {t('浏览')}
               </Button></div>

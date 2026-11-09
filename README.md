@@ -249,7 +249,8 @@ python touchstone.py start | stop | restart | status | build | test
 ### First steps in the UI
 
 1. Sign in and open **Settings → Change password** if you used the one-time password.
-2. **Add project** — source directory, work directory (defaults to `<project>/.touchstone`), and the
+2. **Add project** — source directory, work directory (defaults to
+   `~/.touchstone/projects/<path id>`, so nothing extra lands in the tested repo), and the
    guidance the agent should follow. The case library and bug report directories are derived and
    created for you.
 3. Create a task (or a board card) and let the queue pick it up. Round logs stream live; the session window

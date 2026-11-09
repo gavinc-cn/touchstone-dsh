@@ -82,10 +82,10 @@ import util from 'node:util';
 import * as dbmod from '../lib/db.js';
 import { listTasks, nowStr } from '../lib/db.js';
 import {
-  FILE_RAW_MAX, PY_WS, bugCases, findCaseDirs, fsBrowse, fsMkdir, isDir, normalizeProjectName,
-  parseFields, parseStatusMd, pathLastSegment, pyBasename, pyIntOr, pyIsDigits, pyJoin, pyMtimeInt,
-  pyNormpath, pyRelpath, pyStrip, readText, readTextPreview, resolveProjectFile, setMdField,
-  severityLevel,
+  FILE_RAW_MAX, PY_WS, bugCases, defaultWorkDir, findCaseDirs, fsBrowse, fsMkdir, isDir,
+  normalizeProjectName, parseFields, parseStatusMd, pathLastSegment, pyBasename, pyIntOr,
+  pyIsDigits, pyJoin, pyMtimeInt, pyNormpath, pyRelpath, pyStrip, readText, readTextPreview,
+  resolveProjectFile, setMdField, severityLevel,
 } from '../lib/lib.js';
 import { bugLastTask, listProjectBugs, pyJsonDumpsSorted } from '../lib/casescan.js';
 import { pyJsonDumps } from '../lib/pyjson.js';
@@ -714,8 +714,8 @@ function respondWorkDirUnavailable(ctx, failure) {
  * 四个照抄点：
  *  ① `project_dir` 缺省 `os.path.expanduser("~")` ⇒ `os.homedir()`（**不是** `process.env.HOME`
  *     手拼：HOME 未设时 Python 会回落到 pwd 库，`os.homedir()` 是同一回落，手拼会得空串）；
- *  ② `work_dir` 缺省 `<project_dir>/.touchstone`，用 `pyJoin`（Python 的 join **保留**
- *     `project_dir` 结尾的重复斜杠，`path.join` 会压掉 ⇒ 落库的 work_dir 会差字节）；
+ *  ② `work_dir` 缺省 `~/.touchstone/projects/<项目路径 id>`（`lib.defaultWorkDir`，
+ *     2026-11-08 起不再落进项目目录；id 规则与 Python 逐字节一致，见 `lib.projectPathId`）；
  *  ③ `commit_spec`/`deploy_spec` 恒传空串（已废弃），而 `skill_test`/`skill_cases`
  *     **必须往下传**——历史缺陷：这两个字段读了却没传给 `insert_project`，新建项目时
  *     「测试项目/用例规范」静默丢失，只有再编辑一次才存得下；
@@ -735,10 +735,10 @@ async function apiCreateProject(ctx) {
   const name = normalizeProjectName(
     pyStripBare(pyGet(body, 'name', undefined)) || pathLastSegment(projectDir));
   const agentPath = pyStripBare(pyGet(body, 'agent_path', undefined));
-  // 只填一个工作目录（未填默认 <项目目录>/.touchstone）；案例库/free_style 与
-  // bug_report 由平台按固定子目录派生、自动创建
+  // 只填一个工作目录（未填默认 ~/.touchstone/projects/<项目路径 id>，2026-11-08 起
+  // 不再落进项目目录）；案例库/free_style 与 bug_report 由平台按固定子目录派生、自动创建
   const workDir = pyStripBare(pyGet(body, 'work_dir', undefined))
-    || pyJoin(projectDir, '.touchstone');
+    || defaultWorkDir(projectDir);
   const guideRaw = pyGet(body, 'guide_text', '');
   const guideText = pyStr(pyTruthy(guideRaw) ? guideRaw : '');
   const envRaw = pyGet(body, 'env_label', '');

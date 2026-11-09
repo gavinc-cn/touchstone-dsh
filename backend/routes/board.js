@@ -29,7 +29,7 @@
  * 4. **卡片附件**：fid 白名单 `^m\d+_[0-9a-f]{10}\.[A-Za-z0-9]{1,10}$` 不匹配即 400
  *    `bad fid`（防路径穿越）；MIME 由扩展名反查 `BOARD_MEDIA_EXTS`（17 项，表照抄
  *    `server.py:2822-2830`），查不到落 `application/octet-stream`；目录 =
- *    `<work_dir or <project_dir>/.touchstone>/board_media`；读不到走 `ctx.file` 的
+ *    `<work_dir or lib.default_work_dir(project_dir)>/board_media`；读不到走 `ctx.file` 的
  *    404 `not found` + text/plain（Python `_send_file` 同形）。
  *
  * ── 与 Python 的两处**形态**差异（语义等价，写在这里防评审重复提问） ────────────────
@@ -58,7 +58,7 @@ import * as dshdriver from '../lib/dshdriver.js';
 import * as dshevents from '../lib/dshevents.js';
 import { detailText } from '../lib/i18n.js';
 import * as localbus from '../lib/localbus.js';
-import { pyStrip } from '../lib/lib.js';
+import { defaultWorkDir, pyStrip } from '../lib/lib.js';
 import { pyJsonDumps } from '../lib/pyjson.js';
 import { PyB64Error, b64decode } from '../lib/pybase64.js';
 import { unquote } from '../lib/query.js';
@@ -177,9 +177,12 @@ function boardOwnsSid(row, sid, handle) {
   return null;
 }
 
-/** 卡片附件目录：`<work_dir or <project_dir>/.touchstone>/board_media`（Python 同表达式） */
+/**
+ * 卡片附件目录：`<work_dir or lib.default_work_dir(project_dir)>/board_media`
+ * （Python 同表达式；work_dir 为空的派生根见 `lib.defaultWorkDir`）
+ */
 function mediaDir(row) {
-  const base = row.work_dir || path.join(row.project_dir, '.touchstone');
+  const base = row.work_dir || defaultWorkDir(row.project_dir);
   return path.join(base, BOARD_MEDIA_SUBDIR);
 }
 

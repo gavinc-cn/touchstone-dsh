@@ -1596,7 +1596,7 @@ export async function executeIntent(binding, intent, senderOpenId, cfg = null, o
 // 契约真源：`doc_ai/plan/202610/20261022_0837_飞书单聊截图支持（图片与图文消息转投绑定
 // 会话）.md` §三/§四/§五。链路：入站 `image`/`post` → 解析 content（§3.3）→ 逐张下载到
 // 内存（§3.4，全有或全无）→ `feishu_conv.routeText(..., images=…)` 存进目标项目
-// `<work_dir or <project_dir>/.touchstone>/board_media` 并按站点会话窗同款 markdown 绝对
+// `<work_dir or lib.default_work_dir(project_dir)>/board_media` 并按站点会话窗同款 markdown 绝对
 // 路径投递绑定会话（§3.5/§3.6）。所有文案与 Python 侧**逐字一致**（`MEDIA_*` 常量即
 // Python `feishu.py:1934-1955` 的同名常量；`feishu_conv.js` 存图时懒 import 本模块取用）。
 //

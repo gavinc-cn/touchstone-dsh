@@ -461,9 +461,63 @@ def bug_cases(bug_dir_path):
     return report, ids
 
 
+# ---------------------------------------------------------------------------
+# 默认工作目录（2026-11-08 起）：<家目录>/.touchstone/projects/<项目路径 id>
+#
+# 以前缺省是 <项目目录>/.touchstone，被测仓库里会白多一个业务无关目录（漏进
+# git status / 打包 / 目录同步）。改到家目录后项目目录保持只读，同一台机器上
+# 所有项目的案例库集中在 ~/.touchstone/projects/ 下。
+# ---------------------------------------------------------------------------
+
+# 默认工作目录的父目录（Node 侧同名常量逐字对齐，见 backend/lib/lib.js）
+DEFAULT_WORK_ROOT = "~/.touchstone/projects"
+# 项目路径 id 必须替换掉的字符：正/反斜杠（路径分隔符）与 Windows 盘符冒号
+_PATH_ID_UNSAFE_RE = re.compile(r"[/\\:]")
+
+
+def _expand_tilde(path):
+    """只展开开头的 `~` / `~/` / `~\\`；`~user` 原样保留。
+
+    不用 os.path.expanduser 的原因：POSIX 会走 pwd 库展开 `~user`，ntpath 又是
+    另一套规则，双后端逐字节一致的成本很高；项目目录都是目录选择器选出来的
+    绝对路径，这里只覆盖 `~` 一条（Node 侧同形实现，见 lib.js:expandTilde）。
+    """
+    p = str(path or "")
+    if p == "~":
+        return os.path.expanduser("~")
+    if p.startswith("~/") or p.startswith("~\\"):
+        return os.path.expanduser("~") + p[1:]
+    return p
+
+
+def project_path_id(project_dir):
+    """项目目录 → 单级目录名（项目路径 id）。
+
+    规则：展开 `~` → 去掉结尾分隔符 → 把 `/` `\\` `:` 全部换成 `-`。
+      /opt/win/touchstone-dsh  →  -opt-win-touchstone-dsh
+      D:\\own\\touchstone-dsh   →  D--own-touchstone-dsh
+
+    只做字符串级归一，**不做 normpath/realpath**：POSIX 的 normpath 不认反斜杠、
+    ntpath 认，双后端各用本平台实现会分叉；只删结尾分隔符则两端逐字节一致。
+    """
+    p = _expand_tilde(str(project_dir or "").strip() or "~")
+    trimmed = p.rstrip("/\\") or p
+    return _PATH_ID_UNSAFE_RE.sub("-", trimmed)
+
+
+def default_work_dir(project_dir):
+    """项目工作目录缺省值：<家目录>/.touchstone/projects/<项目路径 id>。
+
+    新建项目未填工作目录、以及库里 work_dir 为空时的派生根都走这里（server.py
+    建项目 / 看板附件 / 飞书截图三处）。已有项目的 work_dir 是存库值，不随本
+    函数变化——磁盘上的案例库不搬。
+    """
+    return os.path.join(_expand_tilde(DEFAULT_WORK_ROOT), project_path_id(project_dir))
+
+
 # 运行期机器产物目录名：统一挂 <工作目录> 下（案例库目录只保留纯案例内容）。
-# 工作目录缺省为 <项目目录>/.touchstone（见 server.py 项目创建），用户可配置到任意位置，
-# 运行时文件（日志/live 状态/看板附件）全部跟随工作目录，不落项目目录。
+# 工作目录缺省为 ~/.touchstone/projects/<项目路径 id>（见 default_work_dir），
+# 用户可配置到任意位置，运行时文件（日志/live 状态/看板附件）全部跟随工作目录。
 # board_media 为看板卡片附件（描述粘贴图片/文件）存储目录
 RUNTIME_DIR_NAMES = (".web", ".live", "board_media")
 

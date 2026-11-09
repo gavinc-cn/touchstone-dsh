@@ -16,6 +16,7 @@ import db
 import dshevents
 import dshdriver
 import i18n
+import lib
 import sessparse
 import waitq
 
@@ -125,12 +126,12 @@ def new_session(binding, title="", lang="zh"):
 def _media_dir(project):
     """截图落盘目录：项目工作目录 board_media/（与 server.py 看板附件上传同一表达式）。
 
-    工作目录缺省 `<project_dir>/.touchstone`（由 lib.ensure_runtime_dirs 创建并写
-    .gitignore）；这里不另造约定——两处目录/fid 规则一致，现有媒体端点与前端
-    `absToMedia` 才能直接识别飞书存进来的图片。
+    工作目录缺省 `~/.touchstone/projects/<项目路径 id>`（见 lib.default_work_dir；
+    由 lib.ensure_runtime_dirs 创建并写 .gitignore）；这里不另造约定——两处目录/fid
+    规则一致，现有媒体端点与前端 `absToMedia` 才能直接识别飞书存进来的图片。
     """
     return os.path.join(project["work_dir"] or
-                        os.path.join(project["project_dir"], ".touchstone"),
+                        lib.default_work_dir(project["project_dir"]),
                         "board_media")
 
 

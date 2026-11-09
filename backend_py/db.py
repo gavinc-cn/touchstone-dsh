@@ -524,7 +524,10 @@ def _mh_projects_work_dir_from_legacy_cases_root(conn):
     """handler：旧 work_dir（案例库根）改存工作目录；bug_dir 置空（幂等标记=bug_dir 非空）。
 
     旧 work_dir 以 free_style 结尾则取其父目录，否则回落 <项目目录>/.touchstone；
-    磁盘文件一律不动。取父目录分支派生路径与原值一致；回落分支按新版默认目录派生。
+    磁盘文件一律不动。取父目录分支派生路径与原值一致；回落分支按**当时**的默认目录派生。
+    注意：回落分支的 `<项目目录>/.touchstone` 是历史口径（2026-11-08 起新建项目的缺省
+    已改到 ~/.touchstone/projects/<路径 id>，见 lib.default_work_dir），**不要**跟着改——
+    这条 handler 解释的是旧数据当时落在哪，改了反而指向不存在的目录。
     """
     for r in conn.execute(
             "SELECT id, project_dir, work_dir FROM projects"

@@ -381,6 +381,10 @@ function projectsGuideTextMerge(db) {
  *   旧值 strip + 去尾随 `/`；以 `/free_style` 结尾 → 取父目录（path.dirname），
  *   否则回落 `path.join(project_dir || '~', '.touchstone')`；磁盘文件一律不动。
  * 幂等标记 = bug_dir 非空（WHERE 子句）。
+ *
+ * 回落分支的 `.touchstone` 是**历史口径**（2026-11-08 起新建项目缺省改到
+ * `~/.touchstone/projects/<路径 id>`，见 `lib.defaultWorkDir`），不要跟着改：这条 handler
+ * 解释的是旧数据当时落在哪，改了反而指向不存在的目录。
  * @param {import('node:sqlite').DatabaseSync} db
  */
 function projectsWorkDirFromLegacyCasesRoot(db) {

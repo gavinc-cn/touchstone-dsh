@@ -23,8 +23,11 @@ DSH 桌面端的面板 iframe 走 `dsh-app://` 自定义协议：Electron 主进
 """
 import json
 import os
+import re
+import shutil
 import sqlite3
 import socket
+import tempfile
 
 import pytest
 
@@ -34,15 +37,26 @@ BODY_MISSING = "未收到项目信息（请求体为空或格式非法），请�
 NAME_EXISTS = "项目名已存在"
 
 
+def _work_dir_id(project_dir):
+    """缺省工作目录的路径 id：`/` `\\` `:` 全部换成 `-`（约定见 lib.project_path_id）。"""
+    return re.sub(r"[/\\:]", "-", project_dir.rstrip("/\\"))
+
+
 @pytest.fixture(scope="module")
 def srv():
-    """插件形态隔离实例（免登信任头，供写端点直连）。"""
-    s = IsolatedServer(trust_internal=True)
+    """插件形态隔离实例（免登信任头，供写端点直连）。
+
+    HOME 也指到临时目录：新建项目的工作目录缺省在 `~/.touchstone/projects/` 下，
+    不隔离就会写进真实家目录。
+    """
+    home = tempfile.mkdtemp(prefix="tf_iso_home_")
+    s = IsolatedServer(trust_internal=True, extra_env={"HOME": home})
     s.start()
     try:
         yield s
     finally:
         s.stop()
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def raw_request(srv, method, path, body=b"", *, chunked=False, chunk_size=7, extra_headers=None):
@@ -105,8 +119,13 @@ def test_chunked_create_project_parsed_like_content_length(srv):
     row = [r for r in rows if r["id"] == project_id][0]
     assert row["name"] == "分块项目"
     assert row["project_dir"] == project_dir
-    assert os.path.isdir(os.path.join(project_dir, ".touchstone", "free_style"))
-    assert os.path.isdir(os.path.join(project_dir, ".touchstone", "bug_report"))
+    # 工作目录缺省 = <HOME>/.touchstone/projects/<项目路径 id>（不再落进项目目录）
+    work_dir = os.path.join(srv.extra_env["HOME"], ".touchstone", "projects",
+                            _work_dir_id(project_dir))
+    assert row["work_dir"] == work_dir
+    assert os.path.isdir(os.path.join(work_dir, "free_style"))
+    assert os.path.isdir(os.path.join(work_dir, "bug_report"))
+    assert not os.path.exists(os.path.join(project_dir, ".touchstone"))
 
 
 def test_chunked_other_write_endpoint(srv):

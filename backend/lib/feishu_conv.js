@@ -56,7 +56,7 @@ import * as dsheventsMod from './dshevents.js';
 import * as cfgMod from './feishu_cfg.js';
 import * as i18n from './i18n.js';
 import * as restMod from './feishu_rest.js';
-import { PY_WS } from './lib.js';
+import { PY_WS, defaultWorkDir } from './lib.js';
 import { pyJsonDumps } from './pyjson.js';
 import * as sessparseMod from './sessparse.js';
 import * as waitqMod from './waitq.js';
@@ -1337,11 +1337,11 @@ async function newSession(binding, title = '', options = {}) {
 
 /**
  * 截图落盘目录（`feishu_conv.py:92-100` 的 `_media_dir`）：
- * `<project.work_dir or <project.project_dir>/.touchstone>/board_media`——与
- * `server.py` 看板附件上传**同一表达式**，现有媒体端点与前端 `absToMedia` 才能直接识别。
+ * `<project.work_dir or lib.default_work_dir(project.project_dir)>/board_media`——
+ * 与 `server.py` 看板附件上传**同一表达式**，现有媒体端点与前端 `absToMedia` 才能直接识别。
  */
 function mediaDirOf(project) {
-  const base = project.work_dir || path.join(project.project_dir, '.touchstone');
+  const base = project.work_dir || defaultWorkDir(project.project_dir);
   return path.join(base, 'board_media');
 }
 
