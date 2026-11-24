@@ -114,8 +114,10 @@ def new_session(binding, title="", lang="zh"):
     project, err = _locate_project(binding, lang)
     if project is None:
         return err
-    title = (title or "").strip() or _new_title(lang)
-    sid, err = _create_in_project(binding, project, title, lang)
+    requested_title = (title or "").strip()
+    title = requested_title or _new_title(lang)
+    sid, err = _create_in_project(binding, project, title, lang,
+                                  pin_title=bool(requested_title))
     if err:
         return err
     return _text("已新建并绑定「{title}」（项目：{project}），接下来发消息都进这个会话；"
@@ -206,7 +208,8 @@ def route_text(binding, text, cfg=None, images=None, lang="zh"):
                 send_card(open_id, card, cfg)
             return _text(NO_DEFAULT_GUIDE, lang) + (("\n" + note) if note else "")
         title = _new_title(lang)
-        sid, err = _create_in_project(binding, project, title, lang)
+        sid, err = _create_in_project(binding, project, title, lang,
+                                      pin_title=False)
         if err:
             return err + (("\n" + note) if note else "")
         # 创建路径内已写绑定；这里重申一次（幂等）：路由侧不依赖创建函数的副作用
@@ -893,12 +896,15 @@ def _locate_project(binding, lang="zh"):
                        lang, names=sep.join(p["name"] for p in owned[:8]))
 
 
-def _create_in_project(binding, project, title, lang="zh"):
+def _create_in_project(binding, project, title, lang="zh", pin_title=True):
     """在项目目录下新建 dsh 会话并写「当前会话」绑定。返回 (sid, err)，err 非空=失败。
 
     步骤：驱动可用性闸（中文引导，绝不抛异常栈）→ `create_session` → 项目级会话
-    默认值（模型 / 思考等级 / 权限档，**best-effort 只留痕不阻断**）→ `rename`
-    （同上）→ `db.set_feishu_cur_session`。失败路径一律不写绑定。
+    默认值（模型 / 思考等级 / 权限档，**best-effort 只留痕不阻断**）→ 仅用户显式
+    标题执行 `rename`（同上）→ `db.set_feishu_cur_session`。失败路径一律不写绑定。
+
+    ``pin_title=False`` 用于缺省时间标题：它只供飞书回执和绑定展示，不能经
+    ``rename`` 写成 DSH 的用户标题，否则会固定标题并停止后续自动命名。
     """
     if not dshdriver.configured():
         return "", _text(DRIVER_NEEDED, lang)
@@ -922,10 +928,11 @@ def _create_in_project(binding, project, title, lang="zh"):
             log=_trace)
     except Exception as e:
         _trace(f"会话默认值下发失败 sid={sid}: {e!r}")      # 只留痕，不阻断
-    try:
-        dshdriver.rename(sid, title)
-    except Exception as e:
-        _trace(f"会话改名失败 sid={sid}: {e!r}")            # 只留痕，不阻断
+    if pin_title:
+        try:
+            dshdriver.rename(sid, title)
+        except Exception as e:
+            _trace(f"会话改名失败 sid={sid}: {e!r}")        # 只留痕，不阻断
     db.set_feishu_cur_session(binding["open_id"], project["id"], sid, title)
     return sid, ""
 
@@ -1039,7 +1046,7 @@ def _clip_reply(text, lang="zh"):
 
 
 def _new_title(lang="zh"):
-    """新建会话的缺省标题（本地时间；与 dsh 侧栏 / 会话列表卡里可辨认）。"""
+    """缺省展示标题（本地时间）：只供飞书回执/绑定，不写入 DSH 锁自动命名。"""
     return time.strftime(_text(TITLE_FMT, lang))
 
 

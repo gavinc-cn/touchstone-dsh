@@ -141,8 +141,8 @@ def test_empty_session_not_projected_until_first_prompt(monkeypatch):
 
 
 def test_title_only_session_not_projected(monkeypatch):
-    """A 类闸（2026-10-25 会话即卡片）：**标题不算内容**——平台建会话时就会写一枚
-    标题（`feishu_conv._create_in_project` 建完即 rename），只有标题、从未跑过一轮的
+    """A 类闸（2026-10-25 会话即卡片）：**标题不算内容**——历史版本平台建会话时
+    会写一枚缺省标题（现仅显式 `/new` 标题 rename），只有标题、从未跑过一轮的
     会话不投影成卡（卡 943/928 的成因即此）；跑过一轮后才建卡。"""
     proj = _mk_project()
     _patch(monkeypatch, [{"sid": SID, "title": "飞书对话 10-09 13:34",

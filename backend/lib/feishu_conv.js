@@ -1263,8 +1263,10 @@ function baselineOf(sid, options = {}) {
 /**
  * 在项目目录下新建 dsh 会话并写「当前会话」绑定（`feishu_conv.py:772-806`）。
  * @returns {Promise<[string, string]>} `[sid, err]`，err 非空 = 失败（失败路径一律不写绑定）
+ * `pinTitle=false` 用于缺省时间标题：它只供飞书回执和绑定展示，不能经 `rename` 写成
+ * DSH 用户标题，否则会固定标题并停止后续自动命名。`options` 保持在第 4 位，兼容既有读口。
  */
-async function createInProject(binding, project, title, options = {}) {
+async function createInProject(binding, project, title, options = {}, pinTitle = true) {
   options = withLang(options, binding);
   const d = deps(options);
   const lang = convLang(options);
@@ -1291,10 +1293,12 @@ async function createInProject(binding, project, title, options = {}) {
   } catch (e) {
     trace(`会话默认值下发失败 sid=${sid}: ${errorRepr(e)}`, options);     // 只留痕，不阻断
   }
-  try {
-    await d.dshdriver.rename(sid, finalTitle);
-  } catch (e) {
-    trace(`会话改名失败 sid=${sid}: ${errorRepr(e)}`, options);           // 只留痕，不阻断
+  if (pinTitle) {
+    try {
+      await d.dshdriver.rename(sid, finalTitle);
+    } catch (e) {
+      trace(`会话改名失败 sid=${sid}: ${errorRepr(e)}`, options);         // 只留痕，不阻断
+    }
   }
   d.db.setFeishuCurSession(requireKey(binding, 'open_id'), project.id, sid, finalTitle, options);
   return [sid, ''];
@@ -1322,8 +1326,10 @@ async function newSession(binding, title = '', options = {}) {
   const lang = convLang(options);
   const [project, err] = locateProject(binding, options);
   if (project === null) return err;
-  const finalTitle = pyStrStrip(pyOr(title, '')) || newTitle(options);
-  const [sid, createErr] = await createInProject(binding, project, finalTitle, options);
+  const requestedTitle = pyStrStrip(pyOr(title, ''));
+  const finalTitle = requestedTitle || newTitle(options);
+  const [sid, createErr] = await createInProject(
+    binding, project, finalTitle, options, Boolean(requestedTitle));
   if (pyTruthy(createErr)) return createErr;
   void sid;
   return txt('已新建并绑定「{title}」（项目：{project}），接下来发消息都进这个会话；'
@@ -1458,7 +1464,7 @@ export async function routeText(binding, text, cfg = null, options = {}, images 
       return txt(NO_DEFAULT_GUIDE, lang) + (pyTruthy(note) ? `\n${note}` : '');
     }
     title = newTitle(options);
-    const created = await createInProject(binding, project, title, options);
+    const created = await createInProject(binding, project, title, options, false);
     sid = created[0];
     if (pyTruthy(created[1])) return created[1] + (pyTruthy(note) ? `\n${note}` : '');
     // 创建路径内已写绑定；这里**重申**一次（幂等）：路由侧不依赖创建函数的副作用

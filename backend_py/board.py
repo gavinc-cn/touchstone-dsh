@@ -3646,9 +3646,10 @@ def _is_empty_session(item):
     """空会话判定（A 类闸；2026-10-09 立，2026-10-25 收敛为「是否跑过一轮」）。
 
     「有内容」= 会话**跑过至少一轮**（`item["has_content"]`，即事件流里有
-    `turn/start`，见 `sessparse._dsh_scan_turn`）——**标题不算内容**：平台建会话时
-    就会写一枚标题（`feishu_conv._create_in_project` 建完即 rename `/new` 的
-    「飞书对话 …」），旧口径「首问 OR 标题」因此把空壳会话也判成有内容，卡 943/928
+    `turn/start`，见 `sessparse._dsh_scan_turn`）——**标题不算内容**：历史版本平台建
+    会话时会写一枚标题（`feishu_conv._create_in_project` 建完即 rename `/new` 的
+    缺省「飞书对话 …」；2026-11-24 起仅显式标题 rename），旧口径「首问 OR 标题」
+    因此把空壳会话也判成有内容，卡 943/928
     「点进去什么都没有」即由此而来（2026-10-10 设计 §2.1，2026-10-25 实施）。
 
     历史：旧版本会给空会话建一张 `session-xxxx` 占位卡（等首问落盘再补齐标题），

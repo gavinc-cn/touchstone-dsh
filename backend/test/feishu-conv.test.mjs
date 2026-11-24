@@ -341,13 +341,38 @@ test('routeText 分支 2：无会话 ⇒ 新建（驱动序列）+ 绑定写两�
   const ad = h.calls.driver.find((c) => c[0] === 'applySessionDefaults');
   assert.deepEqual(ad, ['applySessionDefaults', 's-new', 'deepseek-flash', 'deepseek', 'high', 'yolo', ad[6]]);
   assert.equal(typeof ad[6], 'function', '第 6 位是 log 回调（位置参数，不是关键字名）');
-  assert.deepEqual(h.calls.driver.find((c) => c[0] === 'rename'), ['rename', 's-new', conv._new_title(h.options)]);
+  assert.deepEqual(h.calls.driver.filter((c) => c[0] === 'rename'), [],
+    '自由文本自动建会话没有用户显式标题 ⇒ 不得 rename 锁住 DSH 自动标题');
   // 绑定写两次：_create_in_project(:805) + route_text 重申(:132)
   const writes = h.calls.db.filter((c) => c[0] === 'setCurSession');
   assert.equal(writes.length, 2, '_create_in_project 一次 + route_text 幂等重申一次');
   assert.deepEqual(writes[0], ['setCurSession', 'ou_a', 7, 's-new', conv._new_title(h.options)]);
   assert.deepEqual(writes[1], writes[0]);
   assert.ok(h.order.indexOf('setCurSession') < h.order.indexOf('submit'), '建会话/写绑定先于投递');
+});
+
+test('_new_session：缺省标题保留 DSH 自动命名，显式标题仍固定', async () => {
+  const h = harness();
+  h.st.projects = [makeProject(7, { name: '甲' })];
+  h.st.createSid = 's-auto';
+  const b = makeBinding({ default_project_id: 7 });
+  const reply = await conv._new_session(b, '', h.options);
+  const defaultTitle = conv._new_title(h.options);
+  assert.match(defaultTitle, /^飞书对话 \d\d-\d\d \d\d:\d\d$/);
+  assert.deepEqual(h.calls.driver.find((c) => c[0] === 'createSession'),
+    ['createSession', '/tmp/p7', defaultTitle, '', '']);
+  assert.deepEqual(h.calls.driver.filter((c) => c[0] === 'rename'), [],
+    '缺省时间标题只用于回执/绑定，不写 source=user 标题事件');
+  assert.deepEqual(h.calls.db.find((c) => c[0] === 'setCurSession'),
+    ['setCurSession', 'ou_a', 7, 's-auto', defaultTitle]);
+  assert.ok(reply.includes('已新建并绑定「' + defaultTitle + '」'));
+
+  const explicit = harness();
+  explicit.st.projects = [makeProject(7)];
+  explicit.st.createSid = 's-explicit';
+  await conv._new_session(makeBinding({ default_project_id: 7 }), '修登录', explicit.options);
+  assert.deepEqual(explicit.calls.driver.filter((c) => c[0] === 'rename'),
+    [['rename', 's-explicit', '修登录']], '/new 标题 是用户显式定名，仍须 pin');
 });
 
 test('routeText 分支 2：驱动不可用 ⇒ DRIVER_NEEDED（中文引导，不抛栈）', async () => {
