@@ -42,9 +42,15 @@ function makeWebServer() {
   };
 }
 
+/** cordis 4.x 真形：loader 条目里的 fiber 是 registry.plugin() 返回的 Object.create(fiber)
+ *  包装（uid 与真 fiber 相同、对象身份不同）。掉线判据必须按 uid 认，不能比身份。 */
+const wrappedFiber = (fiber) => Object.create(fiber);
+
+let fiberUid = 0;
+
 /** 桩 ctx：webServer / loader（可变的 entries 行）/ logger / inject / fiber。 */
 function makeCtx(webServer, rows) {
-  const fiber = { stub: true };
+  const fiber = { stub: true, uid: ++fiberUid };
   return {
     fiber,
     rows,
@@ -135,7 +141,7 @@ async function main() {
     const webServer = makeWebServer();
     const ctx1 = makeCtx(webServer, []);
     const dispose1 = await apply(ctx1, config);
-    ctx1.rows.push({ id: 'include:touchstone', fiber: ctx1.fiber });
+    ctx1.rows.push({ id: 'include:touchstone', fiber: wrappedFiber(ctx1.fiber) });
     let pids = readPids(pidFile);
     // 子进程启动是异步的：等假后端把 pid 写出来（最多 3s）
     await waitFor(() => readPids(pidFile).length >= 1, 3000);
@@ -147,6 +153,14 @@ async function main() {
     spawned.push(...pids);
     check('apply#1 返回 disposer', typeof dispose1 === 'function');
 
+    // ---- 1b) cordis 4.x 真形回归（2026-11-20 面板白屏）：条目里的 .fiber 是 ctx.fiber 的
+    //     Object.create 包装（uid 相同、身份不同）。掉线判据只比身份 ⇒ 首个 2s 节拍就判
+    //     「不在 loader」并自主停壳（路由全摘 + 后端 SIGTERM）—— 真机白屏就是这个。
+    await new Promise((resolve) => setTimeout(resolve, 2600));
+    check('条目 .fiber 为同 uid 包装时不被误判掉线（跨过一个 2s 节拍仍在树）',
+      webServer.prefixes.size === 2 && alive(pids[0]),
+      JSON.stringify({ routes: [...webServer.prefixes.keys()], alive: alive(pids[0]) }));
+
     // ---- 2) 模拟「热重载换下却不 dispose」：同一 webServer 再 apply 一次 ----
     // 不回收的话 register 必抛 duplicate（真机现象），且旧后端会一直活着占库。
     const ctx2 = makeCtx(webServer, []);
@@ -157,7 +171,7 @@ async function main() {
     } catch (error) {
       apply2Error = error && error.message;
     }
-    ctx2.rows.push({ id: 'include:touchstone', fiber: ctx2.fiber });
+    ctx2.rows.push({ id: 'include:touchstone', fiber: wrappedFiber(ctx2.fiber) });
     await waitFor(() => readPids(pidFile).length >= 2, 3000);
     pids = readPids(pidFile);
     spawned.push(...pids);
@@ -175,13 +189,16 @@ async function main() {
     const webServer3 = makeWebServer();
     const ctx3 = makeCtx(webServer3, []);
     await apply(ctx3, config);
-    ctx3.rows.push({ id: 'include:touchstone', fiber: ctx3.fiber });
+    ctx3.rows.push({ id: 'include:touchstone', fiber: wrappedFiber(ctx3.fiber) });
     await waitFor(() => readPids(pidFile).length >= 3, 3000);
     pids = readPids(pidFile);
     spawned.push(...pids);
     const pid3 = pids[pids.length - 1];
     check('apply#3 起第三个后端', pids.length === 3 && alive(pid3), JSON.stringify(pids));
-    ctx3.rows.length = 0;                     // 模拟：条目被换下，loader 里已无本 fiber
+    // 模拟：条目被热重载换下 —— 同 id 的行还在，但 fiber 已换成另一个（新 uid）,
+    // 旧 fiber 从 loader 上掉线。不能用空 entries 模拟：空表被当成「形状不可判定」。
+    ctx3.rows.splice(0, ctx3.rows.length,
+      { id: 'include:touchstone', fiber: wrappedFiber({ stub: true, uid: 99999 }) });
     const watched = await waitFor(
       () => !alive(pid3) && webServer3.prefixes.size === 0, 5000);
     check('掉线自检（2s 节拍）自主停壳：后端退出 + 路由释放', watched,

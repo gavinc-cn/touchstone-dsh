@@ -1121,13 +1121,27 @@ export async function apply(ctx, config = {}) {
 
   // ② 掉线自检：dsh 热重载换下条目却不 dispose 时, fiber 会脱离 loader 但仍在跑。
   //    探不到 loader 服务就不断言（宁可不收，不可误收）；命中即自主停壳。
+  //    认形：dsh 的 loader 服务 = cordis-plugin-loader 的 Loader，entries() 返回条目记录,
+  //    记录的 .fiber 是 registry.plugin() 返回的 `Object.create(fiber)` 包装 —— 与插件拿到的
+  //    ctx.fiber（包装背后的真 fiber）**uid 相同、对象身份不同**（cordis 4.1 读源码实测）。
+  //    2026-11-20 事故：判据只比身份 ⇒ dsh 0.2.2-rc.5 下激活后首个 2s 节拍就误判
+  //    「不在 loader」并自主停壳（路由全摘 + 后端 SIGTERM，面板白屏）。故按 uid 认。
+  //    空表 / 形状不可判定时一律视为在树（宁可不收，不可误收）。
   watchdog = setInterval(() => {
     if (disposed) return;
     const mounted = (() => {
       try {
         const loader = ctx.get('loader');
         if (!loader || typeof loader.entries !== 'function') return true;
-        for (const row of loader.entries()) if (row && row.fiber === ctx.fiber) return true;
+        const list = Array.from(loader.entries());
+        if (!list.length) return true;
+        const selfUid = ctx.fiber && ctx.fiber.uid;
+        for (const row of list) {
+          const fiber = row && row.fiber;
+          if (!fiber) continue;
+          if (fiber === ctx.fiber) return true;
+          if (selfUid != null && fiber.uid === selfUid) return true;
+        }
         return false;
       } catch {
         return true;
