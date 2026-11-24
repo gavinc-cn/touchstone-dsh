@@ -13,6 +13,8 @@
 
 [English](README.md) | 中文
 
+**[在线体验交互 Demo](https://gavinc-cn.github.io/touchstone-dsh/demo.html) · [快速安装](#快速开始)**
+
 <img src="docs/images/board.png" alt="Touchstone 开发看板" width="920">
 
 </div>
@@ -120,86 +122,90 @@ flowchart LR
 
 ## 快速开始
 
-### 环境要求
+### 先在线体验
 
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| Node.js | 22.19+ 或 24+ | 运行 `dsh` 宿主**与插件形态的后端**（缺省；仅构建前端时 Node 18+ 即可） |
-| Python | 3.12+ | 独立形态（`./touchstone.sh start`）与插件形态的 `backend: python`（实测 3.12） |
-| DeepSeek Harness（`dsh`） | 当前版本 | agent 执行——插件形态必需 |
+[打开交互 Demo](https://gavinc-cn.github.io/touchstone-dsh/demo.html)，在浏览器里走一遍项目、任务、
+看板和会话流程。它是**静态模拟**，不连接后端、不读取仓库，也不会发起模型调用。
 
-### 1. 克隆并安装
+### 安装为 `dsh` 插件（推荐）
+
+这是 dsh 用户最短的使用路径，也是启用 agent 执行的形态。需要 Node.js 22.19+ 或 24+，以及当前版本的
+DeepSeek Harness。**不需要 Python，也不需要克隆本仓库。**
+
+1. 先启动一次 `dsh`，它会创建 `web` profile：
+
+   ```bash
+   npx @deepseek-ai/dsh web
+   ```
+
+2. 在另一个终端安装自包含的 Touchstone 包（平台与预构建前端都在包里）：
+
+   ```bash
+   npx @deepseek-ai/dsh plugin --profile web add @gavinc-cn/touchstone-dsh
+   ```
+
+3. 打开 <http://127.0.0.1:3080>，在 **Plugins** 面板启用 **Touchstone**（即选中它的 bundle），
+   然后重启 `dsh web`。点击侧栏的 Touchstone 入口打开面板，**Alt+T** 可切换面板显隐。
+
+如果面板开关没有选中 bundle，可显式执行下面的命令，然后再重启：
+
+```bash
+node ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/dsh-plugin/scripts/select-bundle.mjs \
+  ~/.dsh/profiles/web/package.json
+```
+
+插件缺省使用包内 Node 后端，不需要配置 `repoDir`，也不需要用 pip 安装依赖。插件形态默认免密：
+面板会自动以 `admin` 登录；之后可随时在 **设置 → 修改密码** 中设置口令。
+
+### 启动独立站点（完整界面，但不能执行 agent）
+
+独立形态需要 Python 3.12+，可用于浏览项目、用例、报告、看板与监控。**agent 执行必须使用插件形态**，
+因为 agent 运行在 `dsh` 宿主进程内。
 
 ```bash
 git clone https://github.com/gavinc-cn/touchstone-dsh.git
 cd touchstone-dsh
-python3 -m pip install -r backend_py/requirements.txt   # 独立形态 / 插件形态配了 backend: python 才需要
-```
-
-### 2. 启动站点（独立形态）
-
-```bash
+python3 -m pip install -r backend_py/requirements.txt
 ./touchstone.sh start          # 首次启动会自动构建前端，然后监听 127.0.0.1:4601
 ./touchstone.sh status         # 查看 PID 与实际端口
 ./touchstone.sh stop
 ```
 
-浏览器打开 <http://127.0.0.1:4601>。
-
-首次启动会种子一个 `admin` 账号。若未设置 `TS_ADMIN_PASSWORD`，平台会随机生成一次性初始口令，
-**只在启动横幅打印一次**：
+浏览器打开 <http://127.0.0.1:4601>。首次启动会种子一个 `admin` 账号。若未设置 `TS_ADMIN_PASSWORD`，
+平台会随机生成一次性初始口令，**只在启动横幅打印一次**：
 
 ```bash
 grep '一次性初始口令' .run/server.log     # 或：./touchstone.sh status
 ```
 
-首次登录会被要求改密。想跳过一次性口令（以及强制改密），在首次启动前设置
+首次登录会被要求改密。想跳过一次性口令和强制改密，在首次启动前设置
 `TS_ADMIN_PASSWORD=<你的口令>` 即可。
 
-> 独立形态给的是完整站点——项目、案例库、bug 报告、看板、队列、监控都能用；但**agent 执行需要
-> 插件形态**（见下），因为 agent 跑在 `dsh` 宿主进程里。
+### 可选：插件形态改用 Python 后端
 
-### 3. 以 `dsh` 插件形态运行（推荐：启用 agent 执行）
-
-插件把 Touchstone 嵌进 `dsh` Web 界面（侧栏入口 + 面板），并让 Touchstone 能驱动宿主进程内的常驻
-agent 会话。
-
-**方式 A —— 从 npm 安装（自包含包：整个平台 + 预构建前端都在包里）:**
-
-```bash
-npx @deepseek-ai/dsh web          # 1) 先启动一次 dsh 宿主（会创建 ~/.dsh/profiles/web）
-dsh plugin --profile web add @gavinc-cn/touchstone-dsh   # 2) 装插件包
-# 3) 把包名选进 profile 清单（等同 Plugins 面板里那一行的开关）：
-node ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/dsh-plugin/scripts/select-bundle.mjs \
-  ~/.dsh/profiles/web/package.json
-# 4) 重启 dsh web，打开 http://127.0.0.1:3080，用侧栏里的 Touchstone 入口（Alt+T 开关面板）
-```
-
-**插件形态缺省不需要 Python。** 自 2026-10-15 起薄壳拉起的是包内 Node 后端（先探宿主 Node 的
-`node:sqlite`，过旧则给提示页并列出两条出路）。只有用 Python 后端时才需要 Python —— 即独立形态，
-或在插件 config 里显式写 `backend: python`（观测期的一行回滚；**删掉该键不再有任何回退效果**，
-缺省就是 `node`）。走 Python 后端时，平台自身的依赖走 pip，npm 不管：
+插件缺省后端是 Node。若要使用观测期回滚档，在插件 config 里显式写 `backend: python`
+（删掉该键不会改变缺省值）。这个后端的依赖用 pip 安装，npm 不负责：
 
 ```bash
 pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/backend_py/requirements.txt
 # Windows 用 python -m pip install ...（官方安装器只装 python.exe，没有 python3）
 ```
 
-配了 Python 后端且未指定解释器时，插件自己探——先试 `python`、再试 `python3`（与 `touchstone.cmd`
-同序），用第一个真能跑起来的那个。如果探到的不是你装依赖的那支，缺依赖提示页里给的就是**它探到的那支**
-的解释器命令；想指定别支，在 profile patch 里写 `pythonPath`：
+插件会按 `python` → `python3` 的顺序探测，使用第一个能运行的解释器。如果探到的不是你装依赖的那支，
+可在 profile patch 里指定解释器：
 
 ```yaml
 - id: touchstone-dsh
   config: { backend: python, pythonPath: /path/to/python }
 ```
 
-**不需要配 `repoDir`**：包里带着两版后端（`backend/` Node、`backend_py/` Python）与
-`webui/dist-plugin`，插件缺省就用包自身目录。
+缺依赖提示页会给出**实际选中的解释器**对应的安装命令。包内同时带 `backend/`、`backend_py/` 与
+`webui/dist-plugin`，因此不需要配置 `repoDir`。
 
-**方式 B —— 从检出安装（开发用）:**
+### 从检出安装（开发用）
 
 ```bash
+git clone https://github.com/gavinc-cn/touchstone-dsh.git
 cd touchstone-dsh
 ./dsh-plugin/install.sh           # 幂等安装本检出到 profile
 ```

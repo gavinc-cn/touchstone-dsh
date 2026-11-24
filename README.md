@@ -12,6 +12,8 @@
 
 English | [中文](README.zh.md)
 
+**[Try the interactive demo](https://gavinc-cn.github.io/touchstone-dsh/en-demo.html) · [Quick install](#quick-start)**
+
 <img src="docs/images/board.png" alt="Touchstone development board" width="920">
 
 </div>
@@ -132,103 +134,99 @@ flowchart LR
 
 ## Quick start
 
-### Prerequisites
+### Try the demo first
 
-| Requirement | Version | Needed for |
-|-------------|---------|------------|
-| Node.js | 22.19+ or 24+ | The `dsh` host **and the plugin-mode backend** (default; the front-end build alone needs Node 18+) |
-| Python | 3.12+ | Standalone mode (`./touchstone.sh start`) and plugin mode with `backend: python` (verified on 3.12) |
-| DeepSeek Harness (`dsh`) | current release | Agent execution — required for plugin mode |
+[Open the interactive demo](https://gavinc-cn.github.io/touchstone-dsh/en-demo.html) to explore the project,
+task, board and session workflow in your browser. It is a static simulation: no backend, repository or model
+calls are involved.
 
-### 1. Clone and install
+### Install as a `dsh` plugin (recommended)
+
+This is the shortest path for `dsh` users and the mode that enables agent execution. You need Node.js 22.19+
+or 24+ and a current DeepSeek Harness release. **No Python or git clone is required.**
+
+1. Start `dsh` once; this creates the `web` profile:
+
+   ```bash
+   npx @deepseek-ai/dsh web
+   ```
+
+2. In a second terminal, install the self-contained Touchstone package (platform + prebuilt front end):
+
+   ```bash
+   npx @deepseek-ai/dsh plugin --profile web add @gavinc-cn/touchstone-dsh
+   ```
+
+3. Open <http://127.0.0.1:3080>, enable **Touchstone** in the **Plugins** panel (this selects its bundle),
+   then restart `dsh web`. Use the Touchstone sidebar entry to open the panel; **Alt+T** toggles it.
+
+If the bundle is not selected by the panel toggle, select it explicitly and then restart:
+
+```bash
+node ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/dsh-plugin/scripts/select-bundle.mjs \
+  ~/.dsh/profiles/web/package.json
+```
+
+The plugin defaults to its bundled Node backend. No `repoDir` or Python dependency installation is needed.
+Plugin mode is password-free by default: the panel is auto-logged-in as `admin`; you can set a password later
+in **Settings → Change password**.
+
+### Run the standalone site (full UI, without agent execution)
+
+Standalone mode requires Python 3.12+ and is useful for browsing projects, cases, reports, the board and
+monitoring. **Agent execution requires plugin mode**, because the agent runs inside the `dsh` host process.
 
 ```bash
 git clone https://github.com/gavinc-cn/touchstone-dsh.git
 cd touchstone-dsh
-python3 -m pip install -r backend_py/requirements.txt   # needed for standalone mode / plugin mode with backend: python
-```
-
-### 2. Start the site (standalone mode)
-
-```bash
+python3 -m pip install -r backend_py/requirements.txt
 ./touchstone.sh start          # builds the front end on first run, then serves 127.0.0.1:4601
 ./touchstone.sh status         # PID and the actual port
 ./touchstone.sh stop
 ```
 
-Then open <http://127.0.0.1:4601>.
-
-The first start seeds an `admin` account. If `TS_ADMIN_PASSWORD` is not set, a random one-time password
-is generated and printed **once** in the startup banner:
+Then open <http://127.0.0.1:4601>. The first start seeds an `admin` account. If `TS_ADMIN_PASSWORD` is not
+set, a random one-time password is printed **once** in the startup banner:
 
 ```bash
 grep '一次性初始口令' .run/server.log     # or: ./touchstone.sh status
 ```
 
 You will be asked to change it on first login. Set `TS_ADMIN_PASSWORD=<your-password>` before the first
-start to skip the one-time password (and the forced change).
+start to skip the one-time password and forced change.
 
-> **Plugin mode (`dsh`) is password-free by default** (2026-10-08): the shell passes
-> `TS_ADMIN_PASSWORDLESS=1`, so the seeded `admin` has an **empty password** and no forced change — the
-> panel is auto-logged-in as `admin` anyway. Set a password in **Settings → Change password** whenever you
-> want one (it then becomes the password used for direct/standalone logins). The plugin also writes the
-> backend's stdout/stderr line by line to `<db dir>/plugin-backend.log` (next to
-> `~/.touchstone/touchstone.db`) — that is where the plugin-mode startup banner and the
-> `[board]`/`[waitq]`/`[runner]` diagnostics can be read.
+### Optional: use the Python backend in plugin mode
 
-> Standalone mode gives you the full site — projects, case library, bug reports, board, queue, monitoring —
-> but **agent execution needs plugin mode** (below), because the agent runs inside the `dsh` host process.
-
-### 3. Run as a `dsh` plugin (recommended: enables agent execution)
-
-The plugin embeds Touchstone in the `dsh` Web UI as a sidebar entry and panel, and lets Touchstone drive
-resident agent sessions in the host process.
-
-**Option A — from npm (self-contained package: whole platform + prebuilt front end):**
-
-```bash
-npx @deepseek-ai/dsh web          # 1) start the dsh host once (creates ~/.dsh/profiles/web)
-dsh plugin --profile web add @gavinc-cn/touchstone-dsh   # 2) install the plugin package
-# 3) select the bundle in the profile manifest (the Plugins panel toggle does the same thing):
-node ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/dsh-plugin/scripts/select-bundle.mjs \
-  ~/.dsh/profiles/web/package.json
-# 4) restart the dsh web UI, open http://127.0.0.1:3080, use the Touchstone entry (Alt+T toggles the panel)
-```
-
-**Plugin mode needs no Python by default.** Since 2026-10-15 the plugin shell starts the bundled Node
-backend (it probes the host Node for `node:sqlite` first; if the host is too old it shows a hint page with
-the two ways out). Python is used only for the Python backend — standalone mode, or `backend: python` in the
-plugin config, which is the one-line fallback during the observation window (deleting the key no longer
-reverts anything: the default *is* `node` now). For that Python backend, the platform's own dependencies are
-installed with pip, not npm:
+The default plugin backend is Node. To use the observation-window fallback instead, set `backend: python`
+in the plugin config (deleting the key does not change the default). Install that backend's dependencies with
+pip, not npm:
 
 ```bash
 pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/backend_py/requirements.txt
 # Windows: python -m pip install ...   (the official installer ships python.exe, not python3)
 ```
 
-With the Python backend, the plugin resolves the interpreter itself when you do not configure one: it probes
-`python` first, then `python3` (the same order as `touchstone.cmd`), and uses the first one that actually
-runs. If that is not the interpreter where you installed the dependencies, the missing-dependency page prints
-the exact command for the interpreter it picked; to pin another one, set `pythonPath` in the profile patch:
+The plugin probes `python`, then `python3`, and uses the first interpreter that runs. If that is not where
+you installed the dependencies, pin another interpreter in the profile patch:
 
 ```yaml
 - id: touchstone-dsh
   config: { backend: python, pythonPath: /path/to/python }
 ```
 
-No `repoDir` is needed: the package carries both backends (`backend/` for Node, `backend_py/` for Python)
-and `webui/dist-plugin`, so the plugin falls back to its own directory.
+The missing-dependency page prints the exact command for the interpreter it selected. The package carries
+both backends (`backend/` and `backend_py/`) plus `webui/dist-plugin`, so no `repoDir` override is needed.
 
-**Option B — from a checkout (development):**
+### Install from a checkout (development)
 
 ```bash
+git clone https://github.com/gavinc-cn/touchstone-dsh.git
 cd touchstone-dsh
 ./dsh-plugin/install.sh           # idempotent install of this checkout into the profile
 ```
 
-The installer prints the optional profile patch for pointing the plugin at your working copy (or picking a
-specific interpreter); skip it to use the package's own directory:
+The installer prints an optional profile patch for pointing the plugin at your working copy or choosing a
+specific interpreter; skip it to use the package's own directory:
 
 ```yaml
 - id: touchstone-dsh
