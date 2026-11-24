@@ -117,9 +117,10 @@ function tmpDir(tag) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `ts-pw-${tag}-`));
 }
 
-/** 缺省工作目录的路径 id（约定见 lib.project_path_id：`/` `\` `:` 全换 `-`） */
+/** 缺省工作目录的路径 id（约定见 lib.project_path_id：`/` `\` `:` 换 `-`，开头 `-` 串换 `_`） */
 function workDirId(dir) {
-  return dir.replace(/[/\\]+$/, '').replace(/[/\\:]/g, '-');
+  const id = dir.replace(/[/\\]+$/, '').replace(/[/\\:]/g, '-');
+  return id.startsWith('-') ? '_' + id.replace(/^-+/, '') : id;
 }
 
 /**

@@ -715,9 +715,13 @@ function expandTilde(value) {
 /**
  * `lib.project_path_id`：项目目录 → 单级目录名（项目路径 id）。
  *
- * 规则：展开 `~` → 去掉结尾分隔符 → 把 `/` `\` `:` 全部换成 `-`。
- *   /opt/win/touchstone-dsh → -opt-win-touchstone-dsh
- *   D:\own\touchstone-dsh   → D--own-touchstone-dsh
+ * 规则：展开 `~` → 去掉结尾分隔符 → 把 `/` `\` `:` 全部换成 `-`；结果若仍以
+ * `-` 开头（POSIX 绝对路径的根标记），把开头这串 `-` 整体换成一个 `_`。
+ *   /opt/win/touchstone-dsh → _opt-win-touchstone-dsh
+ *   D:\work\demo-app        → D--work-demo-app
+ *   /                       → _
+ * 开头的 `-` 必须换掉：以 `-` 开头的一级目录名在 shell 里没法直接用，
+ * `cd -opt-…` 会被内建命令当成选项（加引号也不行）。
  * 不做 normpath/realpath：POSIX 不认反斜杠、ntpath 认，双后端各用本平台实现会分叉。
  * @param {string} projectDir
  * @returns {string}
@@ -725,7 +729,8 @@ function expandTilde(value) {
 export function projectPathId(projectDir) {
   const p = expandTilde(String(projectDir == null ? '' : projectDir).trim() || '~');
   const trimmed = p.replace(/[/\\]+$/, '') || p;
-  return trimmed.replace(PATH_ID_UNSAFE, '-');
+  const id = trimmed.replace(PATH_ID_UNSAFE, '-');
+  return id.startsWith('-') ? `_${id.replace(/^-+/, '')}` : id;
 }
 
 /**

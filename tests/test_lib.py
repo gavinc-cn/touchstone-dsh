@@ -147,23 +147,34 @@ def test_bug_cases_scripted_all_scripted(tmp_path):
 
 # ---------- 默认工作目录（<家目录>/.touchstone/projects/<项目路径 id>） ----------
 
+def _path_id(path):
+    """测试侧按规则手算路径 id（不调 lib.project_path_id，免自证）。
+
+    `/` `\\` `:` 换 `-`；结果开头的 `-` 串（POSIX 根标记）整体换成一个 `_`。
+    """
+    path_id = re.sub(r"[/\\:]", "-", path)
+    return "_" + path_id.lstrip("-") if path_id.startswith("-") else path_id
+
+
 def test_project_path_id_replaces_separators_and_drive_colon():
     """`/` `\\` `:` 一律换 `-`；Windows 形态在 Linux 上同一条规则（不靠 ntpath）。"""
-    assert lib.project_path_id("/opt/win/touchstone-dsh") == "-opt-win-touchstone-dsh"
-    assert lib.project_path_id("/opt/win/touchstone-dsh/") == "-opt-win-touchstone-dsh"
-    assert lib.project_path_id("D:\\own\\touchstone-dsh") == "D--own-touchstone-dsh"
-    assert lib.project_path_id("D:/own/touchstone-dsh") == "D--own-touchstone-dsh"
+    assert lib.project_path_id("/opt/win/touchstone-dsh") == "_opt-win-touchstone-dsh"
+    assert lib.project_path_id("/opt/win/touchstone-dsh/") == "_opt-win-touchstone-dsh"
+    assert lib.project_path_id("D:\\work\\demo-app") == "D--work-demo-app"
+    assert lib.project_path_id("D:/work/demo-app") == "D--work-demo-app"
     assert lib.project_path_id("relative/proj") == "relative-proj"
     # 结尾分隔符全部去掉（`C:\\` 只剩盘符，冒号仍要换）
     assert lib.project_path_id("C:\\") == "C-"
-    # `/` 是根：不能 rstrip 成空串
-    assert lib.project_path_id("/") == "-"
+    # POSIX 绝对路径的根标记不以 `-` 开头（`cd -opt-…` 会被当选项）
+    assert lib.project_path_id("/") == "_"
+    # 连续的前导分隔符只留一个 `_`
+    assert lib.project_path_id("//opt/win") == "_opt-win"
 
 
 def test_project_path_id_expands_only_bare_tilde():
     """`~` / `~/` / `~\\` 展开成家目录；`~user` 原样保留（双后端同口径、不查 pwd）。"""
     home = os.path.expanduser("~")
-    home_id = re.sub(r"[/\\:]", "-", home)
+    home_id = _path_id(home)
     assert lib.project_path_id("~") == home_id
     assert lib.project_path_id("~/work") == home_id + "-work"
     assert lib.project_path_id("~\\work") == home_id + "-work"
@@ -174,13 +185,13 @@ def test_default_work_dir_under_home_projects():
     """缺省工作目录 = <家目录>/.touchstone/projects/<路径 id>，不在项目目录里。"""
     project = "/opt/win/touchstone-dsh"
     expect = os.path.join(os.path.expanduser("~"), ".touchstone", "projects",
-                          "-opt-win-touchstone-dsh")
+                          "_opt-win-touchstone-dsh")
     assert lib.default_work_dir(project) == expect
     assert not lib.default_work_dir(project).startswith(project + os.sep)
     # 空值兜底到家目录项目（建项目时 project_dir 已先兜底，这里只防 helper 直接崩）
     home = os.path.expanduser("~")
     assert lib.default_work_dir("") == os.path.join(
-        home, ".touchstone", "projects", re.sub(r"[/\\:]", "-", home))
+        home, ".touchstone", "projects", _path_id(home))
 
 
 # ---------- 运行目录与 .gitignore 维护 ----------

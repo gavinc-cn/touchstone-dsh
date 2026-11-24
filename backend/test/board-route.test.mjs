@@ -415,8 +415,9 @@ test('GET /board/media/<fid>：work_dir 为空时回落 <HOME>/.touchstone/proje
   process.env.HOME = fx.dir;            // 缺省工作目录在 ~/.touchstone/projects/ 下，指到夹具
   try {
     const projectDir = path.join(fx.dir, 'proj');
+    const projectId = projectDir.replace(/[/\\]+$/, '').replace(/[/\\:]/g, '-');
     const mdir = path.join(fx.dir, '.touchstone', 'projects',
-      projectDir.replace(/[/\\]+$/, '').replace(/[/\\:]/g, '-'), 'board_media');
+      projectId.startsWith('-') ? '_' + projectId.replace(/^-+/, '') : projectId, 'board_media');
     fs.mkdirSync(mdir, { recursive: true });
     fs.writeFileSync(path.join(mdir, 'm1700000000000_0123456789.txt'), 'hello');
     const pid = insertProject(fx.db, { name: 'p', projectDir });

@@ -147,8 +147,9 @@ test('分块请求体：chunked 建项目 ⇒ 200（桌面端 dsh-app 协议形�
     assert.equal(rows[0].project_dir, projectDir);
     // 派生目录真被创建（建目录发生在 insert 之前，与定长请求同一条路径）；
     // 工作目录缺省 = <HOME>/.touchstone/projects/<项目路径 id>，不再落进项目目录
+    const id = projectDir.replace(/[/\\]+$/, '').replace(/[/\\:]/g, '-');
     const workDir = path.join(b.home, '.touchstone', 'projects',
-      projectDir.replace(/[/\\]+$/, '').replace(/[/\\:]/g, '-'));
+      id.startsWith('-') ? '_' + id.replace(/^-+/, '') : id);
     assert.equal(rows[0].work_dir, workDir);
     assert.ok(fs.statSync(path.join(workDir, 'free_style')).isDirectory());
     assert.ok(fs.statSync(path.join(workDir, 'bug_report')).isDirectory());

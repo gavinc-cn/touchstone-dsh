@@ -38,8 +38,9 @@ NAME_EXISTS = "项目名已存在"
 
 
 def _work_dir_id(project_dir):
-    """缺省工作目录的路径 id：`/` `\\` `:` 全部换成 `-`（约定见 lib.project_path_id）。"""
-    return re.sub(r"[/\\:]", "-", project_dir.rstrip("/\\"))
+    """缺省工作目录的路径 id：`/` `\\` `:` 换 `-`，开头 `-` 串换 `_`（约定见 lib.project_path_id）。"""
+    path_id = re.sub(r"[/\\:]", "-", project_dir.rstrip("/\\"))
+    return "_" + path_id.lstrip("-") if path_id.startswith("-") else path_id
 
 
 @pytest.fixture(scope="module")
