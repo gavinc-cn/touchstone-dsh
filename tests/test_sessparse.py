@@ -311,6 +311,85 @@ def test_dsh_ctx_follows_appended_frames():
     assert sessparse.load("dsh", DSH_SID, "main", 0)["ctx"] == {"used": 1000, "max": 1000000}
 
 
+# ------------------------------------------- 上下文占用投影（/compact 后环要立刻缩）
+#
+# 这三个用例钉住 2026-11-11 的修复：ctx.used 不再是「最新一次 usage 的裸压力值」，
+# 而是 dsh GUI 底栏环同口径的**投影值**
+# `max(0, pressure + surfaceTokens - sampledSurfaceTokens)`。
+# 没有 surfaceOp 的旧合成帧（上面几个用例）不参与 surface 折账，行为与修复前一致。
+
+_U400 = {"type": "text", "text": "u" * 400}     # 价格 ceil(400/4)+4（角色框架）= 104
+_A40 = {"type": "text", "text": "a" * 40}       # 价格 ceil(40/4)+4（块）+4（框架）= 18
+
+
+def _surface_frames(compact_shadow=None, gap=False):
+    """构造「一个提问 + 一次 usage 采样（+ 可选 /compact）」的 surface 事件帧。
+
+    真机 seq 布局：`compaction/summary` 紧邻 `user/message` 的 surface replace
+    （compact-checkpoint 注入帧）；`gap=True` 时在两者之间插一条非 surface 事件，
+    用于验证「影子价格只对紧邻 replace 生效」（dsh 同）。
+    """
+    recs = [
+        {"type": "request/context", "seq": 1, "time": 1,
+         "data": {"contextWindow": 1000000}},
+        {"type": "user/message", "seq": 2, "time": 2, "surfaceOp": "append",
+         "data": {"role": "user", "source": {"kind": "user"}, "content": [_U400]}},
+        {"type": "assistant/message", "seq": 3, "time": 3, "surfaceOp": "append",
+         "data": {"message": {"role": "assistant", "content": [_A40]},
+                  "usage": {"inputTokens": 1000, "outputTokens": 10}}},
+    ]
+    seq = 4
+    if compact_shadow is not None:
+        recs.append({"type": "compaction/summary", "seq": seq, "time": seq,
+                     "data": {"shadowedRange": {"start": 2, "end": 3},
+                              "shadowedTokenCount": compact_shadow}})
+        seq += 1
+        if gap:
+            recs.append({"type": "session-log-deepseek/delivery-accepted", "seq": seq,
+                         "time": seq, "data": {}})
+            seq += 1
+        recs.append({"type": "user/message", "seq": seq, "time": seq,
+                     "surfaceOp": {"op": "replace", "startSeq": 2, "endSeq": 3},
+                     "data": {"role": "user", "source": {"kind": "compact-checkpoint"},
+                              "content": [{"type": "text", "text": "s" * 100}]}})
+    return [recs]
+
+
+def test_dsh_ctx_projection_tracks_surface_growth():
+    """分子是「下一次请求」的投影：采样之后的 surface 追加（如 tool/result）会把它抬高。
+
+    口径＝dsh token-meter 的 contextPressure（`pressure + surface - sampled`）——
+    提问帧 104 + 助理帧 18（内容 14 + 角色框架 4）都在采样点之后计入，故 1000 + (104+18) - 104 = 1018。
+    """
+    _mk_dsh(frames=_surface_frames())
+    assert sessparse.load("dsh", DSH_SID, "main", 0)["ctx"] == {"used": 1018, "max": 1000000}
+
+
+def test_dsh_ctx_projection_shrinks_after_compact():
+    """`/compact` 后 ctx.used 必须立刻缩小（TS 侧环与 DSH GUI 同步）。
+
+    `compaction/summary` 的影子价格（shadowedTokenCount=118 = 被替换两帧的启发式价格）
+    由紧邻的 surface replace 消费：surface 从 122 变成 `33`（checkpoint 消息价格），
+    投影 used = 1000 + 33 - 104 = 933 < 1000。修复前这里恒为 1000（要等下一次
+    usage 落盘才变），正是用户报的现象。
+    """
+    _mk_dsh(frames=_surface_frames(compact_shadow=118))
+    data = sessparse.load("dsh", DSH_SID, "main", 0)
+    assert data["ctx"] == {"used": 933, "max": 1000000}
+    # compact-checkpoint 帧只进 surface 计价，不能变成一条 user 对话条目
+    assert _kinds(data) == ["user", "assistant"]
+
+
+def test_dsh_ctx_projection_needs_adjacent_claim():
+    """影子价格只对**紧邻**的 replace 生效（dsh 的 shadow-price 协议）。
+
+    summary 与 replace 之间插一条非 surface 事件 ⇒ claim 过期，replace 折 0 增量：
+    surface 仍是 122，投影 used 回到 1018（宁可不缩，也不按错区间缩）。
+    """
+    _mk_dsh(frames=_surface_frames(compact_shadow=118, gap=True))
+    assert sessparse.load("dsh", DSH_SID, "main", 0)["ctx"] == {"used": 1018, "max": 1000000}
+
+
 def test_dsh_load_tolerates_bad_and_non_object_lines():
     """dsh load：坏 JSON 行与合法 JSON 非对象行（数组/数字/字符串/null）跳过不崩——
     旧实现对这类行直接 .get() 会抛 AttributeError 炸掉整次解析；同一容错覆盖标题

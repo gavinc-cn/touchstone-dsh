@@ -364,6 +364,177 @@ export function _dsh_prompt_tokens(usage) {
   return null;
 }
 
+// ------------------------------------------- 上下文占用投影（surface token 估算）
+
+/**
+ * dsh 模型可见面（surface）事件类型（对齐 dsh `dsh-session/surface` 的
+ * `SURFACE_EVENT_TYPES`）。只有带 `surfaceOp` 的这些事件才改变模型的上下文。
+ */
+const SURFACE_EVENT_TYPES = new Set([
+  'system/message',
+  'developer/message',
+  'user/message',
+  'assistant/message',
+  'tool/result',
+]);
+
+/** 固定密度启发式：4 字符 ≈ 1 token（对齐 dsh `dsh-token-meter` 的 estimate.js）。 */
+const CHARS_PER_TOKEN = 4;
+
+/** 每个内容块 / 消息的结构开销（token），同上。 */
+const BLOCK_OVERHEAD = 4;
+
+/**
+ * 结构块（image / file 等非 text/reasoning/tool-call 块）的启发式价格。
+ *
+ * 口径照抄 dsh：`4 + ceil(JSON.length / 4)`；`image` 块先剔除 `offloaded`——
+ * 那只是宿主本地「已卸到磁盘」的标记，不进模型请求。JSON 序列化必须是
+ * **JS `JSON.stringify`** 的形态（无空格、非 ASCII 不转义），否则与宿主逐值对不上。
+ */
+function _estimate_structural_block(block) {
+  if (dget(block, 'type') === 'image') {
+    const reference = {};
+    for (const [k, v] of Object.entries(block)) {
+      if (k !== 'offloaded') reference[k] = v;
+    }
+    return BLOCK_OVERHEAD + Math.ceil(JSON.stringify(reference).length / CHARS_PER_TOKEN);
+  }
+  return BLOCK_OVERHEAD + Math.ceil(JSON.stringify(block).length / CHARS_PER_TOKEN);
+}
+
+/**
+ * 内容块数组的启发式价格（对齐 dsh `estimateContent`）。
+ *
+ * - text / reasoning：`ceil(text.length / 4) + 4`
+ * - tool-call：`ceil(name.length / 4) + ceil(arguments.length / 4) + 4`
+ * - 其余块（image/file…）：走 `_estimate_structural_block`
+ */
+function _estimate_content(blocks) {
+  let tokens = 0;
+  for (const block of pyIter(blocks)) {
+    if (!isPlainObject(block)) continue;
+    const type = dget(block, 'type');
+    if (type === 'text' || type === 'reasoning') {
+      tokens += Math.ceil(pyStr(dget(block, 'text', '')).length / CHARS_PER_TOKEN) + BLOCK_OVERHEAD;
+    } else if (type === 'tool-call') {
+      tokens += Math.ceil(pyStr(dget(block, 'name', '')).length / CHARS_PER_TOKEN)
+              + Math.ceil(pyStr(dget(block, 'arguments', '')).length / CHARS_PER_TOKEN)
+              + BLOCK_OVERHEAD;
+    } else {
+      tokens += _estimate_structural_block(block);
+    }
+  }
+  return tokens;
+}
+
+/**
+ * system 消息的启发式价格（对齐 dsh `estimateSystemMessage`）：
+ * 适配器把 system prompt 当纯文本序列化，故只按字符密度计 `ceil(chars / 4) + 4`，
+ * 没有每块的结构开销；空内容（=「没有 system prompt」）记 0。
+ */
+function _estimate_system_message(message) {
+  const content = pyIter(pyOr(dget(message, 'content'), []));
+  let characters = 0;
+  let count = 0;
+  for (const block of content) {
+    count += 1;
+    if (!isPlainObject(block)) continue;
+    characters += dget(block, 'type') === 'text'
+      ? pyStr(dget(block, 'text', '')).length
+      : JSON.stringify(block).length;
+  }
+  if (count === 0) return 0;
+  return Math.ceil(characters / CHARS_PER_TOKEN) + BLOCK_OVERHEAD;
+}
+
+/** 一条模型可见消息的启发式价格（对齐 dsh `estimateMessage`）。 */
+function _estimate_message(message) {
+  if (dget(message, 'role') === 'system') return _estimate_system_message(message);
+  return _estimate_content(pyOr(dget(message, 'content'), [])) + BLOCK_OVERHEAD;
+}
+
+/**
+ * 事件 → 它投影出的模型消息（对齐 dsh `deriveEventMessage`）；不产生消息返回 null。
+ *
+ * 注意 `user/message` 直接就是消息本体（含 compact-checkpoint 注入的替换帧），
+ * 其余三类取 `data.message`，`tool/result` 取 `data.message`；空内容的
+ * system/developer/assistant 消息不产生节点（返回 null，计价记 0）。
+ */
+function _event_message(d) {
+  const t = dget(d, 'type');
+  const data = orDict(dget(d, 'data'));
+  if (t === 'user/message') return data;
+  if (t === 'system/message' || t === 'developer/message' || t === 'assistant/message') {
+    const message = dget(data, 'message');
+    if (!isPlainObject(message)) return null;
+    const content = dget(message, 'content');
+    if (!Array.isArray(content) || content.length === 0) return null;
+    return message;
+  }
+  if (t === 'tool/result') {
+    const message = dget(data, 'message');
+    return isPlainObject(message) ? message : null;
+  }
+  return null;
+}
+
+/**
+ * 折一帧事件对「模型可见面」token 总量的增量（对齐 dsh `foldSurfaceProjection`）。
+ *
+ * 影子价格协议：`compaction/summary` / `compaction/prune` 事件不直接改总量，而是
+ * 「armed claim」——记下被替换区间的启发式价格；**紧邻的下一条** surface `replace`
+ * 事件消费该 claim，用 `新帧价格 - claim.tokens` 作为增量（于是 /compact 后总量立刻缩小）。
+ * 任何其他事件都会让 claim 过期（dsh 同）；replace 没有 claim 时增量记 0（读口不重建区间）。
+ *
+ * @returns {{delta: number, claim: object|null}} delta＝本帧带来的 token 增量
+ */
+function _fold_surface_token(claim, d) {
+  const t = dget(d, 'type');
+  const data = orDict(dget(d, 'data'));
+  if (t === 'compaction/summary' || t === 'compaction/prune') {
+    const range = orDict(dget(data, 'shadowedRange'));
+    const tokens = _nonneg_int(dget(data, 'shadowedTokenCount'));
+    const start = dget(range, 'start');
+    const end = dget(range, 'end');
+    if (tokens === null || !Number.isInteger(start) || !Number.isInteger(end)) {
+      return { delta: 0, claim: null };
+    }
+    return { delta: 0, claim: { start, end, tokens } };
+  }
+  if (!SURFACE_EVENT_TYPES.has(t) || dget(d, 'surfaceOp') === undefined) {
+    return { delta: 0, claim: null };
+  }
+  const op = dget(d, 'surfaceOp');
+  const message = _event_message(d);
+  const tokens = message === null ? 0 : _estimate_message(message);
+  if (op === 'append') return { delta: tokens, claim: null };
+  if (claim === null) return { delta: 0, claim: null };
+  const start = isPlainObject(op) ? dget(op, 'startSeq') : null;
+  const end = isPlainObject(op) ? dget(op, 'endSeq') : null;
+  if (claim.start !== start || claim.end !== end) {
+    // dsh 在生产者违约时直接抛错；读口以「不缩不涨」降级——不能因为一帧
+    // 对不上的历史数据让整个会话读不出来（记录一笔，便于发现真问题）
+    noteDegrade('_fold_surface_token', new Error(
+      `replace 区间 ${start}-${end} 与影子价格 ${claim.start}-${claim.end} 不匹配`));
+    return { delta: 0, claim: null };
+  }
+  return { delta: tokens - claim.tokens, claim: null };
+}
+
+/**
+ * 把折账状态折算成 `ctx.used`：**下一次请求**的上下文占用（对齐 dsh token-meter
+ * `contextPressure` 的 `projectedTokens`，也是 dsh GUI 底栏环的取数口径）。
+ *
+ * `projectedTokens = max(0, pressureTokens + surfaceTokens - sampledSurfaceTokens)`——
+ * 压力采样之后模型可见面的净变化（含 /compact 的缩小）立即反映到环上，不必等下一次
+ * usage 落盘。没有采样过 usage 时返回 null（保留「只有分母、没有分子」的旧语义）。
+ */
+export function _projected_used(col) {
+  if (col.pressureTokens === null) return null;
+  const sampled = col.sampledSurfaceTokens === null ? 0 : col.sampledSurfaceTokens;
+  return Math.max(0, col.pressureTokens + col.surfaceTokens - sampled);
+}
+
 /**
  * entry 收集器：自动分配 seq 并累计 totals（Python `class _Entries`）。
  * `ctx` 两槽位与 `dshAnchors` 的语义见 Python 同名类。
@@ -373,9 +544,19 @@ export function _Entries() {
     entries: [],
     // token/耗时汇总（API 契约字段）：dsh 事件流无 usage 汇总事件，恒为 0
     totals: { input: 0, output: 0, cache_read: 0, duration_ms: 0 },
-    // 上下文占用两槽位（两个**独立 last-wins** 槽位）：used＝最新一次 usage 的 prompt 侧
-    // token 数，max＝最新 `request/context` 的 contextWindow；null＝该槽位尚未出现过。
+    // 上下文占用两槽位：used＝**投影后的**下一次请求占用（见 `_projected_used`），
+    // max＝最新 `request/context` 的 contextWindow；null＝该槽位尚未出现过。
     ctx: { used: null, max: null },
+    // 上下文占用投影的折账状态（对齐 dsh `dsh-token-meter` 的 `contextPressure` 投影）：
+    //   surfaceTokens        = 模型可见面（surface 事件）按固定密度估算的当前总量；
+    //   sampledSurfaceTokens = 最新一次 usage 采样时刻的 surfaceTokens（null=还没采样）；
+    //   pressureTokens       = 最新 usage 的 prompt 侧 token 数（即未投影的 used）；
+    //   claim                = `compaction/summary|prune` 留下的「被替换区间影子价格」，
+    //                          只对**紧邻**的 surface replace 生效（dsh 的 shadow-price 协议）。
+    surfaceTokens: 0,
+    sampledSurfaceTokens: null,
+    pressureTokens: null,
+    claim: null,
     // dsh 回退锚点（仅 _parse_dsh 填充）：[(mid, eseq, text), …]
     dshAnchors: [],
   };
@@ -778,7 +959,8 @@ export function dsh_has_content(sid) {
  *
  * 关注事件：user/message（仅 source.kind=user 的真实输入，过滤系统注入）、
  * assistant/message（content 块 reasoning/text）、tool/call、tool/result。
- * 无 usage 汇总事件，totals 记 0；ctx 两槽位见 `_dsh_prompt_tokens` 与 `request/context`。
+ * 无 usage 汇总事件，totals 记 0；ctx 两槽位见 `_dsh_prompt_tokens` / `request/context`，
+ * 分子是 `_projected_used` 的投影值（含 /compact 的 surface 收缩，口径同 dsh GUI 的环）。
  */
 export function _parse_dsh(p) {
   const col = _Entries();
@@ -791,6 +973,21 @@ export function _parse_dsh(p) {
     const t = dget(d, 'type');
     const tm = pyInt(pyOr(dget(d, 'time'), 0));
     const data = orDict(dget(d, 'data'));
+    // ① 先折「模型可见面」的 token 增量（含 compaction 的影子价格协议），
+    //    ② 再给本帧的 usage 采样——顺序与 dsh 投影一致：助理消息的采样点锚在它自己
+    //    加入 surface **之前**的那个面上（`sampledSurfaceTokens = 当前 surfaceTokens`）。
+    //    两步都必须在下面的 source.kind 过滤/`continue` 之前完成，否则 compact-checkpoint
+    //    的替换帧（source.kind=compact-checkpoint）会被漏折，环永远不缩。
+    const fold = _fold_surface_token(col.claim, d);
+    if (t === 'assistant/message') {
+      const used = _dsh_prompt_tokens(dget(data, 'usage'));
+      if (used !== null) {
+        col.pressureTokens = used;
+        col.sampledSurfaceTokens = col.surfaceTokens;
+      }
+    }
+    col.surfaceTokens += fold.delta;
+    col.claim = fold.claim;
     if (t === 'user/message') {
       if (dget(orDict(dget(data, 'source')), 'kind', '') !== 'user') continue;
       const texts = [];
@@ -820,10 +1017,6 @@ export function _parse_dsh(p) {
         if (dget(b, 'type') === 'reasoning') addEntry(col, 'think', tm, { text: dget(b, 'text', '') });
         else if (dget(b, 'type') === 'text') addEntry(col, 'assistant', tm, { text: dget(b, 'text', '') });
       }
-      // 上下文占用分子：每次模型调用结算的 prompt 侧 token 数，last-wins
-      // （无 usage 的中断消息不参与，槽位保留上一次可用的值）
-      const used = _dsh_prompt_tokens(dget(data, 'usage'));
-      if (used !== null) col.ctx.used = used;
     } else if (t === 'request/context') {
       // 上下文占用分母：宿主为该路由解析出的上下文窗口（last-wins）。
       // 0/缺失一律忽略——窗口必须为正才有意义。
@@ -864,6 +1057,9 @@ export function _parse_dsh(p) {
       });
     }
   }
+  // 分子＝投影后的下次请求占用（dsh token-meter 的 `projectedTokens`）：
+  // 只有采样过 usage 才落值，保留「有分母没分子 ⇒ used=0（空上下文）」的旧语义由 load 兜底。
+  col.ctx.used = _projected_used(col);
   return col;
 }
 

@@ -438,6 +438,69 @@ test('load：found/unsupported/missing + after 增量 + ctx 只在分母已知�
   assert.equal('ctx' in sp.load('dsh', sid2, 'main'), false);
 });
 
+// ------------------------------------- 上下文占用投影（/compact 后环要立刻缩，2026-11-11）
+//
+// 与 Python `tests/test_sessparse.py` 的同名三例逐值对齐：ctx.used 是 dsh GUI 底栏环
+// 同口径的投影值 `max(0, pressure + surfaceTokens - sampledSurfaceTokens)`；
+// 没有 surfaceOp 的旧合成帧不参与 surface 折账（行为与修复前一致）。
+
+const U400 = { type: 'text', text: 'u'.repeat(400) };   // 价格 ceil(400/4)+4（角色框架）= 104
+const A40 = { type: 'text', text: 'a'.repeat(40) };     // 价格 ceil(40/4)+4（块）+4（框架）= 18
+
+/** 「一个提问 + 一次 usage 采样（+ 可选 /compact）」的 surface 事件帧 */
+function surfaceFrames(compactShadow = null, gap = false) {
+  const recs = [
+    { type: 'request/context', seq: 1, time: 1, data: { contextWindow: 1000000 } },
+    { type: 'user/message', seq: 2, time: 2, surfaceOp: 'append', data: { role: 'user', source: { kind: 'user' }, content: [U400] } },
+    { type: 'assistant/message', seq: 3, time: 3, surfaceOp: 'append', data: {
+      message: { role: 'assistant', content: [A40] },
+      usage: { inputTokens: 1000, outputTokens: 10 },
+    } },
+  ];
+  let seq = 4;
+  if (compactShadow !== null) {
+    recs.push({ type: 'compaction/summary', seq, time: seq, data: {
+      shadowedRange: { start: 2, end: 3 }, shadowedTokenCount: compactShadow,
+    } });
+    seq += 1;
+    if (gap) {
+      recs.push({ type: 'session-log-deepseek/delivery-accepted', seq, time: seq, data: {} });
+      seq += 1;
+    }
+    recs.push({ type: 'user/message', seq, time: seq,
+      surfaceOp: { op: 'replace', startSeq: 2, endSeq: 3 },
+      data: { role: 'user', source: { kind: 'compact-checkpoint' }, content: [{ type: 'text', text: 's'.repeat(100) }] } });
+  }
+  return [recs];
+}
+
+test('ctx 投影：采样之后的 surface 追加计入（下一步请求口径 1000+122-104=1018）', () => {
+  const root = mkRoot();
+  sp.setSessionsRoot(root);
+  const sid = 'session-00000000-0000-4000-8000-0000000000e1';
+  writeSession(root, '--p--', sid, [headerFrame(sid), ...surfaceFrames()]);
+  assert.deepEqual(sp.load('dsh', sid, 'main').ctx, { used: 1018, max: 1000000 });
+});
+
+test('ctx 投影：/compact 的 replace 消费影子价格，环立刻缩小（1000+33-104=933）', () => {
+  const root = mkRoot();
+  sp.setSessionsRoot(root);
+  const sid = 'session-00000000-0000-4000-8000-0000000000e2';
+  writeSession(root, '--p--', sid, [headerFrame(sid), ...surfaceFrames(118)]);
+  const data = sp.load('dsh', sid, 'main');
+  assert.deepEqual(data.ctx, { used: 933, max: 1000000 });
+  // compact-checkpoint 帧只进 surface 计价，不变成 user 对话条目
+  assert.deepEqual(data.entries.map((e) => e.kind), ['user', 'assistant']);
+});
+
+test('ctx 投影：影子价格只对紧邻 replace 生效（claim 过期 ⇒ 回到 1018）', () => {
+  const root = mkRoot();
+  sp.setSessionsRoot(root);
+  const sid = 'session-00000000-0000-4000-8000-0000000000e3';
+  writeSession(root, '--p--', sid, [headerFrame(sid), ...surfaceFrames(118, true)]);
+  assert.deepEqual(sp.load('dsh', sid, 'main').ctx, { used: 1018, max: 1000000 });
+});
+
 test('load：缓存按 (mtime_ns, size) 复用/失效（同 stamp 换内容仍返回旧解析）', () => {
   const root = mkRoot();
   sp.setSessionsRoot(root);

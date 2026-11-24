@@ -20,10 +20,12 @@
 （dsh 事件流没有 usage 汇总事件与「本轮失败」独立通道，故不产出 usage / error 条目；
 响应里的 totals 字段保留为 0，维持 API 形状稳定。）
 
-上下文占用（会话窗底栏 ctx 圈，2026-10-10 修「恒为 0」）：dsh 会话日志里有两个
-可用槽位——`request/context` 事件带**上下文窗口**（适配器声明，见 _parse_dsh）、
-`assistant/message` 带本次调用的 **TokenUsage**；`load()` 在有窗口时附带
-`ctx={"used","max"}`（分子口径＝prompt 侧 token 数，见 _dsh_prompt_tokens）。
+上下文占用（会话窗底栏 ctx 圈）：dsh 会话日志里有两个可用槽位——`request/context`
+事件带**上下文窗口**（适配器声明，见 _parse_dsh）、`assistant/message` 带本次调用的
+**TokenUsage**；`load()` 在有窗口时附带 `ctx={"used","max"}`。分子不是裸的
+prompt 侧 token 数，而是对齐 dsh GUI 底栏环的**投影值**（`_projected_used`：
+pressure + 采样后模型可见面的净变化），故 `/compact` 压缩后环会立刻缩小，
+不必等下一次模型调用（2026-11-11 修）。
 """
 
 import base64
@@ -107,6 +109,177 @@ def _dsh_prompt_tokens(usage):
     return None
 
 
+# ------------------------------------------------- 上下文占用投影（surface token 估算）
+
+# dsh 模型可见面（surface）事件类型（对齐 dsh `dsh-session/surface` 的
+# SURFACE_EVENT_TYPES）：只有带 `surfaceOp` 的这些事件才改变模型的上下文。
+_SURFACE_EVENT_TYPES = frozenset(("system/message", "developer/message", "user/message",
+                                  "assistant/message", "tool/result"))
+
+# 固定密度启发式：4 字符 ≈ 1 token（对齐 dsh `dsh-token-meter` 的 estimate.js）。
+_CHARS_PER_TOKEN = 4
+# 每个内容块 / 消息的结构开销（token），同上。
+_BLOCK_OVERHEAD = 4
+
+
+def _js_len(text):
+    """JS `String.length`：UTF-16 码元数（代理对算 2）。
+
+    dsh 的启发式计价在 JS 侧做（`text.length / 4`），非 BMP 字符（emoji）在 Python
+    里 `len()` 是 1、在 JS 里是 2——不换算就会与宿主的值对不上（对拍会抓出来）。
+    """
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _js_json_len(value):
+    """JS `JSON.stringify(value).length`（UTF-16 码元数），用于给结构块计价。
+
+    序列化口径按 JS 对齐：无空格分隔符、非 ASCII 不转义。真机上结构块只有
+    image/file 两类（字段是字符串/整数/布尔），与 JS 的输出逐字节一致；浮点
+    格式差异（Python `1.0` vs JS `1`）只在手工数据里出现，不影响会话计价。
+    """
+    return _js_len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+
+def _ceil_tokens(characters):
+    """固定密度折算：`ceil(chars / 4)`（JS `Math.ceil` 的整数等价写法）。"""
+    return (characters + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
+
+
+def _estimate_structural_block(block):
+    """结构块（image / file 等）的启发式价格：`4 + ceil(JSON.length / 4)`。
+
+    口径照抄 dsh `estimateStructuralBlock`；`image` 块先剔除 `offloaded`——那只是
+    宿主「已卸到磁盘」的本地标记，不进模型请求。
+    """
+    if isinstance(block, dict) and block.get("type") == "image":
+        reference = {k: v for k, v in block.items() if k != "offloaded"}
+        return _BLOCK_OVERHEAD + _ceil_tokens(_js_json_len(reference))
+    return _BLOCK_OVERHEAD + _ceil_tokens(_js_json_len(block))
+
+
+def _estimate_content(blocks):
+    """内容块数组的启发式价格（对齐 dsh `estimateContent`）。
+
+    text / reasoning：`ceil(text.length/4) + 4`；
+    tool-call：`ceil(name.length/4) + ceil(arguments.length/4) + 4`；
+    其余块走 `_estimate_structural_block`。
+    """
+    tokens = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        bt = block.get("type")
+        if bt in ("text", "reasoning"):
+            tokens += _ceil_tokens(_js_len(str(block.get("text") or ""))) + _BLOCK_OVERHEAD
+        elif bt == "tool-call":
+            tokens += (_ceil_tokens(_js_len(str(block.get("name") or "")))
+                       + _ceil_tokens(_js_len(str(block.get("arguments") or "")))
+                       + _BLOCK_OVERHEAD)
+        else:
+            tokens += _estimate_structural_block(block)
+    return tokens
+
+
+def _estimate_system_message(message):
+    """system 消息的启发式价格（对齐 dsh `estimateSystemMessage`）。
+
+    适配器把 system prompt 当纯文本序列化，故只按字符密度计 `ceil(chars/4) + 4`，
+    没有每块的结构开销；空内容（=「没有 system prompt」）记 0。
+    """
+    content = message.get("content") or []
+    if not content:
+        return 0
+    characters = 0
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            characters += _js_len(str(block.get("text") or ""))
+        else:
+            characters += _js_json_len(block)
+    return _ceil_tokens(characters) + _BLOCK_OVERHEAD
+
+
+def _estimate_message(message):
+    """一条模型可见消息的启发式价格（对齐 dsh `estimateMessage`）。"""
+    if message.get("role") == "system":
+        return _estimate_system_message(message)
+    return _estimate_content(message.get("content") or []) + _BLOCK_OVERHEAD
+
+
+def _event_message(d):
+    """事件 → 它投影出的模型消息（对齐 dsh `deriveEventMessage`）；不产生消息返回 None。
+
+    `user/message` 直接就是消息本体（含 compact-checkpoint 注入的替换帧），
+    system/developer/assistant 取 `data.message`（空内容不产生节点），
+    tool/result 取 `data.message`。
+    """
+    t = d.get("type")
+    data = d.get("data") or {}
+    if t == "user/message":
+        return data
+    if t in ("system/message", "developer/message", "assistant/message"):
+        message = data.get("message")
+        if not isinstance(message, dict):
+            return None
+        if not message.get("content"):
+            return None
+        return message
+    if t == "tool/result":
+        message = data.get("message")
+        return message if isinstance(message, dict) else None
+    return None
+
+
+def _fold_surface_token(claim, d):
+    """折一帧事件对「模型可见面」token 总量的增量（对齐 dsh `foldSurfaceProjection`）。
+
+    影子价格协议：`compaction/summary` / `compaction/prune` 不直接改总量，而是记下
+    被替换区间的启发式价格（claim）；**紧邻的下一条** surface `replace` 消费该 claim，
+    增量＝`新帧价格 - claim.tokens`（于是 /compact 后总量立刻缩小）。其他事件让 claim
+    过期；replace 没有 claim 时增量记 0（读口不重建被替换区间）。
+
+    返回 `(delta, 下一个 claim 或 None)`。
+    """
+    t = d.get("type")
+    data = d.get("data") or {}
+    if t in ("compaction/summary", "compaction/prune"):
+        rng = data.get("shadowedRange") or {}
+        tokens = _nonneg_int(data.get("shadowedTokenCount"))
+        start, end = rng.get("start"), rng.get("end")
+        if (tokens is None or not isinstance(start, int) or isinstance(start, bool)
+                or not isinstance(end, int) or isinstance(end, bool)):
+            return 0, None
+        return 0, {"start": start, "end": end, "tokens": tokens}
+    if t not in _SURFACE_EVENT_TYPES or d.get("surfaceOp") is None:
+        return 0, None
+    op = d.get("surfaceOp")
+    message = _event_message(d)
+    tokens = 0 if message is None else _estimate_message(message)
+    if op == "append":
+        return tokens, None
+    if claim is None:
+        return 0, None
+    if (not isinstance(op, dict) or claim["start"] != op.get("startSeq")
+            or claim["end"] != op.get("endSeq")):
+        # dsh 在生产者违约时抛错；读口以「不缩不涨」降级——不能因为一帧对不上的
+        # 历史数据让整个会话读不出来
+        return 0, None
+    return tokens - claim["tokens"], None
+
+
+def _projected_used(col):
+    """折账状态 → `ctx.used`：**下一次请求**的上下文占用（对齐 dsh token-meter 的
+    `contextPressure` 投影，`projectedTokens = max(0, pressure + surface - sampled)`）。
+
+    压力采样之后模型可见面的净变化（含 /compact 的缩小）立即反映到环上，不必等下一次
+    usage 落盘。还没采样过 usage 时返回 None（保留「只有分母没有分子」的旧语义）。
+    """
+    if col.pressure_tokens is None:
+        return None
+    sampled = col.sampled_surface_tokens or 0
+    return max(0, col.pressure_tokens + col.surface_tokens - sampled)
+
+
 class _Entries:
     """entry 收集器：自动分配 seq 并累计 totals。"""
 
@@ -114,12 +287,21 @@ class _Entries:
         self.entries = []
         # token/耗时汇总（API 契约字段）：dsh 事件流无 usage 汇总事件，恒为 0
         self.totals = {"input": 0, "output": 0, "cache_read": 0, "duration_ms": 0}
-        # 上下文占用两槽位（会话窗底栏 ctx 圈，2026-10-10 修「恒为 0」）：两个**独立
-        # last-wins** 槽位，口径与 dsh token-meter 的 `contextPressure` 投影一致：
-        #   used = 最新一次 usage 的 prompt 侧 token 数（pressureTokens）
+        # 上下文占用两槽位（会话窗底栏 ctx 圈）：
+        #   used = **投影后的**下一次请求占用（见 _projected_used，口径同 dsh GUI 的环）；
         #   max  = 最新 `request/context` 事件的 contextWindow（适配器声明的路由窗口）
-        # None = 该槽位尚未出现过（老会话 / 适配器未声明窗口 / 还没有一次模型调用）。
+        # None = 该槽位尚未出现过（老会话 / 适配器未声明窗口 / 还没采样到 usage）。
         self.ctx = {"used": None, "max": None}
+        # 上下文占用投影的折账状态（对齐 dsh `dsh-token-meter` 的 contextPressure 投影）：
+        #   surface_tokens         = 模型可见面（surface 事件）按固定密度估算的当前总量；
+        #   sampled_surface_tokens = 最新一次 usage 采样时刻的 surface_tokens（None=还没采样）；
+        #   pressure_tokens        = 最新 usage 的 prompt 侧 token 数；
+        #   claim                  = compaction/summary|prune 留下的「被替换区间影子价格」，
+        #                            只对紧邻的 surface replace 生效（dsh 的 shadow-price 协议）。
+        self.surface_tokens = 0
+        self.sampled_surface_tokens = None
+        self.pressure_tokens = None
+        self.claim = None
         # dsh 回退锚点（仅 _parse_dsh 填充）：[(mid, ese)，...] —— 真实用户提问的
         # 合成 mid 与**会话事件 seq**；dsh 没有原地 undo，回退＝按该 seq fork 新会话
         self.dsh_anchors = []
@@ -517,6 +699,19 @@ def _parse_dsh(path):
         t = d.get("type")
         tm = int(d.get("time") or 0)
         data = d.get("data") or {}
+        # ① 先折「模型可见面」的 token 增量（含 compaction 的影子价格协议），
+        #    ② 再给本帧的 usage 采样——顺序与 dsh 投影一致：助理消息的采样点锚在它自己
+        #    加入 surface **之前**的那个面上（sampled_surface_tokens = 当前 surface_tokens）。
+        #    两步都必须在下面的 source.kind 过滤/continue 之前完成，否则 compact-checkpoint
+        #    的替换帧（source.kind=compact-checkpoint）会被漏折，环永远不缩。
+        delta, claim = _fold_surface_token(col.claim, d)
+        if t == "assistant/message":
+            used = _dsh_prompt_tokens(data.get("usage"))
+            if used is not None:
+                col.pressure_tokens = used
+                col.sampled_surface_tokens = col.surface_tokens
+        col.surface_tokens += delta
+        col.claim = claim
         if t == "user/message":
             if (data.get("source") or {}).get("kind", "") != "user":
                 continue
@@ -548,11 +743,6 @@ def _parse_dsh(path):
                     col.add("think", tm, text=b.get("text", ""))
                 elif b.get("type") == "text":
                     col.add("assistant", tm, text=b.get("text", ""))
-            # 上下文占用分子（会话窗 ctx 圈）：每次模型调用结算的 prompt 侧 token 数，
-            # last-wins（无 usage 的中断消息不参与，槽位保留上一次可用的值）
-            used = _dsh_prompt_tokens(data.get("usage"))
-            if used is not None:
-                col.ctx["used"] = used
         elif t == "request/context":
             # 上下文占用分母（会话窗 ctx 圈）：宿主为该路由解析出的上下文窗口
             # （适配器声明才有；中途 /model 换模型会再落一条，故 last-wins）。
@@ -586,6 +776,9 @@ def _parse_dsh(path):
             col.add("tool_result", tm, call_id=cid, name=tool_names.get(cid, ""),
                     text=_trunc(out, OUT_MAX), is_error=bool(msg.get("isError")),
                     truncated=len(out) > OUT_MAX)
+    # 分子＝投影后的下次请求占用（dsh token-meter 的 projectedTokens）；没有采样过
+    # usage 时保持 None，由 load 兜底成「used=0（空上下文）」。
+    col.ctx["used"] = _projected_used(col)
     return col
 
 

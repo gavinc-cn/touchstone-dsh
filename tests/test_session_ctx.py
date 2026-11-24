@@ -139,3 +139,42 @@ def test_task_session_payload_carries_session_ctx(monkeypatch):
     body = server.Handler._session_payload(None, task, project, "dsh_plugin", "main", 0)
     assert body["found"] is True
     assert body["ctx"] == WANT_CTX
+
+
+def test_board_session_payload_ctx_shrinks_after_compact(monkeypatch):
+    """看板端点下发的 ctx 是**投影值**：/compact 后立刻缩小（2026-11-11 修）。
+
+    与 tests/test_sessparse.py 的投影单测互补——这里钉的是**用户可见链路**
+    （会话文件 → sessparse.load → 看板会话端点 → meta.ctx）。
+    提问帧 104 + 助理帧 18 在采样点之后计入；summary 的影子价格 118 由紧邻的
+    replace 消费，surface 变成 checkpoint 的 33 ⇒ used = 1000 + 33 - 104 = 933。
+    """
+    _stub_common(monkeypatch)
+    sessparse.cache_clear()
+    events = [
+        {"type": "request/context", "seq": 1, "time": 1,
+         "data": {"provider": "deepseek-account", "model": "deepseek-flash",
+                  "contextWindow": WINDOW}},
+        {"type": "user/message", "seq": 2, "time": 2, "surfaceOp": "append",
+         "data": {"role": "user", "source": {"kind": "user"},
+                  "content": [{"type": "text", "text": "u" * 400}]}},
+        {"type": "assistant/message", "seq": 3, "time": 3, "surfaceOp": "append",
+         "data": {"message": {"role": "assistant",
+                              "content": [{"type": "text", "text": "a" * 40}]},
+                  "usage": {"inputTokens": 1000, "outputTokens": 10}}},
+        {"type": "compaction/summary", "seq": 4, "time": 4,
+         "data": {"shadowedRange": {"start": 2, "end": 3},
+                  "shadowedTokenCount": 118}},
+        {"type": "user/message", "seq": 5, "time": 5,
+         "surfaceOp": {"op": "replace", "startSeq": 2, "endSeq": 3},
+         "data": {"role": "user", "source": {"kind": "compact-checkpoint"},
+                  "content": [{"type": "text", "text": "s" * 100}]}},
+    ]
+    path = os.path.join(sessparse.DSH_SESSIONS, "bucket", SID, "session.v4.jsonl.zstd")
+    with open(path, "wb") as f:
+        f.write(zstandard.ZstdCompressor().compress(
+            "".join(json.dumps(e) + "\n" for e in events).encode("utf-8")))
+    h = _BoardHandler()
+    server.Handler._api_board_session_messages(h, 126, {"sid": [SID]})
+    assert h.resp[0][0] == 200
+    assert h.resp[0][1]["ctx"] == {"used": 933, "max": WINDOW}
