@@ -125,8 +125,8 @@ board.py / waitq.py 的判定同构」）：五列门禁、
 
 `assets/fonts/` 里的 woff2 不是完整字库，而是用 Google Fonts 的 `text=` 接口按**全站用字**
 切出来的（四个页面 + `assets/demo/i18n.js` 的字符串字面量；中文宋体两个字重、中文黑体三个字重、
-Fraunces / IBM Plex Sans / JetBrains Mono）。全站 11 个文件合计 667 KB，用字 805 个
-（中日韩 707 个）。拉丁字族只请求非中日韩字符。
+Fraunces / IBM Plex Sans / JetBrains Mono）。全站 11 个文件合计 681 KB，用字 821 个
+（中日韩 722 个；2026-11-26 五步上手批次复测）。拉丁字族只请求非中日韩字符。
 
 ```bash
 python3 tools/fetch_fonts.py            # 重新切片并落盘（改了文案就重跑）
@@ -155,6 +155,11 @@ JetBrains Mono），均为 SIL OFL 或 Apache-2.0 许可，随站点自托管分
 `webui/src/components/BoardTab.jsx`、`webui/src/utils/queueBadge.js`、
 `builtin_prompts/free_style/flow.md`、`prompts.py` 的任务类型说明）。
 **改产品行为时要回来对一遍官网文案**，不要让它成为过时宣传。
+
+「上手」章节的五步（启动 dsh 并配模型 → 装插件 → 重启开面板 → 建项目 → 跑任务）与
+`README.md` / `README.zh.md` 的 `Quick start` 是**同一套**：命令、前置条件（Node 24.9+、
+`Settings → Models`、缺 pnpm 时 `corepack enable pnpm`）与首轮产物描述必须逐条对应，
+改一边就同步另一边。
 
 ### 5. 站点图标与链接预览（favicon / og:image）是生成物，改图形配色要重跑脚本
 

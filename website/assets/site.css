@@ -935,7 +935,7 @@ code, kbd { font-family: var(--f-mono); }
 .limit code { font-size: 12px; color: var(--star); }
 
 /* ---------- 上手 ---------- */
-.start { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s5); }
+.start { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s5); margin-top: var(--s4); }
 /* grid 项的自动最小尺寸会被 pre 的 max-content 顶开（窄屏整页横向溢出），显式归零 */
 .start-block { min-width: 0; }
 
@@ -971,6 +971,42 @@ code, kbd { font-family: var(--f-mono); }
 
 .start-note { margin: var(--s3) 0 0; font-size: 13.5px; line-height: 1.8; color: var(--ink-3); }
 .start-note code { font-size: 12px; color: var(--ink-2); }
+
+/* ---------- 上手：编号步骤（README Quick start 的站内版） ---------- */
+.qs { margin-top: var(--s4); border-top: 1px solid var(--rule-soft); }
+.qs-step {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  column-gap: var(--s3);
+  padding: var(--s4) 0;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.qs-num {
+  padding-top: 5px;
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.12em;
+  color: var(--star);
+}
+.qs-body { min-width: 0; }
+.qs-body h3 {
+  margin: 0;
+  font-family: var(--f-display-cjk);
+  font-weight: 700;
+  font-size: 17px;
+  letter-spacing: 0.04em;
+}
+.qs-body h3 code { font-family: var(--f-mono-cjk); font-size: 14.5px; letter-spacing: 0; color: var(--star); }
+.qs-body .term { margin-top: var(--s2); }
+.qs-body .start-note { margin-top: var(--s2); }
+.qs-subhead {
+  margin: var(--s6) 0 var(--s1);
+  font-family: var(--f-display-cjk);
+  font-weight: 700;
+  font-size: 17px;
+  letter-spacing: 0.04em;
+}
+
 
 /* ---------- 页脚 ---------- */
 .foot {
@@ -1032,6 +1068,9 @@ code, kbd { font-family: var(--f-mono); }
 .lang-en .mark-lat { font-size: 15px; letter-spacing: 0.1em; text-transform: none; color: var(--cloud); font-family: var(--f-display-lat); font-weight: 900; }
 .lang-en .stage-cjk { font-size: 12px; letter-spacing: 0.06em; color: var(--ink-3); }
 .lang-en .mark-out, .lang-en .span-name { letter-spacing: 0; }
+.lang-en .qs-body h3, .lang-en .qs-subhead, .lang-en .start-block h3 {
+  font-family: var(--f-display-lat); font-weight: 900; letter-spacing: 0.01em;
+}
 
 /* ---------- 响应式 ---------- */
 @media (max-width: 1080px) {
@@ -1052,6 +1091,9 @@ code, kbd { font-family: var(--f-mono); }
   :root { --gut: 22px; --s8: 76px; --s7: 58px; }
   .band-grid { grid-template-columns: minmax(0, 1fr); gap: var(--s3); }
   .rail { border-right: 0; border-bottom: 1px solid var(--rule); padding-right: 0; padding-bottom: 12px; }
+  .qs-step { grid-template-columns: 30px minmax(0, 1fr); }
+  /* 窄屏命令块换行而不是横向裁切（长 install 命令在手机上超出 344px） */
+  .term { white-space: pre-wrap; overflow-wrap: break-word; }
   .rail-sticky { position: static; flex-direction: row; align-items: baseline; gap: 12px; }
   .rail-cjk { writing-mode: horizontal-tb; font-size: 15px; }
   .rail-lat { writing-mode: horizontal-tb; }

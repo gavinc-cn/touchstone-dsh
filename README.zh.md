@@ -8,12 +8,12 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![npm](https://img.shields.io/npm/v/@gavinc-cn/touchstone-dsh?logo=npm&color=cb3837)](https://www.npmjs.com/package/@gavinc-cn/touchstone-dsh)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB.svg)](https://www.python.org/)
-[![Node 22.19+ | 24+](https://img.shields.io/badge/Node-22.19%2B%20%7C%2024%2B-339933.svg)](https://nodejs.org/)
+[![Node 24.9+](https://img.shields.io/badge/Node-24.9%2B-339933.svg)](https://nodejs.org/)
 [![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek%20Harness-plugin-4D6BFE.svg)](https://github.com/deepseek-ai/deepseek-harness)
 
 [English](README.md) | 中文
 
-**[在线体验交互 Demo](https://gavinc-cn.github.io/touchstone-dsh/demo.html) · [快速安装](#快速开始)**
+**[快速开始](#快速开始) · [在线体验交互 Demo](https://gavinc-cn.github.io/touchstone-dsh/demo.html)**
 
 <img src="docs/images/board.png" alt="Touchstone 开发看板" width="920">
 
@@ -36,6 +36,166 @@ Touchstone 是**本地运行**的：独立形态是 Python 站点；插件形态
 （要回 Python 就在插件 config 里显式写 `backend: python`）。两种形态都是 SQLite + 文件系统工作区，
 除了你的 `dsh` 宿主发起的模型调用之外，数据不出本机。
 
+## 快速开始
+
+Touchstone 跑在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）**里面**：平台
+把自己的界面挂在 `dsh` 宿主进程内，写用例、跑用例的就是宿主里那个 agent。除此之外不用再装任何东西——
+不需要 Python，也不需要克隆本仓库。
+
+**开始前需要：** Node.js **24.9+**（当前 `dsh` 的门槛；Touchstone 包自身的门槛是 22.19）、`dsh` 里配好
+一个模型路由，以及一个你希望被测的仓库。
+
+> 面板界面目前只有中文；下面的命令与落到磁盘的产物都与语言无关。
+
+### 1. 启动 `dsh` 并配置模型
+
+```bash
+npx @deepseek-ai/dsh web
+```
+
+首次运行会创建 `web` profile（`~/.dsh/profiles/web`），并打印一个带访问令牌的地址（默认 3080 端口）。
+打开那个地址，进 **设置 → 模型**（Settings → Models）保存一个 DeepSeek API key（其它 provider 与 OpenAI
+兼容端点同样支持）。**这个进程要保持运行**——它就是 Touchstone 要驱动的 agent 运行时。
+
+### 2. 安装 Touchstone 插件
+
+另开一个终端：
+
+```bash
+npx @deepseek-ai/dsh plugin --profile web add @gavinc-cn/touchstone-dsh
+```
+
+包是自包含的（界面、两套后端、预构建前端），安装时会同时把它加进 profile 的 bundle 列表——不用手改任何
+清单，也不需要装 Python 依赖。这条命令由 `dsh` 转发给 pnpm：PATH 上没有 pnpm 时它会停下来说明——用
+`corepack enable pnpm` 启用 Node 自带的 shim，再重跑一次即可。
+
+### 3. 重启 `dsh`，打开面板
+
+Ctrl+C 停掉 `dsh`，用同一条命令再启动。侧栏这时会多出 **Touchstone** 入口——点它，或按 **Alt+T**。
+面板打开时已经以 `admin` 登录（插件形态默认免密；之后可在面板里的 **设置 → 修改密码** 设置口令）。
+
+### 4. 添加第一个项目
+
+在面板里点 **添加项目**，按下面填：
+
+| 字段 | 填什么 |
+|------|--------|
+| 项目名称 | 随便起，例如 `my-service` |
+| 项目目录 | 被测仓库的绝对路径——agent 会读它、改它 |
+| 工作目录 | 留空即 `~/.touchstone/projects/<项目路径 id>`；案例库与 bug 报告落在这里 |
+| 智能体 | 保持扫描到的 **dsh（插件·进程内）** 那一条 |
+| 模型 | 留空用 `dsh` 默认；列表来自宿主的模型目录 |
+| 权限 | 任务与卡片会话运行的权限档；它能够改文件、执行命令 |
+| 项目附加提示词 | 怎么构建/测试/部署这个项目，以及 agent 必须遵守的约定；注入每轮首轮提示词 |
+
+案例库（`free_style/`）与 `bug_report/` 会在工作目录里自动建好，被测仓库里不会多出任何目录。
+
+### 5. 跑一个任务，看它留下什么
+
+进 **测试任务** 标签页 → **新建任务**。默认值就是第一次跑该用的：类型 **探索**、终点 **生成报告**、
+停止条件 **1 轮**。起个名字，提交。
+
+接下来会依次发生：
+
+1. 任务进入项目队列（**排队中**），随后开跑（**运行中**）。队列按项目串行——一个项目同一时刻只有一轮
+   在跑，第二个任务排队等它；不同项目之间并行。
+2. 任务详情里逐轮日志实时刷新；会话窗口边跑边渲染完整 agent 对话（消息、思考、工具调用与返回）。
+3. 一轮结束后，工作目录下的 `free_style/` 里出现新用例（`case.md` + `status.md`，另有 `INDEX.md`）；
+   有失败就是 `bug_report/` 下的一个目录（严重程度、复现步骤、日志证据、关联用例）。
+4. 任务在 **生成报告** 阶段结束，列表里能看到轮次与新 bug 数。
+
+后段任务负责闭环：报告可派生修复任务，修复派生复测，被否决的报告派生修例。细节见
+[工作原理](#工作原理) 与 [任务类型](#任务类型)。
+
+### 跑不起来时
+
+| 现象 | 原因与处理 |
+|------|-----------|
+| 侧栏没有 **Touchstone** 入口 | 包没装进 profile。重跑第 2 步看输出；`~/.dsh/profiles/web/package.json` 的 `dependencies` 与 `dsh.profile.bundles` 都要有它，然后重启 `dsh`。 |
+| 面板打开了，但页面提示后端没起来 | 已经有另一个 Touchstone 实例占着数据库（`~/.touchstone/touchstone.db`）。同一时刻只能跑一个：停掉另一个，或用 `TOUCHSTONE_DB` 让它用别的库。 |
+| 一轮秒结束、什么也没留下 | `dsh` 没有可用的模型路由。去 **设置 → 模型** 配一个；会话窗只显示宿主回报的内容，缺模型看起来就是一轮空跑。 |
+| 提示 `dsh: pnpm was not found` | 先 `corepack enable pnpm` 启用 Node 自带的 pnpm shim，再重跑第 2 步。 |
+| 任务一直 **排队中** | 该项目还有任务或看板卡占着串行位。等它、停它，或换个项目。 |
+| 3080 端口被占 | 换一个端口启动：`dsh web --port 8081`。 |
+| 界面不是你的语言 | 目前只有中文（见 [能力与边界](#能力与边界)）。 |
+
+插件形态的后端诊断日志在 `~/.touchstone/plugin-backend.log`。
+
+## 其它运行方式
+
+### 在线 Demo
+
+[打开交互 Demo](https://gavinc-cn.github.io/touchstone-dsh/demo.html)，在浏览器里走一遍项目、任务、看板和
+会话流程。它是**静态模拟**：不连后端、不读仓库、不发起模型调用。
+
+### 独立站点（不能执行 agent）
+
+适合浏览项目、案例库、bug 报告、看板与监控。界面与插件形态相同，但**不能执行 agent**——agent 只存在于
+`dsh` 宿主进程内。需要 Python 3.12+。
+
+```bash
+git clone https://github.com/gavinc-cn/touchstone-dsh.git
+cd touchstone-dsh
+python3 -m pip install -r backend_py/requirements.txt
+./touchstone.sh start          # 首次启动会自动构建前端，然后监听 127.0.0.1:4601
+./touchstone.sh status         # 查看 PID 与实际端口
+./touchstone.sh stop
+```
+
+浏览器打开 <http://127.0.0.1:4601>。首次启动会种子一个 `admin` 账号；未设置 `TS_ADMIN_PASSWORD` 时，
+随机一次性初始口令**只在启动横幅打印一次**：
+
+```bash
+grep '一次性初始口令' .run/server.log     # 或：./touchstone.sh status
+```
+
+首次登录会被要求改密。想跳过一次性口令和强制改密，在首次启动前设置
+`TS_ADMIN_PASSWORD=<你的口令>`。
+
+独立站点与插件形态默认共用同一个数据库（`~/.touchstone/touchstone.db`），运行时互斥：第二个实例会拒绝
+启动，并打印当前占用者。
+
+### 插件形态改用 Python 后端
+
+插件缺省后端是 Node。若要使用观测期回滚档，在插件 config 里显式写 `backend: python`（删掉该键不会改变
+缺省值），并用 pip（不是 npm）安装该后端的依赖：
+
+```bash
+pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/backend_py/requirements.txt
+# Windows 用 python -m pip install ...（官方安装器只装 python.exe，没有 python3）
+```
+
+插件按 `python` → `python3` 的顺序探测，使用第一个能运行的解释器。如果探到的不是你装依赖的那支，可在
+profile patch 里指定解释器：
+
+```yaml
+- id: touchstone-dsh
+  config: { backend: python, pythonPath: /path/to/python }
+```
+
+### 从检出安装（开发用）
+
+```bash
+git clone https://github.com/gavinc-cn/touchstone-dsh.git
+cd touchstone-dsh
+./dsh-plugin/install.sh           # 幂等安装本检出到 profile
+```
+
+安装脚本会打印**可选**的 profile 覆盖（指向本机工作副本、或指定解释器）；不写就用包自身目录：
+
+```yaml
+- id: touchstone-dsh
+  config: { repoDir: /path/to/touchstone-dsh, pythonPath: /path/to/python3 }
+```
+
+### Windows
+
+跨平台启停器为独立站点提供同一套命令；插件按与 Linux 相同的方式安装：
+
+```bash
+python touchstone.py start | stop | restart | status | build | test
+```
+
 ## 主要特性
 
 - **六类任务**覆盖完整测试闭环：探索 / 回归 / 压测 / 修复 / 复测 / 修例，每类都走七阶段生命周期
@@ -53,7 +213,7 @@ Touchstone 是**本地运行**的：独立形态是 Python 站点；插件形态
 - **内置压测**。压测任务先让 agent 产出场景与脚本，之后由平台自己发压，一个任务可跑 N 次，每次都有
   指标、图表与 Markdown/JSON 报告。
 - **可选集成**。飞书（Lark）推送通知与卡片双向作答；案例库的可选语义检索（RAG）。
-- **自包含技术栈**。后端：包内 Node 后端（插件形态缺省，需 Node 22.19+）或 Python 标准库 + 4 个小依赖
+- **自包含技术栈**。后端：包内 Node 后端（插件形态缺省，需 Node 24.9+）或 Python 标准库 + 4 个小依赖
   （独立形态 / `backend: python`）；前端：React + Vite；存储：SQLite + 普通文件。Linux 与 Windows 均可运行。
 
 ## 界面截图
@@ -78,7 +238,7 @@ Touchstone 是**本地运行**的：独立形态是 Python 站点；插件形态
 
 ```mermaid
 flowchart LR
-  U[浏览器] -->|REST + SSE| S["Touchstone 站点<br/>Python 标准库 · SQLite · 文件"]
+  U[浏览器] -->|REST + SSE| S["Touchstone 站点<br/>包内后端 · SQLite · 文件"]
   S -->|"/touchstone-agent<br/>常驻会话"| D["dsh 宿主<br/>DeepSeek Harness"]
   D -->|"读 / 改 / 执行"| R["你的代码仓库"]
   D --> C[("案例库<br/>free_style/")]
@@ -119,122 +279,6 @@ flowchart LR
 | bug 报告 | `<工作目录>/bug_report/<时间戳>_FS_<标题>/`：一条用例的失败档案 |
 | 卡片 | 看板条目，可起跑、排队并驱动自己的 agent 会话 |
 | 队列 | 任务 / 卡片 / 会话消息共享的项目级串行位 |
-
-## 快速开始
-
-### 先在线体验
-
-[打开交互 Demo](https://gavinc-cn.github.io/touchstone-dsh/demo.html)，在浏览器里走一遍项目、任务、
-看板和会话流程。它是**静态模拟**，不连接后端、不读取仓库，也不会发起模型调用。
-
-### 安装为 `dsh` 插件（推荐）
-
-这是 dsh 用户最短的使用路径，也是启用 agent 执行的形态。需要 Node.js 22.19+ 或 24+，以及当前版本的
-DeepSeek Harness。**不需要 Python，也不需要克隆本仓库。**
-
-1. 先启动一次 `dsh`，它会创建 `web` profile：
-
-   ```bash
-   npx @deepseek-ai/dsh web
-   ```
-
-2. 在另一个终端安装自包含的 Touchstone 包（平台与预构建前端都在包里）：
-
-   ```bash
-   npx @deepseek-ai/dsh plugin --profile web add @gavinc-cn/touchstone-dsh
-   ```
-
-3. 打开 <http://127.0.0.1:3080>，在 **Plugins** 面板启用 **Touchstone**（即选中它的 bundle），
-   然后重启 `dsh web`。点击侧栏的 Touchstone 入口打开面板，**Alt+T** 可切换面板显隐。
-
-如果面板开关没有选中 bundle，可显式执行下面的命令，然后再重启：
-
-```bash
-node ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/dsh-plugin/scripts/select-bundle.mjs \
-  ~/.dsh/profiles/web/package.json
-```
-
-插件缺省使用包内 Node 后端，不需要配置 `repoDir`，也不需要用 pip 安装依赖。插件形态默认免密：
-面板会自动以 `admin` 登录；之后可随时在 **设置 → 修改密码** 中设置口令。
-
-### 启动独立站点（完整界面，但不能执行 agent）
-
-独立形态需要 Python 3.12+，可用于浏览项目、用例、报告、看板与监控。**agent 执行必须使用插件形态**，
-因为 agent 运行在 `dsh` 宿主进程内。
-
-```bash
-git clone https://github.com/gavinc-cn/touchstone-dsh.git
-cd touchstone-dsh
-python3 -m pip install -r backend_py/requirements.txt
-./touchstone.sh start          # 首次启动会自动构建前端，然后监听 127.0.0.1:4601
-./touchstone.sh status         # 查看 PID 与实际端口
-./touchstone.sh stop
-```
-
-浏览器打开 <http://127.0.0.1:4601>。首次启动会种子一个 `admin` 账号。若未设置 `TS_ADMIN_PASSWORD`，
-平台会随机生成一次性初始口令，**只在启动横幅打印一次**：
-
-```bash
-grep '一次性初始口令' .run/server.log     # 或：./touchstone.sh status
-```
-
-首次登录会被要求改密。想跳过一次性口令和强制改密，在首次启动前设置
-`TS_ADMIN_PASSWORD=<你的口令>` 即可。
-
-### 可选：插件形态改用 Python 后端
-
-插件缺省后端是 Node。若要使用观测期回滚档，在插件 config 里显式写 `backend: python`
-（删掉该键不会改变缺省值）。这个后端的依赖用 pip 安装，npm 不负责：
-
-```bash
-pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/backend_py/requirements.txt
-# Windows 用 python -m pip install ...（官方安装器只装 python.exe，没有 python3）
-```
-
-插件会按 `python` → `python3` 的顺序探测，使用第一个能运行的解释器。如果探到的不是你装依赖的那支，
-可在 profile patch 里指定解释器：
-
-```yaml
-- id: touchstone-dsh
-  config: { backend: python, pythonPath: /path/to/python }
-```
-
-缺依赖提示页会给出**实际选中的解释器**对应的安装命令。包内同时带 `backend/`、`backend_py/` 与
-`webui/dist-plugin`，因此不需要配置 `repoDir`。
-
-### 从检出安装（开发用）
-
-```bash
-git clone https://github.com/gavinc-cn/touchstone-dsh.git
-cd touchstone-dsh
-./dsh-plugin/install.sh           # 幂等安装本检出到 profile
-```
-
-安装脚本会打印**可选**的 profile 覆盖（指向本机工作副本、或指定解释器）；不写就用包自身目录：
-
-```yaml
-- id: touchstone-dsh
-  config: { repoDir: /path/to/touchstone-dsh, pythonPath: /path/to/python3 }
-```
-
-两种形态默认共用同一个数据库（`~/.touchstone/touchstone.db`），运行时互斥：第二个实例会拒绝启动，
-并打印当前占用者。
-
-### Windows
-
-跨平台启停器提供同一套命令：
-
-```bash
-python touchstone.py start | stop | restart | status | build | test
-```
-
-### 界面里的第一步
-
-1. 登录；若用的是一次性口令，先去 **设置 → 修改密码**。
-2. **添加项目**——源码目录、工作目录（默认 `~/.touchstone/projects/<项目路径 id>`，
-   被测仓库里不再落额外目录），以及要求 agent
-   遵守的约定。案例库与 bug 报告目录由平台派生并自动创建。
-3. 新建任务（或建一张看板卡），等队列调度。逐轮日志实时刷新，会话窗口随对话增长即时渲染。
 
 ## 配置
 

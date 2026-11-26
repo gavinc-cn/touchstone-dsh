@@ -522,34 +522,108 @@
   <div class="band-grid">
     <div class="rail"><div class="rail-sticky"><span class="rail-lat">Quick start</span><span class="rail-cjk">上手</span></div></div>
     <div>
-      <h2 class="h2-lat">Get it running</h2>
-      <p class="sec-lead">No environment yet? The <a class="lead-link" href="en-demo.html">live demo</a> needs neither an install nor any data: create a project, create a task, watch it queue, answer the agent's question, and see cases and bug reports grow — all in the browser (a front-end simulation, no backend).</p>
-      <p class="sec-lead">To run the real thing you need Python 3 and Node. Pick one of the two modes.</p>
+      <h2 class="h2-lat">Five steps to a first round</h2>
+      <p class="sec-lead">Touchstone runs <strong>inside DeepSeek Harness (<code>dsh</code>)</strong>: the platform
+        serves its own UI from the host, and the agent that writes and runs the tests is that host's agent.
+        No Python, no clone.</p>
+      <p class="start-note">You need Node.js <b>24.9+</b> (what current <code>dsh</code> releases require), a
+        model configured in <code>dsh</code>, and a repository you want tested. The panel UI is Chinese-only
+        today; the commands and every artifact on disk are language-neutral.</p>
+
+      <div class="qs">
+        <div class="qs-step">
+          <span class="qs-num">01</span>
+          <div class="qs-body">
+            <h3>Start <code>dsh</code> and give it a model</h3>
+<pre class="term">npx @deepseek-ai/dsh web</pre>
+            <p class="start-note">The first run creates the <code>web</code> profile and prints a URL carrying an
+              access token (port 3080). Open it, add a model under <b>Settings → Models</b>, and leave the process
+              running — it is the agent runtime.</p>
+          </div>
+        </div>
+
+        <div class="qs-step">
+          <span class="qs-num">02</span>
+          <div class="qs-body">
+            <h3>Install the plugin</h3>
+<pre class="term">npx @deepseek-ai/dsh plugin --profile web add @gavinc-cn/touchstone-dsh</pre>
+            <p class="start-note">Self-contained: the UI, both backends and a prebuilt front end. The install also
+              selects the bundle — no manifest to edit, no Python dependencies to install. The command is
+              forwarded to pnpm; if pnpm is not on your PATH, run <code>corepack enable pnpm</code> once and
+              retry.</p>
+          </div>
+        </div>
+
+        <div class="qs-step">
+          <span class="qs-num">03</span>
+          <div class="qs-body">
+            <h3>Restart <code>dsh</code>, then open the panel</h3>
+<pre class="term"><span class="t-dim"># stop dsh with Ctrl+C, then start it again</span>
+npx @deepseek-ai/dsh web</pre>
+            <p class="start-note">The sidebar gains a <b>Touchstone</b> entry — click it, or press <b>Alt+T</b>.
+              The panel is already signed in as <code>admin</code> (plugin mode is password-free by default; set
+              a password later under <b>设置 → 修改密码</b> in the panel).</p>
+          </div>
+        </div>
+
+        <div class="qs-step">
+          <span class="qs-num">04</span>
+          <div class="qs-body">
+            <h3>Add your first project</h3>
+            <p class="start-note">Point <b>项目目录</b> (project directory) at the repository and leave
+              <b>工作目录</b> (work directory) empty for <code>~/.touchstone/projects/&lt;path id&gt;</code>. Keep the
+              scanned dsh agent entry, and write the build/test/deploy rules into <b>项目附加提示词</b>
+              (project guidance). The case library and bug reports are created in the work directory, never in
+              your repository.</p>
+          </div>
+        </div>
+
+        <div class="qs-step">
+          <span class="qs-num">05</span>
+          <div class="qs-body">
+            <h3>Run one task and read the result</h3>
+            <p class="start-note"><b>测试任务 → 新建任务</b> (Test tasks → New task): keep the defaults —
+              Exploration, end at Generate report, one round — and submit. The queue is serial per project. When
+              the round ends, <code>free_style/</code> holds the new cases and <code>bug_report/</code> holds any
+              failure; the session window has the full transcript.</p>
+          </div>
+        </div>
+      </div>
+
+      <p class="start-note">Stuck? The README keeps a symptom → fix table:
+        <a class="lead-link" href="https://github.com/gavinc-cn/touchstone-dsh#quick-start">Quick start troubleshooting ↗</a>.</p>
+
+      <h3 class="qs-subhead">Other ways to run</h3>
+      <p class="start-note">Only the plugin executes an agent. The two below are for browsing and for development.</p>
 
       <div class="start">
         <div class="start-block">
           <h3>Standalone site</h3>
-          <p class="start-sub">ships its own front end · 127.0.0.1:4601 by default</p>
-<pre class="term">./touchstone.sh build   <span class="t-dim"># build the front end</span>
-./touchstone.sh start   <span class="t-dim"># start in the background</span>
-./touchstone.sh status
-<span class="t-dim"># Windows: python touchstone.py start</span></pre>
-          <p class="start-note">Without <code>webui/dist</code>, <code>server.py</code> exits immediately — build first. The first start seeds one admin account: a random initial password is printed once in the start-up banner and must be changed at first login. The database lives at <code>~/.touchstone/touchstone.db</code> and must be on a local disk — SQLite file locks don't work on network shares.</p>
+          <p class="start-sub">same UI · no agent execution · 127.0.0.1:4601</p>
+<pre class="term">git clone https://github.com/gavinc-cn/touchstone-dsh
+cd touchstone-dsh
+python3 -m pip install -r backend_py/requirements.txt
+./touchstone.sh start
+<span class="t-dim"># first start builds the front end</span></pre>
+          <p class="start-note">Needs Python 3.12+. The first start seeds an <code>admin</code> account whose
+            one-time password is printed once in the start-up banner, and forces a change at first login. It
+            shares <code>~/.touchstone/touchstone.db</code> with the plugin, and only one of the two may run at
+            a time.</p>
         </div>
 
         <div class="start-block">
-          <h3>dsh plugin</h3>
-          <p class="start-sub">embedded in dsh web · this mode or the site, not both</p>
-<pre class="term">./dsh-plugin/install.sh
-<span class="t-dim"># idempotent install into ~/.dsh/profiles/web</span>
-<span class="t-dim"># restart dsh web to take effect, then open the panel</span></pre>
-          <p class="start-note">This mode puts the panel in dsh's side rail. The agent session lives inside the host process, and the board, session window and live monitoring are identical to the standalone site. Only one of the two modes runs at a time.</p>
+          <h3>From a checkout</h3>
+          <p class="start-sub">development · installs into ~/.dsh/profiles/web</p>
+<pre class="term">git clone https://github.com/gavinc-cn/touchstone-dsh
+cd touchstone-dsh
+./dsh-plugin/install.sh</pre>
+          <p class="start-note">The installer is idempotent and prints an optional profile patch for pointing the
+            plugin at your working copy or pinning an interpreter. Restart <code>dsh web</code> afterwards.</p>
         </div>
       </div>
     </div>
   </div>
 </section>
-
 </main>
 
 <!-- ==================== footer ==================== -->

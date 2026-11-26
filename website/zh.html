@@ -524,34 +524,100 @@
   <div class="band-grid">
     <div class="rail"><div class="rail-sticky"><span class="rail-cjk">上手</span><span class="rail-lat">Quick start</span></div></div>
     <div>
-      <h2 class="h2-cjk">跑起来</h2>
-      <p class="sec-lead">不想先装环境？<a class="lead-link" href="demo.html">在线 Demo</a> 不用安装、不用准备数据：建项目、建任务、看排队、答 agent 的提问、看用例与 bug 报告长出来，全部在浏览器里跑一遍（静态模拟，不连后端）。</p>
-      <p class="sec-lead">要跑真的，需要 Python 3 与 Node，两种形态二选一。</p>
+      <h2 class="h2-cjk">五步跑出第一轮</h2>
+      <p class="sec-lead">Touchstone 跑在 <strong>DeepSeek Harness（<code>dsh</code>）里面</strong>：平台把自己的界面
+        挂在宿主进程内，写用例、跑用例的就是宿主里那个 agent。不需要 Python，也不需要克隆本仓库。</p>
+      <p class="start-note">需要 Node.js <b>24.9+</b>（当前 <code>dsh</code> 的门槛）、<code>dsh</code> 里配好一个
+        模型路由，以及一个你希望被测的仓库。面板界面目前只有中文；命令与落到磁盘的产物都与语言无关。</p>
+
+      <div class="qs">
+        <div class="qs-step">
+          <span class="qs-num">01</span>
+          <div class="qs-body">
+            <h3>启动 <code>dsh</code> 并配置模型</h3>
+<pre class="term">npx @deepseek-ai/dsh web</pre>
+            <p class="start-note">首次运行会创建 <code>web</code> profile，并打印一个带访问令牌的地址（3080 端口）。
+              打开它，进 <b>设置 → 模型</b>（Settings → Models）保存一个 DeepSeek API key，然后让这个进程一直跑着
+              ——它就是 agent 运行时。</p>
+          </div>
+        </div>
+
+        <div class="qs-step">
+          <span class="qs-num">02</span>
+          <div class="qs-body">
+            <h3>安装插件</h3>
+<pre class="term">npx @deepseek-ai/dsh plugin --profile web add @gavinc-cn/touchstone-dsh</pre>
+            <p class="start-note">包是自包含的：界面、两套后端、预构建前端都在里面。安装时也会把它选进 bundle
+              列表——不用手改清单，也不用装 Python 依赖。命令由 <code>dsh</code> 转发给 pnpm；PATH 上没有 pnpm 时，
+              先执行一次 <code>corepack enable pnpm</code> 再重试。</p>
+          </div>
+        </div>
+
+        <div class="qs-step">
+          <span class="qs-num">03</span>
+          <div class="qs-body">
+            <h3>重启 <code>dsh</code>，打开面板</h3>
+<pre class="term"><span class="t-dim"># Ctrl+C 停掉 dsh，再用同一条命令启动</span>
+npx @deepseek-ai/dsh web</pre>
+            <p class="start-note">侧栏会多出 <b>Touchstone</b> 入口——点它，或按 <b>Alt+T</b>。面板打开时已经以
+              <code>admin</code> 登录（插件形态默认免密；之后可在面板里的 <b>设置 → 修改密码</b> 设口令）。</p>
+          </div>
+        </div>
+
+        <div class="qs-step">
+          <span class="qs-num">04</span>
+          <div class="qs-body">
+            <h3>添加第一个项目</h3>
+            <p class="start-note"><b>项目目录</b>填被测仓库的绝对路径，<b>工作目录</b>留空即
+              <code>~/.touchstone/projects/&lt;项目路径 id&gt;</code>；<b>智能体</b>保持扫描到的 dsh 那一条；
+              怎么构建/测试/部署、以及 agent 必须遵守的约定写进<b>项目附加提示词</b>。案例库与 bug 报告会建在
+              工作目录里，不会往你的仓库里塞东西。</p>
+          </div>
+        </div>
+
+        <div class="qs-step">
+          <span class="qs-num">05</span>
+          <div class="qs-body">
+            <h3>跑一个任务，看它留下什么</h3>
+            <p class="start-note"><b>测试任务 → 新建任务</b>：默认值就是第一次跑该用的——探索、终点生成报告、
+              1 轮——起个名字提交即可。队列按项目串行。一轮结束时 <code>free_style/</code> 里是新用例、
+              <code>bug_report/</code> 里是失败档案，会话窗口里有完整对话。</p>
+          </div>
+        </div>
+      </div>
+
+      <p class="start-note">卡住了？README 里有「现象 → 处理」对照表：
+        <a class="lead-link" href="https://github.com/gavinc-cn/touchstone-dsh/blob/master/README.zh.md#快速开始">快速开始排障 ↗</a>。</p>
+
+      <h3 class="qs-subhead">其它运行方式</h3>
+      <p class="start-note">只有插件形态能执行 agent；下面两种分别用于浏览和开发。</p>
 
       <div class="start">
         <div class="start-block">
           <h3>独立站点</h3>
-          <p class="start-sub">自带前端，默认 127.0.0.1:4601</p>
-<pre class="term">./touchstone.sh build   <span class="t-dim"># 构建前端</span>
-./touchstone.sh start   <span class="t-dim"># 后台启动，日志在 .run/</span>
-./touchstone.sh status
-<span class="t-dim"># Windows: python touchstone.py start</span></pre>
-          <p class="start-note">没有 <code>webui/dist</code> 时 <code>server.py</code> 会直接退出，所以先 build 再 start。首次启动会种下一个 admin 账号：随机初始口令只在启动横幅打印一次，首次登录强制改密。数据库在 <code>~/.touchstone/touchstone.db</code>，必须放本地盘——SQLite 的文件锁在网盘同步目录里不可用。</p>
+          <p class="start-sub">同一套界面 · 不执行 agent · 127.0.0.1:4601</p>
+<pre class="term">git clone https://github.com/gavinc-cn/touchstone-dsh
+cd touchstone-dsh
+python3 -m pip install -r backend_py/requirements.txt
+./touchstone.sh start
+<span class="t-dim"># 首次启动会自动构建前端</span></pre>
+          <p class="start-note">需要 Python 3.12+。首次启动会种下 <code>admin</code> 账号，随机一次性口令只在启动横幅
+            打印一次，首次登录强制改密。它与插件形态共用 <code>~/.touchstone/touchstone.db</code>，同一时刻只能跑一个。</p>
         </div>
 
         <div class="start-block">
-          <h3>dsh 插件形态</h3>
-          <p class="start-sub">内嵌 dsh web，与独立站点二选一</p>
-<pre class="term">./dsh-plugin/install.sh
-<span class="t-dim"># 幂等装到 ~/.dsh/profiles/web</span>
-<span class="t-dim"># 重启 dsh web 生效，之后在 dsh 里开面板</span></pre>
-          <p class="start-note">这一形态把平台面板嵌进 dsh 的半侧栏：agent 会话就活在宿主进程内，看板卡片、会话窗口、实时监控与独立站点完全一致。两种形态同一时刻只跑一个。</p>
+          <h3>从检出安装</h3>
+          <p class="start-sub">开发用 · 装进 ~/.dsh/profiles/web</p>
+<pre class="term">git clone https://github.com/gavinc-cn/touchstone-dsh
+cd touchstone-dsh
+./dsh-plugin/install.sh</pre>
+          <p class="start-note">安装脚本幂等，并会打印可选的 profile 覆盖（指向本机工作副本、或指定解释器）。
+            装完重启 <code>dsh web</code> 生效。</p>
         </div>
       </div>
     </div>
   </div>
 </section>
-
 </main>
 
 <!-- ==================== 页脚 ==================== -->

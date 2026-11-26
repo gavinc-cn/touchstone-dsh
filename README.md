@@ -7,12 +7,12 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![npm](https://img.shields.io/npm/v/@gavinc-cn/touchstone-dsh?logo=npm&color=cb3837)](https://www.npmjs.com/package/@gavinc-cn/touchstone-dsh)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB.svg)](https://www.python.org/)
-[![Node 22.19+ | 24+](https://img.shields.io/badge/Node-22.19%2B%20%7C%2024%2B-339933.svg)](https://nodejs.org/)
+[![Node 24.9+](https://img.shields.io/badge/Node-24.9%2B-339933.svg)](https://nodejs.org/)
 [![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek%20Harness-plugin-4D6BFE.svg)](https://github.com/deepseek-ai/deepseek-harness)
 
 English | [中文](README.zh.md)
 
-**[Try the interactive demo](https://gavinc-cn.github.io/touchstone-dsh/en-demo.html) · [Quick install](#quick-start)**
+**[Quick start](#quick-start) · [Try the interactive demo](https://gavinc-cn.github.io/touchstone-dsh/en-demo.html)**
 
 <img src="docs/images/board.png" alt="Touchstone development board" width="920">
 
@@ -38,6 +38,180 @@ backend (since 2026-10-15, with `backend: python` as the one-line fallback). Eit
 database plus a file-system workspace, and no data leaves your machine except for the model calls your
 `dsh` host makes.
 
+## Quick start
+
+Touchstone runs **inside [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)**: the
+platform serves its own UI from the `dsh` host, and the agent that writes and runs tests is that host's
+agent. Nothing else has to be installed — no Python, no `git clone`.
+
+**What you need:** Node.js **24.9+** (the floor of current `dsh` releases; Touchstone's own floor is 22.19),
+a model route configured in `dsh`, and a repository you want tested.
+
+> The panel UI is Chinese-only today. The commands below and every artifact on disk are language-neutral;
+> where a label is Chinese, its meaning is given in parentheses.
+
+### 1. Start `dsh` and give it a model
+
+```bash
+npx @deepseek-ai/dsh web
+```
+
+The first run creates the `web` profile under `~/.dsh/profiles/web` and prints a URL that carries an
+access token (default port 3080). Open that URL, go to **Settings → Models**, and save a DeepSeek API key
+(other providers and OpenAI-compatible endpoints work too). Leave this process running: it is the agent
+runtime.
+
+### 2. Install the Touchstone plugin
+
+In a second terminal:
+
+```bash
+npx @deepseek-ai/dsh plugin --profile web add @gavinc-cn/touchstone-dsh
+```
+
+The package is self-contained (UI, both backends, prebuilt front end), and the install also adds it to the
+profile's bundle list. No manifest to edit, no Python dependencies to install. `dsh` forwards this command to
+pnpm: if pnpm is not on your PATH the command stops and says so — enable the shim that ships with Node
+(`corepack enable pnpm`) and run it again.
+
+### 3. Restart `dsh` and open the panel
+
+Stop `dsh` (Ctrl+C) and start it again with the same command. A **Touchstone** entry now appears in the
+sidebar — click it, or press **Alt+T**. The panel opens already signed in as `admin` (plugin mode is
+password-free by default; set a password later under **设置 → 修改密码** (*Settings → Change password*)
+in the panel).
+
+### 4. Add your first project
+
+In the panel, click **添加项目** (*Add project*) and fill in the form:
+
+| Field | What to enter |
+|-------|---------------|
+| 项目名称 (*Project name*) | Any label, e.g. `my-service` |
+| 项目目录 (*Project directory*) | Absolute path of the repository to test — the agent reads and edits it |
+| 工作目录 (*Work directory*) | Leave empty to use `~/.touchstone/projects/<path id>`; cases and bug reports are written here |
+| 智能体 (*Agent*) | Keep the scanned **dsh (plugin, in-process)** entry |
+| 模型 (*Model*) | Leave empty for the `dsh` default; the list is the host's model catalog |
+| 权限 (*Permission*) | The permission preset agent sessions run under; it can edit files and run commands |
+| 项目附加提示词 (*Project guidance*) | How to build, test and deploy the project, plus the rules the agent must follow; injected into every first round |
+
+The case library (`free_style/`) and `bug_report/` are created inside the work directory; nothing extra is
+written into the tested repository.
+
+### 5. Run one task and read the result
+
+Open the **测试任务** (*Test tasks*) tab → **新建任务** (*New task*). The defaults are already what a first
+run needs: type **探索** (*Exploration*), end stage **生成报告** (*Generate report*), stop after one round.
+Give it a name and submit.
+
+What happens, in order:
+
+1. The task enters the project's queue (**排队中**, *queued*) and then starts (**运行中**, *running*). The
+   queue is serial per project — one agent round at a time — so a second task waits for the first; different
+   projects run in parallel.
+2. The task detail refreshes its round log every couple of seconds, and the session window renders the
+   full agent transcript (messages, reasoning, tool calls and results) as it grows.
+3. When the round ends, `free_style/` under the work directory holds the new cases (`case.md` +
+   `status.md`, plus an `INDEX.md`), and any failure has a directory under `bug_report/` (severity,
+   reproduction steps, log evidence, related case).
+4. The task finishes at **生成报告** and shows its round count and new-bug count.
+
+Follow-up tasks close the loop: a bug report can spawn a fix task, a fix a retest, a rejected report a
+case-revision task. See [How it works](#how-it-works) and [Task types](#task-types).
+
+### If it doesn't work
+
+| Symptom | Cause and fix |
+|---------|---------------|
+| No **Touchstone** entry in the sidebar | The package is not in the profile. Re-run step 2 and read its output; `~/.dsh/profiles/web/package.json` must list the package under `dependencies` and in `dsh.profile.bundles`. Then restart `dsh`. |
+| The panel opens, but the page reports that the backend did not start | Another Touchstone instance already holds the database (`~/.touchstone/touchstone.db`). Only one runs at a time: stop the other one, or point this one at another database with `TOUCHSTONE_DB`. |
+| A round ends instantly and leaves nothing | `dsh` has no usable model route. Configure one under **Settings → Models**; the session window shows only what the host reported, so a missing model looks like an empty round. |
+| `dsh: pnpm was not found` | Enable Corepack's pnpm shim once (`corepack enable pnpm`) and re-run step 2. |
+| The task sits in **排队中** | Another task or board card holds this project's serial slot. Wait for it, stop it, or use a different project. |
+| Port 3080 is taken | Start `dsh` on another port: `dsh web --port 8081`. |
+| The panel is not in your language | It is Chinese-only today (see [Capabilities and limits](#capabilities-and-limits)). |
+
+Plugin backend diagnostics are appended to `~/.touchstone/plugin-backend.log`.
+
+## Other ways to run
+
+### Interactive demo
+
+[Open the interactive demo](https://gavinc-cn.github.io/touchstone-dsh/en-demo.html) to walk the project,
+task, board and session workflow in a browser tab. It is a static simulation: no backend, no repository and
+no model calls.
+
+### Standalone site (no agent execution)
+
+Useful for browsing projects, the case library, bug reports, the board and monitoring. It serves the same UI
+but **cannot execute an agent** — the agent only exists inside the `dsh` host. Requires Python 3.12+.
+
+```bash
+git clone https://github.com/gavinc-cn/touchstone-dsh.git
+cd touchstone-dsh
+python3 -m pip install -r backend_py/requirements.txt
+./touchstone.sh start          # builds the front end on first run, then serves 127.0.0.1:4601
+./touchstone.sh status         # PID and the actual port
+./touchstone.sh stop
+```
+
+Open <http://127.0.0.1:4601>. The first start seeds an `admin` account; without `TS_ADMIN_PASSWORD` a
+random one-time password is printed **once** in the startup banner:
+
+```bash
+grep '一次性初始口令' .run/server.log     # or: ./touchstone.sh status
+```
+
+First login forces a password change. Set `TS_ADMIN_PASSWORD=<your-password>` before the first start to skip
+the one-time password and the forced change.
+
+The standalone site and the plugin share one database (`~/.touchstone/touchstone.db`) and are mutually
+exclusive while running: the second instance refuses to start and names the current holder.
+
+### Python backend in plugin mode
+
+The plugin's default backend is Node. To use the observation-window fallback instead, set `backend: python`
+in the plugin config (deleting the key does not change the default) and install that backend's dependencies
+with pip, not npm:
+
+```bash
+pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/backend_py/requirements.txt
+# Windows: python -m pip install ...   (the official installer ships python.exe, not python3)
+```
+
+The plugin probes `python`, then `python3`, and uses the first interpreter that runs. If that is not where
+you installed the dependencies, pin another interpreter in the profile patch:
+
+```yaml
+- id: touchstone-dsh
+  config: { backend: python, pythonPath: /path/to/python }
+```
+
+### From a checkout (development)
+
+```bash
+git clone https://github.com/gavinc-cn/touchstone-dsh.git
+cd touchstone-dsh
+./dsh-plugin/install.sh           # idempotent install of this checkout into the profile
+```
+
+The installer prints an optional profile patch for pointing the plugin at your working copy or choosing a
+specific interpreter; skip it to use the package's own directory:
+
+```yaml
+- id: touchstone-dsh
+  config: { repoDir: /path/to/touchstone-dsh, pythonPath: /path/to/python3 }
+```
+
+### Windows
+
+The cross-platform launcher offers the same commands for the standalone site; the plugin is installed the same
+way as on Linux:
+
+```bash
+python touchstone.py start | stop | restart | status | build | test
+```
+
 ## Highlights
 
 - **Six task types** covering the whole QA loop — exploration, regression, stress, fix, retest, and case
@@ -60,7 +234,7 @@ database plus a file-system workspace, and no data leaves your machine except fo
   drives the load itself, N runs per task, with per-run metrics, charts, and Markdown/JSON reports.
 - **Optional integrations.** Feishu (Lark) push notifications with two-way answering from chat cards, and
   RAG-based semantic search over the case library.
-- **Self-contained stack.** Backend: the bundled Node backend (plugin-mode default, needs Node 22.19+) or
+- **Self-contained stack.** Backend: the bundled Node backend (plugin-mode default, needs Node 24.9+) or
   the Python standard library plus four small dependencies (standalone mode / `backend: python`).
   Frontend: React + Vite. Storage: SQLite + plain files. Runs on Linux and Windows.
 
@@ -87,7 +261,7 @@ Card detail — description, scheduling, dependent cards, bound sessions, and co
 
 ```mermaid
 flowchart LR
-  U[Browser] -->|REST + SSE| S["Touchstone server<br/>Python stdlib · SQLite · files"]
+  U[Browser] -->|REST + SSE| S["Touchstone server<br/>bundled backend · SQLite · files"]
   S -->|"/touchstone-agent<br/>resident sessions"| D["dsh host<br/>DeepSeek Harness"]
   D -->|"read / edit / bash"| R["Your repository"]
   D --> C[("Case library<br/>free_style/")]
@@ -131,128 +305,6 @@ flowchart LR
 | Bug report | `<work_dir>/bug_report/<timestamp>_FS_<title>/` — the failure dossier for a case |
 | Card | A board item that can start, queue, and drive its own agent session |
 | Queue | The per-project serial slot shared by tasks, cards, and chat messages |
-
-## Quick start
-
-### Try the demo first
-
-[Open the interactive demo](https://gavinc-cn.github.io/touchstone-dsh/en-demo.html) to explore the project,
-task, board and session workflow in your browser. It is a static simulation: no backend, repository or model
-calls are involved.
-
-### Install as a `dsh` plugin (recommended)
-
-This is the shortest path for `dsh` users and the mode that enables agent execution. You need Node.js 22.19+
-or 24+ and a current DeepSeek Harness release. **No Python or git clone is required.**
-
-1. Start `dsh` once; this creates the `web` profile:
-
-   ```bash
-   npx @deepseek-ai/dsh web
-   ```
-
-2. In a second terminal, install the self-contained Touchstone package (platform + prebuilt front end):
-
-   ```bash
-   npx @deepseek-ai/dsh plugin --profile web add @gavinc-cn/touchstone-dsh
-   ```
-
-3. Open <http://127.0.0.1:3080>, enable **Touchstone** in the **Plugins** panel (this selects its bundle),
-   then restart `dsh web`. Use the Touchstone sidebar entry to open the panel; **Alt+T** toggles it.
-
-If the bundle is not selected by the panel toggle, select it explicitly and then restart:
-
-```bash
-node ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/dsh-plugin/scripts/select-bundle.mjs \
-  ~/.dsh/profiles/web/package.json
-```
-
-The plugin defaults to its bundled Node backend. No `repoDir` or Python dependency installation is needed.
-Plugin mode is password-free by default: the panel is auto-logged-in as `admin`; you can set a password later
-in **Settings → Change password**.
-
-### Run the standalone site (full UI, without agent execution)
-
-Standalone mode requires Python 3.12+ and is useful for browsing projects, cases, reports, the board and
-monitoring. **Agent execution requires plugin mode**, because the agent runs inside the `dsh` host process.
-
-```bash
-git clone https://github.com/gavinc-cn/touchstone-dsh.git
-cd touchstone-dsh
-python3 -m pip install -r backend_py/requirements.txt
-./touchstone.sh start          # builds the front end on first run, then serves 127.0.0.1:4601
-./touchstone.sh status         # PID and the actual port
-./touchstone.sh stop
-```
-
-Then open <http://127.0.0.1:4601>. The first start seeds an `admin` account. If `TS_ADMIN_PASSWORD` is not
-set, a random one-time password is printed **once** in the startup banner:
-
-```bash
-grep '一次性初始口令' .run/server.log     # or: ./touchstone.sh status
-```
-
-You will be asked to change it on first login. Set `TS_ADMIN_PASSWORD=<your-password>` before the first
-start to skip the one-time password and forced change.
-
-### Optional: use the Python backend in plugin mode
-
-The default plugin backend is Node. To use the observation-window fallback instead, set `backend: python`
-in the plugin config (deleting the key does not change the default). Install that backend's dependencies with
-pip, not npm:
-
-```bash
-pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/backend_py/requirements.txt
-# Windows: python -m pip install ...   (the official installer ships python.exe, not python3)
-```
-
-The plugin probes `python`, then `python3`, and uses the first interpreter that runs. If that is not where
-you installed the dependencies, pin another interpreter in the profile patch:
-
-```yaml
-- id: touchstone-dsh
-  config: { backend: python, pythonPath: /path/to/python }
-```
-
-The missing-dependency page prints the exact command for the interpreter it selected. The package carries
-both backends (`backend/` and `backend_py/`) plus `webui/dist-plugin`, so no `repoDir` override is needed.
-
-### Install from a checkout (development)
-
-```bash
-git clone https://github.com/gavinc-cn/touchstone-dsh.git
-cd touchstone-dsh
-./dsh-plugin/install.sh           # idempotent install of this checkout into the profile
-```
-
-The installer prints an optional profile patch for pointing the plugin at your working copy or choosing a
-specific interpreter; skip it to use the package's own directory:
-
-```yaml
-- id: touchstone-dsh
-  config: { repoDir: /path/to/touchstone-dsh, pythonPath: /path/to/python3 }
-```
-
-Both run modes share one database (`~/.touchstone/touchstone.db` by default) and are mutually exclusive
-while running; the second instance refuses to start and tells you who holds the lock.
-
-### Windows
-
-A cross-platform launcher offers the same commands:
-
-```bash
-python touchstone.py start | stop | restart | status | build | test
-```
-
-### First steps in the UI
-
-1. Sign in and open **Settings → Change password** if you used the one-time password.
-2. **Add project** — source directory, work directory (defaults to
-   `~/.touchstone/projects/<path id>`, so nothing extra lands in the tested repo), and the
-   guidance the agent should follow. The case library and bug report directories are derived and
-   created for you.
-3. Create a task (or a board card) and let the queue pick it up. Round logs stream live; the session window
-   shows the transcript as it grows.
 
 ## Configuration
 
