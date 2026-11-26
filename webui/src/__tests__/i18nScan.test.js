@@ -242,8 +242,9 @@ describe('i18nScan 项目基线（零残留 ratchet）', () => {
     // + 卡 #1088 新增 components/ImageViewer.jsx = 82
     // + 会话详情页小分辨率自适应新增 utils/rzClamp.js = 83
     // + 任务日志入口修复新增 lib/taskLog.js = 84；
+    // + 跨用户重复目录分类新增 utils/dupCheck.js = 85；
     // 新增/删除源文件需同步更新本断言）
-    expect(files).toHaveLength(84)
+    expect(files).toHaveLength(85)
     // 每个顶层源码目录都必须有文件进入清单：某个目录整体消失（遍历被打断/根被收窄）立即失败
     for (const sentinel of [
       'App.jsx', 'api/index.js', 'components/TasksTab.jsx', 'hooks/useDshHost.js',

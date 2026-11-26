@@ -36,6 +36,8 @@
  *     以便日志对拍逐行可比；Node 自有 banner 仍留在 stderr（M1 决定，见上）。
  */
 import http from 'node:http';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { REPO_ROOT, parseBackendArgs, resolveWebDir } from './lib/args.js';
 import { mustChangePwBlocked } from './lib/access.js';
@@ -73,6 +75,33 @@ const TRUST_HEADER = 'x-ts-internal-user';
  * 名单与 Python **逐字相同**（不含 `::1`）：等价优先于「看起来更全」——差异会在对拍里暴露。
  */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost']);
+
+/**
+ * 运行目录：与 Python 侧 `TOUCHSTONE_RUN_DIR` 同口径（缺省 <仓库>/.run）。
+ * 独立启动时用它落实际监听端口，供启停器探活/status 读取（plugin 形态也会写，无副作用）。
+ */
+function runDir() {
+  return process.env.TOUCHSTONE_RUN_DIR || join(REPO_ROOT, '.run');
+}
+
+/** 实际监听端口落盘（listen 成功后写；写失败不阻断启动，只影响 status/探活展示）。 */
+function writePortFile(port) {
+  try {
+    mkdirSync(runDir(), { recursive: true });
+    writeFileSync(join(runDir(), 'server.port'), String(port), 'utf8');
+  } catch {
+    // 只读目录/权限不足：与 Python 侧一致，不让端口标记阻断站点
+  }
+}
+
+/** 退出时清理端口标记（只清理自己的；无条件删会让同目录另一实例的标记消失）。 */
+function removePortFile() {
+  try {
+    rmSync(join(runDir(), 'server.port'), { force: true });
+  } catch {
+    // 退出路径不抛
+  }
+}
 
 /** SPA 页面集合：与 `server.py` 的 `PUBLIC_PAGES` + ("/app","/monitor","/admin","/log") 一致 */
 const SPA_PAGES = new Set(['/login', '/app', '/monitor', '/admin', '/log']);
@@ -355,7 +384,7 @@ async function main() {
   setMediaFetcher(dshdriver.media);
   const hubStarted = dshevents.start();
   console.error(`touchstone-node: dsh 状态事件中枢 ${hubStarted ? '已启动' : '未启动'
-    + '（未下发 TS_AGENT_DRIVER_URL）'}`);
+    + '（未配置驱动；将按退避重试，dsh 起来后自动连上）'}`);
 
   // ---- board 启动步（顺序照 Python：ext 补跑 → 调和器 → 等待项周期自检）-------------
   // `startExtRecoverAfterConnect()` 等中枢首连后补跑一次 ext 行对账；`startInteractionWatcher()`
@@ -454,6 +483,8 @@ async function main() {
   });
 
   const port = server.address().port;
+  // 实际端口落盘：独立启动器/status 按它探活（plugin 形态也会写，路径与 Python 同口径）
+  writePortFile(port);
 
   // ---- 退出路径与父死感知必须**在打出 LISTEN 行之前**武装好 -------------------------
   // 为什么顺序不能反：端口行是「就绪」的唯一信号，消费方（薄壳 stopBackend、自检、对拍器）
@@ -473,6 +504,7 @@ async function main() {
     } catch (error) {
       console.error(`touchstone-node: 释放单实例锁异常（忽略）: ${error && error.message}`);
     }
+    removePortFile();
     // 兜底定时器：长连接（SSE）挂着时 close 回调不会来，不能让父进程等我们
     const hard = setTimeout(() => process.exit(0), 1000);
     if (hard.unref) hard.unref();

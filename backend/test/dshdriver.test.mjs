@@ -16,7 +16,10 @@
  *   ⑥ `stream`/`stateStream`/`feedInto` 的 SSE 行为（帧/seq/stop/超时/对端关闭/非 200）。
  */
 import assert from 'node:assert/strict';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import * as driver from '../lib/dshdriver.js';
@@ -1099,6 +1102,43 @@ test('feedInto：stop 收「鸭子 {aborted}」对象（M6.5-R3 真缺陷回归�
     assert.equal(r.stopped, true, '鸭子 {aborted} 必须是有效的停止信号');
     assert.equal(w.error, null, '主动断开不算链路异常（尤其不许是 addEventListener 那条）');
   });
+});
+
+test('独立站点：driver.json 0600 读取、env 优先与权限拒绝', async () => {
+  const drv = await new FakeDriver().start();
+  const dir = mkdtempSync(join(tmpdir(), 'ts-driver-file-'));
+  const file = join(dir, 'driver.json');
+  const saved = saveEnv();
+  const savedFile = process.env[driver.DRIVER_FILE_ENV];
+  delete process.env[driver.URL_ENV];
+  delete process.env[driver.TOKEN_ENV];
+  process.env[driver.DRIVER_FILE_ENV] = file;
+  try {
+    writeFileSync(file, JSON.stringify({ url: drv.base, token: TOKEN }), { mode: 0o600 });
+    chmodSync(file, 0o600);
+    driver.invalidateDriverConfig();
+    assert.equal(driver.configured(), true);
+    assert.equal(driver.driverUrl(), drv.base);
+    assert.equal((await driver.health()).ok, true);
+    // POSIX：组/其他可读的令牌不算可信配置（Windows 无 POSIX mode，跳过）
+    if (process.platform !== 'win32') {
+      chmodSync(file, 0o644);
+      driver.invalidateDriverConfig();
+      assert.equal(driver.configured(), false);
+    }
+    // env 存在时优先于文件
+    process.env[driver.URL_ENV] = drv.base;
+    process.env[driver.TOKEN_ENV] = TOKEN;
+    driver.invalidateDriverConfig();
+    assert.equal(driver.configured(), true);
+  } finally {
+    if (savedFile === undefined) delete process.env[driver.DRIVER_FILE_ENV];
+    else process.env[driver.DRIVER_FILE_ENV] = savedFile;
+    restoreEnv(saved);
+    driver.invalidateDriverConfig();
+    rmSync(dir, { recursive: true, force: true });
+    await drv.close();
+  }
 });
 
 test('接口冻结：streamEvents/parseStreamLine/STOP_WATCH_INTERVAL_MS 从 dshdriver 再导出', () => {

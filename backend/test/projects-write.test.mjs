@@ -302,6 +302,37 @@ test('建项目：重名 ⇒ 400 带空格 + 不落行（`项目名已存在`）
   assert.equal(countOf(env, 'projects'), 1);
 });
 
+test('建项目：跨用户重复目录 ⇒ 400、不落行、不建目录；同用户重复仍可保存', async (t) => {
+  const env = setup('create-cross-dup');
+  t.after(() => env.close());
+  const pdir = path.join(env.dat, 'cross-pd');
+  const wdir = path.join(env.dat, 'cross-wd');
+  seedProject(env, { userId: 1, name: 'admin-p', projectDir: pdir, workDir: wdir });
+
+  // 他人 project_dir：400，且不建目录/不落行
+  await expectBody(env, 'POST', '/api/projects',
+    { user: env.bob, body: { name: 'bob-p1', project_dir: pdir,
+      work_dir: path.join(env.dat, 'bob-w1') } },
+    400, '{"error": "项目目录已被其他用户使用"}');
+  // 他人 work_dir：400
+  await expectBody(env, 'POST', '/api/projects',
+    { user: env.bob, body: { name: 'bob-p2', project_dir: path.join(env.dat, 'bob-pd2'),
+      work_dir: wdir } },
+    400, '{"error": "工作目录已被其他用户使用"}');
+  assert.equal(countOf(env, 'projects'), 1, '被拒的跨用户重复不得落行');
+  assert.equal(isDirNow(path.join(env.dat, 'bob-w1')), false, '被拒后不得建工作目录');
+
+  // 同用户重复：仍允许（保持既有"提醒但可保存"）
+  const bobDir = path.join(env.dat, 'bob-pd3');
+  const bobWork = path.join(env.dat, 'bob-w3');
+  const first = await call(env, 'POST', '/api/projects',
+    { user: env.bob, body: { name: 'bob-p3', project_dir: bobDir, work_dir: bobWork } });
+  assert.equal(first.status, 200);
+  const second = await call(env, 'POST', '/api/projects',
+    { user: env.bob, body: { name: 'bob-p4', project_dir: bobDir, work_dir: bobWork } });
+  assert.equal(second.status, 200, '同用户重复不拦（后端只拦跨用户）');
+});
+
 test('建项目：reasoning_effort/permission_mode 非法 ⇒ 400 带空格、不落行、不建目录', async (t) => {
   const env = setup('create-bad-effort');
   t.after(() => env.close());

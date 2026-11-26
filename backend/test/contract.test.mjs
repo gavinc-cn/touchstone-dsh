@@ -70,7 +70,7 @@ async function startBackend(webDir, extraArgv = []) {
     child.once('exit', resolve);
     child.kill('SIGTERM');
   });
-  return { child, port, stdout: () => stdout, stderr: () => stderr, stop };
+  return { child, port, runDir, dbPath, stdout: () => stdout, stderr: () => stderr, stop };
 }
 
 const base = (port) => `http://127.0.0.1:${port}`;
@@ -95,6 +95,9 @@ test('契约：stdout 出 TOUCHSTONE_LISTEN <port> 行，静态/SPA/鉴权/信�
     assert.equal(listenLines.length, 1,
       `stdout 必须恰有一行端口行：stdout=${JSON.stringify(b.stdout())}`);
     assert.match(listenLines[0], /^TOUCHSTONE_LISTEN \d+$/, `stdout=${JSON.stringify(b.stdout())}`);
+    // ①b 实际端口落盘（独立启动器/status 读它；TOUCHSTONE_RUN_DIR 可覆盖）
+    const portFile = path.join(b.runDir, 'server.port');
+    assert.equal(fs.readFileSync(portFile, 'utf8').trim(), String(b.port));
 
     // ② SPA 页面 → index.html 200 + text/html + no-store
     const app = await fetch(`${base(b.port)}/app`);

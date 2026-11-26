@@ -5,15 +5,17 @@
 # 则跳过，TS_FORCE_BUILD=1 强制重建），保证 webui/dist 与源码一致
 # （dist 不入库，部署机需装 Node）
 # 用法: ./touchstone.sh start|stop|restart|status|build|test|test-full|test-ui
+# 后端: 缺省 node（backend/server.js）；TS_BACKEND=python 回退 backend_py/server.py
 # 监听: 默认 127.0.0.1:4601（仅本机）；环境变量 TS_PORT / TS_HOST 覆盖
-#       （对外监听: TS_HOST=0.0.0.0）；后端绑定失败会自动 port+1 顺延
+#       （对外监听: TS_HOST=0.0.0.0）；Node 固定端口，占用即报错（不静默 +1）
 # 运行产物: .run/server.pid（PID 文件）、.run/server.log（追加写日志）、
-#           .run/server.port（backend_py/server.py 落盘的实际监听端口，探活与展示按它读取）
+#           .run/server.port（后端落盘的实际监听端口，探活与展示按它读取）
 # 测试三档（2026-09-13 批次，细节见 tests/README.md）:
 #   test      快层：后端单测 pytest（~2s）+ 前端单测 vitest（webui 配置后自动纳入）
 #   test-full 快层 + 隔离实例 e2e 脚本（自起临时实例，无需站点，分钟级）
 #   test-ui   Playwright e2e（需站点在跑；只探活提示，不自动重启站点）
 # Python 解析: 默认 python3；项目环境不在默认 PATH 时用环境变量 TS_PYTHON 指定
+# Node 解析: 默认 node/npm；不在默认 PATH 时用 TS_NODE / TS_NPM 指定
 
 set -u
 
@@ -22,15 +24,26 @@ cd "$(dirname "$0")" || exit 1
 
 PORT="${TS_PORT:-4601}"
 HOST="${TS_HOST:-127.0.0.1}"   # 监听地址: 默认仅本机回环, 对外监听显式 TS_HOST=0.0.0.0
-RUN_DIR=".run"
+RUN_DIR="${TOUCHSTONE_RUN_DIR:-.run}"
 PID_FILE="$RUN_DIR/server.pid"
 LOG_FILE="$RUN_DIR/server.log"
 PORT_FILE="$RUN_DIR/server.port"
 PROBE_TIMEOUT=20   # 启动探活超时（秒；server 初始化含 feishu 入站连接可超 10s）
 STOP_TIMEOUT=5     # SIGTERM 后等待退出的超时（秒）
 
+# 站点后端选择：node（缺省，2026-11-26 起）| python（显式回退）
+BACKEND="${TS_BACKEND:-node}"
+# 可执行文件：TS_NODE / TS_NPM 可覆盖（Windows 无 python3 的同类问题：node 也可能不在 PATH）
+NODE="${TS_NODE:-node}"
+NPM="${TS_NPM:-npm}"
 # 站点启动与测试命令共用的 python：默认 python3；项目环境不在默认 PATH 时用 TS_PYTHON 指定
 PY="${TS_PYTHON:-python3}"
+
+# 校验 TS_BACKEND 只认 node/python（未知值不静默猜测）
+case "$BACKEND" in
+    node|python) ;;
+    *) echo "错误: TS_BACKEND 只支持 node / python（当前: $BACKEND）" >&2; exit 1 ;;
+esac
 
 # 打印用法并返回错误码
 usage() {
@@ -85,6 +98,21 @@ require_runtime_deps() {
     fi
 }
 
+# Node 运行依赖预检：可执行文件在 + 版本 >= 22.19（node:sqlite 的硬门槛）。
+# 独立形态默认 Node，失败必须在构建/启动前说清楚，而不是让后端 import 期崩。
+require_node() {
+    if ! command -v "$NODE" >/dev/null 2>&1; then
+        echo "错误: 未找到 node（独立站点默认 Node 后端；用 TS_NODE=<路径> 指定，或 TS_BACKEND=python 回退）" >&2
+        exit 1
+    fi
+    if ! "$NODE" -e 'const m=process.versions.node.split(".").map(Number); process.exit(m[0]>22||(m[0]===22&&m[1]>=19)?0:1)' >/dev/null 2>&1; then
+        echo "错误: Node $( "$NODE" -p 'process.versions.node' 2>/dev/null || echo '?' ) 低于 22.19（node:sqlite 需要）" >&2
+        echo "升级 Node 到 22.19+，或用 TS_BACKEND=python 回退" >&2
+        exit 1
+    fi
+    command -v "$NPM" >/dev/null 2>&1 || { echo "错误: 未找到 npm（前端构建需要；用 TS_NPM=<路径> 指定）" >&2; exit 1; }
+}
+
 cmd_start() {
     # 已在运行(PID 文件有效)则直接返回
     if pid="$(read_pid)"; then
@@ -97,18 +125,37 @@ cmd_start() {
         exit 1
     fi
     # 运行依赖预检放在构建之前: 缺依赖时不必等前端构建白跑
-    require_runtime_deps
+    if [ "$BACKEND" = "python" ]; then
+        require_runtime_deps
+    else
+        require_node
+    fi
     # 前置构建前端: dist 不入库, 启动时重建保证与源码一致(部署机需 Node);
     # 任一步失败即中止启动(后端无 dist 会直接退出)
     cmd_build
     mkdir -p "$RUN_DIR"
-    # nohup 后台启动(用 $PY, 兑现 TS_PYTHON 对 start 生效), 日志追加写；
-    # Python 后端源码在 backend_py/（2026-10-19 起，仓库根 = 本脚本 cwd）
-    nohup "$PY" backend_py/server.py --port "$PORT" --host "$HOST" >> "$LOG_FILE" 2>&1 &
+    # nohup 后台启动；日志追加写。Node 是缺省后端（独立站点），
+    # Python 只在 TS_BACKEND=python 时显式回退。
+    if [ "$BACKEND" = "python" ]; then
+        nohup "$PY" backend_py/server.py --port "$PORT" --host "$HOST" >> "$LOG_FILE" 2>&1 &
+    else
+        # 独立站点不传 --trust-internal-user / --parent-watch：
+        # 前者是 admin 后门（只允许插件反代），后者是 dsh 子进程的父死感知。
+        nohup "$NODE" backend/server.js --port "$PORT" --host "$HOST" --web-dir webui/dist >> "$LOG_FILE" 2>&1 &
+    fi
     echo $! > "$PID_FILE"
-    # 探活等待启动完成
+    local pid
+    pid="$(cat "$PID_FILE")"
+    # 探活等待启动完成：除了超时，还要尽早发现「进程已死」（端口被占/启动崩溃），
+    # 否则 Node 的 listen 失败会白等满 PROBE_TIMEOUT 才从日志里看到。
     local waited=0
     while ! probe; do
+        if ! is_alive "$pid"; then
+            echo "错误: 后端启动后立即退出, 日志尾部:" >&2
+            tail -n 20 "$LOG_FILE" >&2
+            rm -f "$PID_FILE"
+            exit 1
+        fi
         sleep 1
         waited=$((waited + 1))
         if [ "$waited" -ge "$PROBE_TIMEOUT" ]; then
@@ -222,17 +269,18 @@ build_needed() {
 
 cmd_build() {
     # 前端构建: npm install 按需(依赖指纹未变则跳过) + npm run build 按需
+    command -v "$NPM" >/dev/null 2>&1 || { echo "错误: 未找到 npm（前端构建需要；用 TS_NPM=<路径> 指定）" >&2; exit 1; }
     # (源码指纹未变且 dist 在则跳过), 任一步失败即停
     if npm_install_needed; then
         echo "==> npm install"
-        (cd webui && npm install) || { echo "错误: npm install 失败" >&2; exit 1; }
+        (cd webui && "$NPM" install) || { echo "错误: npm install 失败" >&2; exit 1; }
         webui_deps_fingerprint > "$NPM_STAMP_FILE"
     else
         echo "==> npm install（跳过: 依赖未变化, TS_FORCE_INSTALL=1 可强制重装）"
     fi
     if build_needed; then
         echo "==> npm run build"
-        (cd webui && npm run build) || { echo "错误: npm run build 失败" >&2; exit 1; }
+        (cd webui && "$NPM" run build) || { echo "错误: npm run build 失败" >&2; exit 1; }
         # 产物校验: dist 缺 index.html 视为构建无效
         if [ ! -f "webui/dist/index.html" ]; then
             echo "错误: 构建完成但未找到 webui/dist/index.html" >&2

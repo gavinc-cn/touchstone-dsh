@@ -71,6 +71,10 @@
  *
  * 红线：令牌不落任何日志；驱动端点仅回环可达（插件侧同时校验来源地址与令牌）。
  */
+import { readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 import { localizable } from './i18n.js';
 import { pyJsonDumps } from './pyjson.js';
 import { SseError, sseUrl, streamEvents } from './sse.js';
@@ -152,22 +156,86 @@ export class DshDriverError extends Error {
 
 // ---------- 连接与配置 ----------
 
-/** 驱动前缀地址（未配置返回空串）。对齐 `driver_url()`：trim + 去尾部 `/` */
-export function driverUrl() {
-  return String(process.env[URL_ENV] || '').trim().replace(/\/+$/, '');
+/** 驱动端点文件路径覆盖（独立站点读插件写的 0600 文件；缺省 ~/.touchstone/driver.json） */
+export const DRIVER_FILE_ENV = 'TS_AGENT_DRIVER_FILE';
+
+/** 端点文件缓存：按 mtime+size 失效；401/403 时主动清空（令牌轮换/文件重写） */
+let _fileCache = { key: '', url: '', token: '' };
+
+/** 端点文件缺省路径（与插件 lib/index.js 的 driverJsonPath 同口径） */
+function driverFilePath() {
+  return process.env[DRIVER_FILE_ENV] || join(homedir(), '.touchstone', 'driver.json');
 }
 
-/** 本进程是否运行在 dsh 插件形态下（插件已下发驱动地址）。对齐 `configured()` */
+/**
+ * 读驱动端点文件（env 未配置时兜底）。
+ *
+ * 文件由 dsh 插件以 0600 原子写；POSIX 上权限放宽（组/其他可读）一律不认——
+ * 不能把「同机其他用户可读的令牌」当成可信配置。Windows 无 POSIX mode，跳过该判据。
+ *
+ * @returns {{url: string, token: string}|null}
+ */
+function fileDriverConfig() {
+  const file = driverFilePath();
+  let st;
+  try {
+    st = statSync(file);
+  } catch {
+    return null;
+  }
+  if (process.platform !== 'win32' && (st.mode & 0o077) !== 0) return null;
+  const key = `${st.mtimeMs}:${st.size}`;
+  if (_fileCache.key === key && _fileCache.url) {
+    return { url: _fileCache.url, token: _fileCache.token };
+  }
+  try {
+    const row = JSON.parse(readFileSync(file, 'utf8'));
+    const url = String(row.url || '').trim().replace(/\/+$/, '');
+    const token = String(row.token || '').trim();
+    if (!url || !token) return null;
+    _fileCache = { key, url, token };
+    return { url, token };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 当前驱动连接信息：环境变量优先（插件 spawn 的子进程），其次端点文件（独立站点）。
+ * 返回 null 表示未配置；调用方按既有「驱动不可用」语义处理。
+ *
+ * @returns {{url: string, token: string}|null}
+ */
+export function driverConfig() {
+  const envUrl = String(process.env[URL_ENV] || '').trim().replace(/\/+$/, '');
+  const envToken = String(process.env[TOKEN_ENV] || '').trim();
+  if (envUrl || envToken) return { url: envUrl, token: envToken };
+  return fileDriverConfig();
+}
+
+/** 使端点文件缓存失效（401/403 后让下一次请求重读；令牌轮换/文件重写） */
+export function invalidateDriverConfig() {
+  _fileCache = { key: '', url: '', token: '' };
+}
+
+/** 驱动前缀地址（未配置返回空串）。对齐 `driver_url()`：trim + 去尾部 `/` */
+export function driverUrl() {
+  const cfg = driverConfig();
+  return cfg ? cfg.url : '';
+}
+
+/** 本进程是否已配置驱动（插件形态或独立站点读到端点文件）。对齐 `configured()` */
 export function configured() {
   return Boolean(driverUrl());
 }
 
 /**
  * 统一请求头（对齐 `_headers()`）：驱动令牌走自定义头（不回显、不落日志）。
- * 每次调用现取环境变量（与 Python 同口径，测试可运行中改 env）。
+ * 每次调用现取配置（测试可运行中改 env / 重写文件）。
  */
-export function authHeaders() {
-  const token = process.env[TOKEN_ENV] || '';
+export function authHeaders(tokenOverride) {
+  const cfg = driverConfig();
+  const token = tokenOverride !== undefined ? tokenOverride : (cfg ? cfg.token : '');
   const head = {
     'content-type': 'application/json; charset=utf-8',
     accept: 'application/json',
@@ -260,9 +328,11 @@ function transportError(error, aborted, timeoutMs) {
  * @returns {Promise<any>}
  */
 export async function request(method, path, payload = null, timeoutMs = REQUEST_TIMEOUT * 1000,
-  fetchImpl = fetch) {
-  if (!configured()) throw new DshDriverError(-1, UNCONFIGURED_MESSAGE);
-  const init = { method, headers: authHeaders() };
+  fetchImpl = fetch, retried = false) {
+  const cfg = driverConfig();
+  if (!cfg || !cfg.url) throw new DshDriverError(-1, UNCONFIGURED_MESSAGE);
+  // 用同一份 cfg 的令牌，避免 authHeaders() 再读一次文件时令牌已轮换导致「新 URL + 旧令牌」
+  const init = { method, headers: authHeaders(cfg.token) };
   if (payload !== null && payload !== undefined) init.body = pyJsonDumps(payload);
   const controller = new AbortController();
   let aborted = false;
@@ -274,9 +344,18 @@ export async function request(method, path, payload = null, timeoutMs = REQUEST_
   try {
     let response;
     try {
-      response = await fetchImpl(driverUrl() + path, init);
+      response = await fetchImpl(cfg.url + path, init);
     } catch (error) {
       throw transportError(error, aborted, timeoutMs);
+    }
+    // 独立站点：dsh 重启/令牌轮换后文件已重写，旧令牌会 401/403。
+    // 只在「没有 env 覆盖」时重读一次文件并重试，避免把真鉴权失败吞成循环。
+    if ((response.status === 401 || response.status === 403) && !retried
+        && !process.env[URL_ENV]) {
+      clearTimeout(timer);
+      try { await response.body?.cancel(); } catch { /* 旧响应已断：忽略 */ }
+      invalidateDriverConfig();
+      return request(method, path, payload, timeoutMs, fetchImpl, true);
     }
     if (response.status >= 400) {
       let raw = '';

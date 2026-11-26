@@ -24,8 +24,9 @@
  *   两条与正常 dispose 共用同一个幂等 `teardown()`, 因此正常路径行为不变。
  */
 import { spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync }
-  from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { chmodSync, createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync,
+  statSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -142,6 +143,89 @@ const NODE_PROBE_CODE = 'import("node:sqlite").then((m)=>{'
   + 'console.error(String((e&&e.message)||e));process.exit(3)})';
 /** 探测超时（与 Python 侧 PREFLIGHT_TIMEOUT_MS 同量级：探不动就放行，绝不卡住激活） */
 const NODE_PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * 驱动端点交接（2026-11-26，Node 独立站点）：令牌与端点写在同机 0600 文件里，
+ * 独立后端读它而不是要求用户把 URL/令牌复制进 systemd 环境。
+ *
+ * 为什么令牌单独一个文件：driver.json 在 dsh 退出时会被删，而令牌必须跨 apply/重启稳定
+ * （Q9 A）；`config.driverToken` 可覆盖，覆盖时不生成文件。
+ */
+const DRIVER_JSON_NAME = 'driver.json';
+const DRIVER_TOKEN_NAME = 'driver.token';
+
+/** driver.json 路径：TS_AGENT_DRIVER_FILE 覆盖，缺省 ~/.touchstone/driver.json */
+function driverJsonPath() {
+  return resolve(process.env.TS_AGENT_DRIVER_FILE || join(homedir(), '.touchstone', DRIVER_JSON_NAME));
+}
+
+/** 令牌文件：与 driver.json 同目录（测试用 TS_AGENT_DRIVER_FILE 即可整组隔离） */
+function driverTokenPath() {
+  return join(dirname(driverJsonPath()), DRIVER_TOKEN_NAME);
+}
+
+/** 读稳定令牌；不存在则生成并 0600 落盘。config.driverToken 优先（覆盖时不落盘）。 */
+function resolveDriverToken(configToken) {
+  const override = String(configToken || '').trim();
+  if (override) return override;
+  const file = driverTokenPath();
+  try {
+    const existing = readFileSync(file, 'utf8').trim();
+    if (existing) return existing;
+  } catch {
+    // 不存在/不可读：生成新的
+  }
+  const token = randomUUID();
+  try {
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${token}\n`, { encoding: 'utf8', mode: 0o600 });
+    renameSync(tmp, file);
+    try { chmodSync(file, 0o600); } catch { /* Windows 无 POSIX mode：忽略 */ }
+  } catch {
+    // 文件写失败不阻断驱动：令牌仍在内存里，只是独立后端读不到
+  }
+  return token;
+}
+
+/** 原子写 driver.json（0600）。失败只告警，不阻断插件激活。 */
+function writeDriverEndpoint({ url, token, port, profile, logger }) {
+  const file = driverJsonPath();
+  const payload = {
+    version: 1,
+    url,
+    token,
+    pid: process.pid,
+    port,
+    profile: profile || '',
+    updated_at: new Date().toISOString(),
+  };
+  try {
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(payload)}\n`, { encoding: 'utf8', mode: 0o600 });
+    renameSync(tmp, file);
+    try { chmodSync(file, 0o600); } catch { /* Windows 无 POSIX mode：忽略 */ }
+  } catch (error) {
+    logger.warn(`touchstone: 驱动端点文件写入失败（独立站点将读不到驱动）: ${error && error.message}`);
+  }
+}
+
+/** 只删「自己的」driver.json：热重载/多实例时不要误删后来者的端点。 */
+function removeDriverEndpoint(logger) {
+  const file = driverJsonPath();
+  let removed = false;
+  try {
+    const row = JSON.parse(readFileSync(file, 'utf8'));
+    if (row && row.pid === process.pid) {
+      rmSync(file, { force: true });
+      removed = true;
+    }
+  } catch {
+    // 不存在/损坏/不是自己的：不动
+  }
+  if (removed && logger) logger.info('touchstone: driver-only 端点文件已清理');
+}
 
 /** 解析 `config.backend`；未知值 warn 一句后按缺省 node 处理（不静默、不猜测） */
 function resolveBackend(config, logger) {
@@ -856,9 +940,12 @@ export async function apply(ctx, config = {}) {
   // 显式 config.repoDir 仍优先 —— 要指向开发中的工作副本、或包被拆开放置时才需要写。
   const repoDir = config.repoDir || PACKAGE_DIR;
   const backend = resolveBackend(config, logger);
+  // 驱动-only（2026-11-26）：独立站点由用户自己起，本插件只提供 agent 驱动与连接信息。
+  // 不 spawn 后端、不取库锁、不注册 /touchstone；普通形态行为完全不变。
+  const driverOnly = config.driverOnly === true;
   const entryRel = backend === BACKEND_NODE ? NODE_ENTRY_REL : PYTHON_ENTRY_REL;
   const entryPath = join(repoDir, entryRel);
-  const entryMissing = !existsSync(entryPath);
+  const entryMissing = !driverOnly && !existsSync(entryPath);
   if (entryMissing) {
     logger.warn(`touchstone: 找不到 ${entryPath}（repoDir 配置有误, 或安装包不完整）`);
     // Python 侧行为与改动前一致：不注册路由、直接退出（存量用户不受影响）。
@@ -885,6 +972,11 @@ export async function apply(ctx, config = {}) {
   const webServer = ctx.get('webServer');
   const myDriver = new AgentDriver(ctx, logger);
   driver = myDriver;
+  myDriver.driverOnly = driverOnly;
+  if (driverOnly) {
+    // 稳定令牌：独立后端读同一个文件；config.driverToken 优先（覆盖时不落盘）
+    myDriver.token = resolveDriverToken(config.driverToken);
+  }
   myDriver.start();
   void loadUserMessageFactory(logger).then((factory) => {
     if (driver === myDriver && factory) myDriver._userMessageFactory = factory;
@@ -894,6 +986,20 @@ export async function apply(ctx, config = {}) {
   });
   const driverUrl = webServer && webServer.port
     ? `http://127.0.0.1:${webServer.port}/touchstone-agent` : '';
+  if (driverOnly) {
+    if (driverUrl) {
+      writeDriverEndpoint({
+        url: driverUrl,
+        token: myDriver.token,
+        port: webServer.port,
+        profile: (ctx.config && ctx.config.profile) || process.env.DSH_PROFILE || '',
+        logger,
+      });
+      logger.info(`touchstone: driver-only 已就绪（${driverUrl}），独立站点读 ${driverJsonPath()}`);
+    } else {
+      logger.warn('touchstone: driver-only 缺少 webServer，无法写驱动端点文件');
+    }
+  }
 
   // 两个后端共用的参数尾巴（方案 §3.2 的进程契约）：只差入口路径与 node 的进程选项，
   // 因此从入口之后的部分**逐字相同** —— 薄壳不需要为哪个后端分叉。
@@ -934,7 +1040,7 @@ export async function apply(ctx, config = {}) {
   let myLog = null;
   /** 待拉起的命令（null = 本次不拉后端：入口缺失/缺依赖/缺解释器，三种都有提示页） */
   let launch = null;
-  if (backend === BACKEND_NODE) {
+  if (!driverOnly && backend === BACKEND_NODE) {
     // Node 后端：不探测解释器、不跑依赖预检、不会有缺依赖提示页。
     // 用 process.execPath（= 当前 dsh 宿主跑的那个 node）而不是 PATH 上的 `node`：
     // 用户机器上可能根本没有 node 在 PATH 里（dsh 自己是打包运行的），
@@ -972,7 +1078,7 @@ export async function apply(ctx, config = {}) {
           + '② 在本插件 config 里显式写 backend: python（Python 版随包分发、未退役）后停用再启用');
       }
     }
-  } else {
+  } else if (!driverOnly) {
     const pythonPath = config.pythonPath || await resolveDefaultPython(childEnv);
     if (!pythonPath) {
       backendHint = renderNoPythonHint();
@@ -997,7 +1103,7 @@ export async function apply(ctx, config = {}) {
     }
   }
 
-  if (launch) {
+  if (!driverOnly && launch) {
     logger.info(`touchstone: 启动后端（${backend}） ${launch.cmd} ${launch.argv.join(' ')}`);
     // stdio[0] 必须是 pipe 且**永不写入**：这是父死感知的 A 通道——dsh 进程无论
     // 优雅退出还是被 kill -9，OS 都会关闭该管道写端，后端读到 EOF 即自主退出
@@ -1077,7 +1183,9 @@ export async function apply(ctx, config = {}) {
   }
 
   let disposeRoute = null;
-  if (!webServer) {
+  if (driverOnly) {
+    // 驱动-only 不反代面板：独立站点走自己的 URL，dsh 侧栏入口由客户端按 /mode 隐藏
+  } else if (!webServer) {
     logger.warn('touchstone: webServer 服务不可用(dsh web profile 之外?), 不注册路由');
   } else {
     disposeRoute = webServer.register({ kind: 'prefix', path: '/touchstone', handler: proxy });
@@ -1104,6 +1212,7 @@ export async function apply(ctx, config = {}) {
     } catch (error) {
       logger.warn(`touchstone: 驱动释放失败（忽略）: ${error && error.message}`);
     }
+    if (driverOnly) removeDriverEndpoint(logger);
     await stopChild(myChild, logger, why);
     if (myLog) {                    // 子进程停稳后再收日志流：最后几行不丢
       try { myLog.end(); } catch { /* 已关闭：忽略 */ }

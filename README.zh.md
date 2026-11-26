@@ -32,9 +32,9 @@ Touchstone 把「我们真该多测一点」变成一条持续转动的流水线
 一个写者（不会有两个 agent 同时改同一份检出），并且全流程可观测——逐轮实时日志、可渲染的会话窗口、
 以及基于 SSE 的看板。
 
-Touchstone 是**本地运行**的：独立形态是 Python 站点；插件形态自 2026-10-15 起缺省走包内 Node 后端
-（要回 Python 就在插件 config 里显式写 `backend: python`）。两种形态都是 SQLite + 文件系统工作区，
-除了你的 `dsh` 宿主发起的模型调用之外，数据不出本机。
+Touchstone 是**本地运行**的：独立站点缺省走 Node 后端（Python 用 `TS_BACKEND=python` 显式回退），
+插件形态自 2026-10-15 起缺省也走包内 Node 后端（要回 Python 就在插件 config 里显式写 `backend: python`）。
+两种形态都是 SQLite + 文件系统工作区；独立站点在 dsh 以驱动-only 模式运行时也能执行 agent。
 
 ## 快速开始
 
@@ -128,16 +128,16 @@ Ctrl+C 停掉 `dsh`，用同一条命令再启动。侧栏这时会多出 **Touc
 [打开交互 Demo](https://gavinc-cn.github.io/touchstone-dsh/demo.html)，在浏览器里走一遍项目、任务、看板和
 会话流程。它是**静态模拟**：不连后端、不读仓库、不发起模型调用。
 
-### 独立站点（不能执行 agent）
+### 独立站点（Node 默认，多用户；可接 dsh 执行 agent）
 
-适合浏览项目、案例库、bug 报告、看板与监控。界面与插件形态相同，但**不能执行 agent**——agent 只存在于
-`dsh` 宿主进程内。需要 Python 3.12+。
+适合多人共用一台机器：独立进程、普通登录、各自项目；dsh 只作为 agent 运行时。需要 Node.js 22.19+
+（站点与前端构建）。装上 dsh 与 Touchstone 插件、并在插件 config 里开 `driverOnly: true` 后，
+任务/看板/会话投递会走 dsh 的 agent；没有驱动时站点仍可登录浏览，任务会报「驱动不可用」。
 
 ```bash
 git clone https://github.com/gavinc-cn/touchstone-dsh.git
 cd touchstone-dsh
-python3 -m pip install -r backend_py/requirements.txt
-./touchstone.sh start          # 首次启动会自动构建前端，然后监听 127.0.0.1:4601
+./touchstone.sh start          # 首次启动自动 npm install + build，监听 127.0.0.1:4601
 ./touchstone.sh status         # 查看 PID 与实际端口
 ./touchstone.sh stop
 ```
@@ -146,27 +146,52 @@ python3 -m pip install -r backend_py/requirements.txt
 随机一次性初始口令**只在启动横幅打印一次**：
 
 ```bash
-grep '一次性初始口令' .run/server.log     # 或：./touchstone.sh status
+grep '一次性初始口令' .run/server.log
 ```
 
 首次登录会被要求改密。想跳过一次性口令和强制改密，在首次启动前设置
 `TS_ADMIN_PASSWORD=<你的口令>`。
 
-独立站点与插件形态默认共用同一个数据库（`~/.touchstone/touchstone.db`），运行时互斥：第二个实例会拒绝
-启动，并打印当前占用者。
+**让独立站点执行 agent**：dsh 与插件照常运行，但把插件切成只提供驱动、不起第二个后端：
 
-### 插件形态改用 Python 后端
+```yaml
+- id: touchstone-dsh
+  config: { driverOnly: true }
+```
 
-插件缺省后端是 Node。若要使用观测期回滚档，在插件 config 里显式写 `backend: python`（删掉该键不会改变
-缺省值），并用 pip（不是 npm）安装该后端的依赖：
+插件会写 0600 的驱动端点文件；独立站点自动读取，dsh 重启/换端口后自动重连。侧栏 Touchstone 入口在
+驱动-only 模式下隐藏，站点用自己的 URL 打开。
+
+**多用户与边界**：独立站点有普通登录/注册与 admin 用户管理；每个用户只看自己的项目，admin 只管理账号。
+这是**可信团队内的逻辑隔离，不是安全沙箱**：任何能访问端口的人都能自助注册，目录浏览对所有登录用户
+开放，agent 以 dsh 的 OS 用户运行。新建/修改项目时，`project_dir`/`work_dir` 与其他用户的项目重复会
+被拒绝（同用户重复仍提醒但可保存）。
+
+独立站点与插件普通形态默认共用同一个数据库（`~/.touchstone/touchstone.db`），运行时互斥：第二个实例
+会拒绝启动并打印当前占用者。驱动-only 模式不取库锁。
+
+### Python 后端（遗留回退，不追平本批行为）
+
+独立站点缺省是 Node；需要旧后端时用 `TS_BACKEND=python`，并装 Python 依赖：
+
+```bash
+python3 -m pip install -r backend_py/requirements.txt
+TS_BACKEND=python ./touchstone.sh start
+# Windows: python -m pip install -r backend_py\requirements.txt
+#          python touchstone.py start（先设 TS_BACKEND=python）
+```
+
+插件缺省后端也是 Node。要回滚：在插件 config 里显式写 `backend: python`（删掉该键不会改变缺省值），
+并用 pip（不是 npm）安装该后端的依赖：
 
 ```bash
 pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/backend_py/requirements.txt
 # Windows 用 python -m pip install ...（官方安装器只装 python.exe，没有 python3）
 ```
 
-插件按 `python` → `python3` 的顺序探测，使用第一个能运行的解释器。如果探到的不是你装依赖的那支，可在
-profile patch 里指定解释器：
+本批的「driver-only 驱动交接 / 跨用户重复目录拒绝 / 多用户独立站点」是 **Node-only**，Python 侧保持
+原样（不读 driver.json、不拦跨用户重复）。插件按 `python` → `python3` 的顺序探测，使用第一个能运行的
+解释器；如果探到的不是你装依赖的那支，可在 profile patch 里指定解释器：
 
 ```yaml
 - id: touchstone-dsh
@@ -190,7 +215,7 @@ cd touchstone-dsh
 
 ### Windows
 
-跨平台启停器为独立站点提供同一套命令；插件按与 Linux 相同的方式安装：
+跨平台启停器为独立站点提供同一套命令，**默认也启动 Node 后端**（要求 Node.js 22.19+；启动器本身仍是 Python 脚本，需要 Python 3.12+）。插件按与 Linux 相同的方式安装：
 
 ```bash
 python touchstone.py start | stop | restart | status | build | test
@@ -213,8 +238,9 @@ python touchstone.py start | stop | restart | status | build | test
 - **内置压测**。压测任务先让 agent 产出场景与脚本，之后由平台自己发压，一个任务可跑 N 次，每次都有
   指标、图表与 Markdown/JSON 报告。
 - **可选集成**。飞书（Lark）推送通知与卡片双向作答；案例库的可选语义检索（RAG）。
-- **自包含技术栈**。后端：包内 Node 后端（插件形态缺省，需 Node 24.9+）或 Python 标准库 + 4 个小依赖
-  （独立形态 / `backend: python`）；前端：React + Vite；存储：SQLite + 普通文件。Linux 与 Windows 均可运行。
+- **自包含技术栈**。后端：包内 Node 后端（独立站点与插件缺省；站点需 Node 22.19+，dsh 插件本身需
+  24.9+），或 Python 标准库 + 4 个小依赖（遗留回退：`TS_BACKEND=python` / `backend: python`）；
+  前端：React + Vite；存储：SQLite + 普通文件。Linux 与 Windows 均可运行。
 
 ## 界面截图
 
@@ -284,8 +310,11 @@ flowchart LR
 
 | 环境变量 | 默认值 | 作用 |
 |----------|--------|------|
+| `TS_BACKEND` | `node` | 独立站点后端：`node`（缺省）/ `python`（遗留回退） |
 | `TS_PORT` / `TS_HOST` | `4601` / `127.0.0.1` | 监听地址；`TS_HOST=0.0.0.0` 可对局域网开放 |
-| `TS_PYTHON` | `python3` | 启停器使用的解释器（需装好运行依赖） |
+| `TS_NODE` / `TS_NPM` | `node` / `npm` | Node 分支的可执行文件路径（不在 PATH 时用） |
+| `TS_PYTHON` | `python3` | Python 回退分支的解释器（需装好运行依赖） |
+| `TS_AGENT_DRIVER_FILE` | `~/.touchstone/driver.json` | 驱动端点文件路径（独立站点读插件 `driverOnly` 写的文件） |
 | `TOUCHSTONE_DB` | `~/.touchstone/touchstone.db` | SQLite 数据库，必须放本地盘——文件锁在 CIFS/网盘上不可用 |
 | `TS_ADMIN_PASSWORD` | *（随机，打印一次）* | `admin` 初始口令；设了就跳过强制改密 |
 | `TS_WEB_DIR` | `webui/dist` | 站点托管的前端静态目录 |
@@ -320,7 +349,8 @@ flowchart LR
 如实说明的已知限制：
 
 - **界面目前只有中文。**
-- **agent 执行必须走插件形态**；独立形态是「没有 agent 的站点」。
+- **agent 执行需要 dsh 驱动**：插件形态天然有；独立站点把插件切成 `driverOnly` 后也有。没有驱动时
+  独立站点仍可登录浏览，任务/卡片会报「驱动不可用」。
 - **回退与「压缩并新建」是语义近似**——回退是从更早的节点另起一支（原会话保留），不是原地截断。
 - **模型请求失败没有错误横幅**——`dsh` 没有对应事件通道，会话窗只能显示宿主真实回报的内容。
 - **Windows 启停器已实现，但 `dsh` 在 Windows 上尚未实机验证。**
@@ -330,9 +360,10 @@ flowchart LR
 
 ```
 touchstone-dsh/
-├── backend/             Node 后端（插件形态缺省）：server.js + lib/ + routes/ + schema/
+├── backend/             Node 后端（独立站点与插件缺省）：server.js + lib/ + routes/ + schema/
 ├── backend_py/          Python 后端：server.py、runner.py、waitq.py、board.py、chat.py、db.py……
-│                        （+ requirements.txt）；「保留但不退役」，独立形态 / backend: python 走它
+│                        （+ requirements.txt）；遗留回退（TS_BACKEND=python / backend: python），
+│                        本批 Node-only 行为不追平
 ├── builtin_prompts/     注入首轮提示词的提示词资产
 ├── dsh-plugin/          dsh 插件包（Node 薄壳 + 驱动 + 客户端 bundle）
 │                        + autocommit/（自动提交守卫，bundle 第二行，随包发）

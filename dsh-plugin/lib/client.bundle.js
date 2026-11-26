@@ -127,6 +127,7 @@ function useOpen() {
 const COMMAND_ID = 'touchstone.toggle'; // 官方命令 id(dsh 要求: 小写点分)
 const KEY_CODE = 'KeyT';                // 物理键(Alt+T 的 T)
 let shortcuts = null;                   // 官方 shortcuts 服务(未注册成功时为 null)
+let driverOnlyMode = false;             // 驱动-only 探测结果（异步写入；快捷键据此早退）
 
 /** 事件是否发生在文本输入控件里(判定口径与 dsh 的适配器一致)。 */
 function isEditableTarget(e) {
@@ -185,7 +186,7 @@ function toggleByKey(e) {
 }
 
 /** 宿主页 keydown 监听体(capture 阶段; 函数引用稳定, 便于 dispose 时精确解绑)。 */
-function onHostKey(e) { toggleByKey(e); }
+function onHostKey(e) { if (driverOnlyMode) return; toggleByKey(e); }
 
 // ── 侧栏入口按钮的配色与几何(2026-10-09 修) ──────────────────────────────────
 // 血案: 原先写 color:'var(--dsw-alias-text-l1, #e8e8e8)' —— dsh **没有** text-l1 这族
@@ -245,9 +246,24 @@ function mountEntryStyle() {
   }
 }
 
+/**
+ * 驱动-only 模式下隐藏侧栏入口（2026-11-26）。探测是异步的；组件先渲染、查到后再返回 null。
+ * 查询失败/普通形态一律 false（绝不因为探测失败把入口藏掉）。
+ */
+function useDriverOnly() {
+  const [only, setOnly] = React.useState(false);
+  React.useEffect(() => {
+    let alive = true;
+    detectDriverOnly().then((v) => { if (alive) setOnly(v); });
+    return () => { alive = false; };
+  }, []);
+  return only;
+}
+
 // 侧栏入口按钮(footer.action 槽; wide=侧栏展开态显示文字)
 function Toggle(props) {
   const wide = !!(props && props.wide);
+  if (useDriverOnly()) return null;   // 驱动-only 形态没有站点面板：不渲染入口
   const isOpen = useOpen();
   const lang = useLang(); // 订阅语言: 面板打开期间切语言也更新 title/aria/文案
   const title = entryTitle(lang);
@@ -604,8 +620,26 @@ function Panel() {
     }, '✕'));
 }
 
+/**
+ * 驱动-only 探测（2026-11-26）：插件服务端在 /touchstone-agent/mode 免令牌回一个布尔。
+ * 查不到/请求失败一律按普通形态处理（绝不能因为探测失败把面板藏掉）。
+ */
+async function detectDriverOnly() {
+  try {
+    const res = await fetch('/touchstone-agent/mode', { cache: 'no-store' });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return Boolean(data && data.driverOnly === true);
+  } catch {
+    return false;
+  }
+}
+
 // cordis 客户端插件入口: 等 slots 服务就位后注册两个 UI 槽, 再挂快捷键
 function apply(ctx) {
+  // 驱动-only 探测异步写入 driverOnlyMode；入口组件另行在查到后返回 null，
+  // 这里保持同步注册（客户端插件 apply 的既有契约 + 自检脚本按同步调用）。
+  void detectDriverOnly().then((v) => { driverOnlyMode = v; });
   // 侧栏入口的交互态样式表(悬停/开合/聚焦环), 与本插件同生命周期
   ctx.effect(() => mountEntryStyle(), 'touchstone: 侧栏入口样式');
   const slots = ctx.get('slots');
@@ -640,7 +674,7 @@ function apply(ctx) {
         },
         regions: ['page', 'editable'], // 聊天输入框里也认(终端 xterm 不抢)
         modals: [],
-        resolve: () => ({ status: 'handled', run: () => setOpen(!open) }),
+        resolve: () => ({ status: 'handled', run: () => { if (!driverOnlyMode) setOpen(!open); } }),
       }), 'touchstone: 快捷键');
     } catch (error) {
       shortcuts = null;

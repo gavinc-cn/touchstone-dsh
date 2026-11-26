@@ -102,6 +102,12 @@ import {
 export const RECONNECT_MIN = 1.0;
 /** 重连退避上限（秒）：与 Python 同名同值导出**仅供对照**，本实现不参与计算（口径见上） */
 export const RECONNECT_MAX = 10.0;
+/**
+ * 驱动未配置/不可用时的重试退避（ms）：独立站点先起、dsh 后起时用。
+ * 5s 起、30s 封顶；只在 `driverConfigured() === false` 时使用，正常流重连仍用 1s。
+ */
+export const DRIVER_RETRY_MIN_MS = 5000;
+export const DRIVER_RETRY_MAX_MS = 30000;
 /** 读空闲上限（秒）：插件每 15s 发一次 keepalive 注释帧，这里放宽到 4 倍留抖动余量 */
 export const STREAM_IDLE = 60.0;
 
@@ -202,9 +208,15 @@ export class EventHub {
   constructor({
     reconnectMinMs = RECONNECT_MIN * 1000,
     streamIdleMs = STREAM_IDLE * 1000,
+    driverRetryMinMs = DRIVER_RETRY_MIN_MS,
+    driverRetryMaxMs = DRIVER_RETRY_MAX_MS,
   } = {}) {
     this._reconnectMinMs = Math.max(0, Number(reconnectMinMs));
     this._streamIdleMs = Math.max(0, Number(streamIdleMs));
+    this._driverRetryMinMs = Math.max(0, Number(driverRetryMinMs));
+    this._driverRetryMaxMs = Math.max(this._driverRetryMinMs, Number(driverRetryMaxMs));
+    this._driverRetryDelay = this._driverRetryMinMs;
+    this._driverRetryTimer = null;
     this._sessions = new Map();       // sid -> 实时态（字段见文件头；插入序＝快照序）
     // 宿主归档集（看板「已完成」双向同步）：null=未知（断连/未对齐），Set=已知整表。
     this._archived = null;
@@ -237,8 +249,20 @@ export class EventHub {
    * 也不会再建流（见 `_run`）。
    */
   start() {
-    if (!driverConfigured()) return false;
     if (this._running) return false;
+    // start 是「重新开始」：清掉上一次 stop 的标志，否则未配置时的退避重试会被旧标志挡住
+    this._stop = false;
+    if (!driverConfigured()) {
+      // 独立站点先起、dsh 后起：不启动消费循环，但挂一个可 unref 的退避重试；
+      // 驱动文件出现后自动 start()，不需要重启站点。
+      this._scheduleDriverRetry();
+      return false;
+    }
+    if (this._driverRetryTimer !== null) {
+      clearTimeout(this._driverRetryTimer);
+      this._driverRetryTimer = null;
+    }
+    this._driverRetryDelay = this._driverRetryMinMs;
     this._gen += 1;
     const gen = this._gen;
     this._stop = false;
@@ -267,6 +291,10 @@ export class EventHub {
    */
   async stop(timeoutMs = 2000) {
     this._stop = true;
+    if (this._driverRetryTimer !== null) {
+      clearTimeout(this._driverRetryTimer);
+      this._driverRetryTimer = null;
+    }
     this._wakeWaiters();        // 对齐 notify_all：wait() 被唤醒但值未变 ⇒ resolve false
     this._wakeConnWaiters();
     this._wakeSleeps();         // Node 增补：退避睡眠可打断（Python 的 join 只能干等）
@@ -474,13 +502,31 @@ export class EventHub {
   // ---------- 内部：连接与折叠 ----------
 
   /**
+   * 驱动未配置时的退避重试（独立站点先起、dsh 后起）。定时器 unref：不阻止进程退出；
+   * `stop()` 清掉它。驱动一旦出现就复用正常的 `start()` 建立消费循环。
+   */
+  _scheduleDriverRetry() {
+    if (this._stop || this._driverRetryTimer !== null) return;
+    const delay = this._driverRetryDelay;
+    this._driverRetryTimer = setTimeout(() => {
+      this._driverRetryTimer = null;
+      if (this._stop || this._running) return;
+      if (driverConfigured()) {
+        this.start();
+        return;
+      }
+      this._driverRetryDelay = Math.min(this._driverRetryDelay * 2, this._driverRetryMaxMs);
+      this._scheduleDriverRetry();
+    }, delay);
+    if (this._driverRetryTimer.unref) this._driverRetryTimer.unref();
+  }
+
+  /**
    * 消费循环：每次（重）连前做一次对齐（首连的初始快照 + 补断连期间的增删），
    * 然后挂 `since=last_seq` 的状态流；任何异常都走「断连=未知 → 退避 → 重连」。
    *
-   * **退避口径＝Python 的实际行为（恒为基数）**：每次重连尝试前 sleep 基数，不翻倍——
-   * Python `dshevents.py:240-241` 的 `finally: backoff = RECONNECT_MIN` 会把 `except` 分支
-   * `continue` 前的翻倍立刻复位，实测每次都是 1.0s（见文件头差异 ④）。`RECONNECT_MAX` 只导出
-   * 对照、不参与计算；**要改成真退避必须两侧一起改**。
+   * **退避口径**：有驱动时的流重连保持 1s（与 Python 现行为一致，见文件头差异 ④）；
+   * 驱动整个缺失时改用 5s→30s（Node 独立站点新增），避免 dsh 长时间不在线时刷请求/日志。
    *
    * **代际守卫**（`gen`）：`stop()` 超时返回后旧循环可能还在收尾（正在等的 `/live` 才返回），
    * 而调用方已 `start()` 了新循环。故本函数内一切「我是否还应继续/是否可改状态」的判据都走
@@ -490,7 +536,7 @@ export class EventHub {
   async _run(gen = this._gen) {
     const current = () => this._gen === gen;      // 自己仍是当前那一代
     const stopped = () => this._stop || !current();
-    const backoff = this._reconnectMinMs;         // 恒基数：翻倍逻辑被 Python 的 finally 吃掉
+    let driverBackoff = this._driverRetryMinMs;   // 仅在驱动不可用时 5s→30s 退避
     try {
       while (!stopped()) {
         try {
@@ -510,7 +556,14 @@ export class EventHub {
         } catch {
           if (current()) this._setConnected(false);
           if (stopped()) break;
-          await this._sleep(backoff);
+          // 有驱动时的流重连保持 1s（与 Python 现行为一致）；驱动整个缺失时
+          // 用 5s→30s，避免 dsh 长时间不在线时每秒打一次请求/日志。
+          const driverUp = driverConfigured();
+          const delay = driverUp ? this._reconnectMinMs : driverBackoff;
+          driverBackoff = driverUp
+            ? this._driverRetryMinMs
+            : Math.min(driverBackoff * 2, this._driverRetryMaxMs);
+          await this._sleep(delay);
           if (stopped()) break;
         }
       }

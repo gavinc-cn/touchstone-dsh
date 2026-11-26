@@ -20,7 +20,10 @@
  *   ⑦ start()：未配置驱动返回 false 且不起消费循环（不连网）。
  */
 import assert from 'node:assert/strict';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import {
@@ -44,7 +47,7 @@ import {
   wait,
   waitConnected,
 } from '../lib/dshevents.js';
-import { configured } from '../lib/dshdriver.js';
+import { DRIVER_FILE_ENV, configured } from '../lib/dshdriver.js';
 
 /** 驱动连接信息环境变量（与 dshdriver.URL_ENV 同值；测试里显式定向到假驱动） */
 const DRIVER_URL_ENV = 'TS_AGENT_DRIVER_URL';
@@ -883,12 +886,42 @@ test('start()：未配置驱动返回 false 且不起消费循环（不连网）
     assert.equal(hub.stats().reconnects, 0);
     await hub.stop(100);                                    // 幂等、无异常
     assert.equal(await hub.wait(20), false);
-    // 模块级薄封装同样不误连
+    // 模块级薄封装同样不误连（start 会挂一个 unref 的驱动重试定时器，收尾清掉）
     assert.equal(start(), false);
     assert.equal(connected(), false);
+    await stop(100);
   } finally {
     if (prev === undefined) delete process.env[DRIVER_URL_ENV];
     else process.env[DRIVER_URL_ENV] = prev;
+  }
+});
+
+test('驱动文件后到：退避重试自动连上（独立站点先起、dsh 后起）', async () => {
+  const drv = await new FakeStateDriver().start();
+  const dir = mkdtempSync(join(tmpdir(), 'ts-events-file-'));
+  const file = join(dir, 'driver.json');
+  const savedUrl = process.env[DRIVER_URL_ENV];
+  const savedFile = process.env[DRIVER_FILE_ENV];
+  delete process.env[DRIVER_URL_ENV];
+  process.env[DRIVER_FILE_ENV] = file;
+  const hub = new EventHub({ driverRetryMinMs: 20, driverRetryMaxMs: 40, streamIdleMs: 1000 });
+  try {
+    assert.equal(configured(), false);
+    assert.equal(hub.start(), false, '无驱动时不起循环');
+    assert.equal(hub.connected(), false);
+    writeFileSync(file, JSON.stringify({ url: drv.url, token: 'file-token' }), { mode: 0o600 });
+    chmodSync(file, 0o600);
+    assert.ok(await until(hub, () => drv.calls.events >= 1, 2000), '驱动文件出现后应挂上状态流');
+    assert.equal(hub.connected(), true, '状态流建立后应在线');
+    assert.ok(drv.calls.live >= 1, '重连时做一次 /live 对齐');
+  } finally {
+    if (savedUrl === undefined) delete process.env[DRIVER_URL_ENV];
+    else process.env[DRIVER_URL_ENV] = savedUrl;
+    if (savedFile === undefined) delete process.env[DRIVER_FILE_ENV];
+    else process.env[DRIVER_FILE_ENV] = savedFile;
+    await hub.stop(200);
+    await drv.stop();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

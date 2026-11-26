@@ -284,3 +284,33 @@ def test_both_launchers_run_vitest_entry_not_bin_shim():
     # py 侧入口常量与 sh 侧字面量同值（Windows 上 os.sep 为反斜杠，归一后比较）
     assert touchstone.VITEST_ENTRY.replace(os.sep, "/") == "node_modules/vitest/vitest.mjs"
     assert "npm test" not in sh and "npm test" not in py
+
+
+def test_default_backend_is_node_and_env_overrides(monkeypatch):
+    """独立站点缺省 Node；TS_BACKEND=python 显式回退（2026-11-26）。"""
+    import importlib
+    monkeypatch.delenv("TS_BACKEND", raising=False)
+    m = importlib.reload(touchstone)
+    assert m.BACKEND == "node"
+    monkeypatch.setenv("TS_BACKEND", "python")
+    m = importlib.reload(touchstone)
+    assert m.BACKEND == "python"
+    monkeypatch.delenv("TS_BACKEND", raising=False)
+    importlib.reload(touchstone)
+
+
+def test_require_node_version_gate(monkeypatch):
+    """Node < 22.19 在构建/启动前明确失败；达标则通过（node:sqlite 门槛）。"""
+    monkeypatch.setattr(touchstone, "find_node", lambda: "/usr/bin/node")
+    monkeypatch.setattr(touchstone, "find_npm", lambda: "/usr/bin/npm")
+
+    class _Out:
+        def __init__(self, v):
+            self.stdout = v
+
+    monkeypatch.setattr(touchstone.subprocess, "run", lambda *a, **k: _Out("22.18.0"))
+    with pytest.raises(SystemExit):
+        touchstone.require_node()
+
+    monkeypatch.setattr(touchstone.subprocess, "run", lambda *a, **k: _Out("22.19.0"))
+    assert touchstone.require_node() == "/usr/bin/node"

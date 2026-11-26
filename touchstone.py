@@ -6,6 +6,7 @@ Windows 原生运行的首选入口（bash/nohup/kill 不可用），Linux 上�
 .run/server.log）。用法:
 
     python3 touchstone.py start|stop|restart|status|build|test|test-full|test-ui
+    # 独立站点后端缺省 node（backend/server.js）；TS_BACKEND=python 回退 backend_py/server.py
     # Windows: python touchstone.py 或 touchstone.cmd（后者自动解析 python → python3）
 
 行为对齐 touchstone.sh:
@@ -13,8 +14,9 @@ Windows 原生运行的首选入口（bash/nohup/kill 不可用），Linux 上�
   TS_FORCE_INSTALL=1 强制重装；npm run build 按需：源码指纹未变化且 dist 在
   则跳过，TS_FORCE_BUILD=1 强制重建；无 dist 则 server.py 直接退出），
   任一步失败即中止启动；
-- start 前做运行依赖预检（zstandard/requests 顶层导入，缺失即启动崩）；
-- 后台拉起 backend_py/server.py（Python 后端源码在 backend_py/）：POSIX
+- 独立站点缺省 Node：start 前预检 node >= 22.19 + npm；TS_BACKEND=python 时做
+  Python 运行依赖预检（zstandard/requests 顶层导入，缺失即启动崩）；
+- 后台拉起 backend/server.js（缺省）或 backend_py/server.py（回退）：POSIX
   start_new_session 脱离本进程组、Windows
   DETACHED_PROCESS 脱离控制台，日志追加写 .run/server.log，env 注入
   PYTHONUTF8=1 统一子进程编码；
@@ -50,10 +52,15 @@ sys.path.insert(0, os.path.join(ROOT, "backend_py"))
 import platcompat  # noqa: E402 — 必须在 backend_py 入 sys.path 之后导入
 PORT = int(os.environ.get("TS_PORT", "4601"))
 HOST = os.environ.get("TS_HOST", "127.0.0.1")  # 监听地址: 默认仅本机回环, 对外监听显式 TS_HOST=0.0.0.0
-RUN_DIR = os.path.join(ROOT, ".run")
+# 站点后端选择：node（缺省，2026-11-26 起）| python（显式回退）
+BACKEND = (os.environ.get("TS_BACKEND") or "node").strip()
+# 可执行文件：TS_NODE / TS_NPM 可覆盖（Windows 上 node/npm 不一定在 PATH）
+NODE = os.environ.get("TS_NODE") or "node"
+NPM = os.environ.get("TS_NPM") or "npm"
+RUN_DIR = os.environ.get("TOUCHSTONE_RUN_DIR") or os.path.join(ROOT, ".run")
 PID_FILE = os.path.join(RUN_DIR, "server.pid")
 LOG_FILE = os.path.join(RUN_DIR, "server.log")
-PORT_FILE = os.path.join(RUN_DIR, "server.port")  # server.py 落盘的实际监听端口
+PORT_FILE = os.path.join(RUN_DIR, "server.port")  # 后端落盘的实际监听端口
 PROBE_TIMEOUT = 20   # 启动探活超时（秒；实测 server 拉起到可服务含 feishu 入站
                      # 连接等初始化可超 10s，留足余量）
 STOP_TIMEOUT = 5     # SIGTERM 后等待退出的超时（秒）
@@ -130,20 +137,43 @@ def precheck_deps():
 
 
 def find_npm():
-    """定位 npm（Windows 下为 npm.cmd，shutil.which 按 PATHEXT 命中）。"""
-    npm = shutil.which("npm")
+    """定位 npm（TS_NPM 覆盖；Windows 下为 npm.cmd，shutil.which 按 PATHEXT 命中）。"""
+    npm = shutil.which(NPM)
     if not npm:
-        print_err("错误: 未找到 npm（前端构建需要 Node.js）")
+        print_err("错误: 未找到 npm（前端构建需要 Node.js；用 TS_NPM=<路径> 指定）")
         sys.exit(1)
     return npm
 
 
 def find_node():
-    """定位 node（跑 vitest 包入口用；Windows 下为 node.exe）。"""
-    node = shutil.which("node")
+    """定位 node（TS_NODE 覆盖；Windows 下为 node.exe）。"""
+    node = shutil.which(NODE)
     if not node:
-        print_err("错误: 未找到 node（前端单测需要 Node.js）")
+        print_err("错误: 未找到 node（独立站点默认 Node 后端；用 TS_NODE=<路径> 指定，"
+                  "或 TS_BACKEND=python 回退）")
         sys.exit(1)
+    return node
+
+
+def require_node():
+    """Node 运行依赖预检：可执行文件在 + 版本 >= 22.19（node:sqlite 的硬门槛）。
+
+    缺依赖时在构建/启动前报错；否则后端 import 期才崩，用户只会看到一行 traceback。
+    """
+    node = find_node()
+    try:
+        out = subprocess.run([node, "-p", "process.versions.node"],
+                             capture_output=True, text=True, timeout=5)
+        ver = (out.stdout or "").strip()
+        major, minor = (int(x) for x in ver.split(".")[:2])
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        print_err(f"错误: 无法读取 Node 版本（{NODE}）")
+        sys.exit(1)
+    if major < 22 or (major == 22 and minor < 19):
+        print_err(f"错误: Node {ver} 低于 22.19（node:sqlite 需要）")
+        print_err("升级 Node 到 22.19+，或用 TS_BACKEND=python 回退")
+        sys.exit(1)
+    find_npm()
     return node
 
 
@@ -301,11 +331,24 @@ def cmd_start():
         print_err(f"错误: 端口 {actual_port() or PORT} 已被占用(可能是手动启动的服务, "
                   f"未找到 PID 文件 {PID_FILE})")
         sys.exit(1)
-    precheck_deps()
+    if BACKEND not in ("node", "python"):
+        print_err(f"错误: TS_BACKEND 只支持 node / python（当前: {BACKEND}）")
+        sys.exit(1)
+    if BACKEND == "python":
+        precheck_deps()
+    else:
+        require_node()
     cmd_build()
     os.makedirs(RUN_DIR, exist_ok=True)
-    cmd = [sys.executable, os.path.join(ROOT, "backend_py", "server.py"),
-           "--port", str(PORT), "--host", HOST]
+    if BACKEND == "python":
+        cmd = [sys.executable, os.path.join(ROOT, "backend_py", "server.py"),
+               "--port", str(PORT), "--host", HOST]
+    else:
+        # 独立站点不传 --trust-internal-user / --parent-watch：
+        # 前者是 admin 后门（只允许插件反代），后者是 dsh 子进程的父死感知。
+        cmd = [find_node(), os.path.join(ROOT, "backend", "server.js"),
+               "--port", str(PORT), "--host", HOST,
+               "--web-dir", os.path.join(ROOT, "webui", "dist")]
     env = dict(os.environ, PYTHONUTF8="1")  # 统一 server 及其子进程的文本编码
     with open(LOG_FILE, "ab") as logf:
         if platcompat.IS_WINDOWS:
@@ -325,6 +368,16 @@ def cmd_start():
         f.write(str(proc.pid))
     waited = 0
     while not probe():
+        # 进程已死（端口被占/启动崩溃/Node 版本不满足）时立即报错，
+        # 不白等满 PROBE_TIMEOUT 才从日志里看到原因。
+        if proc.poll() is not None:
+            print_err(f"错误: 后端启动后立即退出 (exit={proc.returncode}), 日志尾部:")
+            print_err(log_tail())
+            try:
+                os.remove(PID_FILE)
+            except OSError:
+                pass
+            sys.exit(1)
         time.sleep(1)
         waited += 1
         if waited >= PROBE_TIMEOUT:

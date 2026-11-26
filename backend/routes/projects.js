@@ -580,6 +580,9 @@ function isIntegrityError(error) {
 const ERR_PROJECT_BODY_MISSING = '未收到项目信息（请求体为空或格式非法），请刷新页面后重试';
 /** 项目名（(user_id, name) 唯一索引）冲突文案（Python 同文） */
 const ERR_PROJECT_NAME_EXISTS = '项目名已存在';
+/** 多用户收口（2026-11-26）：跨用户重复目录的 400 文案（i18n 词条 key） */
+const ERR_PROJECT_DIR_TAKEN = '项目目录已被其他用户使用';
+const ERR_WORK_DIR_TAKEN = '工作目录已被其他用户使用';
 /**
  * SQLite 对 projects(user_id, name) 唯一索引冲突的消息（Python sqlite3 与 node:sqlite
  * 实测逐字节相同）。只有命中它才算真重名。
@@ -700,6 +703,25 @@ function makedirsProjectDirs(workDir) {
   return null;
 }
 
+/**
+ * 跨用户重复目录检查（2026-11-26 多用户收口）：命中其他用户的项目返回字段名，否则空串。
+ *
+ * 只拦 `project_dir` / `work_dir`；**同用户重复不拦**（保持既有"提醒但可保存"体验）。
+ * 修改项目时传 excludeId 排除自身；归档项目也参与比较（取消归档后仍是同一 checkout）。
+ * 路径归一走 `pyNormpath`，与 `dup_check` 同口径。
+ */
+function crossUserDuplicate(ctx, projectDir, workDir, excludeId = null) {
+  const pdir = pyNormpath(String(projectDir || ''));
+  const wdir = pyNormpath(String(workDir || ''));
+  for (const row of dbmod.listProjectsAll({ db: ctx.db })) {
+    if (excludeId !== null && row.id === excludeId) continue;
+    if (row.user_id === ctx.user.id) continue;
+    if (pdir && pyNormpath(String(row.project_dir || '')) === pdir) return 'project_dir';
+    if (wdir && pyNormpath(String(row.work_dir || '')) === wdir) return 'work_dir';
+  }
+  return '';
+}
+
 /** `except OSError as e: 400 {"error": f"工作目录不可用: {e}"}`（建/改项目共用，带空格口径） */
 function respondWorkDirUnavailable(ctx, failure) {
   ctx.errorSpaced(400, '工作目录不可用: {detail}',
@@ -755,6 +777,12 @@ async function apiCreateProject(ctx) {
   const permissionMode = normalizePermissionMode(pyGet(body, 'permission_mode', undefined), '');
   if (reasoningEffort === null || permissionMode === null) {
     ctx.errorSpaced(400, '思考等级或权限档非法');
+    return;
+  }
+  // 跨用户重复目录：先拒绝，再建目录/落库（避免建出目录后才发现不能保存）
+  const dupField = crossUserDuplicate(ctx, projectDir, workDir);
+  if (dupField) {
+    ctx.errorSpaced(400, dupField === 'project_dir' ? ERR_PROJECT_DIR_TAKEN : ERR_WORK_DIR_TAKEN);
     return;
   }
   // Python 的 try 同时罩着 makedirs 与 insert_project；能抛 OSError 的只有 makedirs
@@ -814,6 +842,14 @@ async function apiUpdateProject(ctx, projectId) {
     const newDir = pyStripBare(pyTruthy(bodyDir) ? bodyDir : row.project_dir);
     const bodyWork = pyGet(body, 'work_dir', undefined);
     const newWork = pyStripBare(pyTruthy(bodyWork) ? bodyWork : row.work_dir);
+    // 只在目录真的变化时查重：既有项目（可能是旧数据里的跨用户重复）改名字不应被拦。
+    if (newDir !== row.project_dir || newWork !== row.work_dir) {
+      const dupField = crossUserDuplicate(ctx, newDir, newWork, projectId);
+      if (dupField) {
+        ctx.errorSpaced(400, dupField === 'project_dir' ? ERR_PROJECT_DIR_TAKEN : ERR_WORK_DIR_TAKEN);
+        return;
+      }
+    }
     if (newWork !== row.work_dir) {
       // 工作目录变更：新目录与派生子目录一并创建（幂等），旧目录文件不动
       const failure = makedirsProjectDirs(newWork);

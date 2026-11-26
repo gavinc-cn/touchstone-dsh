@@ -33,10 +33,10 @@ remembers what it already tried. A unified queue keeps exactly one writer per pr
 editing the same checkout at once), and the whole thing is observable — live round logs, a rendered
 session window, and an SSE-backed board.
 
-Touchstone runs **locally**. Standalone mode is a Python web site; plugin mode defaults to the bundled Node
-backend (since 2026-10-15, with `backend: python` as the one-line fallback). Either way it is a SQLite
-database plus a file-system workspace, and no data leaves your machine except for the model calls your
-`dsh` host makes.
+Touchstone runs **locally**. Standalone mode defaults to the bundled Node backend (Python via
+`TS_BACKEND=python`); plugin mode also defaults to Node (since 2026-10-15, with `backend: python` as the
+one-line fallback). Either way it is a SQLite database plus a file-system workspace, and no data leaves your
+machine except for the model calls your `dsh` host makes.
 
 ## Quick start
 
@@ -141,15 +141,16 @@ Plugin backend diagnostics are appended to `~/.touchstone/plugin-backend.log`.
 task, board and session workflow in a browser tab. It is a static simulation: no backend, no repository and
 no model calls.
 
-### Standalone site (no agent execution)
+### Standalone site (Node default, multi-user; optional agent execution)
 
-Useful for browsing projects, the case library, bug reports, the board and monitoring. It serves the same UI
-but **cannot execute an agent** — the agent only exists inside the `dsh` host. Requires Python 3.12+.
+For several people sharing one machine: a standalone process, ordinary login, one project list per user;
+`dsh` only provides the agent runtime. Requires Node.js 22.19+ (site and front-end build). To let the site
+execute agents, keep dsh and the Touchstone plugin running with `driverOnly: true` in the plugin config;
+without a driver the site still logs in and browses, but tasks report "driver unavailable".
 
 ```bash
 git clone https://github.com/gavinc-cn/touchstone-dsh.git
 cd touchstone-dsh
-python3 -m pip install -r backend_py/requirements.txt
 ./touchstone.sh start          # builds the front end on first run, then serves 127.0.0.1:4601
 ./touchstone.sh status         # PID and the actual port
 ./touchstone.sh stop
@@ -159,28 +160,57 @@ Open <http://127.0.0.1:4601>. The first start seeds an `admin` account; without 
 random one-time password is printed **once** in the startup banner:
 
 ```bash
-grep '一次性初始口令' .run/server.log     # or: ./touchstone.sh status
+grep '一次性初始口令' .run/server.log
 ```
 
 First login forces a password change. Set `TS_ADMIN_PASSWORD=<your-password>` before the first start to skip
 the one-time password and the forced change.
 
+**Let the standalone site execute agents**: keep dsh and the plugin running, but turn the plugin into a
+driver-only provider (no second backend):
+
+```yaml
+- id: touchstone-dsh
+  config: { driverOnly: true }
+```
+
+The plugin writes a 0600 driver endpoint file; the standalone site reads it and reconnects after dsh restarts
+or changes ports. The Touchstone sidebar entry is hidden in driver-only mode; use the standalone URL.
+
+**Multi-user and the boundary**: the standalone site has ordinary login/registration and admin user
+management; each user sees only their own projects, and admin only manages accounts. This is a **logical
+separation for a trusted team, not a security sandbox**: anyone who can reach the port can self-register,
+directory browsing is open to every logged-in user, and agents run as the dsh OS user. Creating or editing a
+project is rejected when `project_dir`/`work_dir` is already used by another user (same-user duplicates
+still warn but can be saved).
+
 The standalone site and the plugin share one database (`~/.touchstone/touchstone.db`) and are mutually
-exclusive while running: the second instance refuses to start and names the current holder.
+exclusive while running: the second instance refuses to start and names the current holder. Driver-only mode
+does not take the database lock.
 
-### Python backend in plugin mode
+### Python backend (legacy fallback; this batch's behavior is Node-only)
 
-The plugin's default backend is Node. To use the observation-window fallback instead, set `backend: python`
-in the plugin config (deleting the key does not change the default) and install that backend's dependencies
-with pip, not npm:
+The standalone site defaults to Node; for the old backend set `TS_BACKEND=python` and install Python deps:
+
+```bash
+python3 -m pip install -r backend_py/requirements.txt
+TS_BACKEND=python ./touchstone.sh start
+# Windows: python -m pip install -r backend_py\requirements.txt
+#          set TS_BACKEND=python && python touchstone.py start
+```
+
+The plugin's default backend is also Node. To roll back, set `backend: python` in the plugin config
+(deleting the key does not change the default) and install that backend's dependencies with pip, not npm:
 
 ```bash
 pip install -r ~/.dsh/profiles/web/node_modules/@gavinc-cn/touchstone-dsh/backend_py/requirements.txt
 # Windows: python -m pip install ...   (the official installer ships python.exe, not python3)
 ```
 
-The plugin probes `python`, then `python3`, and uses the first interpreter that runs. If that is not where
-you installed the dependencies, pin another interpreter in the profile patch:
+This batch's driver-only handoff, cross-user duplicate-directory rejection and multi-user standalone site
+are **Node-only**; the Python side is unchanged (no driver.json, no cross-user rejection). The plugin probes
+`python`, then `python3`, and uses the first interpreter that runs. If that is not where you installed the
+dependencies, pin another interpreter in the profile patch:
 
 ```yaml
 - id: touchstone-dsh
@@ -205,8 +235,9 @@ specific interpreter; skip it to use the package's own directory:
 
 ### Windows
 
-The cross-platform launcher offers the same commands for the standalone site; the plugin is installed the same
-way as on Linux:
+The cross-platform launcher offers the same commands for the standalone site and **also defaults to the Node
+backend** (Node.js 22.19+ required; the launcher itself is a Python script, so Python 3.12+ is still needed to
+run it). The plugin is installed the same way as on Linux:
 
 ```bash
 python touchstone.py start | stop | restart | status | build | test
@@ -234,9 +265,10 @@ python touchstone.py start | stop | restart | status | build | test
   drives the load itself, N runs per task, with per-run metrics, charts, and Markdown/JSON reports.
 - **Optional integrations.** Feishu (Lark) push notifications with two-way answering from chat cards, and
   RAG-based semantic search over the case library.
-- **Self-contained stack.** Backend: the bundled Node backend (plugin-mode default, needs Node 24.9+) or
-  the Python standard library plus four small dependencies (standalone mode / `backend: python`).
-  Frontend: React + Vite. Storage: SQLite + plain files. Runs on Linux and Windows.
+- **Self-contained stack.** Backend: the bundled Node backend (default for both standalone and plugin;
+  the site needs Node 22.19+, the dsh plugin itself needs 24.9+), or the Python standard library plus four
+  small dependencies (legacy fallback: `TS_BACKEND=python` / `backend: python`). Frontend: React + Vite.
+  Storage: SQLite + plain files. Runs on Linux and Windows.
 
 ## Screenshots
 
@@ -310,8 +342,11 @@ flowchart LR
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `TS_BACKEND` | `node` | Standalone backend: `node` (default) or `python` (legacy fallback) |
 | `TS_PORT` / `TS_HOST` | `4601` / `127.0.0.1` | Listen address. Use `TS_HOST=0.0.0.0` to expose the site on your LAN |
-| `TS_PYTHON` | `python3` | Interpreter used by the launcher (must have the runtime dependencies) |
+| `TS_NODE` / `TS_NPM` | `node` / `npm` | Node executables used by the launcher (when not on PATH) |
+| `TS_PYTHON` | `python3` | Interpreter for the Python fallback (must have the runtime dependencies) |
+| `TS_AGENT_DRIVER_FILE` | `~/.touchstone/driver.json` | Driver endpoint file the standalone site reads (written by the plugin's `driverOnly` mode) |
 | `TOUCHSTONE_DB` | `~/.touchstone/touchstone.db` | SQLite database. Must live on a local disk — file locking does not work on CIFS/network shares |
 | `TS_ADMIN_PASSWORD` | *(random, printed once)* | Initial `admin` password; setting it skips the forced change |
 | `TS_ADMIN_PASSWORDLESS` | `1` in plugin mode | Seed `admin` with an empty password and no forced change (the plugin shell sets this); ignored when `TS_ADMIN_PASSWORD` is set |
@@ -347,7 +382,9 @@ Runtime paths inside a project's work directory:
 Known limitations, stated plainly:
 
 - **The UI is currently Chinese-only.**
-- **Agent execution requires plugin mode**; standalone mode is the site without the agent.
+- **Agent execution requires a dsh driver**: plugin mode has one natively; standalone mode gets one by
+  running the plugin with `driverOnly`. Without a driver, the standalone site still logs in and browses, but
+  tasks/cards report "driver unavailable".
 - **Rewind and "compact into a new session" are approximations** — rewind starts a new branch at an
   earlier point (the original session is kept), rather than truncating in place.
 - **No error banner for failed model requests** — `dsh` has no event for it, so the session window shows
@@ -360,9 +397,10 @@ Known limitations, stated plainly:
 
 ```
 touchstone-dsh/
-├── backend/             Node backend (the plugin-mode default): server.js + lib/ + routes/ + schema/
+├── backend/             Node backend (default for standalone and plugin): server.js + lib/ + routes/ + schema/
 ├── backend_py/          Python backend: server.py, runner.py, waitq.py, board.py, chat.py, db.py, …
-│                        (+ requirements.txt). Legacy-but-kept; used by standalone mode / backend: python
+│                        (+ requirements.txt). Legacy fallback (TS_BACKEND=python / backend: python);
+│                        this batch's Node-only behavior is not mirrored there
 ├── builtin_prompts/     Prompt assets injected into first-round prompts
 ├── dsh-plugin/          The dsh plugin package (thin Node shell + driver + client bundle)
 │                        + autocommit/ (auto-commit guard, bundle row 2, shipped in the package)

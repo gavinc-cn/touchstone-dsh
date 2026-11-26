@@ -220,6 +220,8 @@ export class AgentDriver {
     this.logger = logger;
     /** 驱动令牌：随子进程环境变量下发，Python 每次请求回带；防止同机其它进程驱动 agent */
     this.token = randomUUID();
+    /** 驱动-only 模式标记（2026-11-26）：客户端据此隐藏侧栏入口；/mode 免令牌只回这个布尔 */
+    this.driverOnly = false;
     /** 平台持有的会话（建/恢复由本插件完成，handle 归本插件） */
     this.sessions = new Map();
     /** 全局可见会话（含用户自己直跑的）：外部会话发现通道，替代逐会话 REST 探测 */
@@ -1220,12 +1222,17 @@ export class AgentDriver {
       this._json(res, 403, { error: `driver 仅接受回环来源（收到 ${peer}）` });
       return;
     }
+    const url = new URL(req.url, 'http://127.0.0.1');
+    const path = url.pathname.slice(DRIVER_PREFIX.length) || '/';
+    // 模式标记免令牌（只回一个布尔，不泄露 URL/令牌）：客户端在注册侧栏前查它。
+    // 放在令牌闸之前，且仍受回环来源限制。
+    if (path === '/mode' && req.method === 'GET') {
+      return this._json(res, 200, { driverOnly: this.driverOnly === true });
+    }
     if (req.headers['x-ts-driver-token'] !== this.token) {
       this._json(res, 403, { error: 'driver 令牌不匹配' });
       return;
     }
-    const url = new URL(req.url, 'http://127.0.0.1');
-    const path = url.pathname.slice(DRIVER_PREFIX.length) || '/';
     try {
       if (path === '/health' && req.method === 'GET') return this._json(res, 200, this._health());
       if (path === '/live' && req.method === 'GET') {

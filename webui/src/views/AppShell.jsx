@@ -15,6 +15,7 @@ import { canonicalPermission, permissionDefaultLabel, permissionItems, permissio
   from '../utils/permission'
 import { effortChoices } from '../utils/sessionEffort'
 import { dirCanGoUp, dirPathText, dirUpTitle, dirRootHint } from '../utils/dirNav'
+import { hasCrossUserDuplicate } from '../utils/dupCheck'
 // 主标签页定义/默认序/布局规范化（含压测面板默认置末的存量迁移）唯一出处
 import { TAB_KEYS, normTabCfg, tabLabel } from '../utils/tabCfg'
 import { RzHandles } from '../components/RzHandles'
@@ -1133,10 +1134,16 @@ export default function AppShell() {
               <span className="dup-owner">{t('被「{user} / {project}」使用', { user: d.username, project: d.project_name })}</span>
             </div>
           ))}
-          <div className="hint" style={{ textAlign: 'left', margin: '6px 0 0' }}>{t('重复的目录可能与其他项目的案例库/报告互相干扰，确认仍要保存？')}</div>
+          {hasCrossUserDuplicate(dups, auth.username) ? (
+            <div className="hint" style={{ textAlign: 'left', margin: '6px 0 0' }}>{t('该目录已被其他用户使用，不能保存；请更换目录')}</div>
+          ) : (
+            <div className="hint" style={{ textAlign: 'left', margin: '6px 0 0' }}>{t('重复的目录可能与其他项目的案例库/报告互相干扰，确认仍要保存？')}</div>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setDupModal(false)}>{t('返回修改')}</Button>
-            <Button onClick={confirmDup}>{t('仍然保存')}</Button>
+            {!hasCrossUserDuplicate(dups, auth.username) && (
+              <Button onClick={confirmDup}>{t('仍然保存')}</Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
