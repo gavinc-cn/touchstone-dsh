@@ -65,6 +65,8 @@ WEB_DIR = os.environ.get("TS_WEB_DIR") or os.path.join(BASE_DIR, "webui", "dist"
 PROJECTS_DIR = os.path.join(BASE_DIR, "projects")
 # 启停运行产物（与 touchstone.py / touchstone.sh 的 RUN_DIR 同目录）：实际监听端口落盘
 # .run/server.port，touchstone 脚本探活与展示按它读取（端口自动顺延后须能感知）。
+# 插件薄壳会下发自己的 TOUCHSTONE_RUN_DIR（~/.touchstone/plugin-run），避免插件后端的
+# 随机端口覆盖独立站点在 <仓库>/.run 的标记。
 # TOUCHSTONE_RUN_DIR 供 e2e 隔离实例重定向（默认 .run 与真实启停共用，
 # e2e spawn 的 server 不得污染真实实例的端口标记）
 RUN_DIR = os.environ.get("TOUCHSTONE_RUN_DIR") or os.path.join(BASE_DIR, ".run")

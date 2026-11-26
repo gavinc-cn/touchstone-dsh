@@ -97,12 +97,8 @@ def actual_port():
         return None
 
 
-def probe():
-    """对本地端口发 HTTP 请求：任何响应（含 302/401）即视为服务在。
-
-    端口优先取 server.py 落盘的实际监听端口（server 绑定失败会自动 port+1
-    顺延，启动器须跟着探新端口），无落盘时回退 TS_PORT/默认端口。"""
-    port = actual_port() or PORT
+def probe_port(port):
+    """对指定端口发 HTTP 请求：任何响应（含 302/401）即视为服务在。"""
     try:
         urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2)
         return True
@@ -110,6 +106,12 @@ def probe():
         return True   # 有 HTTP 响应即活（401 登录墙/302 跳转都算）
     except Exception:
         return False
+
+
+def probe():
+    """探活已在运行的实例：优先按 server.py 落盘的实际监听端口（server 绑定失败
+    会自动 port+1 顺延，启动器须跟着探新端口），无落盘时回退 TS_PORT/默认端口。"""
+    return probe_port(actual_port() or PORT)
 
 
 def log_tail(n=10):
@@ -320,6 +322,16 @@ def cmd_build():
     print("构建完成: webui/dist")
 
 
+def start_port_taken():
+    """start 前置占用检查：只探本次要绑定的配置端口（TS_PORT/默认 4601）。
+
+    不能读 PORT_FILE：它记录的是**已运行实例**的实际端口（Python 绑定失败会顺延，
+    插件后端的随机端口也可能落在这里），拿它探活会把别的实例误判成本端口被占。
+    2026-11-26 实录：插件后端把 43555 写进 .run/server.port，独立站点 start 误报
+    「端口 43555 已被占用」，实际 4601 空闲。"""
+    return probe_port(PORT)
+
+
 def cmd_start():
     """启动：已运行则幂等返回；端口被占（无 PID 文件）报错；否则构建 + 拉起 +
     探活等待。server 以脱离本进程的方式后台运行，日志追加写 .run/server.log。"""
@@ -327,8 +339,8 @@ def cmd_start():
     if pid:
         print(f"已在运行 (PID {pid}, 端口 {PORT})")
         return
-    if probe():
-        print_err(f"错误: 端口 {actual_port() or PORT} 已被占用(可能是手动启动的服务, "
+    if start_port_taken():
+        print_err(f"错误: 端口 {PORT} 已被占用(可能是手动启动的服务, "
                   f"未找到 PID 文件 {PID_FILE})")
         sys.exit(1)
     if BACKEND not in ("node", "python"):
@@ -340,6 +352,11 @@ def cmd_start():
         require_node()
     cmd_build()
     os.makedirs(RUN_DIR, exist_ok=True)
+    # 清掉上一实例/插件形态留下的端口标记：启动等待探活只认本实例随后写入的值
+    try:
+        os.remove(PORT_FILE)
+    except OSError:
+        pass
     if BACKEND == "python":
         cmd = [sys.executable, os.path.join(ROOT, "backend_py", "server.py"),
                "--port", str(PORT), "--host", HOST]

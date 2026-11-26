@@ -78,7 +78,9 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost']);
 
 /**
  * 运行目录：与 Python 侧 `TOUCHSTONE_RUN_DIR` 同口径（缺省 <仓库>/.run）。
- * 独立启动时用它落实际监听端口，供启停器探活/status 读取（plugin 形态也会写，无副作用）。
+ * 独立启动时用它落实际监听端口，供启停器探活/status 读取。插件薄壳会下发自己的
+ * `TOUCHSTONE_RUN_DIR`（~/.touchstone/plugin-run），避免插件后端的随机端口覆盖
+ * 独立站点在 <仓库>/.run 的标记（2026-11-26 实测误报端口占用）。
  */
 function runDir() {
   return process.env.TOUCHSTONE_RUN_DIR || join(REPO_ROOT, '.run');

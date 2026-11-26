@@ -1035,6 +1035,12 @@ export async function apply(ctx, config = {}) {
   // 这一段按 backend 分叉**只到「决定用什么命令拉起」为止**：探测/预检属 Python 专有，
   // 之后 spawn、日志落盘、端口解析、退出处理全部共用（见下面的 launch 分支）。
   const childEnv = { ...process.env, ...extraEnv };
+  // 插件后端运行产物与独立站点分家（2026-11-26）：插件后端 cwd=repoDir，若沿用
+  // 缺省 <repo>/.run，会把随机监听端口写进独立站点的 server.port，让
+  // `./touchstone.sh start` 的前置占用检查读到无关端口而误报。用户显式下发时以用户为准。
+  if (!('TOUCHSTONE_RUN_DIR' in extraEnv) && !process.env.TOUCHSTONE_RUN_DIR) {
+    childEnv.TOUCHSTONE_RUN_DIR = join(homedir(), '.touchstone', 'plugin-run');
+  }
   let myChild = null;
   /** 本次壳的开的后端日志流（teardown 关闭；null = 不可用/未启动） */
   let myLog = null;

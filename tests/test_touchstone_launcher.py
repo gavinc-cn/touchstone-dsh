@@ -314,3 +314,32 @@ def test_require_node_version_gate(monkeypatch):
 
     monkeypatch.setattr(touchstone.subprocess, "run", lambda *a, **k: _Out("22.19.0"))
     assert touchstone.require_node() == "/usr/bin/node"
+
+
+def test_start_precheck_probes_configured_port_not_stale_port_file(tmp_path, monkeypatch):
+    """启动前置占用检查只探 TS_PORT，不读 .run/server.port。
+
+    2026-11-26 实录：插件后端把随机端口 43555 写进 .run/server.port，独立站点
+    `./touchstone.sh start` 的前置检查照它探活，误报「端口 43555 已被占用」，
+    而真正要绑的 4601 是空闲的。回归守卫：探针只能收到配置端口。
+    """
+    monkeypatch.setattr(touchstone, "PORT", 4601)
+    stale = tmp_path / "server.port"
+    stale.write_text("43555", encoding="utf-8")
+    monkeypatch.setattr(touchstone, "PORT_FILE", str(stale))
+    seen = []
+    monkeypatch.setattr(touchstone, "probe_port",
+                        lambda port: seen.append(port) or False)
+
+    assert touchstone.start_port_taken() is False
+    assert seen == [4601]
+
+
+def test_sh_start_precheck_uses_configured_port():
+    """touchstone.sh 的 start 前置检查与 py 侧同口径（静态守卫旧写法不回潮）。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "touchstone.sh"), encoding="utf-8") as f:
+        sh = f.read()
+
+    assert 'if probe_port "$PORT"; then' in sh
+    assert "if probe; then" not in sh   # 旧写法（按 PORT_FILE 探活）不得回潮

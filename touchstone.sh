@@ -82,9 +82,14 @@ actual_port() {
     esac
 }
 
-# 探活: 对本地端口发 HTTP 请求, 收到任何响应(含 302/200)即视为服务在
+# 对指定端口探活: 收到任何 HTTP 响应(含 302/200)即视为服务在
+probe_port() {
+    curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$1/"
+}
+
+# 探活已在运行的实例: 按它落盘的实际端口(Python 绑定失败会自动顺延)
 probe() {
-    curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$(actual_port)/"
+    probe_port "$(actual_port)"
 }
 
 # 运行依赖预检: 解释器须能导入 backend_py/requirements.txt 声明的运行依赖, 缺失时秒级报错
@@ -119,9 +124,11 @@ cmd_start() {
         echo "已在运行 (PID $pid, 端口 $(actual_port))"
         exit 0
     fi
-    # 端口被占且无 PID 文件: 可能是手动启动的进程
-    if probe; then
-        echo "错误: 端口 $(actual_port) 已被占用(可能是手动启动的服务, 未找到 PID 文件 $PID_FILE)" >&2
+    # 端口占用检查只探本次要绑定的配置端口: .run/server.port 记的是**已运行实例**的
+    # 实际端口(Python 顺延, 或插件后端随机端口), 拿它探活会把别的实例误判成本端口被占
+    # (2026-11-26 实录: 插件后端 43555 写进该文件, 独立站点 start 误报 43555 被占)。
+    if probe_port "$PORT"; then
+        echo "错误: 端口 $PORT 已被占用(可能是手动启动的服务, 未找到 PID 文件 $PID_FILE)" >&2
         exit 1
     fi
     # 运行依赖预检放在构建之前: 缺依赖时不必等前端构建白跑
@@ -134,6 +141,8 @@ cmd_start() {
     # 任一步失败即中止启动(后端无 dist 会直接退出)
     cmd_build
     mkdir -p "$RUN_DIR"
+    # 清掉上一实例/插件形态留下的端口标记: 启动等待探活只认本实例随后写入的值
+    rm -f "$PORT_FILE"
     # nohup 后台启动；日志追加写。Node 是缺省后端（独立站点），
     # Python 只在 TS_BACKEND=python 时显式回退。
     if [ "$BACKEND" = "python" ]; then
